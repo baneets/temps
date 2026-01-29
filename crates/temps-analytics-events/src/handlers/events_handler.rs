@@ -619,8 +619,20 @@ pub async fn record_event_metrics(
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
 
-    // Use payload referrer if provided, otherwise fall back to header
-    let referrer = payload.referrer.or(referrer_header);
+    // Priority for referrer:
+    // 1. event_data.referrer - the actual referrer from where the user came (captured by JS)
+    // 2. payload.referrer - top-level referrer field if provided
+    // 3. HTTP Referer header - fallback (usually just the current page making the request)
+    let event_data_referrer = payload
+        .event_data
+        .get("referrer")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let referrer = event_data_referrer
+        .or(payload.referrer.clone())
+        .or(referrer_header);
 
     // Extract language from event_data if not provided in payload
     let language = payload.language.or_else(|| {
