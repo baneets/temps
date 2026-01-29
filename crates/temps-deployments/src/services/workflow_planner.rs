@@ -891,7 +891,8 @@ impl WorkflowPlanner {
     }
 
     /// Plan jobs for external Docker image deployment
-    /// PullExternalImageJob -> DeployImageJob -> MarkDeploymentCompleteJob
+    /// For registry images: PullExternalImageJob -> DeployImageJob -> MarkDeploymentCompleteJob
+    /// For uploaded images: VerifyLocalImageJob -> DeployImageJob -> MarkDeploymentCompleteJob
     async fn plan_docker_image_deployment(
         &self,
         project: &projects::Model,
@@ -912,29 +913,71 @@ impl WorkflowPlanner {
                 )
             })?;
 
+        // Check if this is a locally uploaded image (via docker save/load)
+        let is_uploaded_locally = deployment
+            .metadata
+            .as_ref()
+            .map(|m| m.image_uploaded_locally)
+            .unwrap_or(false);
+
+        let uploaded_image_id = deployment
+            .metadata
+            .as_ref()
+            .and_then(|m| m.uploaded_image_id.clone());
+
         info!(
-            "📦 Planning Docker image deployment for project {} with image: {}",
-            project.name, external_image_ref
+            "📦 Planning Docker image deployment for project {} with image: {} (uploaded_locally: {})",
+            project.name, external_image_ref, is_uploaded_locally
         );
 
-        // Job 1: Pull external image (verifies the image exists and is accessible)
-        jobs.push(JobDefinition {
-            job_id: "pull_external_image".to_string(),
-            job_type: "PullExternalImageJob".to_string(),
-            name: "Pull External Image".to_string(),
-            description: Some(format!(
-                "Pull and verify external image: {}",
-                external_image_ref
-            )),
-            dependencies: vec![],
-            job_config: Some(serde_json::json!({
-                "image_ref": external_image_ref,
-                "external_image_id": deployment.metadata.as_ref().and_then(|m| m.external_image_id),
-            })),
-            required_for_completion: true,
-        });
+        // Job 1: Either verify local image or pull from registry
+        if is_uploaded_locally {
+            // Image was uploaded via docker save/load - just verify it exists locally
+            debug!(
+                "Image was uploaded locally, using VerifyLocalImageJob instead of PullExternalImageJob"
+            );
+            jobs.push(JobDefinition {
+                job_id: "verify_local_image".to_string(),
+                job_type: "VerifyLocalImageJob".to_string(),
+                name: "Verify Local Image".to_string(),
+                description: Some(format!(
+                    "Verify uploaded image exists locally: {}",
+                    external_image_ref
+                )),
+                dependencies: vec![],
+                job_config: Some(serde_json::json!({
+                    "image_ref": external_image_ref,
+                    "expected_image_id": uploaded_image_id,
+                })),
+                required_for_completion: true,
+            });
+        } else {
+            // Image needs to be pulled from registry
+            jobs.push(JobDefinition {
+                job_id: "pull_external_image".to_string(),
+                job_type: "PullExternalImageJob".to_string(),
+                name: "Pull External Image".to_string(),
+                description: Some(format!(
+                    "Pull and verify external image: {}",
+                    external_image_ref
+                )),
+                dependencies: vec![],
+                job_config: Some(serde_json::json!({
+                    "image_ref": external_image_ref,
+                    "external_image_id": deployment.metadata.as_ref().and_then(|m| m.external_image_id),
+                })),
+                required_for_completion: true,
+            });
+        }
 
         // Job 2: Deploy container
+        // Dependency is based on whether image was uploaded locally or needs to be pulled
+        let image_job_dependency = if is_uploaded_locally {
+            "verify_local_image".to_string()
+        } else {
+            "pull_external_image".to_string()
+        };
+
         let exposed_port = self
             .resolve_exposed_port(environment, project, Some(&external_image_ref))
             .await;
@@ -954,7 +997,7 @@ impl WorkflowPlanner {
             job_type: "DeployImageJob".to_string(),
             name: "Deploy Container".to_string(),
             description: Some("Deploy the external Docker image".to_string()),
-            dependencies: vec!["pull_external_image".to_string()],
+            dependencies: vec![image_job_dependency],
             job_config: Some(serde_json::json!({
                 "port": exposed_port,
                 "replicas": replicas,

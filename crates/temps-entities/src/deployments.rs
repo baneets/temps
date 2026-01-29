@@ -95,6 +95,16 @@ pub struct DeploymentMetadata {
     /// (docker_image, static_files, or git) while keeping per-deployment tracking
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_source_type: Option<crate::source_type::SourceType>,
+
+    /// Whether the image was uploaded directly (via docker save/load) rather than pulled from registry
+    /// When true, the PullExternalImageJob is skipped since the image is already loaded locally
+    #[serde(default)]
+    pub image_uploaded_locally: bool,
+
+    /// Docker image ID of the locally uploaded image (sha256:...)
+    /// Used to verify the image exists before deployment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_image_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]

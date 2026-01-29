@@ -845,8 +845,8 @@ pub async fn deploy_from_image_upload(
     let mut file_data: Option<bytes::Bytes> = None;
     let mut original_filename: Option<String> = None;
 
-    // Maximum file size: 2GB for Docker images
-    const MAX_FILE_SIZE: usize = 2 * 1024 * 1024 * 1024;
+    // Maximum file size: 1GB for Docker images
+    const MAX_FILE_SIZE: usize = 1024 * 1024 * 1024;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         error!("Multipart error: {}", e);
@@ -963,10 +963,13 @@ pub async fn deploy_from_image_upload(
     });
 
     // 9. Build deployment metadata
+    // Mark image_uploaded_locally=true to skip PullExternalImageJob since image is already loaded
     let deployment_metadata = DeploymentMetadata {
         external_image_ref: Some(image_tag.clone()),
         external_image_id: None,
         deployment_source_type: Some(SourceType::DockerImage),
+        image_uploaded_locally: true,
+        uploaded_image_id: Some(imported_image_id.clone()),
         ..Default::default()
     };
 
@@ -1749,6 +1752,11 @@ pub async fn delete_static_bundle(
 }
 
 pub fn configure_routes() -> Router<Arc<AppState>> {
+    use axum::extract::DefaultBodyLimit;
+
+    // 1GB limit for image and static bundle uploads
+    const UPLOAD_LIMIT: usize = 1024 * 1024 * 1024;
+
     Router::new()
         // Deploy endpoints
         .route(
@@ -1759,14 +1767,14 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/environments/{environment_id}/deploy/static",
             post(deploy_from_static),
         )
+        // Upload endpoints with increased body limit
         .route(
             "/projects/{project_id}/environments/{environment_id}/deploy/image-upload",
-            post(deploy_from_image_upload),
+            post(deploy_from_image_upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
-        // Upload endpoints
         .route(
             "/projects/{project_id}/upload/static",
-            post(upload_static_bundle),
+            post(upload_static_bundle).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
         // External images CRUD
         .route(

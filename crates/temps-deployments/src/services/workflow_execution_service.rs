@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::jobs::{
     BuildImageJobBuilder, ConfigureCronsJobBuilder, CronConfigService, DeployImageJobBuilder,
     DeployStaticBundleJob, DeployStaticJob, DeploymentTarget, DownloadRepoBuilder,
-    PullExternalImageJob,
+    PullExternalImageJob, VerifyLocalImageJob,
 };
 use crate::services::DeploymentJobTracker;
 use temps_screenshots::ScreenshotService;
@@ -870,6 +870,37 @@ impl WorkflowExecutionService {
                     db_job.job_id.clone(),
                     image_ref,
                     external_image_id,
+                    self.docker.clone(),
+                )
+                .with_log_service(self.log_service.clone(), db_job.log_id.clone());
+
+                Ok(Arc::new(job))
+            }
+
+            "VerifyLocalImageJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let image_ref = config
+                    .get("image_ref")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "image_ref is required".to_string(),
+                        )
+                    })?
+                    .to_string();
+
+                let expected_image_id = config
+                    .get("expected_image_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let job = VerifyLocalImageJob::new(
+                    db_job.job_id.clone(),
+                    image_ref,
+                    expected_image_id,
                     self.docker.clone(),
                 )
                 .with_log_service(self.log_service.clone(), db_job.log_id.clone());

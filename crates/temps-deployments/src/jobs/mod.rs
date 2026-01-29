@@ -13,6 +13,7 @@ pub mod pipeline_validation;
 pub mod pull_external_image;
 pub mod scan_vulnerabilities;
 pub mod take_screenshot;
+pub mod verify_local_image;
 
 pub use build_image::*;
 pub use configure_crons::*;
@@ -24,3 +25,4 @@ pub use mark_deployment_complete::*;
 pub use pull_external_image::*;
 pub use scan_vulnerabilities::*;
 pub use take_screenshot::*;
+pub use verify_local_image::*;
