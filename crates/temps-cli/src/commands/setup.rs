@@ -700,12 +700,17 @@ async fn download_geolite2_database(data_dir: &PathBuf) -> anyhow::Result<()> {
     println!(
         "   {} {}",
         "📥".bright_cyan(),
-        "Downloading GeoLite2-City.mmdb...".bright_white()
+        "Downloading GeoLite2-City.mmdb (~60 MB)...".bright_white()
     );
     println!(
         "   {} {}",
         "🔗".bright_blue(),
-        GEOLITE2_DOWNLOAD_URL.bright_cyan()
+        "GitHub repository".bright_cyan()
+    );
+    println!(
+        "   {} {}",
+        "⏳".bright_yellow(),
+        "This may take a few minutes depending on your connection...".bright_white()
     );
     println!();
 
@@ -730,6 +735,15 @@ async fn download_geolite2_database(data_dir: &PathBuf) -> anyhow::Result<()> {
 
     // Create progress bar with beautiful styling
     let pb = if total_size > 0 {
+        let size_mb = total_size as f64 / 1024.0 / 1024.0;
+        println!(
+            "   {} {} {:.1} MB",
+            "📦".bright_blue(),
+            "Total size:".bright_white(),
+            size_mb
+        );
+        println!();
+
         let pb = ProgressBar::new(total_size);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -738,9 +752,18 @@ async fn download_geolite2_database(data_dir: &PathBuf) -> anyhow::Result<()> {
                 .progress_chars("█▓▒░  "),
         );
         pb.set_message("downloading...");
+        // Enable steady tick for smooth updates even when chunks are slow
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
         pb
     } else {
-        // Unknown size - use spinner
+        // Unknown size - use spinner with byte counter
+        println!(
+            "   {} {}",
+            "📦".bright_blue(),
+            "Size unknown, downloading...".bright_white()
+        );
+        println!();
+
         let pb = ProgressBar::new_spinner();
         pb.set_style(
             ProgressStyle::default_spinner()
@@ -748,6 +771,8 @@ async fn download_geolite2_database(data_dir: &PathBuf) -> anyhow::Result<()> {
                 .unwrap(),
         );
         pb.set_message("downloading...");
+        // Enable steady tick for spinner animation
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
         pb
     };
 

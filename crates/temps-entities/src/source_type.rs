@@ -101,13 +101,15 @@ impl SourceType {
 
     /// Returns true if this project source type allows the given deployment method
     ///
-    /// - `Manual` projects accept any deployment method (Docker, static, Git)
-    /// - Other project types only accept their specific deployment method
-    pub fn allows_deployment_method(&self, method: &SourceType) -> bool {
-        match self {
-            SourceType::Manual => true, // Accepts everything
-            other => other == method,
-        }
+    /// All project types accept any deployment method. The `source_type` indicates
+    /// the primary/configured source, not a restriction on deployment methods.
+    /// This allows:
+    /// - Git projects to accept Docker images for hotfixes or CI/CD-built images
+    /// - Any project to use alternative deployment methods when needed
+    /// - Hybrid workflows where different environments use different methods
+    pub fn allows_deployment_method(&self, _method: &SourceType) -> bool {
+        // All source types accept any deployment method
+        true
     }
 }
 
@@ -162,26 +164,29 @@ mod tests {
 
     #[test]
     fn test_allows_deployment_method() {
+        // All source types accept any deployment method
+        // The source_type indicates the primary/configured source, not a restriction
+
         // Manual accepts everything
         assert!(SourceType::Manual.allows_deployment_method(&SourceType::Git));
         assert!(SourceType::Manual.allows_deployment_method(&SourceType::DockerImage));
         assert!(SourceType::Manual.allows_deployment_method(&SourceType::StaticFiles));
         assert!(SourceType::Manual.allows_deployment_method(&SourceType::Manual));
 
-        // Git only accepts Git
+        // Git accepts everything (allows Docker images for hotfixes, CI/CD builds, etc.)
         assert!(SourceType::Git.allows_deployment_method(&SourceType::Git));
-        assert!(!SourceType::Git.allows_deployment_method(&SourceType::DockerImage));
-        assert!(!SourceType::Git.allows_deployment_method(&SourceType::StaticFiles));
+        assert!(SourceType::Git.allows_deployment_method(&SourceType::DockerImage));
+        assert!(SourceType::Git.allows_deployment_method(&SourceType::StaticFiles));
 
-        // DockerImage only accepts DockerImage
+        // DockerImage accepts everything
         assert!(SourceType::DockerImage.allows_deployment_method(&SourceType::DockerImage));
-        assert!(!SourceType::DockerImage.allows_deployment_method(&SourceType::Git));
-        assert!(!SourceType::DockerImage.allows_deployment_method(&SourceType::StaticFiles));
+        assert!(SourceType::DockerImage.allows_deployment_method(&SourceType::Git));
+        assert!(SourceType::DockerImage.allows_deployment_method(&SourceType::StaticFiles));
 
-        // StaticFiles only accepts StaticFiles
+        // StaticFiles accepts everything
         assert!(SourceType::StaticFiles.allows_deployment_method(&SourceType::StaticFiles));
-        assert!(!SourceType::StaticFiles.allows_deployment_method(&SourceType::Git));
-        assert!(!SourceType::StaticFiles.allows_deployment_method(&SourceType::DockerImage));
+        assert!(SourceType::StaticFiles.allows_deployment_method(&SourceType::Git));
+        assert!(SourceType::StaticFiles.allows_deployment_method(&SourceType::DockerImage));
     }
 
     #[test]
