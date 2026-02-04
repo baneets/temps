@@ -944,7 +944,25 @@ pub async fn deploy_from_image_upload(
         imported_image_id, image_tag
     );
 
-    // 7. Generate deployment slug
+    // 7. Validate image platform matches the target platform
+    if let Err(e) = state
+        .image_builder
+        .validate_image_platform(&image_tag)
+        .await
+    {
+        error!("Image platform validation failed: {}", e);
+        return Err(problemdetails::new(StatusCode::BAD_REQUEST)
+            .with_title("Platform Mismatch")
+            .with_detail(format!(
+                "The uploaded image architecture does not match the target platform. {}. \
+                Please ensure you're uploading an image built for the correct architecture.",
+                e
+            )));
+    }
+
+    info!("Image platform validation passed for tag: {}", image_tag);
+
+    // 8. Generate deployment slug
     let deployment_number = deployments::Entity::find()
         .filter(deployments::Column::ProjectId.eq(project_id))
         .count(state.db.as_ref())
@@ -954,7 +972,7 @@ pub async fn deploy_from_image_upload(
 
     let env_slug = format!("{}-{}", environment.slug, deployment_number);
 
-    // 8. Get deployment config from environment
+    // 9. Get deployment config from environment
     let deployment_config_snapshot = environment.deployment_config.as_ref().map(|config| {
         temps_entities::deployment_config::DeploymentConfigSnapshot::from_config(
             config,
@@ -962,7 +980,7 @@ pub async fn deploy_from_image_upload(
         )
     });
 
-    // 9. Build deployment metadata
+    // 10. Build deployment metadata
     // Mark image_uploaded_locally=true to skip PullExternalImageJob since image is already loaded
     let deployment_metadata = DeploymentMetadata {
         external_image_ref: Some(image_tag.clone()),
@@ -973,7 +991,7 @@ pub async fn deploy_from_image_upload(
         ..Default::default()
     };
 
-    // 10. Create deployment record
+    // 11. Create deployment record
     let now = Utc::now();
     let new_deployment = deployments::ActiveModel {
         project_id: Set(project_id),
@@ -1009,7 +1027,7 @@ pub async fn deploy_from_image_upload(
         deployment.id
     );
 
-    // 11. Fire DeploymentCreated event
+    // 12. Fire DeploymentCreated event
     let deployment_created_event = Job::DeploymentCreated(DeploymentCreatedJob {
         deployment_id: deployment.id,
         project_id: project.id,
@@ -1037,7 +1055,7 @@ pub async fn deploy_from_image_upload(
         );
     }
 
-    // 12. Create jobs using WorkflowPlanner
+    // 13. Create jobs using WorkflowPlanner
     let create_jobs_result = state
         .workflow_planner
         .create_deployment_jobs(deployment.id)
@@ -1121,7 +1139,7 @@ pub async fn deploy_from_image_upload(
         }
     }
 
-    // 13. Return deployment info
+    // 14. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
         Json(DeploymentResponse {

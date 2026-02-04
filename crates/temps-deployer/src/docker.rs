@@ -106,7 +106,7 @@ impl DockerRuntime {
 
     /// Detect the native platform for Docker builds
     /// Returns the platform string in the format "linux/arch"
-    fn get_native_platform() -> String {
+    fn detect_native_platform() -> String {
         #[cfg(target_arch = "x86_64")]
         {
             "linux/amd64".to_string()
@@ -259,7 +259,9 @@ impl ImageBuilder for DockerRuntime {
                 // Legacy builder supports custom networks
                 Some(self.network_name.clone())
             },
-            platform: request.platform.unwrap_or_else(Self::get_native_platform),
+            platform: request
+                .platform
+                .unwrap_or_else(Self::detect_native_platform),
             memory: Some(((memory_limit * 1024 * 1024 * 1024) & 0x7FFFFFFF) as i32), // Convert GB to bytes
             cpuquota: Some((cpu_limit * 100000) as i32), // CPU quota in microseconds (cpu_limit * 100ms)
             cpuperiod: Some(100000),                     // CPU period in microseconds (100ms)
@@ -411,7 +413,9 @@ impl ImageBuilder for DockerRuntime {
                 // Legacy builder supports custom networks
                 Some(self.network_name.clone())
             },
-            platform: request.platform.unwrap_or_else(Self::get_native_platform),
+            platform: request
+                .platform
+                .unwrap_or_else(Self::detect_native_platform),
             memory: Some(((memory_limit * 1024 * 1024 * 1024) & 0x7FFFFFFF) as i32), // Convert GB to bytes
             cpuquota: Some((cpu_limit * 100000) as i32), // CPU quota in microseconds (cpu_limit * 100ms)
             cpuperiod: Some(100000),                     // CPU period in microseconds (100ms)
@@ -723,6 +727,39 @@ impl ImageBuilder for DockerRuntime {
         );
 
         Ok(())
+    }
+
+    async fn inspect_image(&self, image_name: &str) -> Result<crate::ImageInfo, BuilderError> {
+        let inspect = self.docker.inspect_image(image_name).await.map_err(|e| {
+            BuilderError::ImageNotFound(format!("Failed to inspect image '{}': {}", image_name, e))
+        })?;
+
+        let architecture = inspect
+            .architecture
+            .unwrap_or_else(|| "unknown".to_string());
+        let os = inspect.os.unwrap_or_else(|| "linux".to_string());
+        let platform = format!("{}/{}", os, architecture);
+
+        let size_bytes = inspect.size.map(|s| s as u64).unwrap_or(0);
+
+        // Get tags from repo_tags
+        let tags = inspect.repo_tags.unwrap_or_default();
+
+        let created = inspect.created;
+
+        Ok(crate::ImageInfo {
+            id: inspect.id.unwrap_or_default(),
+            architecture,
+            os,
+            platform,
+            size_bytes,
+            tags,
+            created,
+        })
+    }
+
+    fn get_native_platform(&self) -> String {
+        Self::detect_native_platform()
     }
 }
 
@@ -1212,7 +1249,7 @@ mod docker_tests {
 
     #[test]
     fn test_native_platform_detection() {
-        let platform = DockerRuntime::get_native_platform();
+        let platform = DockerRuntime::detect_native_platform();
 
         // Verify platform format
         assert!(platform.starts_with("linux/"));

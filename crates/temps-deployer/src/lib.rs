@@ -42,6 +42,15 @@ pub enum BuilderError {
     #[error("Resource limit exceeded: {0}")]
     ResourceLimitExceeded(String),
 
+    #[error("Platform mismatch: image is for {image_platform}, but target platform is {target_platform}")]
+    PlatformMismatch {
+        image_platform: String,
+        target_platform: String,
+    },
+
+    #[error("Image not found: {0}")]
+    ImageNotFound(String),
+
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -90,6 +99,25 @@ pub struct BuildResult {
     pub image_name: String,
     pub size_bytes: u64,
     pub build_duration_ms: u64,
+}
+
+/// Information about a Docker image, including architecture and platform details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInfo {
+    /// Image ID (sha256:...)
+    pub id: String,
+    /// Image architecture (e.g., "amd64", "arm64")
+    pub architecture: String,
+    /// Operating system (e.g., "linux")
+    pub os: String,
+    /// Full platform string (e.g., "linux/amd64")
+    pub platform: String,
+    /// Image size in bytes
+    pub size_bytes: u64,
+    /// Image tags
+    pub tags: Vec<String>,
+    /// Creation timestamp
+    pub created: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +352,28 @@ pub trait ImageBuilder: Send + Sync {
 
     /// Remove an image
     async fn remove_image(&self, image_name: &str) -> Result<(), BuilderError>;
+
+    /// Inspect an image and return its metadata including architecture
+    async fn inspect_image(&self, image_name: &str) -> Result<ImageInfo, BuilderError>;
+
+    /// Get the native platform string for this runtime (e.g., "linux/amd64" or "linux/arm64")
+    fn get_native_platform(&self) -> String;
+
+    /// Validate that an image's architecture matches the target platform
+    /// Returns Ok(()) if compatible, or Err(BuilderError::PlatformMismatch) if not
+    async fn validate_image_platform(&self, image_name: &str) -> Result<(), BuilderError> {
+        let image_info = self.inspect_image(image_name).await?;
+        let native_platform = self.get_native_platform();
+
+        if image_info.platform != native_platform {
+            return Err(BuilderError::PlatformMismatch {
+                image_platform: image_info.platform,
+                target_platform: native_platform,
+            });
+        }
+
+        Ok(())
+    }
 }
 
 /// Trait for deploying and managing containers
