@@ -745,7 +745,7 @@ impl ImageBuilder for DockerRuntime {
         // Get tags from repo_tags
         let tags = inspect.repo_tags.unwrap_or_default();
 
-        let created = inspect.created;
+        let created = inspect.created.map(|dt| dt.to_rfc3339());
 
         Ok(crate::ImageInfo {
             id: inspect.id.unwrap_or_default(),

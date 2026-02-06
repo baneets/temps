@@ -60,6 +60,25 @@ impl ImageBuilder for MockImageBuilder {
     async fn remove_image(&self, _image_name: &str) -> Result<(), BuilderError> {
         Ok(())
     }
+
+    async fn inspect_image(
+        &self,
+        image_name: &str,
+    ) -> Result<temps_deployer::ImageInfo, BuilderError> {
+        Ok(temps_deployer::ImageInfo {
+            id: "sha256:mock123".to_string(),
+            architecture: "amd64".to_string(),
+            os: "linux".to_string(),
+            platform: "linux/amd64".to_string(),
+            size_bytes: 104857600,
+            tags: vec![image_name.to_string()],
+            created: Some("2025-01-01T00:00:00Z".to_string()),
+        })
+    }
+
+    fn get_native_platform(&self) -> String {
+        "linux/amd64".to_string()
+    }
 }
 
 /// Mock ContainerDeployer for pipeline validation
