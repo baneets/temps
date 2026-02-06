@@ -33,7 +33,9 @@ function ReferrerIcon({ domain, className = 'h-5 w-5' }: ReferrerIconProps) {
   }
 
   // Use Google's favicon service
-  const faviconUrl = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32`
+  // For Twitter/X domains, use x.com to get the X logo instead of the old Twitter bird
+  const faviconDomain = ['twitter.com', 't.co'].includes(domain) ? 'x.com' : domain
+  const faviconUrl = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(faviconDomain)}&sz=32`
 
   return (
     <img
@@ -78,7 +80,7 @@ function getDisplayName(hostname: string): string {
     'reddit.com': 'Reddit',
     'www.reddit.com': 'Reddit',
     'out.reddit.com': 'Reddit',
-    'twitter.com': 'Twitter',
+    'twitter.com': 'X',
     'x.com': 'X',
     't.co': 'X',
     'linkedin.com': 'LinkedIn',
