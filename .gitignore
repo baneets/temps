@@ -18,3 +18,5 @@ target
 ai
 
 .cargo/config.toml
+*.crt
+*.key
