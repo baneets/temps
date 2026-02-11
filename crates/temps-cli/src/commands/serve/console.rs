@@ -44,7 +44,7 @@ use temps_import::ImportPlugin;
 use temps_infra::InfraPlugin;
 use temps_kv::KvPlugin;
 use temps_logs::LogsPlugin;
-use temps_monitoring::DiskSpaceMonitor;
+use temps_monitoring::{DiskSpaceMonitor, OutageDetectionService};
 use temps_notifications::NotificationsPlugin;
 use temps_projects::ProjectsPlugin;
 use temps_providers::ProvidersPlugin;
@@ -888,6 +888,28 @@ pub async fn start_console_api(
     } else {
         tracing::warn!(
             "ConfigService or NotificationService not available - disk space monitoring disabled."
+        );
+    }
+
+    // Start event-driven outage detection service (listens to StatusCheckCompleted jobs)
+    if let (Some(notification_service), Some(queue_service)) = (
+        service_context.get_service::<dyn temps_core::notifications::NotificationService>(),
+        service_context.get_service::<dyn temps_core::JobQueue>(),
+    ) {
+        let outage_service = Arc::new(OutageDetectionService::new(
+            db.clone(),
+            notification_service,
+        ));
+
+        let job_receiver = queue_service.subscribe();
+        tokio::spawn(async move {
+            outage_service.start_monitoring(job_receiver).await;
+        });
+
+        debug!("Event-driven outage detection service started (listening to StatusCheckCompleted jobs)");
+    } else {
+        tracing::warn!(
+            "NotificationService or JobQueue not available - outage detection disabled."
         );
     }
 

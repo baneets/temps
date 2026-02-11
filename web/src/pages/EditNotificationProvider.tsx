@@ -8,6 +8,7 @@ import {
   getNotificationProviderOptions,
   updateEmailProviderMutation,
   updateSlackProviderMutation,
+  updateWebhookProviderMutation,
   testProvider2Mutation,
   deleteProvider2Mutation,
 } from '@/api/client/@tanstack/react-query.gen'
@@ -89,6 +90,11 @@ export function EditNotificationProvider() {
         tls_mode: 'Starttls', // Default TLS mode
         starttls_required: false,
         accept_invalid_certs: false,
+        // Webhook config
+        url: '',
+        method: 'POST',
+        headers: {},
+        timeout_secs: 30,
       },
     },
   })
@@ -96,28 +102,35 @@ export function EditNotificationProvider() {
   // Load provider data into form
   useEffect(() => {
     if (provider) {
+      const config = provider.config as Record<string, unknown>
       form.reset({
         name: provider.name,
-        provider_type: provider.provider_type,
+        provider_type: provider.provider_type as 'email' | 'slack' | 'webhook',
         config: {
           // Slack config
-          webhook_url: provider.config.webhook_url,
-          channel: provider.config.channel,
+          webhook_url: config.webhook_url as string,
+          channel: config.channel as string,
 
           // Email config
-          smtp_host: provider.config.smtp_host,
-          smtp_port: provider.config.smtp_port,
+          smtp_host: config.smtp_host as string,
+          smtp_port: config.smtp_port as number,
           use_credentials: !!(
-            provider.config.username || provider.config.password
+            config.username || config.password
           ),
-          smtp_username: provider.config.username,
-          password: provider.config.password,
-          from_name: provider.config.from_name,
-          from_address: provider.config.from_address,
-          to_addresses: provider.config.to_addresses,
-          tls_mode: provider.config.tls_mode || undefined,
-          starttls_required: provider.config.starttls_required,
-          accept_invalid_certs: provider.config.accept_invalid_certs,
+          smtp_username: config.username as string,
+          password: config.password as string,
+          from_name: config.from_name as string,
+          from_address: config.from_address as string,
+          to_addresses: config.to_addresses as string[],
+          tls_mode: (config.tls_mode as 'None' | 'Starttls' | 'Tls') || undefined,
+          starttls_required: config.starttls_required as boolean,
+          accept_invalid_certs: config.accept_invalid_certs as boolean,
+
+          // Webhook config
+          url: config.url as string,
+          method: (config.method as 'POST' | 'PUT' | 'PATCH') || 'POST',
+          headers: (config.headers as Record<string, string>) || {},
+          timeout_secs: (config.timeout_secs as number) || 30,
         },
       })
     }
@@ -143,6 +156,18 @@ export function EditNotificationProvider() {
     },
     onSuccess: () => {
       toast.success('Slack provider updated successfully')
+      queryClient.invalidateQueries({ queryKey: ['getNotificationProviders'] })
+      navigate('/notifications')
+    },
+  })
+
+  const updateWebhookMutation = useMutation({
+    ...updateWebhookProviderMutation(),
+    meta: {
+      errorTitle: 'Failed to update Webhook provider',
+    },
+    onSuccess: () => {
+      toast.success('Webhook provider updated successfully')
       queryClient.invalidateQueries({ queryKey: ['getNotificationProviders'] })
       navigate('/notifications')
     },
@@ -183,6 +208,20 @@ export function EditNotificationProvider() {
           config: {
             webhook_url: data.config.webhook_url!,
             channel: data.config.channel ?? null,
+          },
+        },
+      })
+    } else if (data.provider_type === 'webhook') {
+      await updateWebhookMutation.mutateAsync({
+        path: { id: provider.id },
+        body: {
+          name: data.name,
+          enabled: provider.enabled,
+          config: {
+            url: data.config.url!,
+            method: data.config.method || 'POST',
+            headers: data.config.headers || {},
+            timeout_secs: data.config.timeout_secs || 30,
           },
         },
       })
@@ -263,7 +302,7 @@ export function EditNotificationProvider() {
   }
 
   const isSubmitting =
-    updateEmailMutation.isPending || updateSlackMutation.isPending
+    updateEmailMutation.isPending || updateSlackMutation.isPending || updateWebhookMutation.isPending
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">

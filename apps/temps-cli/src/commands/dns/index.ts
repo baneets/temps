@@ -28,7 +28,6 @@ const PROVIDER_TYPES: { name: string; value: DnsProviderType }[] = [
 export function registerDnsCommands(program: Command): void {
   const dns = program
     .command('dns')
-    .alias('dns-providers')
     .description('Manage DNS providers for automated domain verification')
 
   dns

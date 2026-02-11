@@ -8,14 +8,25 @@ import type { ProjectResponse } from '../../api/types.gen.js'
 
 interface ListOptions {
   json?: boolean
+  page?: string
+  perPage?: string
 }
 
 export async function list(options: ListOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
+  const page = options.page ? parseInt(options.page, 10) : undefined
+  const perPage = options.perPage ? parseInt(options.perPage, 10) : undefined
+
   const projects = await withSpinner('Fetching projects...', async () => {
-    const { data, error } = await getProjects({ client })
+    const { data, error } = await getProjects({
+      client,
+      query: {
+        ...(page && { page }),
+        ...(perPage && { per_page: perPage }),
+      },
+    })
 
     if (error) {
       throw new Error(getErrorMessage(error))

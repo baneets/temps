@@ -20,3 +20,5 @@ ai
 .cargo/config.toml
 *.crt
 *.key
+
+target_old

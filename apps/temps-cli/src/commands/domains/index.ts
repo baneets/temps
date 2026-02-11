@@ -8,8 +8,15 @@ import {
   provisionDomain,
   renewDomain,
   checkDomainStatus,
+  listOrders as listOrdersApi,
+  getDomainOrder,
+  createOrRecreateOrder,
+  finalizeOrder as finalizeOrderApi,
+  cancelDomainOrder,
+  setupDnsChallenge as setupDnsChallengeApi,
+  getHttpChallengeDebug,
 } from '../../api/sdk.gen.js'
-import type { DomainResponse } from '../../api/types.gen.js'
+import type { DomainResponse, AcmeOrderResponse, HttpChallengeDebugResponse } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
 import { promptConfirm } from '../../ui/prompts.js'
@@ -49,6 +56,35 @@ interface SslOptions {
 
 interface StatusOptions {
   domain: string
+}
+
+interface OrderShowOptions {
+  domainId: string
+  json?: boolean
+}
+
+interface OrderCreateOptions {
+  domainId: string
+}
+
+interface OrderFinalizeOptions {
+  domainId: string
+}
+
+interface OrderCancelOptions {
+  domainId: string
+  force?: boolean
+  yes?: boolean
+}
+
+interface DnsChallengeOptions {
+  domainId: string
+  providerId: string
+}
+
+interface HttpDebugOptions {
+  domain: string
+  json?: boolean
 }
 
 export function registerDomainsCommands(program: Command): void {
@@ -98,6 +134,61 @@ export function registerDomainsCommands(program: Command): void {
     .description('Check domain status')
     .requiredOption('-d, --domain <domain>', 'Domain name')
     .action(domainStatus)
+
+  // --- Nested orders command group ---
+  const orders = domains
+    .command('orders')
+    .alias('order')
+    .description('Manage ACME orders for SSL certificate provisioning')
+
+  orders
+    .command('list')
+    .alias('ls')
+    .description('List all ACME orders')
+    .option('--json', 'Output in JSON format')
+    .action(listOrders)
+
+  orders
+    .command('show')
+    .description('Show ACME order for a domain')
+    .requiredOption('--domain-id <id>', 'Domain ID')
+    .option('--json', 'Output in JSON format')
+    .action(showOrder)
+
+  orders
+    .command('create')
+    .description('Create or recreate an ACME order for a domain')
+    .requiredOption('--domain-id <id>', 'Domain ID')
+    .action(createOrder)
+
+  orders
+    .command('finalize')
+    .description('Finalize an ACME order (complete challenge validation)')
+    .requiredOption('--domain-id <id>', 'Domain ID')
+    .action(finalizeOrder)
+
+  orders
+    .command('cancel')
+    .description('Cancel an ACME order for a domain')
+    .requiredOption('--domain-id <id>', 'Domain ID')
+    .option('-f, --force', 'Skip confirmation')
+    .option('-y, --yes', 'Skip confirmation prompts (alias for --force)')
+    .action(cancelOrder)
+
+  // --- Standalone domain subcommands ---
+  domains
+    .command('dns-challenge')
+    .description('Setup DNS challenge records automatically using a DNS provider')
+    .requiredOption('--domain-id <id>', 'Domain ID')
+    .requiredOption('--provider-id <id>', 'DNS provider ID')
+    .action(dnsChallengeSetup)
+
+  domains
+    .command('http-debug')
+    .description('Debug HTTP-01 challenge for a domain')
+    .requiredOption('-d, --domain <domain>', 'Domain name')
+    .option('--json', 'Output in JSON format')
+    .action(httpChallengeDebug)
 }
 
 async function listDomains(options: { json?: boolean }): Promise<void> {
@@ -341,6 +432,390 @@ async function domainStatus(options: StatusOptions): Promise<void> {
     if (status.last_error_type) {
       keyValue('Error Type', status.last_error_type)
     }
+  }
+
+  newline()
+}
+
+// --- ACME Orders ---
+
+async function listOrders(options: { json?: boolean }): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const result = await withSpinner('Fetching ACME orders...', async () => {
+    const { data, error } = await listOrdersApi({ client })
+    if (error) throw new Error(getErrorMessage(error))
+    return data?.orders ?? []
+  })
+
+  if (options.json) {
+    json(result)
+    return
+  }
+
+  newline()
+  header(`${icons.lock} ACME Orders (${result.length})`)
+
+  if (result.length === 0) {
+    info('No ACME orders found')
+    info('Run: temps domains orders create --domain-id <id>')
+    newline()
+    return
+  }
+
+  const columns: TableColumn<AcmeOrderResponse>[] = [
+    { header: 'ID', key: 'id', width: 6 },
+    { header: 'Domain ID', key: 'domain_id', width: 10 },
+    { header: 'Status', key: 'status', color: (v) => statusBadge(v) },
+    { header: 'Email', key: 'email' },
+    {
+      header: 'Created',
+      accessor: (o) => formatDate(new Date(o.created_at * 1000).toISOString()),
+      color: (v) => colors.muted(v),
+    },
+    {
+      header: 'Expires',
+      accessor: (o) => o.expires_at ? formatDate(new Date(o.expires_at * 1000).toISOString()) : '-',
+      color: (v) => colors.muted(v),
+    },
+  ]
+
+  printTable(result, columns, { style: 'minimal' })
+  newline()
+}
+
+async function showOrder(options: OrderShowOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const domainId = parseInt(options.domainId, 10)
+  if (isNaN(domainId)) {
+    warning('Invalid domain ID')
+    return
+  }
+
+  const order = await withSpinner('Fetching ACME order...', async () => {
+    const { data, error } = await getDomainOrder({
+      client,
+      path: { domain_id: domainId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  if (!order) {
+    warning('No order found for this domain')
+    return
+  }
+
+  if (options.json) {
+    json(order)
+    return
+  }
+
+  newline()
+  header(`${icons.lock} ACME Order for Domain ${domainId}`)
+  keyValue('Order ID', order.id)
+  keyValue('Status', statusBadge(order.status))
+  keyValue('Email', order.email)
+  keyValue('Order URL', order.order_url)
+  if (order.finalize_url) {
+    keyValue('Finalize URL', order.finalize_url)
+  }
+  if (order.certificate_url) {
+    keyValue('Certificate URL', order.certificate_url)
+  }
+  keyValue('Created', formatDate(new Date(order.created_at * 1000).toISOString()))
+  keyValue('Updated', formatDate(new Date(order.updated_at * 1000).toISOString()))
+  if (order.expires_at) {
+    keyValue('Expires', formatDate(new Date(order.expires_at * 1000).toISOString()))
+  }
+
+  if (order.challenge_validation) {
+    newline()
+    header('Challenge Validation')
+    keyValue('Type', order.challenge_validation.type)
+    keyValue('Status', statusBadge(order.challenge_validation.status))
+    keyValue('Token', order.challenge_validation.token)
+    keyValue('URL', order.challenge_validation.url)
+    if (order.challenge_validation.validated) {
+      keyValue('Validated', order.challenge_validation.validated)
+    }
+    if (order.challenge_validation.error) {
+      newline()
+      warning(`Challenge Error: ${order.challenge_validation.error.detail ?? 'Unknown error'}`)
+    }
+  }
+
+  if (order.error) {
+    newline()
+    warning(`Error: ${order.error}`)
+    if (order.error_type) {
+      keyValue('Error Type', order.error_type)
+    }
+  }
+
+  newline()
+}
+
+async function createOrder(options: OrderCreateOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const domainId = parseInt(options.domainId, 10)
+  if (isNaN(domainId)) {
+    warning('Invalid domain ID')
+    return
+  }
+
+  const result = await withSpinner(`Creating ACME order for domain ${domainId}...`, async () => {
+    const { data, error } = await createOrRecreateOrder({
+      client,
+      path: { domain_id: domainId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  if (!result) {
+    warning('No response received')
+    return
+  }
+
+  newline()
+  success(`ACME order created for ${result.domain}`)
+  keyValue('Status', statusBadge(result.status))
+
+  if (result.txt_records && result.txt_records.length > 0) {
+    newline()
+    header('DNS TXT Records to Add')
+    for (const record of result.txt_records) {
+      box(
+        `Type: TXT\n` +
+        `Name: ${record.name}\n` +
+        `Value: ${record.value}`,
+        'Add this DNS record'
+      )
+      newline()
+    }
+    info('After adding DNS records, run:')
+    info(`  temps domains orders finalize --domain-id ${domainId}`)
+  } else {
+    newline()
+    info('HTTP-01 challenge will be validated automatically')
+    info(`Run: temps domains orders finalize --domain-id ${domainId}`)
+  }
+}
+
+async function finalizeOrder(options: OrderFinalizeOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const domainId = parseInt(options.domainId, 10)
+  if (isNaN(domainId)) {
+    warning('Invalid domain ID')
+    return
+  }
+
+  const result = await withSpinner(`Finalizing ACME order for domain ${domainId}...`, async () => {
+    const { data, error } = await finalizeOrderApi({
+      client,
+      path: { domain_id: domainId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  if (!result) {
+    warning('No response received')
+    return
+  }
+
+  newline()
+  if (result.status === 'active' || result.status === 'provisioned') {
+    success(`ACME order finalized for ${result.domain}`)
+    keyValue('Status', statusBadge(result.status))
+    if (result.expiration_time) {
+      keyValue('Certificate Expires', formatDate(new Date(result.expiration_time * 1000).toISOString()))
+    }
+  } else {
+    warning(`Order finalization returned status: ${result.status}`)
+    keyValue('Domain', result.domain)
+    keyValue('Status', statusBadge(result.status))
+    if (result.last_error) {
+      warning(`Error: ${result.last_error}`)
+    }
+  }
+  newline()
+}
+
+async function cancelOrder(options: OrderCancelOptions): Promise<void> {
+  await requireAuth()
+
+  const domainId = parseInt(options.domainId, 10)
+  if (isNaN(domainId)) {
+    warning('Invalid domain ID')
+    return
+  }
+
+  const skipConfirmation = options.force || options.yes
+
+  if (!skipConfirmation) {
+    const confirmed = await promptConfirm({
+      message: `Cancel ACME order for domain ID ${domainId}?`,
+      default: false,
+    })
+    if (!confirmed) {
+      info('Cancelled')
+      return
+    }
+  }
+
+  await setupClient()
+
+  const result = await withSpinner(`Cancelling ACME order for domain ${domainId}...`, async () => {
+    const { data, error } = await cancelDomainOrder({
+      client,
+      path: { domain_id: domainId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  newline()
+  success(`ACME order cancelled for domain ${domainId}`)
+  if (result) {
+    keyValue('Domain', result.domain)
+    keyValue('Status', statusBadge(result.status))
+  }
+  newline()
+}
+
+// --- DNS Challenge Setup ---
+
+async function dnsChallengeSetup(options: DnsChallengeOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const domainId = parseInt(options.domainId, 10)
+  if (isNaN(domainId)) {
+    warning('Invalid domain ID')
+    return
+  }
+
+  const providerId = parseInt(options.providerId, 10)
+  if (isNaN(providerId)) {
+    warning('Invalid DNS provider ID')
+    return
+  }
+
+  const result = await withSpinner(`Setting up DNS challenge for domain ${domainId}...`, async () => {
+    const { data, error } = await setupDnsChallengeApi({
+      client,
+      path: { domain_id: domainId },
+      body: { dns_provider_id: providerId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  if (!result) {
+    warning('No response received')
+    return
+  }
+
+  newline()
+  if (result.success) {
+    success(result.message)
+    keyValue('Records Created', `${result.records_created}/${result.total_records}`)
+  } else {
+    warning(result.message)
+    keyValue('Records Created', `${result.records_created}/${result.total_records}`)
+  }
+
+  if (result.results && result.results.length > 0) {
+    newline()
+    header('DNS Record Results')
+    for (const record of result.results) {
+      const statusIcon = record.success ? colors.success('OK') : colors.error('FAIL')
+      console.log(`  ${statusIcon}  ${colors.bold(record.name)}`)
+      console.log(`       Value: ${colors.muted(record.value)}`)
+      console.log(`       ${record.message}`)
+    }
+  }
+
+  if (result.success) {
+    newline()
+    info('DNS records created. You can now finalize the order:')
+    info(`  temps domains orders finalize --domain-id ${domainId}`)
+  }
+  newline()
+}
+
+// --- HTTP Challenge Debug ---
+
+async function httpChallengeDebug(options: HttpDebugOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const domainName = options.domain
+
+  const result = await withSpinner(`Fetching HTTP challenge debug info for ${domainName}...`, async () => {
+    const { data, error } = await getHttpChallengeDebug({
+      client,
+      path: { domain: domainName },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  if (!result) {
+    warning('No response received')
+    return
+  }
+
+  if (options.json) {
+    json(result)
+    return
+  }
+
+  newline()
+  header(`${icons.globe} HTTP Challenge Debug: ${domainName}`)
+  keyValue('Domain', result.domain)
+  keyValue('Challenge Exists', result.challenge_exists ? colors.success('Yes') : colors.error('No'))
+
+  if (result.challenge_token) {
+    keyValue('Challenge Token', result.challenge_token)
+  }
+  if (result.challenge_url) {
+    keyValue('Challenge URL', result.challenge_url)
+  }
+  if (result.validation_url) {
+    keyValue('Validation URL', result.validation_url)
+  }
+
+  newline()
+  header('DNS Resolution')
+  if (result.dns_a_records.length > 0) {
+    keyValue('A Records', result.dns_a_records.join(', '))
+  } else {
+    keyValue('A Records', colors.muted('none'))
+  }
+  if (result.dns_aaaa_records.length > 0) {
+    keyValue('AAAA Records', result.dns_aaaa_records.join(', '))
+  } else {
+    keyValue('AAAA Records', colors.muted('none'))
+  }
+  if (result.dns_error) {
+    newline()
+    warning(`DNS Error: ${result.dns_error}`)
+  }
+
+  if (!result.challenge_exists) {
+    newline()
+    info('No active HTTP challenge found for this domain.')
+    info('Create an order first: temps domains orders create --domain-id <id>')
   }
 
   newline()

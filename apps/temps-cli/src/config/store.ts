@@ -16,6 +16,7 @@ export interface TempsCredentials {
   apiKey?: string
   userId?: number
   email?: string
+  cloudApiKey?: string
 }
 
 const DEFAULT_CONFIG: TempsConfig = {
@@ -35,6 +36,7 @@ const SECRET_KEYS = {
   apiKey: 'temps_api_key',
   userId: 'temps_user_id',
   email: 'temps_email',
+  cloudApiKey: 'temps_cloud_api_key',
 } as const
 
 /**
@@ -176,6 +178,7 @@ export const credentials = {
       apiKey: secrets[SECRET_KEYS.apiKey],
       userId: userIdStr ? parseInt(userIdStr, 10) : undefined,
       email: secrets[SECRET_KEYS.email],
+      cloudApiKey: secrets[SECRET_KEYS.cloudApiKey],
     }
   },
 
@@ -201,6 +204,13 @@ export const credentials = {
         secrets[SECRET_KEYS.email] = values.email
       } else {
         delete secrets[SECRET_KEYS.email]
+      }
+    }
+    if (values.cloudApiKey !== undefined) {
+      if (values.cloudApiKey) {
+        secrets[SECRET_KEYS.cloudApiKey] = values.cloudApiKey
+      } else {
+        delete secrets[SECRET_KEYS.cloudApiKey]
       }
     }
 

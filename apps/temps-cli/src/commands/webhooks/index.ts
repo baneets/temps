@@ -8,8 +8,11 @@ import {
   deleteWebhook,
   updateWebhook,
   listEventTypes,
+  listDeliveries,
+  getDelivery,
+  retryDelivery,
 } from '../../api/sdk.gen.js'
-import type { WebhookResponse } from '../../api/types.gen.js'
+import type { WebhookResponse, WebhookDeliveryResponse } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
 import { promptText, promptPassword, promptConfirm } from '../../ui/prompts.js'
@@ -46,6 +49,34 @@ interface EnableDisableOptions {
   webhookId: string
 }
 
+interface UpdateOptions {
+  projectId: string
+  webhookId: string
+  url?: string
+  events?: string
+  secret?: string
+}
+
+interface DeliveriesListOptions {
+  projectId: string
+  webhookId: string
+  limit?: string
+  json?: boolean
+}
+
+interface DeliveriesShowOptions {
+  projectId: string
+  webhookId: string
+  deliveryId: string
+  json?: boolean
+}
+
+interface DeliveriesRetryOptions {
+  projectId: string
+  webhookId: string
+  deliveryId: string
+}
+
 export function registerWebhooksCommands(program: Command): void {
   const webhooks = program
     .command('webhooks')
@@ -80,6 +111,16 @@ export function registerWebhooksCommands(program: Command): void {
     .action(showWebhook)
 
   webhooks
+    .command('update')
+    .description('Update a webhook')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .requiredOption('--webhook-id <id>', 'Webhook ID')
+    .option('-u, --url <url>', 'New webhook URL')
+    .option('-e, --events <events>', 'Comma-separated event types (or "all" for all events)')
+    .option('-s, --secret <secret>', 'New webhook secret for signature verification')
+    .action(updateWebhookAction)
+
+  webhooks
     .command('remove')
     .alias('rm')
     .description('Delete a webhook')
@@ -108,6 +149,38 @@ export function registerWebhooksCommands(program: Command): void {
     .description('List available webhook event types')
     .option('--json', 'Output in JSON format')
     .action(listEvents)
+
+  // Deliveries subcommand group
+  const deliveries = webhooks
+    .command('deliveries')
+    .description('Manage webhook deliveries')
+
+  deliveries
+    .command('list')
+    .alias('ls')
+    .description('List deliveries for a webhook')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .requiredOption('--webhook-id <id>', 'Webhook ID')
+    .option('--limit <n>', 'Number of deliveries to return (default: 50)')
+    .option('--json', 'Output in JSON format')
+    .action(listDeliveriesAction)
+
+  deliveries
+    .command('show')
+    .description('Show delivery details')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .requiredOption('--webhook-id <id>', 'Webhook ID')
+    .requiredOption('--delivery-id <id>', 'Delivery ID')
+    .option('--json', 'Output in JSON format')
+    .action(showDeliveryAction)
+
+  deliveries
+    .command('retry')
+    .description('Retry a failed delivery')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .requiredOption('--webhook-id <id>', 'Webhook ID')
+    .requiredOption('--delivery-id <id>', 'Delivery ID')
+    .action(retryDeliveryAction)
 }
 
 async function listWebhooksAction(options: ListOptions): Promise<void> {
@@ -239,8 +312,8 @@ async function createWebhookAction(options: CreateOptions): Promise<void> {
     }) || null
   }
 
-  await withSpinner('Creating webhook...', async () => {
-    const { error } = await createWebhook({
+  const webhook = await withSpinner('Creating webhook...', async () => {
+    const { data, error } = await createWebhook({
       client,
       path: { project_id: projectId },
       body: {
@@ -253,10 +326,13 @@ async function createWebhookAction(options: CreateOptions): Promise<void> {
     if (error) {
       throw new Error(getErrorMessage(error))
     }
+    return data
   })
 
   success('Webhook created successfully')
-  info(`Subscribed to ${selectedEvents.length} event(s)`)
+  if (webhook) {
+    json(webhook)
+  }
 }
 
 async function showWebhook(options: ShowOptions): Promise<void> {
@@ -301,6 +377,71 @@ async function showWebhook(options: ShowOptions): Promise<void> {
     console.log(`  • ${event}`)
   }
   newline()
+}
+
+async function updateWebhookAction(options: UpdateOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const projId = parseInt(options.projectId, 10)
+  const hookId = parseInt(options.webhookId, 10)
+  if (isNaN(projId) || isNaN(hookId)) {
+    warning('Invalid project or webhook ID')
+    return
+  }
+
+  const body: Record<string, unknown> = {}
+
+  if (options.url) {
+    body.url = options.url
+  }
+
+  if (options.events) {
+    if (options.events.toLowerCase() === 'all') {
+      // Fetch available event types to resolve "all"
+      const { data: eventTypesData } = await listEventTypes({ client })
+      if (!eventTypesData || eventTypesData.length === 0) {
+        warning('No event types available')
+        return
+      }
+      body.events = eventTypesData.map(e => e.event_type)
+    } else {
+      body.events = options.events.split(',').map(e => e.trim())
+    }
+  }
+
+  if (options.secret) {
+    body.secret = options.secret
+  }
+
+  if (Object.keys(body).length === 0) {
+    warning('No fields to update. Provide at least one of --url, --events, or --secret')
+    return
+  }
+
+  const webhook = await withSpinner('Updating webhook...', async () => {
+    const { data, error } = await updateWebhook({
+      client,
+      path: { project_id: projId, webhook_id: hookId },
+      body,
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  success(`Webhook #${hookId} updated`)
+
+  if (options.url) {
+    info(`URL: ${options.url}`)
+  }
+  if (body.events) {
+    info(`Events: ${(body.events as string[]).length} event(s)`)
+  }
+  if (options.secret) {
+    info('Secret: updated')
+  }
 }
 
 async function removeWebhook(options: RemoveOptions): Promise<void> {
@@ -410,4 +551,147 @@ async function listEvents(options: { json?: boolean }): Promise<void> {
     }
   }
   newline()
+}
+
+async function listDeliveriesAction(options: DeliveriesListOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const projId = parseInt(options.projectId, 10)
+  const hookId = parseInt(options.webhookId, 10)
+  if (isNaN(projId) || isNaN(hookId)) {
+    warning('Invalid project or webhook ID')
+    return
+  }
+
+  const limit = options.limit ? parseInt(options.limit, 10) : undefined
+
+  const deliveriesData = await withSpinner('Fetching deliveries...', async () => {
+    const { data, error } = await listDeliveries({
+      client,
+      path: { project_id: projId, webhook_id: hookId },
+      query: {
+        ...(limit && { limit }),
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data ?? []
+  })
+
+  if (options.json) {
+    json(deliveriesData)
+    return
+  }
+
+  newline()
+  header(`${icons.info} Deliveries for Webhook #${hookId} (${deliveriesData.length})`)
+
+  if (deliveriesData.length === 0) {
+    info('No deliveries found')
+    newline()
+    return
+  }
+
+  const columns: TableColumn<WebhookDeliveryResponse>[] = [
+    { header: 'ID', key: 'id', width: 6 },
+    { header: 'Event', key: 'event_type' },
+    { header: 'Status', accessor: (d) => d.success ? 'success' : 'failed', color: (v) => statusBadge(v === 'success' ? 'active' : 'error') },
+    { header: 'Code', accessor: (d) => d.status_code != null ? d.status_code.toString() : '-' },
+    { header: 'Attempt', accessor: (d) => d.attempt_number.toString() },
+    { header: 'Delivered', accessor: (d) => d.delivered_at ? new Date(d.delivered_at).toLocaleString() : '-' },
+  ]
+
+  printTable(deliveriesData, columns, { style: 'minimal' })
+  newline()
+}
+
+async function showDeliveryAction(options: DeliveriesShowOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const projId = parseInt(options.projectId, 10)
+  const hookId = parseInt(options.webhookId, 10)
+  const delId = parseInt(options.deliveryId, 10)
+  if (isNaN(projId) || isNaN(hookId) || isNaN(delId)) {
+    warning('Invalid project, webhook, or delivery ID')
+    return
+  }
+
+  const delivery = await withSpinner('Fetching delivery...', async () => {
+    const { data, error } = await getDelivery({
+      client,
+      path: { project_id: projId, webhook_id: hookId, delivery_id: delId },
+    })
+    if (error || !data) {
+      throw new Error(getErrorMessage(error) ?? `Delivery ${options.deliveryId} not found`)
+    }
+    return data
+  })
+
+  if (options.json) {
+    json(delivery)
+    return
+  }
+
+  newline()
+  header(`${icons.info} Delivery #${delivery.id}`)
+  keyValue('Webhook ID', delivery.webhook_id)
+  keyValue('Event Type', delivery.event_type)
+  keyValue('Event ID', delivery.event_id)
+  keyValue('Status', delivery.success ? colors.success('Success') : colors.error('Failed'))
+  keyValue('Status Code', delivery.status_code != null ? delivery.status_code.toString() : '-')
+  keyValue('Attempt', delivery.attempt_number.toString())
+  keyValue('Created', new Date(delivery.created_at).toLocaleString())
+  keyValue('Delivered', delivery.delivered_at ? new Date(delivery.delivered_at).toLocaleString() : '-')
+
+  if (delivery.error_message) {
+    newline()
+    header('Error')
+    console.log(`  ${colors.error(delivery.error_message)}`)
+  }
+
+  newline()
+  header('Payload')
+  try {
+    const parsed = JSON.parse(delivery.payload)
+    console.log(JSON.stringify(parsed, null, 2))
+  } catch {
+    console.log(delivery.payload)
+  }
+  newline()
+}
+
+async function retryDeliveryAction(options: DeliveriesRetryOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const projId = parseInt(options.projectId, 10)
+  const hookId = parseInt(options.webhookId, 10)
+  const delId = parseInt(options.deliveryId, 10)
+  if (isNaN(projId) || isNaN(hookId) || isNaN(delId)) {
+    warning('Invalid project, webhook, or delivery ID')
+    return
+  }
+
+  const delivery = await withSpinner('Retrying delivery...', async () => {
+    const { data, error } = await retryDelivery({
+      client,
+      path: { project_id: projId, webhook_id: hookId, delivery_id: delId },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  if (delivery?.success) {
+    success(`Delivery #${delId} retried successfully`)
+  } else {
+    warning(`Delivery #${delId} retry attempted but delivery failed`)
+    if (delivery?.error_message) {
+      info(`Error: ${delivery.error_message}`)
+    }
+  }
 }

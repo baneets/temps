@@ -1,13 +1,125 @@
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use temps_core::UtcDateTime;
 use temps_entities::{funnel_steps, funnels};
+use tokio::sync::RwLock;
 
-#[derive(Debug, Serialize, Deserialize)]
+// ============================================================================
+// Caching Infrastructure
+// ============================================================================
+
+/// Cache entry with expiration time
+#[derive(Clone, Debug)]
+struct CacheEntry<T> {
+    value: T,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+impl<T> CacheEntry<T> {
+    fn new(value: T, ttl_minutes: i64) -> Self {
+        Self {
+            value,
+            expires_at: Utc::now() + Duration::minutes(ttl_minutes),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        Utc::now() > self.expires_at
+    }
+}
+
+/// Cache key for funnel metrics
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunnelMetricsCacheKey {
+    pub funnel_id: i32,
+    pub environment_id: Option<i32>,
+    pub country_code: Option<String>,
+    pub start_date: Option<i64>, // Unix timestamp for hashing
+    pub end_date: Option<i64>,
+}
+
+impl FunnelMetricsCacheKey {
+    pub fn from_filter(funnel_id: i32, filter: &FunnelFilter) -> Self {
+        Self {
+            funnel_id,
+            environment_id: filter.environment_id,
+            country_code: filter.country_code.clone(),
+            start_date: filter.start_date.map(|d| d.timestamp()),
+            end_date: filter.end_date.map(|d| d.timestamp()),
+        }
+    }
+}
+
+/// Generic TTL-based cache
+pub struct MetricsCache<K, V>
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+{
+    cache: Arc<RwLock<HashMap<K, CacheEntry<V>>>>,
+    default_ttl_minutes: i64,
+}
+
+impl<K, V> MetricsCache<K, V>
+where
+    K: Eq + Hash + Clone,
+    V: Clone,
+{
+    pub fn new(default_ttl_minutes: i64) -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            default_ttl_minutes,
+        }
+    }
+
+    pub async fn get(&self, key: &K) -> Option<V> {
+        let cache = self.cache.read().await;
+        if let Some(entry) = cache.get(key) {
+            if !entry.is_expired() {
+                return Some(entry.value.clone());
+            }
+        }
+        None
+    }
+
+    pub async fn set(&self, key: K, value: V) {
+        let mut cache = self.cache.write().await;
+        cache.insert(key, CacheEntry::new(value, self.default_ttl_minutes));
+    }
+
+    pub async fn invalidate(&self, key: &K) {
+        let mut cache = self.cache.write().await;
+        cache.remove(key);
+    }
+
+    pub async fn invalidate_by_funnel(&self, funnel_id: i32)
+    where
+        K: std::fmt::Debug,
+    {
+        let mut cache = self.cache.write().await;
+        // Remove all entries for this funnel (checks if key contains funnel_id)
+        cache.retain(|k, _| {
+            let k_str = format!("{:?}", k);
+            !k_str.contains(&format!("funnel_id: {}", funnel_id))
+        });
+    }
+
+    pub async fn cleanup_expired(&self) {
+        let mut cache = self.cache.write().await;
+        cache.retain(|_, entry| !entry.is_expired());
+    }
+}
+
+// ============================================================================
+// Domain Types
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunnelMetrics {
     pub funnel_id: i32,
     pub funnel_name: String,
@@ -17,14 +129,14 @@ pub struct FunnelMetrics {
     pub average_completion_time_seconds: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepConversion {
     pub step_id: i32,
     pub step_name: String,
     pub step_order: i32,
     pub completions: u64,
-    pub conversion_rate: f64, // Percentage of previous step that completed this step
-    pub drop_off_rate: f64,
+    pub conversion_rate: f64, // Percentage of previous step that completed this step (0 for step 1)
+    pub drop_off_rate: f64,   // 0 for step 1 (N/A)
     pub average_time_to_complete_seconds: f64,
 }
 
@@ -191,13 +303,38 @@ pub struct FunnelFilter {
     pub end_date: Option<UtcDateTime>,
 }
 
+/// Default cache TTL in minutes (5 minutes)
+const METRICS_CACHE_TTL_MINUTES: i64 = 5;
+
 pub struct FunnelService {
     db: Arc<DatabaseConnection>,
+    metrics_cache: MetricsCache<FunnelMetricsCacheKey, FunnelMetrics>,
 }
 
 impl FunnelService {
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
-        Self { db }
+        Self {
+            db,
+            metrics_cache: MetricsCache::new(METRICS_CACHE_TTL_MINUTES),
+        }
+    }
+
+    /// Create with custom cache TTL (for testing)
+    pub fn with_cache_ttl(db: Arc<DatabaseConnection>, cache_ttl_minutes: i64) -> Self {
+        Self {
+            db,
+            metrics_cache: MetricsCache::new(cache_ttl_minutes),
+        }
+    }
+
+    /// Invalidate cache for a specific funnel (call after funnel updates)
+    pub async fn invalidate_funnel_cache(&self, funnel_id: i32) {
+        self.metrics_cache.invalidate_by_funnel(funnel_id).await;
+    }
+
+    /// Cleanup expired cache entries (can be called periodically)
+    pub async fn cleanup_cache(&self) {
+        self.metrics_cache.cleanup_expired().await;
     }
 
     // Removed process_event_for_funnels_static - no longer needed
@@ -255,6 +392,9 @@ impl FunnelService {
             funnel_steps::Entity::insert(step_model).exec(db).await?;
         }
 
+        // Invalidate cache for this funnel
+        self.invalidate_funnel_cache(funnel_id).await;
+
         Ok(())
     }
 
@@ -274,6 +414,9 @@ impl FunnelService {
         funnel.is_active = Set(false);
         funnel.updated_at = Set(Utc::now());
         funnel.update(db).await?;
+
+        // Invalidate cache for this funnel
+        self.invalidate_funnel_cache(funnel_id).await;
 
         Ok(())
     }
@@ -317,13 +460,40 @@ impl FunnelService {
         Ok(funnel_id)
     }
 
-    /// Get all unique event types for a project
-    /// Returns event names with their occurrence count, ordered by count descending
-    pub async fn get_unique_events(&self, project_id: i32) -> Result<Vec<(String, i64)>, DbErr> {
+    /// Get unique event types for a project with pagination
+    /// Returns (events with counts, total count) ordered by count descending
+    pub async fn get_unique_events(
+        &self,
+        project_id: i32,
+        page: Option<u64>,
+        page_size: Option<u64>,
+    ) -> Result<(Vec<(String, i64)>, u64), DbErr> {
         let db = self.db.as_ref();
 
-        // Query to get unique events using COALESCE to check both event_name and event_type
-        // Group by the coalesced value and count occurrences
+        let page = page.unwrap_or(1).max(1);
+        let page_size = page_size.unwrap_or(50).min(100); // Default 50, max 100
+        let offset = (page - 1) * page_size;
+
+        // Query to get total count of unique events
+        let count_sql = r#"
+            SELECT COUNT(DISTINCT COALESCE(event_name, event_type)) as total
+            FROM events
+            WHERE project_id = $1
+        "#;
+
+        let count_result = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                count_sql,
+                vec![project_id.into()],
+            ))
+            .await?;
+
+        let total: i64 = count_result
+            .map(|r| r.try_get("", "total").unwrap_or(0))
+            .unwrap_or(0);
+
+        // Query to get paginated unique events
         let sql = r#"
             SELECT
                 COALESCE(event_name, event_type) as event,
@@ -332,13 +502,18 @@ impl FunnelService {
             WHERE project_id = $1
             GROUP BY COALESCE(event_name, event_type)
             ORDER BY count DESC, event ASC
+            LIMIT $2 OFFSET $3
         "#;
 
         let results = db
             .query_all(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 sql,
-                vec![project_id.into()],
+                vec![
+                    project_id.into(),
+                    (page_size as i64).into(),
+                    (offset as i64).into(),
+                ],
             ))
             .await?;
 
@@ -349,7 +524,7 @@ impl FunnelService {
             events.push((event_name, count));
         }
 
-        Ok(events)
+        Ok((events, total as u64))
     }
 
     /// Preview funnel metrics without saving the funnel
@@ -384,12 +559,24 @@ impl FunnelService {
         .await
     }
 
-    /// Get funnel metrics by querying events directly
+    /// Get funnel metrics by querying events directly (with caching)
     pub async fn get_funnel_metrics(
         &self,
         funnel_id: i32,
         filter: FunnelFilter,
     ) -> Result<FunnelMetrics, DbErr> {
+        // Check cache first
+        let cache_key = FunnelMetricsCacheKey::from_filter(funnel_id, &filter);
+        if let Some(cached) = self.metrics_cache.get(&cache_key).await {
+            tracing::debug!("Cache hit for funnel {} metrics", funnel_id);
+            return Ok(cached);
+        }
+
+        tracing::debug!(
+            "Cache miss for funnel {} metrics, calculating...",
+            funnel_id
+        );
+
         let db = self.db.as_ref();
 
         // Get funnel and its steps
@@ -411,18 +598,24 @@ impl FunnelService {
             .collect();
 
         // Calculate metrics using the internal method
-        self.calculate_funnel_metrics_internal(
-            funnel_id,
-            &funnel.name,
-            funnel.project_id,
-            &steps_data,
-            filter,
-        )
-        .await
+        let metrics = self
+            .calculate_funnel_metrics_internal(
+                funnel_id,
+                &funnel.name,
+                funnel.project_id,
+                &steps_data,
+                filter,
+            )
+            .await?;
+
+        // Store in cache
+        self.metrics_cache.set(cache_key, metrics.clone()).await;
+
+        Ok(metrics)
     }
 
-    /// Internal method to calculate funnel metrics
-    /// Takes funnel_id, name, project_id, and steps data as parameters
+    /// Internal method to calculate funnel metrics using database-side aggregation
+    /// Uses a single SQL query with CTEs and window functions for efficiency
     async fn calculate_funnel_metrics_internal(
         &self,
         funnel_id: i32,
@@ -444,271 +637,355 @@ impl FunnelService {
             });
         }
 
-        // Build a map of sessions that completed each step
-        let mut step_conversions = Vec::new();
-        let mut sessions_by_step: Vec<HashMap<String, UtcDateTime>> = Vec::new();
+        // Build a single SQL query with CTEs for each step
+        // This avoids N+1 queries and keeps all data in the database
+        let (query, values) =
+            self.build_funnel_aggregation_query(project_id, steps_data, &filter)?;
 
-        for (step_index, (_step_order, event_name, event_filter_opt)) in
-            steps_data.iter().enumerate()
+        tracing::debug!("Funnel aggregation query: {}", query);
+
+        // Execute the aggregation query
+        let result = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                &query,
+                values,
+            ))
+            .await?;
+
+        // Parse results and build metrics
+        self.parse_funnel_results(funnel_id, funnel_name, steps_data, result)
+    }
+
+    /// Build the SQL query for funnel aggregation using CTEs
+    /// Returns (query_string, parameter_values)
+    fn build_funnel_aggregation_query(
+        &self,
+        project_id: i32,
+        steps_data: &[(i32, String, Option<String>)],
+        filter: &FunnelFilter,
+    ) -> Result<(String, Vec<sea_orm::Value>), DbErr> {
+        let mut values: Vec<sea_orm::Value> = vec![project_id.into()];
+        let mut param_index = 2;
+
+        // Build global filter conditions
+        let mut global_conditions = Vec::new();
+        if let Some(env_id) = filter.environment_id {
+            global_conditions.push(format!("environment_id = ${}", param_index));
+            values.push(env_id.into());
+            param_index += 1;
+        }
+        if let Some(start_date) = filter.start_date {
+            global_conditions.push(format!("timestamp >= ${}", param_index));
+            values.push(start_date.into());
+            param_index += 1;
+        }
+        if let Some(end_date) = filter.end_date {
+            global_conditions.push(format!("timestamp <= ${}", param_index));
+            values.push(end_date.into());
+            param_index += 1;
+        }
+        // Add country_code filter via ip_geolocations join
+        if let Some(ref country_code) = filter.country_code {
+            global_conditions.push(format!(
+                "ip_geolocation_id IN (SELECT id FROM ip_geolocations WHERE country_code = ${})",
+                param_index
+            ));
+            values.push(country_code.clone().into());
+            param_index += 1;
+        }
+
+        let global_filter = if global_conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", global_conditions.join(" AND "))
+        };
+
+        // Build CTEs for each step
+        let mut ctes = Vec::new();
+
+        for (step_idx, (_step_order, event_name, event_filter_opt)) in steps_data.iter().enumerate()
         {
-            // Query events matching this step
-            // Use COALESCE to check both event_name and event_type since event_name is optional
-            let mut where_conditions = vec![
-                "project_id = $1".to_string(),
-                "COALESCE(event_name, event_type) = $2".to_string(),
-                "session_id IS NOT NULL".to_string(),
-            ];
-            let mut values: Vec<sea_orm::Value> =
-                vec![project_id.into(), event_name.clone().into()];
-            let mut param_index = 3;
+            let step_num = step_idx + 1;
+            let event_param_idx = param_index;
+            values.push(event_name.clone().into());
+            param_index += 1;
 
-            // Apply event-specific filters from step.event_filter
-            if let Some(event_filter_str) = event_filter_opt {
-                if let Ok(filter_obj) =
-                    serde_json::from_str::<serde_json::Map<String, Value>>(event_filter_str)
-                {
-                    for (key, value) in filter_obj.iter() {
-                        // Handle CustomData filters separately
-                        if key == "_custom_data" {
-                            if let Value::Array(custom_filters) = value {
-                                for custom_filter in custom_filters {
-                                    if let (Some(path), Some(filter_value)) = (
-                                        custom_filter.get("path").and_then(|v| v.as_str()),
-                                        custom_filter.get("value").and_then(|v| v.as_str()),
-                                    ) {
-                                        // Create SmartFilter and use to_json_condition
-                                        let smart_filter = SmartFilter::CustomData {
-                                            path: path.to_string(),
-                                            value: filter_value.to_string(),
-                                        };
-                                        if let Some(json_condition) =
-                                            smart_filter.to_json_condition()
-                                        {
-                                            where_conditions.push(json_condition);
-                                        }
+            // Build step-specific filter conditions
+            let step_filters =
+                self.build_step_filter_conditions(event_filter_opt, &mut values, &mut param_index);
+
+            let cte = format!(
+                r#"step{step_num}_events AS (
+    SELECT
+        session_id,
+        MIN(timestamp) as first_timestamp
+    FROM events
+    WHERE project_id = $1
+      AND COALESCE(event_name, event_type) = ${event_param_idx}
+      AND session_id IS NOT NULL
+      {global_filter}
+      {step_filters}
+    GROUP BY session_id
+)"#,
+                step_num = step_num,
+                event_param_idx = event_param_idx,
+                global_filter = global_filter,
+                step_filters = step_filters
+            );
+            ctes.push(cte);
+        }
+
+        // Build the funnel join query
+        // Each step is joined with temporal ordering (step N must happen after step N-1)
+        let funnel_join = self.build_funnel_join_query(steps_data.len());
+
+        // Build the aggregation query
+        let aggregation = self.build_aggregation_select(steps_data.len());
+
+        let query = format!(
+            "WITH {ctes}\n{funnel_join}\n{aggregation}",
+            ctes = ctes.join(",\n"),
+            funnel_join = funnel_join,
+            aggregation = aggregation
+        );
+
+        Ok((query, values))
+    }
+
+    /// Build step-specific filter conditions from event_filter JSON
+    fn build_step_filter_conditions(
+        &self,
+        event_filter_opt: &Option<String>,
+        values: &mut Vec<sea_orm::Value>,
+        param_index: &mut usize,
+    ) -> String {
+        let mut conditions = Vec::new();
+
+        if let Some(event_filter_str) = event_filter_opt {
+            if let Ok(filter_obj) =
+                serde_json::from_str::<serde_json::Map<String, Value>>(event_filter_str)
+            {
+                for (key, value) in filter_obj.iter() {
+                    // Handle CustomData filters
+                    if key == "_custom_data" {
+                        if let Value::Array(custom_filters) = value {
+                            for custom_filter in custom_filters {
+                                if let (Some(path), Some(filter_value)) = (
+                                    custom_filter.get("path").and_then(|v| v.as_str()),
+                                    custom_filter.get("value").and_then(|v| v.as_str()),
+                                ) {
+                                    let smart_filter = SmartFilter::CustomData {
+                                        path: path.to_string(),
+                                        value: filter_value.to_string(),
+                                    };
+                                    if let Some(json_condition) = smart_filter.to_json_condition() {
+                                        conditions.push(format!("AND {}", json_condition));
                                     }
                                 }
                             }
-                            continue;
                         }
+                        continue;
+                    }
 
-                        // Validate that the column exists to prevent SQL injection
-                        let allowed_columns = vec![
-                            "pathname",
-                            "hostname",
-                            "page_path",
-                            "referrer",
-                            "referrer_hostname",
-                            "utm_source",
-                            "utm_medium",
-                            "utm_campaign",
-                            "utm_term",
-                            "utm_content",
-                            "channel",
-                            "device_type",
-                            "browser",
-                            "operating_system",
-                            "language",
-                        ];
+                    // Validate column name
+                    let allowed_columns = [
+                        "pathname",
+                        "hostname",
+                        "page_path",
+                        "referrer",
+                        "referrer_hostname",
+                        "utm_source",
+                        "utm_medium",
+                        "utm_campaign",
+                        "utm_term",
+                        "utm_content",
+                        "channel",
+                        "device_type",
+                        "browser",
+                        "operating_system",
+                        "language",
+                    ];
 
-                        if !allowed_columns.contains(&key.as_str()) {
+                    if !allowed_columns.contains(&key.as_str()) {
+                        tracing::warn!("Invalid filter column '{}' in funnel step, skipping", key);
+                        continue;
+                    }
+
+                    // Build parameterized condition
+                    match value {
+                        Value::String(s) => {
+                            conditions.push(format!("AND {} = ${}", key, param_index));
+                            values.push(s.as_str().into());
+                            *param_index += 1;
+                        }
+                        Value::Number(n) => {
+                            conditions.push(format!("AND {} = ${}", key, param_index));
+                            if let Some(n_i64) = n.as_i64() {
+                                values.push(n_i64.into());
+                            } else if let Some(n_f64) = n.as_f64() {
+                                values.push(n_f64.into());
+                            }
+                            *param_index += 1;
+                        }
+                        Value::Bool(b) => {
+                            conditions.push(format!("AND {} = ${}", key, param_index));
+                            values.push((*b).into());
+                            *param_index += 1;
+                        }
+                        Value::Null => {
+                            conditions.push(format!("AND {} IS NULL", key));
+                        }
+                        _ => {
                             tracing::warn!(
-                                "Invalid filter column '{}' in funnel step, skipping",
+                                "Unsupported filter value type for column '{}', skipping",
                                 key
                             );
-                            continue;
-                        }
-
-                        // Build condition based on value type using parameterized queries
-                        match value {
-                            Value::String(s) => {
-                                where_conditions.push(format!("{} = ${}", key, param_index));
-                                values.push(s.as_str().into());
-                                param_index += 1;
-                            }
-                            Value::Number(n) => {
-                                where_conditions.push(format!("{} = ${}", key, param_index));
-                                if let Some(n_i64) = n.as_i64() {
-                                    values.push(n_i64.into());
-                                } else if let Some(n_f64) = n.as_f64() {
-                                    values.push(n_f64.into());
-                                }
-                                param_index += 1;
-                            }
-                            Value::Bool(b) => {
-                                where_conditions.push(format!("{} = ${}", key, param_index));
-                                values.push((*b).into());
-                                param_index += 1;
-                            }
-                            Value::Null => {
-                                where_conditions.push(format!("{} IS NULL", key));
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    "Unsupported filter value type for column '{}', skipping",
-                                    key
-                                );
-                            }
                         }
                     }
                 }
             }
-
-            // Apply global filters
-            if let Some(env_id) = filter.environment_id {
-                where_conditions.push(format!("environment_id = ${}", param_index));
-                values.push(env_id.into());
-                param_index += 1;
-            }
-            if let Some(start_date) = filter.start_date {
-                where_conditions.push(format!("timestamp >= ${}", param_index));
-                values.push(start_date.into());
-                param_index += 1;
-            }
-            if let Some(end_date) = filter.end_date {
-                where_conditions.push(format!("timestamp <= ${}", param_index));
-                values.push(end_date.into());
-            }
-
-            let query = format!(
-                "SELECT session_id, timestamp FROM events WHERE {} ORDER BY timestamp ASC",
-                where_conditions.join(" AND ")
-            );
-
-            tracing::debug!("Funnel step {} query: {}", step_index + 1, query);
-
-            #[derive(Debug, FromQueryResult)]
-            struct EventResult {
-                session_id: Option<String>,
-                timestamp: UtcDateTime,
-            }
-
-            // Get all matching events using parameterized query
-            let events = EventResult::find_by_statement(Statement::from_sql_and_values(
-                DatabaseBackend::Postgres,
-                query,
-                values,
-            ))
-            .all(db)
-            .await?;
-
-            // Group by session and keep the earliest occurrence
-            let mut sessions_completed = HashMap::new();
-            for event in events {
-                if let Some(session_id) = event.session_id {
-                    // Keep the earliest timestamp for each session
-                    sessions_completed
-                        .entry(session_id.clone())
-                        .and_modify(|existing_time| {
-                            if event.timestamp < *existing_time {
-                                *existing_time = event.timestamp;
-                            }
-                        })
-                        .or_insert(event.timestamp);
-                }
-            }
-
-            tracing::debug!(
-                "Step {}: '{}' - Found {} sessions: {:?}",
-                step_index + 1,
-                event_name,
-                sessions_completed.len(),
-                sessions_completed.keys().collect::<Vec<_>>()
-            );
-
-            // For first step, all sessions count
-            // For subsequent steps, only count sessions that completed previous step
-            let qualified_sessions = if step_index == 0 {
-                sessions_completed.clone()
-            } else {
-                let previous_sessions = &sessions_by_step[step_index - 1];
-                tracing::debug!(
-                    "Step {}: Previous step had {} sessions: {:?}",
-                    step_index + 1,
-                    previous_sessions.len(),
-                    previous_sessions.keys().collect::<Vec<_>>()
-                );
-
-                let filtered: HashMap<_, _> = sessions_completed
-                    .into_iter()
-                    .filter(|(session_id, timestamp)| {
-                        // Only count if session completed previous step AND
-                        // this step happened after (or at the same time as) the previous step
-                        if let Some(prev_time) = previous_sessions.get(session_id) {
-                            let qualifies = *timestamp >= *prev_time;
-                            tracing::debug!(
-                                "Step {}: Session '{}' - current: {:?}, prev: {:?}, qualifies: {}",
-                                step_index + 1,
-                                session_id,
-                                timestamp,
-                                prev_time,
-                                qualifies
-                            );
-                            qualifies
-                        } else {
-                            tracing::debug!(
-                                "Step {}: Session '{}' not found in previous step",
-                                step_index + 1,
-                                session_id
-                            );
-                            false
-                        }
-                    })
-                    .collect();
-
-                tracing::debug!(
-                    "Step {}: After filtering, {} sessions qualify",
-                    step_index + 1,
-                    filtered.len()
-                );
-
-                filtered
-            };
-
-            sessions_by_step.push(qualified_sessions);
         }
 
-        // Calculate metrics for each step
-        let total_entries = sessions_by_step[0].len() as u64;
-        let mut previous_step_completions = total_entries;
+        conditions.join("\n      ")
+    }
 
-        for (step_index, (step_order, event_name, _event_filter)) in steps_data.iter().enumerate() {
-            let completions = sessions_by_step[step_index].len() as u64;
+    /// Build the funnel join CTE that combines all steps with temporal ordering
+    fn build_funnel_join_query(&self, num_steps: usize) -> String {
+        if num_steps == 1 {
+            return r#"funnel_sessions AS (
+    SELECT
+        s1.session_id,
+        s1.first_timestamp as step1_time
+    FROM step1_events s1
+)"#
+            .to_string();
+        }
 
-            let conversion_rate = if previous_step_completions > 0 {
-                (completions as f64 / previous_step_completions as f64) * 100.0
+        let mut select_cols = vec!["s1.session_id".to_string()];
+        let mut joins = Vec::new();
+
+        for i in 1..=num_steps {
+            select_cols.push(format!("s{}.first_timestamp as step{}_time", i, i));
+        }
+
+        // Build LEFT JOINs with temporal ordering
+        for i in 2..=num_steps {
+            joins.push(format!(
+                "LEFT JOIN step{i}_events s{i} ON s1.session_id = s{i}.session_id AND s{i}.first_timestamp >= s{prev}.first_timestamp",
+                i = i,
+                prev = i - 1
+            ));
+        }
+
+        format!(
+            r#"funnel_sessions AS (
+    SELECT
+        {select_cols}
+    FROM step1_events s1
+    {joins}
+)"#,
+            select_cols = select_cols.join(",\n        "),
+            joins = joins.join("\n    ")
+        )
+    }
+
+    /// Build the final aggregation SELECT statement
+    fn build_aggregation_select(&self, num_steps: usize) -> String {
+        let mut select_parts = vec![
+            "COUNT(*) as total_entries".to_string(),
+            "COUNT(step1_time) as step1_completions".to_string(),
+        ];
+
+        // Add completion counts for each step
+        for i in 2..=num_steps {
+            select_parts.push(format!("COUNT(step{}_time) as step{}_completions", i, i));
+        }
+
+        // Add average time between consecutive steps
+        for i in 2..=num_steps {
+            select_parts.push(format!(
+                "AVG(EXTRACT(EPOCH FROM (step{i}_time - step{prev}_time))) as avg_time_{prev}_to_{i}",
+                i = i,
+                prev = i - 1
+            ));
+        }
+
+        // Add total funnel completion time (first to last step)
+        if num_steps > 1 {
+            select_parts.push(format!(
+                "AVG(EXTRACT(EPOCH FROM (step{}_time - step1_time))) as avg_total_time",
+                num_steps
+            ));
+        }
+
+        format!(
+            "SELECT \n    {}\nFROM funnel_sessions",
+            select_parts.join(",\n    ")
+        )
+    }
+
+    /// Parse the aggregation query results into FunnelMetrics
+    fn parse_funnel_results(
+        &self,
+        funnel_id: i32,
+        funnel_name: &str,
+        steps_data: &[(i32, String, Option<String>)],
+        result: Option<QueryResult>,
+    ) -> Result<FunnelMetrics, DbErr> {
+        let result = match result {
+            Some(r) => r,
+            None => {
+                return Ok(FunnelMetrics {
+                    funnel_id,
+                    funnel_name: funnel_name.to_string(),
+                    total_entries: 0,
+                    step_conversions: vec![],
+                    overall_conversion_rate: 0.0,
+                    average_completion_time_seconds: 0.0,
+                });
+            }
+        };
+
+        let total_entries: i64 = result.try_get("", "total_entries").unwrap_or(0);
+        let num_steps = steps_data.len();
+
+        let mut step_conversions = Vec::new();
+        let mut previous_completions = total_entries as u64;
+
+        for (step_idx, (step_order, event_name, _)) in steps_data.iter().enumerate() {
+            let step_num = step_idx + 1;
+            let completions: i64 = result
+                .try_get("", &format!("step{}_completions", step_num))
+                .unwrap_or(0);
+            let completions = completions as u64;
+
+            // Step 1 has no conversion rate (nothing to convert FROM)
+            // Subsequent steps show conversion from previous step
+            let (conversion_rate, drop_off_rate) = if step_num == 1 {
+                (0.0, 0.0) // N/A for entry step
+            } else if previous_completions > 0 {
+                let rate = (completions as f64 / previous_completions as f64) * 100.0;
+                (rate, 100.0 - rate)
             } else {
-                0.0
+                (0.0, 100.0)
             };
 
-            let drop_off_rate = 100.0 - conversion_rate;
-
-            // Calculate average time to complete this step
-            let avg_time = if step_index > 0 && completions > 0 {
-                let current_sessions = &sessions_by_step[step_index];
-                let previous_sessions = &sessions_by_step[step_index - 1];
-
-                let mut times = Vec::new();
-                for (session_id, current_time) in current_sessions {
-                    if let Some(prev_time) = previous_sessions.get(session_id) {
-                        let duration = current_time.signed_duration_since(*prev_time).num_seconds();
-                        if duration >= 0 {
-                            times.push(duration);
-                        }
-                    }
-                }
-
-                if !times.is_empty() {
-                    times.iter().sum::<i64>() as f64 / times.len() as f64
-                } else {
-                    0.0
-                }
+            // Get average time to complete this step (from previous step)
+            let avg_time = if step_num > 1 {
+                result
+                    .try_get::<Option<f64>>(
+                        "",
+                        &format!("avg_time_{}_to_{}", step_num - 1, step_num),
+                    )
+                    .unwrap_or(None)
+                    .unwrap_or(0.0)
             } else {
                 0.0
             };
 
             step_conversions.push(StepConversion {
-                step_id: 0, // Will be 0 for preview, actual ID for saved funnels
+                step_id: 0,
                 step_name: event_name.clone(),
                 step_order: *step_order,
                 completions,
@@ -717,37 +994,24 @@ impl FunnelService {
                 average_time_to_complete_seconds: avg_time,
             });
 
-            previous_step_completions = completions;
+            previous_completions = completions;
         }
 
-        // Calculate overall conversion rate
-        let final_completions = sessions_by_step.last().map(|s| s.len() as u64).unwrap_or(0);
+        // Get final step completions for overall conversion
+        let final_completions = step_conversions.last().map(|s| s.completions).unwrap_or(0);
+
         let overall_conversion_rate = if total_entries > 0 {
             (final_completions as f64 / total_entries as f64) * 100.0
         } else {
             0.0
         };
 
-        // Calculate average completion time for full funnel
-        let average_completion_time = if !steps_data.is_empty() && final_completions > 0 {
-            let last_step_sessions = &sessions_by_step[sessions_by_step.len() - 1];
-            let first_step_sessions = &sessions_by_step[0];
-
-            let mut completion_times = Vec::new();
-            for (session_id, last_time) in last_step_sessions {
-                if let Some(first_time) = first_step_sessions.get(session_id) {
-                    let duration = last_time.signed_duration_since(*first_time).num_seconds();
-                    if duration >= 0 {
-                        completion_times.push(duration);
-                    }
-                }
-            }
-
-            if !completion_times.is_empty() {
-                completion_times.iter().sum::<i64>() as f64 / completion_times.len() as f64
-            } else {
-                0.0
-            }
+        // Get average total completion time
+        let average_completion_time_seconds = if num_steps > 1 {
+            result
+                .try_get::<Option<f64>>("", "avg_total_time")
+                .unwrap_or(None)
+                .unwrap_or(0.0)
         } else {
             0.0
         };
@@ -755,10 +1019,10 @@ impl FunnelService {
         Ok(FunnelMetrics {
             funnel_id,
             funnel_name: funnel_name.to_string(),
-            total_entries,
+            total_entries: total_entries as u64,
             step_conversions,
             overall_conversion_rate,
-            average_completion_time_seconds: average_completion_time,
+            average_completion_time_seconds,
         })
     }
 }

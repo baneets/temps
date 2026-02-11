@@ -10,8 +10,16 @@ import {
   enableBackupSchedule,
   disableBackupSchedule,
   getBackup,
+  listS3Sources,
+  createS3Source,
+  getS3Source,
+  updateS3Source,
+  deleteS3Source,
+  listSourceBackups,
+  runBackupForSource,
+  runExternalServiceBackup,
 } from '../../api/sdk.gen.js'
-import type { BackupScheduleResponse, BackupResponse } from '../../api/types.gen.js'
+import type { BackupScheduleResponse, BackupResponse, S3SourceResponse, SourceBackupEntry } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
 import { promptConfirm, promptText, promptSelect } from '../../ui/prompts.js'
@@ -50,6 +58,54 @@ interface ListBackupsOptions {
 interface ShowBackupOptions {
   id: string
   json?: boolean
+}
+
+interface CreateSourceOptions {
+  name?: string
+  bucket?: string
+  region?: string
+  endpoint?: string
+  accessKey?: string
+  secretKey?: string
+  prefix?: string
+  yes?: boolean
+}
+
+interface ShowSourceOptions {
+  id: string
+  json?: boolean
+}
+
+interface UpdateSourceOptions {
+  id: string
+  name?: string
+  bucket?: string
+  region?: string
+  endpoint?: string
+  accessKey?: string
+  secretKey?: string
+  prefix?: string
+}
+
+interface DeleteSourceOptions {
+  id: string
+  force?: boolean
+  yes?: boolean
+}
+
+interface SourceBackupsOptions {
+  id: string
+  json?: boolean
+}
+
+interface RunSourceBackupOptions {
+  id: string
+}
+
+interface RunServiceBackupOptions {
+  id: string
+  s3SourceId: string
+  type?: string
 }
 
 export function registerBackupsCommands(program: Command): void {
@@ -111,6 +167,74 @@ export function registerBackupsCommands(program: Command): void {
     .option('-y, --yes', 'Skip confirmation prompts (alias for --force)')
     .action(deleteSchedule)
 
+  // S3 Source commands
+  const sources = backups
+    .command('sources')
+    .alias('source')
+    .description('Manage S3 backup sources')
+
+  sources
+    .command('list')
+    .alias('ls')
+    .description('List S3 sources')
+    .option('--json', 'Output in JSON format')
+    .action(listSources)
+
+  sources
+    .command('create')
+    .description('Create an S3 source')
+    .option('-n, --name <name>', 'Source name')
+    .option('--bucket <bucket>', 'S3 bucket name')
+    .option('--region <region>', 'S3 region')
+    .option('--endpoint <endpoint>', 'S3 endpoint (for S3-compatible services)')
+    .option('--access-key <key>', 'Access key ID')
+    .option('--secret-key <key>', 'Secret access key')
+    .option('--prefix <prefix>', 'Bucket path/prefix')
+    .option('-y, --yes', 'Skip confirmation prompts (for automation)')
+    .action(createSource)
+
+  sources
+    .command('show')
+    .description('Show S3 source details')
+    .requiredOption('--id <id>', 'S3 source ID')
+    .option('--json', 'Output in JSON format')
+    .action(showSource)
+
+  sources
+    .command('update')
+    .description('Update an S3 source')
+    .requiredOption('--id <id>', 'S3 source ID')
+    .option('-n, --name <name>', 'New source name')
+    .option('--bucket <bucket>', 'New S3 bucket name')
+    .option('--region <region>', 'New S3 region')
+    .option('--endpoint <endpoint>', 'New S3 endpoint')
+    .option('--access-key <key>', 'New access key ID')
+    .option('--secret-key <key>', 'New secret access key')
+    .option('--prefix <prefix>', 'New bucket path/prefix')
+    .action(updateSource)
+
+  sources
+    .command('remove')
+    .alias('rm')
+    .description('Delete an S3 source')
+    .requiredOption('--id <id>', 'S3 source ID')
+    .option('-f, --force', 'Skip confirmation')
+    .option('-y, --yes', 'Skip confirmation prompts (alias for --force)')
+    .action(deleteSource)
+
+  sources
+    .command('backups')
+    .description('List backups for an S3 source')
+    .requiredOption('--id <id>', 'S3 source ID')
+    .option('--json', 'Output in JSON format')
+    .action(listSourceBackupsFn)
+
+  sources
+    .command('run')
+    .description('Trigger a backup for an S3 source')
+    .requiredOption('--id <id>', 'S3 source ID')
+    .action(runSourceBackup)
+
   // Backup commands
   backups
     .command('list')
@@ -126,6 +250,15 @@ export function registerBackupsCommands(program: Command): void {
     .requiredOption('--id <id>', 'Backup ID')
     .option('--json', 'Output in JSON format')
     .action(showBackup)
+
+  // Run backup for external service
+  backups
+    .command('run-service')
+    .description('Run a backup for an external service')
+    .requiredOption('--id <id>', 'External service ID')
+    .requiredOption('--s3-source-id <id>', 'S3 source ID to store the backup')
+    .option('-t, --type <type>', 'Backup type (e.g., full, incremental)')
+    .action(runServiceBackup)
 }
 
 async function listSchedules(options: { json?: boolean }): Promise<void> {
@@ -395,6 +528,372 @@ async function deleteSchedule(options: DeleteScheduleOptions): Promise<void> {
   success(`Schedule #${options.id} deleted`)
 }
 
+// S3 Source commands
+
+async function listSources(options: { json?: boolean }): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const sources = await withSpinner('Fetching S3 sources...', async () => {
+    const { data, error } = await listS3Sources({ client })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data ?? []
+  })
+
+  if (options.json) {
+    json(sources)
+    return
+  }
+
+  newline()
+  header(`${icons.package} S3 Sources (${sources.length})`)
+
+  if (sources.length === 0) {
+    info('No S3 sources configured')
+    info('Run: temps backups sources create --name my-s3 --bucket my-bucket --region us-east-1 --access-key AKIA... --secret-key ... -y')
+    newline()
+    return
+  }
+
+  const columns: TableColumn<S3SourceResponse>[] = [
+    { header: 'ID', key: 'id', width: 6 },
+    { header: 'Name', key: 'name', color: (v) => colors.bold(v) },
+    { header: 'Bucket', key: 'bucket_name' },
+    { header: 'Region', key: 'region' },
+    { header: 'Path', key: 'bucket_path' },
+    { header: 'Endpoint', accessor: (s) => s.endpoint ?? '-', color: (v) => colors.muted(v) },
+  ]
+
+  printTable(sources, columns, { style: 'minimal' })
+  newline()
+}
+
+async function createSource(options: CreateSourceOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  let name: string
+  let bucketName: string
+  let region: string
+  let endpoint: string | null = null
+  let accessKeyId: string
+  let secretKey: string
+  let bucketPath: string
+
+  const isAutomation = options.yes && options.name && options.bucket && options.region && options.accessKey && options.secretKey
+
+  if (isAutomation) {
+    name = options.name!
+    bucketName = options.bucket!
+    region = options.region!
+    endpoint = options.endpoint || null
+    accessKeyId = options.accessKey!
+    secretKey = options.secretKey!
+    bucketPath = options.prefix || ''
+  } else {
+    name = options.name || await promptText({
+      message: 'Source name',
+      required: true,
+    })
+
+    bucketName = options.bucket || await promptText({
+      message: 'S3 bucket name',
+      required: true,
+    })
+
+    region = options.region || await promptText({
+      message: 'S3 region',
+      default: 'us-east-1',
+      required: true,
+    })
+
+    endpoint = options.endpoint || await promptText({
+      message: 'S3 endpoint (optional, for S3-compatible services)',
+      default: '',
+    }) || null
+
+    accessKeyId = options.accessKey || await promptText({
+      message: 'Access key ID',
+      required: true,
+    })
+
+    secretKey = options.secretKey || await promptText({
+      message: 'Secret access key',
+      required: true,
+    })
+
+    bucketPath = options.prefix || await promptText({
+      message: 'Bucket path/prefix (optional)',
+      default: '',
+    })
+  }
+
+  const source = await withSpinner('Creating S3 source...', async () => {
+    const { data, error } = await createS3Source({
+      client,
+      body: {
+        name,
+        bucket_name: bucketName,
+        region,
+        endpoint,
+        access_key_id: accessKeyId,
+        secret_key: secretKey,
+        bucket_path: bucketPath,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  success(`S3 source #${source.id} created`)
+  info(`Use with schedules: temps backups schedules create --s3-source-id ${source.id} ...`)
+}
+
+async function showSource(options: ShowSourceOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid S3 source ID')
+    return
+  }
+
+  const source = await withSpinner('Fetching S3 source...', async () => {
+    const { data, error } = await getS3Source({
+      client,
+      path: { id },
+    })
+    if (error || !data) {
+      throw new Error(getErrorMessage(error) ?? `S3 source ${options.id} not found`)
+    }
+    return data
+  })
+
+  if (options.json) {
+    json(source)
+    return
+  }
+
+  newline()
+  header(`${icons.package} S3 Source #${source.id}`)
+  console.log(`  ${colors.muted('Name:')} ${source.name}`)
+  console.log(`  ${colors.muted('Bucket:')} ${source.bucket_name}`)
+  console.log(`  ${colors.muted('Region:')} ${source.region}`)
+  console.log(`  ${colors.muted('Path:')} ${source.bucket_path || '-'}`)
+  if (source.endpoint) {
+    console.log(`  ${colors.muted('Endpoint:')} ${source.endpoint}`)
+  }
+  console.log(`  ${colors.muted('Access Key:')} ${maskSecret(source.access_key_id)}`)
+  if (source.force_path_style !== null && source.force_path_style !== undefined) {
+    console.log(`  ${colors.muted('Force Path Style:')} ${source.force_path_style}`)
+  }
+  console.log(`  ${colors.muted('Created:')} ${formatRelativeTime(new Date(source.created_at * 1000).toISOString())}`)
+  console.log(`  ${colors.muted('Updated:')} ${formatRelativeTime(new Date(source.updated_at * 1000).toISOString())}`)
+  newline()
+}
+
+async function updateSource(options: UpdateSourceOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid S3 source ID')
+    return
+  }
+
+  const hasChanges = options.name || options.bucket || options.region || options.endpoint || options.accessKey || options.secretKey || options.prefix
+  if (!hasChanges) {
+    warning('No update options provided. Use --name, --bucket, --region, --endpoint, --access-key, --secret-key, or --prefix')
+    return
+  }
+
+  const source = await withSpinner('Updating S3 source...', async () => {
+    const { data, error } = await updateS3Source({
+      client,
+      path: { id },
+      body: {
+        name: options.name || null,
+        bucket_name: options.bucket || null,
+        region: options.region || null,
+        endpoint: options.endpoint || null,
+        access_key_id: options.accessKey || null,
+        secret_key: options.secretKey || null,
+        bucket_path: options.prefix || null,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  success(`S3 source #${source.id} updated`)
+}
+
+async function deleteSource(options: DeleteSourceOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid S3 source ID')
+    return
+  }
+
+  const skipConfirmation = options.force || options.yes
+
+  if (!skipConfirmation) {
+    const confirmed = await promptConfirm({
+      message: `Delete S3 source #${options.id}?`,
+      default: false,
+    })
+    if (!confirmed) {
+      info('Cancelled')
+      return
+    }
+  }
+
+  await withSpinner('Deleting S3 source...', async () => {
+    const { error } = await deleteS3Source({
+      client,
+      path: { id },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+  })
+
+  success(`S3 source #${options.id} deleted`)
+}
+
+async function listSourceBackupsFn(options: SourceBackupsOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid S3 source ID')
+    return
+  }
+
+  const result = await withSpinner('Fetching source backups...', async () => {
+    const { data, error } = await listSourceBackups({
+      client,
+      path: { id },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  if (options.json) {
+    json(result)
+    return
+  }
+
+  const backupEntries = result?.backups ?? []
+
+  newline()
+  header(`${icons.package} Backups for S3 Source #${options.id} (${backupEntries.length})`)
+
+  if (backupEntries.length === 0) {
+    info('No backups found for this S3 source')
+    newline()
+    return
+  }
+
+  if (result?.last_updated) {
+    info(`Index last updated: ${formatRelativeTime(result.last_updated)}`)
+  }
+
+  const columns: TableColumn<SourceBackupEntry>[] = [
+    { header: 'ID', key: 'id', width: 6 },
+    { header: 'Backup ID', key: 'backup_id', width: 12 },
+    { header: 'Name', key: 'name', color: (v) => colors.bold(v) },
+    { header: 'Type', key: 'backup_type' },
+    { header: 'Size', accessor: (b) => formatBytes(b.size_bytes) },
+    { header: 'Created', accessor: (b) => formatRelativeTime(b.created_at), color: (v) => colors.muted(v) },
+  ]
+
+  printTable(backupEntries, columns, { style: 'minimal' })
+  newline()
+}
+
+async function runSourceBackup(options: RunSourceBackupOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid S3 source ID')
+    return
+  }
+
+  const backup = await withSpinner('Triggering backup...', async () => {
+    const { data, error } = await runBackupForSource({
+      client,
+      path: { id },
+      body: {
+        backup_type: 'full',
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  success(`Backup started for S3 source #${options.id}`)
+  info(`Backup ID: ${backup.backup_id}`)
+  info(`State: ${backup.state}`)
+}
+
+async function runServiceBackup(options: RunServiceBackupOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid external service ID')
+    return
+  }
+
+  const s3SourceId = parseInt(options.s3SourceId, 10)
+  if (isNaN(s3SourceId)) {
+    warning('Invalid S3 source ID')
+    return
+  }
+
+  const backup = await withSpinner('Triggering external service backup...', async () => {
+    const { data, error } = await runExternalServiceBackup({
+      client,
+      path: { id },
+      body: {
+        s3_source_id: s3SourceId,
+        backup_type: options.type || null,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  success(`Backup started for external service #${options.id}`)
+  info(`Backup ID: ${backup.backup_id}`)
+  info(`State: ${backup.state}`)
+  info(`S3 Location: ${backup.s3_location}`)
+}
+
+// Backup commands
+
 async function listBackups(options: ListBackupsOptions): Promise<void> {
   await requireAuth()
   await setupClient()
@@ -486,6 +985,8 @@ async function showBackup(options: ShowBackupOptions): Promise<void> {
   newline()
 }
 
+// Helpers
+
 function formatBytes(bytes?: number | null): string {
   if (bytes === undefined || bytes === null) return '-'
   if (bytes === 0) return '0 B'
@@ -495,4 +996,9 @@ function formatBytes(bytes?: number | null): string {
   const size = bytes / Math.pow(1024, i)
 
   return `${size.toFixed(1)} ${units[i]}`
+}
+
+function maskSecret(value: string): string {
+  if (value.length <= 4) return '***'
+  return value.slice(0, 4) + '***' + value.slice(-2)
 }

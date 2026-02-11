@@ -14,10 +14,13 @@ import {
   updateEnvironmentVariable,
   updateEnvironmentSettings,
   getProjectBySlug,
+  getEnvironmentCrons,
+  getCronById,
+  getCronExecutions,
 } from '../../api/sdk.gen.js'
-import type { EnvironmentResponse, EnvironmentVariableResponse } from '../../api/types.gen.js'
+import type { EnvironmentResponse, EnvironmentVariableResponse, CronInfo, CronExecutionInfo } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
-import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
+import { printTable, type TableColumn } from '../../ui/table.js'
 import { promptText, promptConfirm, promptSelect, promptCheckbox } from '../../ui/prompts.js'
 import { newline, header, icons, json, colors, success, warning, keyValue, info, error as errorOutput } from '../../ui/output.js'
 
@@ -136,6 +139,44 @@ export function registerEnvironmentsCommands(program: Command): void {
     .description('View or set the number of replicas for an environment')
     .option('--json', 'Output in JSON format')
     .action(scaleCmd)
+
+  // Cron jobs subcommand
+  const crons = environments
+    .command('crons <project> <environment>')
+    .description('Manage cron jobs')
+
+  crons
+    .command('list')
+    .alias('ls')
+    .description('List cron jobs for an environment')
+    .option('--json', 'Output in JSON format')
+    .action((options, cmd) => {
+      const [project, environment] = cmd.parent!.args
+      return listCrons(project, environment, options)
+    })
+
+  crons
+    .command('show')
+    .description('Show cron job details')
+    .requiredOption('--id <id>', 'Cron job ID')
+    .option('--json', 'Output in JSON format')
+    .action((options, cmd) => {
+      const [project, environment] = cmd.parent!.args
+      return showCron(project, environment, options)
+    })
+
+  crons
+    .command('executions')
+    .alias('execs')
+    .description('Show cron job execution history')
+    .requiredOption('--id <id>', 'Cron job ID')
+    .option('--page <page>', 'Page number', '1')
+    .option('--per-page <count>', 'Items per page', '20')
+    .option('--json', 'Output in JSON format')
+    .action((options, cmd) => {
+      const [project, environment] = cmd.parent!.args
+      return listCronExecutions(project, environment, options)
+    })
 }
 
 async function getProjectId(projectSlug: string): Promise<number> {
@@ -1130,6 +1171,198 @@ async function scaleCmd(
     info(`To scale: ${colors.muted(`temps env scale ${project} ${environment} <replicas>`)}`)
     info(`Example: ${colors.muted(`temps env scale ${project} ${environment} 3`)}`)
   }
+}
+
+// ============ Cron Jobs Commands ============
+
+async function resolveEnvironmentId(projectId: number, environment: string): Promise<number> {
+  const { data, error } = await getEnvironments({
+    client,
+    path: { project_id: projectId },
+  })
+  if (error) throw new Error(getErrorMessage(error))
+
+  const envs = data ?? []
+  const targetEnv = envs.find(
+    e => e.slug === environment || e.name.toLowerCase() === environment.toLowerCase()
+  )
+
+  if (!targetEnv) {
+    const available = envs.map(e => e.slug).join(', ')
+    throw new Error(`Environment "${environment}" not found. Available: ${available}`)
+  }
+
+  return targetEnv.id
+}
+
+async function listCrons(
+  project: string,
+  environment: string,
+  options: { json?: boolean }
+): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const cronsList = await withSpinner('Fetching cron jobs...', async () => {
+    const projectId = await getProjectId(project)
+    const envId = await resolveEnvironmentId(projectId, environment)
+
+    const { data, error } = await getEnvironmentCrons({
+      client,
+      path: { project_id: projectId, env_id: envId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data ?? []
+  })
+
+  if (options.json) {
+    json(cronsList)
+    return
+  }
+
+  newline()
+  header(`${icons.folder} Cron Jobs for ${project}/${environment} (${cronsList.length})`)
+
+  if (cronsList.length === 0) {
+    info('No cron jobs found')
+    newline()
+    return
+  }
+
+  const columns: TableColumn<CronInfo>[] = [
+    { header: 'ID', key: 'id', color: (v) => colors.muted(String(v)) },
+    { header: 'Schedule', key: 'schedule', color: (v) => colors.bold(v) },
+    { header: 'Path', key: 'path', color: (v) => colors.primary(v) },
+    { header: 'Next Run', accessor: (c) => c.next_run ?? '-', color: (v) => colors.muted(v) },
+    { header: 'Created', accessor: (c) => c.created_at },
+  ]
+
+  printTable(cronsList, columns, { style: 'minimal' })
+  newline()
+}
+
+async function showCron(
+  project: string,
+  environment: string,
+  options: { id: string; json?: boolean }
+): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const cronId = parseInt(options.id, 10)
+  if (isNaN(cronId)) {
+    errorOutput('Cron job ID must be a number')
+    return
+  }
+
+  const cron = await withSpinner('Fetching cron job...', async () => {
+    const projectId = await getProjectId(project)
+    const envId = await resolveEnvironmentId(projectId, environment)
+
+    const { data, error } = await getCronById({
+      client,
+      path: { project_id: projectId, env_id: envId, cron_id: cronId },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data
+  })
+
+  if (!cron) {
+    errorOutput(`Cron job with ID ${cronId} not found`)
+    return
+  }
+
+  if (options.json) {
+    json(cron)
+    return
+  }
+
+  newline()
+  header(`${icons.folder} Cron Job #${cron.id}`)
+  newline()
+  keyValue('ID', String(cron.id))
+  keyValue('Schedule', cron.schedule)
+  keyValue('Path', cron.path)
+  keyValue('Next Run', cron.next_run ?? colors.muted('not scheduled'))
+  keyValue('Created', cron.created_at)
+  keyValue('Updated', cron.updated_at)
+  if (cron.deleted_at) {
+    keyValue('Deleted', cron.deleted_at)
+  }
+  newline()
+}
+
+async function listCronExecutions(
+  project: string,
+  environment: string,
+  options: { id: string; page?: string; perPage?: string; json?: boolean }
+): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const cronId = parseInt(options.id, 10)
+  if (isNaN(cronId)) {
+    errorOutput('Cron job ID must be a number')
+    return
+  }
+
+  const page = options.page ? parseInt(options.page, 10) : undefined
+  const perPage = options.perPage ? parseInt(options.perPage, 10) : undefined
+
+  const executions = await withSpinner('Fetching cron executions...', async () => {
+    const projectId = await getProjectId(project)
+    const envId = await resolveEnvironmentId(projectId, environment)
+
+    const { data, error } = await getCronExecutions({
+      client,
+      path: { project_id: projectId, env_id: envId, cron_id: cronId },
+      query: { page, per_page: perPage },
+    })
+    if (error) throw new Error(getErrorMessage(error))
+    return data ?? []
+  })
+
+  if (options.json) {
+    json(executions)
+    return
+  }
+
+  newline()
+  header(`${icons.folder} Executions for Cron Job #${cronId} (${executions.length})`)
+
+  if (executions.length === 0) {
+    info('No executions found')
+    newline()
+    return
+  }
+
+  const columns: TableColumn<CronExecutionInfo>[] = [
+    { header: 'ID', key: 'id', color: (v) => colors.muted(String(v)) },
+    {
+      header: 'Status',
+      accessor: (e) => String(e.status_code),
+      color: (v) => {
+        const code = parseInt(v, 10)
+        if (code >= 200 && code < 300) return colors.success(v)
+        if (code >= 400) return colors.error(v)
+        return colors.warning(v)
+      },
+    },
+    { header: 'URL', key: 'url', color: (v) => colors.primary(v) },
+    {
+      header: 'Response Time',
+      accessor: (e) => `${e.response_time_ms}ms`,
+    },
+    { header: 'Executed At', key: 'executed_at' },
+    {
+      header: 'Error',
+      accessor: (e) => e.error_message ?? '-',
+      color: (v) => v !== '-' ? colors.error(v) : colors.muted(v),
+    },
+  ]
+
+  printTable(executions, columns, { style: 'minimal' })
+  newline()
 }
 
 // Helper function to parse .env file content

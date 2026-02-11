@@ -23,7 +23,7 @@ function ReferrerIcon({ domain, className = 'h-5 w-5' }: ReferrerIconProps) {
   const [hasError, setHasError] = React.useState(false)
 
   // For direct traffic or empty domains, show Link icon
-  if (!domain || domain === 'Direct / None') {
+  if (!domain || domain === 'Direct') {
     return <Link className={`${className} text-muted-foreground`} />
   }
 
@@ -48,7 +48,7 @@ function ReferrerIcon({ domain, className = 'h-5 w-5' }: ReferrerIconProps) {
 }
 
 function getDisplayName(hostname: string): string {
-  if (!hostname || hostname === 'Direct / None') return 'Direct / None'
+  if (!hostname || hostname === 'Direct') return 'Direct'
 
   // Handle Google domains
   if (hostname.startsWith('google.') || hostname.startsWith('www.google.')) {
@@ -156,7 +156,7 @@ export function ReferrersChart({
     return data.items
       .sort((a, b) => b.count - a.count)
       .map((referrer) => {
-        const hostname = referrer.value || 'Direct / None'
+        const hostname = referrer.value || 'Direct'
         return {
           hostname,
           displayName: getDisplayName(hostname),

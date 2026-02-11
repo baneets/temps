@@ -4,8 +4,18 @@ import { config, credentials } from '../config/store.js'
 /**
  * Setup the API client with the correct base URL and auth headers
  */
+function normalizeApiUrl(url: string): string {
+  // Remove trailing slash
+  let normalized = url.replace(/\/+$/, '')
+  // Ensure /api suffix if not already present
+  if (!normalized.endsWith('/api')) {
+    normalized += '/api'
+  }
+  return normalized
+}
+
 export async function setupClient(): Promise<void> {
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
 
   client.setConfig({
     baseUrl: apiUrl,

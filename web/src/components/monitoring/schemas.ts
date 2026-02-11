@@ -61,12 +61,12 @@ export const weeklyDigestSchema = z.object({
 
 /**
  * Schema for notification provider configuration
- * Supports both Slack and Email providers with comprehensive SMTP settings
+ * Supports Slack, Email, and Webhook providers with comprehensive settings
  */
 export const providerSchema = z
   .object({
     name: z.string().min(1, 'Name is required'),
-    provider_type: z.enum(['email', 'slack']),
+    provider_type: z.enum(['email', 'slack', 'webhook']),
     config: z.object({
       // Slack config
       webhook_url: z.string().optional(),
@@ -85,6 +85,12 @@ export const providerSchema = z
       tls_mode: z.enum(['None', 'Starttls', 'Tls']).optional(),
       starttls_required: z.boolean().optional(),
       accept_invalid_certs: z.boolean().optional(),
+
+      // Webhook config
+      url: z.string().optional(),
+      method: z.enum(['POST', 'PUT', 'PATCH']).optional(),
+      headers: z.record(z.string()).optional(),
+      timeout_secs: z.number().min(1).max(300).optional(),
     }),
   })
   .refine(
@@ -127,6 +133,24 @@ export const providerSchema = z
         }
 
         return true
+      }
+      // Webhook provider validation
+      if (data.provider_type === 'webhook') {
+        const { url } = data.config
+        if (!url || url === '') {
+          return false
+        }
+        // Check if it's a valid URL
+        try {
+          const parsedUrl = new URL(url)
+          // Only allow http and https protocols
+          if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+            return false
+          }
+          return true
+        } catch {
+          return false
+        }
       }
       return false
     },

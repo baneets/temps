@@ -10,7 +10,7 @@ use temps_auth::RequireAuth;
 use super::types::{
     AppState, CreateFunnelRequest, CreateFunnelResponse, CreateFunnelStep, EventType,
     EventTypesResponse, FunnelMetricsResponse, FunnelResponse, GetFunnelMetricsQuery,
-    StepConversionResponse,
+    GetUniqueEventsQuery, StepConversionResponse,
 };
 use crate::services::{
     CreateFunnelRequest as ServiceCreateFunnelRequest, CreateFunnelStep as ServiceCreateFunnelStep,
@@ -328,12 +328,14 @@ pub async fn delete_funnel(
     }
 }
 
-/// Get all unique/distinct event types for a project
+/// Get all unique/distinct event types for a project (paginated)
 #[utoipa::path(
     get,
     path = "/projects/{project_id}/events/unique",
     params(
-        ("project_id" = i32, Path, description = "Project ID")
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("page" = Option<u64>, Query, description = "Page number (default: 1)"),
+        ("page_size" = Option<u64>, Query, description = "Items per page (default: 50, max: 100)")
     ),
     responses(
         (status = 200, description = "Unique event types retrieved successfully", body = EventTypesResponse),
@@ -349,16 +351,26 @@ pub async fn get_unique_events(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
+    Query(query): Query<GetUniqueEventsQuery>,
 ) -> Result<Json<EventTypesResponse>, Problem> {
     permission_guard!(auth, FunnelRead);
 
-    match state.funnel_service.get_unique_events(project_id).await {
-        Ok(events) => {
+    match state
+        .funnel_service
+        .get_unique_events(project_id, query.page, query.page_size)
+        .await
+    {
+        Ok((events, total)) => {
+            let page = query.page.unwrap_or(1);
+            let page_size = query.page_size.unwrap_or(50).min(100);
             let response = EventTypesResponse {
                 events: events
                     .into_iter()
                     .map(|(name, count)| EventType { name, count })
                     .collect(),
+                total,
+                page,
+                page_size,
             };
             Ok(Json(response))
         }
@@ -480,6 +492,7 @@ pub async fn preview_funnel_metrics(
             FunnelMetricsResponse,
             StepConversionResponse,
             GetFunnelMetricsQuery,
+            GetUniqueEventsQuery,
             EventTypesResponse,
             EventType
         )

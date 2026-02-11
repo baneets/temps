@@ -9,7 +9,10 @@ import { newline, header, icons, json, colors, formatRelativeTime, truncate } fr
 interface ListOptions {
   project?: string
   environment?: string
+  environmentId?: string
   limit: string
+  page?: string
+  perPage?: string
   json?: boolean
 }
 
@@ -34,9 +37,18 @@ export async function list(options: ListOptions): Promise<void> {
       throw new Error(`Project "${projectName}" not found`)
     }
 
+    const page = options.page ? parseInt(options.page, 10) : undefined
+    const perPage = options.perPage ? parseInt(options.perPage, 10) : parseInt(options.limit, 10)
+    const environmentId = options.environmentId ? parseInt(options.environmentId, 10) : undefined
+
     const { data, error } = await getProjectDeployments({
       client,
       path: { id: projectData.id },
+      query: {
+        ...(page && { page }),
+        ...(perPage && { per_page: perPage }),
+        ...(environmentId && { environment_id: environmentId }),
+      },
     })
 
     if (error || !data) {
@@ -45,14 +57,12 @@ export async function list(options: ListOptions): Promise<void> {
 
     let result = data.deployments
 
-    // Filter by environment if specified
-    if (options.environment) {
+    // Client-side filter by environment name (if --environment-id not used)
+    if (options.environment && !options.environmentId) {
       result = result.filter(d => d.environment?.name === options.environment)
     }
 
-    // Apply limit
-    const limit = parseInt(options.limit, 10)
-    return result.slice(0, limit)
+    return result
   })
 
   if (options.json) {

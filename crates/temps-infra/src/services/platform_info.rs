@@ -64,6 +64,23 @@ impl PlatformInfoService {
 
         info!("Fetching public IP address from external service");
 
+        // Create HTTP client with timeout to prevent hanging
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .build()
+        {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Failed to create HTTP client: {}", e);
+                return PublicIpInfo {
+                    ip: None,
+                    source: None,
+                    error: Some(format!("Failed to create HTTP client: {}", e)),
+                };
+            }
+        };
+
         // Try multiple services to get the public IP
         let services = vec![
             "https://api.ipify.org?format=json",
@@ -72,7 +89,7 @@ impl PlatformInfoService {
         ];
 
         for service in services {
-            match reqwest::get(service).await {
+            match client.get(service).send().await {
                 Ok(response) => {
                     if let Ok(json) = response.json::<serde_json::Value>().await {
                         // Extract IP from different response formats
@@ -97,7 +114,7 @@ impl PlatformInfoService {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to get IP from {}: {}", service, e);
+                    debug!("Failed to get IP from {}: {}", service, e);
                     continue;
                 }
             }
@@ -107,7 +124,10 @@ impl PlatformInfoService {
         PublicIpInfo {
             ip: None,
             source: None,
-            error: Some("Unable to determine public IP address".to_string()),
+            error: Some(
+                "Unable to determine public IP address (all services timed out or unreachable)"
+                    .to_string(),
+            ),
         }
     }
 

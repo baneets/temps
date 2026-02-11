@@ -1176,6 +1176,12 @@ export type CreateUserRequest = {
     username: string;
 };
 
+export type CreateWebhookProviderRequest = {
+    config: WebhookConfig;
+    enabled?: boolean | null;
+    name: string;
+};
+
 export type CreateWebhookRequestBody = {
     /**
      * Whether the webhook is enabled
@@ -1316,17 +1322,30 @@ export type DemoModeSettings = {
 
 export type DeployFromImageRequest = {
     /**
-     * Optional external image ID (if already registered)
+     * External image ID (if already registered). If provided without image_ref,
+     * the image reference will be fetched from the registered external image.
      */
     external_image_id?: number | null;
     /**
      * Docker image reference (e.g., "ghcr.io/org/app:v1.0")
+     * Required if external_image_id is not provided
      */
-    image_ref: string;
+    image_ref?: string | null;
     /**
      * Optional deployment metadata
      */
     metadata?: unknown;
+};
+
+/**
+ * Query parameters for deploying from an uploaded image tarball
+ */
+export type DeployFromImageUploadQuery = {
+    /**
+     * Tag to apply to the imported image (e.g., "myapp:v1.0")
+     * If not provided, a unique tag will be generated
+     */
+    tag?: string | null;
 };
 
 export type DeployFromStaticRequest = {
@@ -1544,6 +1563,7 @@ export type DeploymentMetadata = {
      * Deployment duration in milliseconds
      */
     deploymentDurationMs?: number | null;
+    deploymentSourceType?: null | SourceType;
     /**
      * Dockerfile path if using Dockerfile builder
      */
@@ -1567,6 +1587,11 @@ export type DeploymentMetadata = {
      */
     imageSizeBytes?: number | null;
     /**
+     * Whether the image was uploaded directly (via docker save/load) rather than pulled from registry
+     * When true, the PullExternalImageJob is skipped since the image is already loaded locally
+     */
+    imageUploadedLocally?: boolean;
+    /**
      * Whether this is a rollback deployment
      */
     isRollback?: boolean;
@@ -1579,6 +1604,10 @@ export type DeploymentMetadata = {
      */
     rolledBackFromId?: number | null;
     /**
+     * Static bundle content type (for proper extraction: application/gzip or application/zip)
+     */
+    staticBundleContentType?: string | null;
+    /**
      * Static bundle ID (reference to static_bundles table, for static_files source type)
      */
     staticBundleId?: number | null;
@@ -1586,6 +1615,11 @@ export type DeploymentMetadata = {
      * Static bundle path in blob storage (for static_files source type)
      */
     staticBundlePath?: string | null;
+    /**
+     * Docker image ID of the locally uploaded image (sha256:...)
+     * Used to verify the image exists before deployment
+     */
+    uploadedImageId?: string | null;
 };
 
 export type DeploymentResponse = {
@@ -2686,6 +2720,9 @@ export type EventTypeResponse = {
 
 export type EventTypesResponse = {
     events: Array<EventType>;
+    page: number;
+    page_size: number;
+    total: number;
 };
 
 export type EventsCountQuery = {
@@ -3038,6 +3075,11 @@ export type GetResponse = {
 
 export type GetSessionReplayResponse = {
     session: SessionReplayWithVisitorDto;
+};
+
+export type GetUniqueEventsQuery = {
+    page?: number | null;
+    page_size?: number | null;
 };
 
 export type GetVisitorSessionsQuery = {
@@ -5942,8 +5984,9 @@ export type SourceBackupIndexResponse = {
  * - `Git`: Source code from a Git repository (traditional flow)
  * - `DockerImage`: Pre-built Docker image from external registry
  * - `StaticFiles`: Pre-built static files uploaded as a bundle
+ * - `Manual`: Flexible type that accepts any deployment method
  */
-export type SourceType = 'git' | 'docker_image' | 'static_files';
+export type SourceType = 'git' | 'docker_image' | 'static_files' | 'manual';
 
 /**
  * Speed metrics payload for recording web vitals
@@ -6718,6 +6761,12 @@ export type UpdateUserRequest = {
     name?: string | null;
 };
 
+export type UpdateWebhookProviderRequest = {
+    config: WebhookConfig;
+    enabled?: boolean | null;
+    name?: string | null;
+};
+
 export type UpdateWebhookRequestBody = {
     /**
      * Whether the webhook is enabled
@@ -7119,6 +7168,30 @@ export type VulnerabilityResponse = {
     title: string;
     type?: string | null;
     vulnerability_id: string;
+};
+
+/**
+ * Configuration for a generic webhook notification provider
+ */
+export type WebhookConfig = {
+    /**
+     * Custom headers to include in the request (e.g., for authentication tokens)
+     */
+    headers?: {
+        [key: string]: string;
+    };
+    /**
+     * HTTP method to use (POST, PUT, PATCH). Defaults to POST.
+     */
+    method?: string;
+    /**
+     * Request timeout in seconds. Defaults to 30.
+     */
+    timeout_secs?: number;
+    /**
+     * The URL to send webhook requests to
+     */
+    url: string;
 };
 
 export type WebhookDeliveryResponse = {
@@ -14962,6 +15035,65 @@ export type UpdateSlackProviderResponses = {
 
 export type UpdateSlackProviderResponse = UpdateSlackProviderResponses[keyof UpdateSlackProviderResponses];
 
+export type CreateWebhookProviderData = {
+    body: CreateWebhookProviderRequest;
+    path?: never;
+    query?: never;
+    url: '/notification-providers/webhook';
+};
+
+export type CreateWebhookProviderErrors = {
+    /**
+     * Invalid request
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateWebhookProviderResponses = {
+    /**
+     * Successfully created Webhook provider
+     */
+    201: NotificationProviderResponse;
+};
+
+export type CreateWebhookProviderResponse = CreateWebhookProviderResponses[keyof CreateWebhookProviderResponses];
+
+export type UpdateWebhookProviderData = {
+    body: UpdateWebhookProviderRequest;
+    path: {
+        /**
+         * Provider ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/notification-providers/webhook/{id}';
+};
+
+export type UpdateWebhookProviderErrors = {
+    /**
+     * Provider not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateWebhookProviderResponses = {
+    /**
+     * Successfully updated Webhook provider
+     */
+    200: NotificationProviderResponse;
+};
+
+export type UpdateWebhookProviderResponse = UpdateWebhookProviderResponses[keyof UpdateWebhookProviderResponses];
+
 export type DeleteProvider4Data = {
     body?: never;
     path: {
@@ -17810,6 +17942,58 @@ export type DeployFromImageResponses = {
 
 export type DeployFromImageResponse = DeployFromImageResponses[keyof DeployFromImageResponses];
 
+export type DeployFromImageUploadData = {
+    body?: never;
+    path: {
+        project_id: number;
+        environment_id: number;
+    };
+    query?: {
+        /**
+         * Tag to apply to the imported image (e.g., "myapp:v1.0")
+         * If not provided, a unique tag will be generated
+         */
+        tag?: string | null;
+    };
+    url: '/projects/{project_id}/environments/{environment_id}/deploy/image-upload';
+};
+
+export type DeployFromImageUploadErrors = {
+    /**
+     * Invalid request or unsupported format
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Project or environment not found
+     */
+    404: unknown;
+    /**
+     * Image tarball too large
+     */
+    413: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeployFromImageUploadResponses = {
+    /**
+     * Image imported and deployment started
+     */
+    202: DeploymentResponse;
+};
+
+export type DeployFromImageUploadResponse = DeployFromImageUploadResponses[keyof DeployFromImageUploadResponses];
+
 export type DeployFromStaticData = {
     body: DeployFromStaticRequest;
     path: {
@@ -18455,7 +18639,16 @@ export type GetUniqueEventsData = {
          */
         project_id: number;
     };
-    query?: never;
+    query?: {
+        /**
+         * Page number (default: 1)
+         */
+        page?: number;
+        /**
+         * Items per page (default: 50, max: 100)
+         */
+        page_size?: number;
+    };
     url: '/projects/{project_id}/events/unique';
 };
 

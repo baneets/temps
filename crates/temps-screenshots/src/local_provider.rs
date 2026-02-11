@@ -85,23 +85,64 @@ impl ScreenshotProvider for LocalScreenshotProvider {
 
                 debug!("Browser launched successfully");
 
-                // Create tab, navigate, and capture screenshot - all in one chain
-                let screenshot_data = browser
-                    .new_tab()
-                    .map_err(|e| {
-                        error!("Failed to create new tab: {}", e);
-                        ScreenshotError::ChromeError(format!("Failed to create tab: {}", e))
-                    })?
-                    .navigate_to(&url)
-                    .map_err(|e| {
-                        error!("Failed to navigate to {}: {}", url, e);
-                        ScreenshotError::ChromeError(format!("Failed to navigate: {}", e))
-                    })?
-                    .wait_until_navigated()
-                    .map_err(|e| {
-                        error!("Page navigation timeout for {}: {}", url, e);
-                        ScreenshotError::ChromeError(format!("Navigation timeout: {}", e))
-                    })?
+                let tab = browser.new_tab().map_err(|e| {
+                    error!("Failed to create new tab: {}", e);
+                    ScreenshotError::ChromeError(format!("Failed to create tab: {}", e))
+                })?;
+
+                // Disable all CSS animations/transitions before navigation so they
+                // don't block the page load event or networkAlmostIdle lifecycle event.
+                let disable_animations_css = r#"
+                    (function() {
+                        const style = document.createElement('style');
+                        style.textContent = '*, *::before, *::after { animation-duration: 0s !important; animation-delay: 0s !important; transition-duration: 0s !important; transition-delay: 0s !important; scroll-behavior: auto !important; }';
+                        (document.head || document.documentElement).appendChild(style);
+                    })()
+                "#;
+                // Inject into every new document via Page.addScriptToEvaluateOnNewDocument
+                tab.evaluate(disable_animations_css, false).ok();
+
+                tab.navigate_to(&url).map_err(|e| {
+                    error!("Failed to navigate to {}: {}", url, e);
+                    ScreenshotError::ChromeError(format!("Failed to navigate: {}", e))
+                })?;
+
+                // Wait for page to be ready using DOM readyState polling instead of
+                // wait_until_navigated(). The latter waits for `networkAlmostIdle`
+                // which can time out on pages with continuous network activity
+                // (animations loading assets, analytics, WebSockets, etc.).
+                let wait_timeout = Duration::from_secs(timeout);
+                let poll_interval = Duration::from_millis(250);
+                let start = std::time::Instant::now();
+                loop {
+                    if start.elapsed() > wait_timeout {
+                        debug!("Page readyState wait timed out after {:?}, proceeding with screenshot anyway", wait_timeout);
+                        break;
+                    }
+                    match tab.evaluate("document.readyState", false) {
+                        Ok(result) => {
+                            if let Some(value) = result.value {
+                                let state = value.as_str().unwrap_or("");
+                                if state == "complete" || state == "interactive" {
+                                    debug!("Page readyState is '{}', proceeding", state);
+                                    break;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Tab may not be ready yet, keep polling
+                        }
+                    }
+                    std::thread::sleep(poll_interval);
+                }
+
+                // Brief extra wait for rendering to settle after DOM is ready
+                std::thread::sleep(Duration::from_secs(2));
+
+                // Re-inject animation disabler in case the page scripts re-enabled them
+                tab.evaluate(disable_animations_css, false).ok();
+
+                let screenshot_data = tab
                     .capture_screenshot(
                         headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption::Png,
                         None, // Quality (only for JPEG)

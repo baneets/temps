@@ -78,10 +78,27 @@ pub async fn get_environments(
         .get_environments(project_id)
         .await?;
 
-    let response: Vec<EnvironmentResponse> = environments
-        .into_iter()
-        .map(EnvironmentResponse::from)
-        .collect();
+    let mut response: Vec<EnvironmentResponse> = Vec::new();
+    for env in environments {
+        let main_url = state
+            .environment_service
+            .compute_environment_url(&env.subdomain)
+            .await;
+
+        response.push(EnvironmentResponse {
+            id: env.id,
+            project_id: env.project_id,
+            name: env.name,
+            slug: env.slug,
+            main_url,
+            current_deployment_id: env.current_deployment_id,
+            created_at: env.created_at.timestamp_millis(),
+            updated_at: env.updated_at.timestamp_millis(),
+            branch: env.branch,
+            is_preview: env.is_preview,
+            deployment_config: env.deployment_config,
+        });
+    }
 
     Ok(Json(response))
 }
@@ -114,7 +131,24 @@ pub async fn get_environment(
         .await
         .map_err(Problem::from)?;
 
-    Ok(Json(EnvironmentResponse::from(env)))
+    let main_url = state
+        .environment_service
+        .compute_environment_url(&env.subdomain)
+        .await;
+
+    Ok(Json(EnvironmentResponse {
+        id: env.id,
+        project_id: env.project_id,
+        name: env.name,
+        slug: env.slug,
+        main_url,
+        current_deployment_id: env.current_deployment_id,
+        created_at: env.created_at.timestamp_millis(),
+        updated_at: env.updated_at.timestamp_millis(),
+        branch: env.branch,
+        is_preview: env.is_preview,
+        deployment_config: env.deployment_config,
+    }))
 }
 
 /// Get all environment domains for a specific environment
@@ -560,7 +594,25 @@ pub async fn update_environment_settings(
         // Continue with the operation even if audit logging fails
     }
 
-    Ok(Json(EnvironmentResponse::from(updated_environment)).into_response())
+    let main_url = state
+        .environment_service
+        .compute_environment_url(&updated_environment.subdomain)
+        .await;
+
+    Ok(Json(EnvironmentResponse {
+        id: updated_environment.id,
+        project_id: updated_environment.project_id,
+        name: updated_environment.name,
+        slug: updated_environment.slug,
+        main_url,
+        current_deployment_id: updated_environment.current_deployment_id,
+        created_at: updated_environment.created_at.timestamp_millis(),
+        updated_at: updated_environment.updated_at.timestamp_millis(),
+        branch: updated_environment.branch,
+        is_preview: updated_environment.is_preview,
+        deployment_config: updated_environment.deployment_config,
+    })
+    .into_response())
 }
 
 /// Delete an environment permanently
@@ -683,9 +735,26 @@ pub async fn create_environment(
         .create_new_environment(project_id, request.name, request.branch, None)
         .await?;
 
+    let main_url = state
+        .environment_service
+        .compute_environment_url(&environment.subdomain)
+        .await;
+
     Ok((
         StatusCode::CREATED,
-        Json(EnvironmentResponse::from(environment)),
+        Json(EnvironmentResponse {
+            id: environment.id,
+            project_id: environment.project_id,
+            name: environment.name,
+            slug: environment.slug,
+            main_url,
+            current_deployment_id: environment.current_deployment_id,
+            created_at: environment.created_at.timestamp_millis(),
+            updated_at: environment.updated_at.timestamp_millis(),
+            branch: environment.branch,
+            is_preview: environment.is_preview,
+            deployment_config: environment.deployment_config,
+        }),
     )
         .into_response())
 }

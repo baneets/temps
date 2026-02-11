@@ -372,11 +372,11 @@ export default function AppSidebar() {
               >
                 <div
                   className={cn(
-                    'flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground',
+                    'flex aspect-square size-8 items-center justify-center rounded-lg',
                     isMinimal && !isMobile && 'w-6 h-6' // Make logo slightly smaller in minimal mode
                   )}
                 >
-                  <img src="/favicon.png" alt="logo" className="size-full" />
+                  <img src="/svg/temps-icon.svg" alt="logo" className="size-full" />
                 </div>
                 {(!isMinimal || isMobile) && (
                   <div

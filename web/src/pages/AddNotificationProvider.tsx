@@ -1,6 +1,7 @@
 import {
   createEmailProviderMutation,
   createSlackProviderMutation,
+  createWebhookProviderMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
 import {
@@ -22,6 +23,7 @@ import {
   Mail,
   MoreHorizontal,
   Slack,
+  Webhook,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
@@ -35,7 +37,7 @@ import {
 import { cn } from '@/lib/utils'
 
 type Step = 'provider-type' | 'configuration' | 'complete'
-type ProviderType = 'email' | 'slack' | 'coming-soon'
+type ProviderType = 'email' | 'slack' | 'webhook' | 'coming-soon'
 
 interface ProviderOption {
   id: ProviderType
@@ -58,6 +60,13 @@ const providerOptions: ProviderOption[] = [
     name: 'Slack',
     description: 'Send notifications to Slack channels via webhooks',
     icon: <Slack className="h-6 w-6" />,
+    available: true,
+  },
+  {
+    id: 'webhook',
+    name: 'Webhook',
+    description: 'Send JSON payloads to any HTTP endpoint for custom integrations',
+    icon: <Webhook className="h-6 w-6" />,
     available: true,
   },
   {
@@ -108,6 +117,11 @@ export function AddNotificationProvider() {
         tls_mode: 'Starttls', // Default TLS mode
         starttls_required: false,
         accept_invalid_certs: false,
+        // Webhook config
+        url: '',
+        method: 'POST',
+        headers: {},
+        timeout_secs: 30,
       },
     },
   })
@@ -140,10 +154,24 @@ export function AddNotificationProvider() {
     },
   })
 
+  const createWebhookMutation = useMutation({
+    ...createWebhookProviderMutation(),
+    meta: {
+      errorTitle: 'Failed to add Webhook provider',
+    },
+    onSuccess: () => {
+      setCurrentStep('complete')
+      toast.success('Webhook provider added successfully')
+      setTimeout(() => {
+        navigate('/notifications')
+      }, 2000)
+    },
+  })
+
   const handleProviderSelect = (provider: ProviderType) => {
     if (provider === 'coming-soon') return
     setSelectedProvider(provider)
-    form.setValue('provider_type', provider as 'email' | 'slack')
+    form.setValue('provider_type', provider as 'email' | 'slack' | 'webhook')
     setCurrentStep('configuration')
   }
 
@@ -166,11 +194,22 @@ export function AddNotificationProvider() {
           },
         },
       })
+    } else if (data.provider_type === 'webhook') {
+      await createWebhookMutation.mutateAsync({
+        body: {
+          name: data.name,
+          config: {
+            url: data.config.url!,
+            method: data.config.method || 'POST',
+            headers: (data.config.headers || {}) as Record<string, string>,
+            timeout_secs: data.config.timeout_secs || 30,
+          },
+        },
+      })
     } else {
       await createEmailMutation.mutateAsync({
         body: {
           name: data.name,
-          enabled: true,
           config: {
             smtp_host: data.config.smtp_host!,
             smtp_port: data.config.smtp_port!,
@@ -193,7 +232,7 @@ export function AddNotificationProvider() {
   }
 
   const isLoading =
-    createEmailMutation.isPending || createSlackMutation.isPending
+    createEmailMutation.isPending || createSlackMutation.isPending || createWebhookMutation.isPending
 
   const renderStepIndicator = () => {
     const steps = [
@@ -301,12 +340,12 @@ export function AddNotificationProvider() {
           <Card>
             <CardHeader>
               <CardTitle>
-                Configure {selectedProvider === 'email' ? 'Email' : 'Slack'}{' '}
+                Configure {selectedProvider === 'email' ? 'Email' : selectedProvider === 'slack' ? 'Slack' : 'Webhook'}{' '}
                 Provider
               </CardTitle>
               <CardDescription>
                 Enter the configuration details for your{' '}
-                {selectedProvider === 'email' ? 'email' : 'Slack'} notification
+                {selectedProvider === 'email' ? 'email' : selectedProvider === 'slack' ? 'Slack' : 'webhook'} notification
                 provider
               </CardDescription>
             </CardHeader>

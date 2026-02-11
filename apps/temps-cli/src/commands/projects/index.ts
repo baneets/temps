@@ -17,6 +17,8 @@ export function registerProjectsCommands(program: Command): void {
     .alias('ls')
     .description('List all projects')
     .option('--json', 'Output in JSON format')
+    .option('--page <n>', 'Page number')
+    .option('--per-page <n>', 'Items per page')
     .action(list)
 
   projects

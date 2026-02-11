@@ -96,6 +96,7 @@ export function ProviderForm({
                     <SelectContent>
                       <SelectItem value="email">Email</SelectItem>
                       <SelectItem value="slack">Slack</SelectItem>
+                      <SelectItem value="webhook">Webhook</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -400,6 +401,191 @@ export function ProviderForm({
                 </FormItem>
               )}
             />
+          </div>
+        )}
+
+        {providerType === 'webhook' && (
+          <div className="space-y-6">
+            <div className="space-y-4">
+              <h3 className="text-sm font-medium leading-none">
+                Webhook Configuration
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Send notifications as JSON payloads to any HTTP endpoint. Use custom headers for authentication.
+              </p>
+            </div>
+
+            <FormField
+              control={form.control}
+              name="config.url"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Webhook URL</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      placeholder="https://api.example.com/webhook"
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    The URL where notifications will be sent as JSON payloads
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <FormField
+                control={form.control}
+                name="config.method"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>HTTP Method</FormLabel>
+                    <Select
+                      onValueChange={field.onChange}
+                      value={field.value || 'POST'}
+                    >
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select method" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        <SelectItem value="POST">POST</SelectItem>
+                        <SelectItem value="PUT">PUT</SelectItem>
+                        <SelectItem value="PATCH">PATCH</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="config.timeout_secs"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Timeout (seconds)</FormLabel>
+                    <FormControl>
+                      <Input
+                        {...field}
+                        type="number"
+                        placeholder="30"
+                        min={1}
+                        max={300}
+                        onChange={(e) =>
+                          field.onChange(
+                            e.target.value ? parseInt(e.target.value) : 30
+                          )
+                        }
+                        value={field.value || 30}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <div className="space-y-4">
+              <h4 className="text-sm font-medium leading-none">
+                Custom Headers
+              </h4>
+              <p className="text-sm text-muted-foreground">
+                Add custom headers for authentication (e.g., Authorization: Bearer token)
+              </p>
+
+              <FormField
+                control={form.control}
+                name="config.headers"
+                render={({ field }) => {
+                  const headers = field.value || {}
+                  const headerEntries = Object.entries(headers)
+
+                  const addHeader = () => {
+                    field.onChange({ ...headers, '': '' })
+                  }
+
+                  const updateHeader = (oldKey: string, newKey: string, value: string) => {
+                    const newHeaders = { ...headers }
+                    if (oldKey !== newKey) {
+                      delete newHeaders[oldKey]
+                    }
+                    if (newKey) {
+                      newHeaders[newKey] = value
+                    }
+                    field.onChange(newHeaders)
+                  }
+
+                  const removeHeader = (key: string) => {
+                    const newHeaders = { ...headers }
+                    delete newHeaders[key]
+                    field.onChange(newHeaders)
+                  }
+
+                  return (
+                    <FormItem>
+                      <div className="space-y-2">
+                        {headerEntries.map(([key, value], index) => (
+                          <div key={index} className="flex gap-2 items-center">
+                            <Input
+                              placeholder="Header name"
+                              value={key}
+                              onChange={(e) => updateHeader(key, e.target.value, value as string)}
+                              className="flex-1"
+                            />
+                            <Input
+                              placeholder="Header value"
+                              value={value as string}
+                              onChange={(e) => updateHeader(key, key, e.target.value)}
+                              className="flex-1"
+                            />
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => removeHeader(key)}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        ))}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={addHeader}
+                        >
+                          Add Header
+                        </Button>
+                      </div>
+                      <FormDescription>
+                        Common headers: Authorization, X-API-Key, X-Custom-Header
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )
+                }}
+              />
+            </div>
+
+            <div className="rounded-lg border p-4 bg-muted/50">
+              <h4 className="text-sm font-medium mb-2">Webhook Payload Format</h4>
+              <pre className="text-xs text-muted-foreground overflow-x-auto">
+{`{
+  "id": "notification-uuid",
+  "title": "Alert Title",
+  "message": "Alert message content",
+  "type": "error | warning | info | alert",
+  "priority": "critical | high | normal | low",
+  "severity": "critical | warning | info",
+  "timestamp": "2025-01-01T12:00:00Z",
+  "metadata": { "key": "value" }
+}`}
+              </pre>
+            </div>
           </div>
         )}
 

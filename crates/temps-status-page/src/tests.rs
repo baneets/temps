@@ -1078,7 +1078,31 @@ mod integration_tests {
             postgres_max_lifetime_secs: None,
         });
         let config_service = Arc::new(temps_config::ConfigService::new(server_config, db.clone()));
-        let health_check_service = HealthCheckService::new(db.clone(), config_service);
+
+        // Create mock job queue for testing
+        use temps_core::{Job, JobQueue, JobReceiver, QueueError};
+        struct MockJobQueue;
+        #[async_trait::async_trait]
+        impl JobQueue for MockJobQueue {
+            async fn send(&self, _job: Job) -> Result<(), QueueError> {
+                Ok(())
+            }
+            fn subscribe(&self) -> Box<dyn JobReceiver> {
+                Box::new(MockJobReceiver)
+            }
+        }
+        struct MockJobReceiver;
+        #[async_trait::async_trait]
+        impl JobReceiver for MockJobReceiver {
+            async fn recv(&mut self) -> Result<Job, QueueError> {
+                // Never return anything (tests don't need this)
+                tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                Err(QueueError::ChannelClosed)
+            }
+        }
+
+        let job_queue: Arc<dyn JobQueue> = Arc::new(MockJobQueue);
+        let health_check_service = HealthCheckService::new(db.clone(), config_service, job_queue);
 
         // Initialize monitors for all environments
         health_check_service.initialize_monitors().await.unwrap();

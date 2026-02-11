@@ -73,10 +73,19 @@ pub struct GetFunnelMetricsQuery {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct EventTypesResponse {
     pub events: Vec<EventType>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct EventType {
     pub name: String,
     pub count: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct GetUniqueEventsQuery {
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
 }

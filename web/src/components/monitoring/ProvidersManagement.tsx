@@ -7,6 +7,7 @@ import {
   updateEmailProviderMutation,
   updateProviderMutation,
   updateSlackProviderMutation,
+  updateWebhookProviderMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { NotificationProviderResponse } from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
@@ -38,7 +39,7 @@ import { ProviderForm } from './ProviderForm'
 import { ProviderFormData, providerSchema } from './schemas'
 
 interface ExtendedNotificationProvider extends NotificationProviderResponse {
-  provider_type: 'email' | 'slack'
+  provider_type: 'email' | 'slack' | 'webhook'
   config: {
     // Slack config
     webhook_url?: string
@@ -53,6 +54,12 @@ interface ExtendedNotificationProvider extends NotificationProviderResponse {
     from_address?: string
     from_name?: string
     to_addresses?: string[]
+
+    // Webhook config
+    url?: string
+    method?: 'POST' | 'PUT' | 'PATCH'
+    headers?: Record<string, string>
+    timeout_secs?: number
   }
 }
 
@@ -90,6 +97,19 @@ export function ProvidersManagement() {
     },
     onSuccess: () => {
       toast.success('Slack provider updated successfully')
+      setIsEditDialogOpen(false)
+      setEditingProvider(null)
+      refetch()
+    },
+  })
+
+  const updateWebhookMutation = useMutation({
+    ...updateWebhookProviderMutation(),
+    meta: {
+      errorTitle: 'Failed to update Webhook provider',
+    },
+    onSuccess: () => {
+      toast.success('Webhook provider updated successfully')
       setIsEditDialogOpen(false)
       setEditingProvider(null)
       refetch()
@@ -146,6 +166,20 @@ export function ProvidersManagement() {
           config: {
             webhook_url: data.config.webhook_url!,
             channel: data.config.channel ?? null,
+          },
+        },
+      })
+    } else if (data.provider_type === 'webhook') {
+      await updateWebhookMutation.mutateAsync({
+        path: { id: editingProvider.id },
+        body: {
+          name: data.name,
+          enabled: editingProvider.enabled,
+          config: {
+            url: data.config.url!,
+            method: data.config.method || 'POST',
+            headers: (data.config.headers || {}) as Record<string, string>,
+            timeout_secs: data.config.timeout_secs || 30,
           },
         },
       })
@@ -230,11 +264,14 @@ export function ProvidersManagement() {
     () =>
       watchedProviderType === 'email'
         ? updateEmailMutation.isPending
-        : updateSlackMutation.isPending,
+        : watchedProviderType === 'slack'
+          ? updateSlackMutation.isPending
+          : updateWebhookMutation.isPending,
     [
       watchedProviderType,
       updateEmailMutation.isPending,
       updateSlackMutation.isPending,
+      updateWebhookMutation.isPending,
     ]
   )
   return (
@@ -324,8 +361,11 @@ export function ProvidersManagement() {
                     {provider.provider_type === 'email'
                       ? typedProvider.config?.from_address ||
                         'No address configured'
-                      : typedProvider.config?.webhook_url ||
-                        'No webhook configured'}
+                      : provider.provider_type === 'slack'
+                        ? typedProvider.config?.webhook_url ||
+                          'No webhook configured'
+                        : typedProvider.config?.url ||
+                          'No webhook configured'}
                   </p>
                 </CardContent>
               </Card>

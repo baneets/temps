@@ -79,14 +79,12 @@ export const Login = () => {
     <div className="flex min-h-screen flex-col items-center justify-center bg-background p-4">
       <div className="w-full max-w-sm space-y-6">
         <div className="flex flex-col items-center space-y-6">
-          <div className="flex items-center gap-2">
-            <div className="flex aspect-square size-12 items-center justify-center rounded-lg bg-primary">
-              <img
-                src="/favicon.png"
-                alt="Temps logo"
-                className="size-full rounded-lg"
-              />
-            </div>
+          <div className="flex items-center gap-3">
+            <img
+              src="/svg/temps-icon.svg"
+              alt="Temps logo"
+              className="size-12"
+            />
             <span className="text-2xl font-bold">Temps</span>
           </div>
           <div className="flex flex-col space-y-2 text-center">

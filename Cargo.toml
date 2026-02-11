@@ -3,8 +3,6 @@ resolver = "2"
 members = [
     # Application crates
     "crates/temps-cli",
-    # LocalTemps desktop app
-    "apps/localtemps/src-tauri",
     # Library crates
     "crates/temps-core",
     "crates/temps-entities",
@@ -262,7 +260,7 @@ opt-level = 3
 opt-level = 0
 debug = true
 incremental = true
-codegen-units = 256
+codegen-units = 16
 
 [profile.dev.package."*"]
 opt-level = 2      # Optimize dependencies

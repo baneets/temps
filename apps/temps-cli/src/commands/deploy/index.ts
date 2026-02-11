@@ -89,8 +89,11 @@ export function registerDeployCommands(program: Command): void {
     .alias('ls')
     .description('List deployments')
     .option('-p, --project <project>', 'Project slug or ID')
-    .option('-e, --environment <env>', 'Filter by environment')
+    .option('-e, --environment <env>', 'Filter by environment name (client-side)')
+    .option('--environment-id <id>', 'Filter by environment ID (server-side)')
     .option('-n, --limit <number>', 'Limit results', '10')
+    .option('--page <n>', 'Page number')
+    .option('--per-page <n>', 'Items per page')
     .option('--json', 'Output in JSON format')
     .action(list)
 

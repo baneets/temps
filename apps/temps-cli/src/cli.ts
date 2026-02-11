@@ -1,6 +1,6 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
-import { colors, icons } from './ui/output.js'
+import { colors } from './ui/output.js'
 import { handleError } from './utils/errors.js'
 import { createRequire } from 'module'
 
@@ -25,6 +25,40 @@ import { registerWebhooksCommands } from './commands/webhooks/index.js'
 import { registerContainersCommands } from './commands/containers/index.js'
 import { registerDocsCommand } from './commands/docs.js'
 import { registerTokensCommands } from './commands/tokens/index.js'
+import { registerErrorsCommands } from './commands/errors/index.js'
+import { registerKvCommands } from './commands/kv/index.js'
+import { registerBlobCommands } from './commands/blob/index.js'
+import { registerDsnCommands } from './commands/dsn/index.js'
+import { registerScansCommands } from './commands/scans/index.js'
+import { registerCustomDomainsCommands } from './commands/custom-domains/index.js'
+import { registerDnsProvidersCommands } from './commands/dns-providers/index.js'
+import { registerIpAccessCommands } from './commands/ip-access/index.js'
+import { registerAuditCommands } from './commands/audit/index.js'
+import { registerProxyLogsCommands } from './commands/proxy-logs/index.js'
+import { registerEmailDomainsCommands } from './commands/email-domains/index.js'
+import { registerEmailProvidersCommands } from './commands/email-providers/index.js'
+import { registerIncidentsCommands } from './commands/incidents/index.js'
+import { registerEmailsCommands } from './commands/emails/index.js'
+import { registerLoadBalancerCommands } from './commands/load-balancer/index.js'
+import { registerImportsCommands } from './commands/imports/index.js'
+import { registerTemplatesCommands } from './commands/templates/index.js'
+import { registerPlatformCommands } from './commands/platform/index.js'
+import { registerPresetsCommands } from './commands/presets/index.js'
+import { registerFunnelsCommands } from './commands/funnels/index.js'
+import { registerNotificationPreferencesCommands } from './commands/notification-preferences/index.js'
+
+// Developer workflow commands
+import { registerInitCommand } from './commands/init/index.js'
+import { registerLinkCommand } from './commands/link/index.js'
+import { registerUpCommand } from './commands/up/index.js'
+import { registerStatusCommand } from './commands/status/index.js'
+import { registerInstancesCommands } from './commands/instances/index.js'
+import { registerEnvSyncCommands } from './commands/env-sync/index.js'
+import { registerRollbackCommand } from './commands/rollback/index.js'
+import { registerOpenCommand } from './commands/open/index.js'
+import { registerExecCommands } from './commands/exec/index.js'
+import { registerDevCommand } from './commands/dev/index.js'
+import { registerCloudCommands } from './commands/cloud/index.js'
 
 // Read version from package.json
 const require = createRequire(import.meta.url)
@@ -77,6 +111,41 @@ export function createProgram(): Command {
   registerWebhooksCommands(program)
   registerContainersCommands(program)
   registerTokensCommands(program)
+  registerErrorsCommands(program)
+  registerKvCommands(program)
+  registerBlobCommands(program)
+  registerDsnCommands(program)
+  registerScansCommands(program)
+  registerCustomDomainsCommands(program)
+  registerDnsProvidersCommands(program)
+  registerIpAccessCommands(program)
+  registerAuditCommands(program)
+  registerProxyLogsCommands(program)
+  registerEmailDomainsCommands(program)
+  registerEmailProvidersCommands(program)
+  registerIncidentsCommands(program)
+  registerEmailsCommands(program)
+  registerLoadBalancerCommands(program)
+  registerImportsCommands(program)
+  registerTemplatesCommands(program)
+  registerPlatformCommands(program)
+  registerPresetsCommands(program)
+  registerFunnelsCommands(program)
+  registerNotificationPreferencesCommands(program)
+
+  // Developer workflow commands
+  registerInitCommand(program)
+  registerLinkCommand(program)
+  registerUpCommand(program)
+  registerStatusCommand(program)
+  registerInstancesCommands(program)
+  registerEnvSyncCommands(program)
+  registerRollbackCommand(program)
+  registerOpenCommand(program)
+  registerExecCommands(program)
+  registerDevCommand(program)
+  registerCloudCommands(program)
+
   registerDocsCommand(program)
 
   // Custom help
@@ -85,13 +154,20 @@ export function createProgram(): Command {
   program.addHelpText(
     'after',
     `
-${colors.bold('Examples:')}
+${colors.bold('Quick Start:')}
   ${colors.muted('$')} temps login                    ${colors.muted('# Authenticate with Temps')}
-  ${colors.muted('$')} temps configure                ${colors.muted('# Configure CLI settings')}
-  ${colors.muted('$')} temps projects list            ${colors.muted('# List all projects')}
-  ${colors.muted('$')} temps deploy my-app            ${colors.muted('# Deploy a project')}
-  ${colors.muted('$')} temps logs my-app --follow     ${colors.muted('# Stream deployment logs')}
-  ${colors.muted('$')} temps env vars my-app list     ${colors.muted('# List environment variables')}
+  ${colors.muted('$')} temps init                     ${colors.muted('# Initialize project in current directory')}
+  ${colors.muted('$')} temps up                       ${colors.muted('# Deploy from current directory')}
+  ${colors.muted('$')} temps status                   ${colors.muted('# View project status')}
+
+${colors.bold('Common Commands:')}
+  ${colors.muted('$')} temps link my-app              ${colors.muted('# Link directory to a project')}
+  ${colors.muted('$')} temps open                     ${colors.muted('# Open project URL in browser')}
+  ${colors.muted('$')} temps rollback                 ${colors.muted('# Rollback to previous deployment')}
+  ${colors.muted('$')} temps env:pull                 ${colors.muted('# Pull env vars to .env file')}
+  ${colors.muted('$')} temps env:push                 ${colors.muted('# Push .env file to project')}
+  ${colors.muted('$')} temps cloud login               ${colors.muted('# Connect to Temps Cloud')}
+  ${colors.muted('$')} temps instances list            ${colors.muted('# Manage server instances')}
 
 ${colors.bold('Documentation:')}
   ${colors.primary('https://temps.dev/docs')}

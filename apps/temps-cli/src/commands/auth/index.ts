@@ -6,8 +6,10 @@ import { whoami } from './whoami.js'
 export function registerAuthCommands(program: Command): void {
   program
     .command('login')
-    .description('Authenticate with Temps using an API key')
+    .description('Authenticate with the current Temps instance')
     .option('-k, --api-key <key>', 'API key (will prompt if not provided)')
+    .option('--email [email]', 'Login with email and password')
+    .option('--magic [email]', 'Login via magic link (email-based)')
     .action(login)
 
   program

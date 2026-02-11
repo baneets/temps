@@ -11,6 +11,13 @@ import {
   getServiceTypes,
   getServiceTypeParameters,
   listServiceProjects,
+  updateService,
+  upgradeService,
+  importExternalService,
+  linkServiceToProject,
+  unlinkServiceFromProject,
+  getServiceEnvironmentVariables,
+  getServiceEnvironmentVariable,
 } from '../../api/sdk.gen.js'
 import type { ExternalServiceInfo, ServiceTypeRoute } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
@@ -49,6 +56,51 @@ interface StartStopOptions {
 
 interface ProjectsOptions {
   id: string
+  json?: boolean
+}
+
+interface UpdateOptions {
+  id: string
+  name?: string
+  parameters?: string
+}
+
+interface UpgradeOptions {
+  id: string
+  version?: string
+}
+
+interface ImportOptions {
+  type?: string
+  name?: string
+  containerId?: string
+  parameters?: string
+  version?: string
+  yes?: boolean
+}
+
+interface LinkOptions {
+  id: string
+  projectId: string
+}
+
+interface UnlinkOptions {
+  id: string
+  projectId: string
+  force?: boolean
+  yes?: boolean
+}
+
+interface EnvOptions {
+  id: string
+  projectId: string
+  json?: boolean
+}
+
+interface EnvVarOptions {
+  id: string
+  projectId: string
+  var: string
   json?: boolean
 }
 
@@ -115,6 +167,65 @@ export function registerServicesCommands(program: Command): void {
     .requiredOption('--id <id>', 'Service ID')
     .option('--json', 'Output in JSON format')
     .action(listLinkedProjects)
+
+  services
+    .command('update')
+    .description('Update a service')
+    .requiredOption('--id <id>', 'Service ID')
+    .option('-n, --name <name>', 'Docker image name (e.g., postgres:17-alpine)')
+    .option('--parameters <json>', 'Service parameters as JSON string')
+    .action(updateServiceAction)
+
+  services
+    .command('upgrade')
+    .description('Upgrade a service to a newer version')
+    .requiredOption('--id <id>', 'Service ID')
+    .option('-v, --version <version>', 'Docker image to upgrade to (e.g., postgres:17-alpine)')
+    .action(upgradeServiceAction)
+
+  services
+    .command('import')
+    .description('Import an existing external service')
+    .option('-t, --type <type>', 'Service type (postgres, mongodb, redis, s3)')
+    .option('-n, --name <name>', 'Service name')
+    .option('--container-id <id>', 'Container ID or name to import')
+    .option('--parameters <json>', 'Service parameters as JSON string')
+    .option('--version <version>', 'Optional version override')
+    .option('-y, --yes', 'Skip confirmation prompts (for automation)')
+    .action(importServiceAction)
+
+  services
+    .command('link')
+    .description('Link a service to a project')
+    .requiredOption('--id <id>', 'Service ID')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .action(linkServiceAction)
+
+  services
+    .command('unlink')
+    .description('Unlink a service from a project')
+    .requiredOption('--id <id>', 'Service ID')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .option('-f, --force', 'Skip confirmation')
+    .option('-y, --yes', 'Skip confirmation prompts (alias for --force)')
+    .action(unlinkServiceAction)
+
+  services
+    .command('env')
+    .description('Show environment variables for a linked service')
+    .requiredOption('--id <id>', 'Service ID')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .option('--json', 'Output in JSON format')
+    .action(envAction)
+
+  services
+    .command('env-var')
+    .description('Get a specific environment variable')
+    .requiredOption('--id <id>', 'Service ID')
+    .requiredOption('--project-id <id>', 'Project ID')
+    .requiredOption('--var <name>', 'Environment variable name')
+    .option('--json', 'Output in JSON format')
+    .action(envVarAction)
 }
 
 async function listServicesAction(options: { json?: boolean }): Promise<void> {
@@ -508,6 +619,347 @@ async function listLinkedProjects(options: ProjectsOptions): Promise<void> {
 
   for (const link of projects) {
     console.log(`  ${colors.bold(link.project.slug)} ${colors.muted(`(ID: ${link.project.id})`)}`)
+  }
+  newline()
+}
+
+async function updateServiceAction(options: UpdateOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid service ID')
+    return
+  }
+
+  let parameters: Record<string, unknown> = {}
+  if (options.parameters) {
+    try {
+      parameters = JSON.parse(options.parameters)
+    } catch {
+      warning('Invalid JSON in --parameters')
+      return
+    }
+  }
+
+  await withSpinner('Updating service...', async () => {
+    const { error } = await updateService({
+      client,
+      path: { id },
+      body: {
+        docker_image: options.name ?? null,
+        parameters,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+  })
+
+  success('Service updated')
+  info(`Run: temps services show --id ${options.id} to check the details`)
+}
+
+async function upgradeServiceAction(options: UpgradeOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid service ID')
+    return
+  }
+
+  let dockerImage: string
+
+  if (options.version) {
+    dockerImage = options.version
+  } else {
+    dockerImage = await promptText({
+      message: 'Docker image to upgrade to (e.g., postgres:17-alpine)',
+      required: true,
+    })
+  }
+
+  await withSpinner('Upgrading service...', async () => {
+    const { error } = await upgradeService({
+      client,
+      path: { id },
+      body: {
+        docker_image: dockerImage,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+  })
+
+  success('Service upgrade initiated')
+  info(`Run: temps services show --id ${options.id} to check the status`)
+}
+
+async function importServiceAction(options: ImportOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  let serviceType: ServiceTypeRoute
+  let name: string
+  let containerId: string
+  let parameters: Record<string, unknown> = {}
+
+  const isAutomation = options.yes && options.type && options.name && options.containerId
+
+  if (isAutomation) {
+    // Get available types for validation
+    const types = await withSpinner('Fetching service types...', async () => {
+      const { data, error } = await getServiceTypes({ client })
+      if (error) {
+        throw new Error(getErrorMessage(error))
+      }
+      return data ?? []
+    })
+
+    if (!types.includes(options.type as ServiceTypeRoute)) {
+      warning(`Invalid service type: ${options.type}. Available: ${types.join(', ')}`)
+      return
+    }
+    serviceType = options.type as ServiceTypeRoute
+    name = options.name!
+    containerId = options.containerId!
+
+    if (options.parameters) {
+      try {
+        parameters = JSON.parse(options.parameters)
+      } catch {
+        warning('Invalid JSON in --parameters')
+        return
+      }
+    }
+  } else {
+    // Interactive mode
+    const types = await withSpinner('Fetching service types...', async () => {
+      const { data, error } = await getServiceTypes({ client })
+      if (error) {
+        throw new Error(getErrorMessage(error))
+      }
+      return data ?? []
+    })
+
+    if (types.length === 0) {
+      warning('No service types available')
+      return
+    }
+
+    serviceType = (options.type as ServiceTypeRoute) ?? await promptSelect({
+      message: 'Service type',
+      choices: types.map(t => ({
+        name: SERVICE_TYPE_LABELS[t] || t,
+        value: t,
+      })),
+    }) as ServiceTypeRoute
+
+    name = options.name ?? await promptText({
+      message: 'Service name',
+      default: `imported-${serviceType}`,
+      required: true,
+    })
+
+    containerId = options.containerId ?? await promptText({
+      message: 'Container ID or name to import',
+      required: true,
+    })
+
+    if (options.parameters) {
+      try {
+        parameters = JSON.parse(options.parameters)
+      } catch {
+        warning('Invalid JSON in --parameters')
+        return
+      }
+    }
+  }
+
+  await withSpinner('Importing service...', async () => {
+    const { error } = await importExternalService({
+      client,
+      body: {
+        service_type: serviceType,
+        name,
+        container_id: containerId,
+        parameters,
+        version: options.version ?? null,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+  })
+
+  success(`Service "${name}" imported successfully`)
+  info('Run: temps services list to see all services')
+}
+
+async function linkServiceAction(options: LinkOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid service ID')
+    return
+  }
+
+  const projectId = parseInt(options.projectId, 10)
+  if (isNaN(projectId)) {
+    warning('Invalid project ID')
+    return
+  }
+
+  await withSpinner('Linking service to project...', async () => {
+    const { error } = await linkServiceToProject({
+      client,
+      path: { id },
+      body: {
+        project_id: projectId,
+      },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+  })
+
+  success(`Service ${options.id} linked to project ${options.projectId}`)
+}
+
+async function unlinkServiceAction(options: UnlinkOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid service ID')
+    return
+  }
+
+  const projectId = parseInt(options.projectId, 10)
+  if (isNaN(projectId)) {
+    warning('Invalid project ID')
+    return
+  }
+
+  const skipConfirmation = options.force || options.yes
+
+  if (!skipConfirmation) {
+    const confirmed = await promptConfirm({
+      message: `Unlink service ${options.id} from project ${options.projectId}?`,
+      default: false,
+    })
+    if (!confirmed) {
+      info('Cancelled')
+      return
+    }
+  }
+
+  await withSpinner('Unlinking service from project...', async () => {
+    const { error } = await unlinkServiceFromProject({
+      client,
+      path: { id, project_id: projectId },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+  })
+
+  success(`Service ${options.id} unlinked from project ${options.projectId}`)
+}
+
+async function envAction(options: EnvOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid service ID')
+    return
+  }
+
+  const projectId = parseInt(options.projectId, 10)
+  if (isNaN(projectId)) {
+    warning('Invalid project ID')
+    return
+  }
+
+  const envVars = await withSpinner('Fetching environment variables...', async () => {
+    const { data, error } = await getServiceEnvironmentVariables({
+      client,
+      path: { id, project_id: projectId },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data ?? []
+  })
+
+  if (options.json) {
+    json(envVars)
+    return
+  }
+
+  newline()
+  header(`${icons.info} Environment Variables (${envVars.length})`)
+
+  if (envVars.length === 0) {
+    info('No environment variables found')
+    newline()
+    return
+  }
+
+  for (const v of envVars) {
+    const sensitiveTag = v.sensitive ? colors.muted(' [sensitive]') : ''
+    keyValue(v.name, v.value + sensitiveTag)
+  }
+  newline()
+}
+
+async function envVarAction(options: EnvVarOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  const id = parseInt(options.id, 10)
+  if (isNaN(id)) {
+    warning('Invalid service ID')
+    return
+  }
+
+  const projectId = parseInt(options.projectId, 10)
+  if (isNaN(projectId)) {
+    warning('Invalid project ID')
+    return
+  }
+
+  const envVar = await withSpinner('Fetching environment variable...', async () => {
+    const { data, error } = await getServiceEnvironmentVariable({
+      client,
+      path: { id, project_id: projectId, var_name: options.var },
+    })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    return data
+  })
+
+  if (options.json) {
+    json(envVar)
+    return
+  }
+
+  newline()
+  if (envVar) {
+    const sensitiveTag = envVar.sensitive ? colors.muted(' [sensitive]') : ''
+    keyValue(envVar.name, envVar.value + sensitiveTag)
+  } else {
+    warning(`Environment variable "${options.var}" not found`)
   }
   newline()
 }

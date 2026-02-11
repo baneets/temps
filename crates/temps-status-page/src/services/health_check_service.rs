@@ -3,7 +3,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, Qu
 use std::sync::Arc;
 use std::time::Duration;
 use temps_config::ConfigService;
-use temps_core::{Job, JobReceiver};
+use temps_core::{Job, JobQueue, JobReceiver, StatusCheckCompletedJob};
 use temps_entities::{
     deployment_containers, deployments, environments, projects, status_checks, status_monitors,
 };
@@ -17,11 +17,16 @@ pub struct HealthCheckService {
     db: Arc<DatabaseConnection>,
     http_client: reqwest::Client,
     config_service: Arc<ConfigService>,
+    job_queue: Arc<dyn JobQueue>,
 }
 
 impl HealthCheckService {
-    /// Create a new HealthCheckService with mandatory ConfigService
-    pub fn new(db: Arc<DatabaseConnection>, config_service: Arc<ConfigService>) -> Self {
+    /// Create a new HealthCheckService with mandatory ConfigService and JobQueue
+    pub fn new(
+        db: Arc<DatabaseConnection>,
+        config_service: Arc<ConfigService>,
+        job_queue: Arc<dyn JobQueue>,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent("Temps-Status-Monitor/1.0")
@@ -32,6 +37,7 @@ impl HealthCheckService {
             db,
             http_client,
             config_service,
+            job_queue,
         }
     }
 
@@ -55,11 +61,13 @@ impl HealthCheckService {
             let db = self.db.clone();
             let http_client = self.http_client.clone();
             let config_service = self.config_service.clone();
+            let job_queue = self.job_queue.clone();
             let permit = semaphore.clone().acquire_owned().await.unwrap();
 
             let task = tokio::spawn(async move {
                 let _permit = permit; // Hold permit until task completes
-                if let Err(e) = Self::check_monitor(db, http_client, config_service, monitor).await
+                if let Err(e) =
+                    Self::check_monitor(db, http_client, config_service, monitor, job_queue).await
                 {
                     error!("Health check failed: {:?}", e);
                 }
@@ -85,6 +93,7 @@ impl HealthCheckService {
         http_client: reqwest::Client,
         config_service: Arc<ConfigService>,
         monitor: status_monitors::Model,
+        job_queue: Arc<dyn JobQueue>,
     ) -> Result<(), StatusPageError> {
         // Check if environment_id is set
         let env_id = monitor.environment_id.ok_or_else(|| {
@@ -132,6 +141,7 @@ impl HealthCheckService {
                     "degraded".to_string(),
                     None,
                     Some(format!("Failed to determine public URL: {:?}", e)),
+                    &job_queue,
                 )
                 .await?;
 
@@ -212,6 +222,7 @@ impl HealthCheckService {
                         } else {
                             None
                         },
+                        &job_queue,
                     )
                     .await;
                 }
@@ -260,6 +271,7 @@ impl HealthCheckService {
                             e,
                             attempt + 1
                         )),
+                        &job_queue,
                     )
                     .await;
                 }
@@ -286,6 +298,7 @@ impl HealthCheckService {
                             "Health check timeout after {} attempts",
                             attempt + 1
                         )),
+                        &job_queue,
                     )
                     .await;
                 }
@@ -300,24 +313,26 @@ impl HealthCheckService {
             "major_outage".to_string(),
             Some(total_response_time_ms),
             Some(last_error.unwrap_or_else(|| "Unknown error after retries".to_string())),
+            &job_queue,
         )
         .await
     }
 
-    /// Record a check result in the database with retry logic
+    /// Record a check result in the database with retry logic and emit job for outage detection
     async fn record_check(
         db: &Arc<DatabaseConnection>,
         monitor_id: i32,
         status: String,
         response_time_ms: Option<i32>,
         error_message: Option<String>,
+        job_queue: &Arc<dyn JobQueue>,
     ) -> Result<(), StatusPageError> {
         let check = status_checks::ActiveModel {
             monitor_id: Set(monitor_id),
-            status: Set(status),
+            status: Set(status.clone()),
             response_time_ms: Set(response_time_ms),
             checked_at: Set(Utc::now()),
-            error_message: Set(error_message),
+            error_message: Set(error_message.clone()),
             ..Default::default()
         };
 
@@ -342,6 +357,22 @@ impl HealthCheckService {
                     if attempt > 0 {
                         debug!("Database insert succeeded after {} attempts", attempt + 1);
                     }
+
+                    // CRITICAL: Emit job for outage detection immediately after recording check
+                    let job = Job::StatusCheckCompleted(StatusCheckCompletedJob {
+                        monitor_id,
+                        status: status.clone(),
+                        error_message: error_message.clone(),
+                    });
+
+                    if let Err(e) = job_queue.send(job).await {
+                        error!(
+                            "Failed to emit StatusCheckCompleted job for monitor {}: {:?}",
+                            monitor_id, e
+                        );
+                        // Don't fail the health check if job emission fails
+                    }
+
                     return Ok(());
                 }
                 Err(e) => {
@@ -478,6 +509,7 @@ impl HealthCheckService {
                                     service.http_client.clone(),
                                     service.config_service.clone(),
                                     monitor,
+                                    service.job_queue.clone(),
                                 )
                                 .await
                                 {

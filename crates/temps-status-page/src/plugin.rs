@@ -151,9 +151,13 @@ impl TempsPlugin for StatusPagePlugin {
                 queue_service.clone(),
             ));
 
-            // Create health check service with mandatory ConfigService
-            let health_check_service =
-                Arc::new(HealthCheckService::new(db.clone(), config_service));
+            // Create health check service with mandatory ConfigService and JobQueue
+            // The service will emit StatusCheckCompleted jobs for outage detection
+            let health_check_service = Arc::new(HealthCheckService::new(
+                db.clone(),
+                config_service,
+                queue_service.clone(),
+            ));
             context.register_service(health_check_service.clone());
 
             // Start the health check scheduler with job receiver for realtime monitor creation

@@ -53,8 +53,10 @@ impl NotificationState {
         test_provider,
         create_slack_provider,
         create_email_provider,
+        create_webhook_provider,
         update_slack_provider,
         update_email_provider,
+        update_webhook_provider,
         get_preferences,
         update_preferences,
         delete_preferences,
@@ -68,11 +70,14 @@ impl NotificationState {
             TestProviderResponse,
             SlackConfig,
             EmailConfig,
+            WebhookConfig,
             TlsMode,
             CreateSlackProviderRequest,
             CreateEmailProviderRequest,
+            CreateWebhookProviderRequest,
             UpdateSlackProviderRequest,
             UpdateEmailProviderRequest,
+            UpdateWebhookProviderRequest,
             NotificationPreferencesResponse,
             UpdatePreferencesRequest,
             TriggerDigestResponse,
@@ -81,7 +86,7 @@ impl NotificationState {
     info(
         title = "Notifications API",
         description = "API endpoints for managing notification providers and user notification preferences. \
-        Handles email, Slack, and other notification delivery services, as well as user notification settings.",
+        Handles email, Slack, webhook, and other notification delivery services, as well as user notification settings.",
         version = "1.0.0"
     ),
     tags(
@@ -183,6 +188,48 @@ pub struct UpdateSlackProviderRequest {
 pub struct UpdateEmailProviderRequest {
     pub name: Option<String>,
     pub config: EmailConfig,
+    pub enabled: Option<bool>,
+}
+
+/// Configuration for a generic webhook notification provider
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct WebhookConfig {
+    /// The URL to send webhook requests to
+    #[schema(example = "https://api.example.com/notifications")]
+    pub url: String,
+    /// HTTP method to use (POST, PUT, PATCH). Defaults to POST.
+    #[serde(default = "default_http_method")]
+    #[schema(example = "POST")]
+    pub method: String,
+    /// Custom headers to include in the request (e.g., for authentication tokens)
+    #[serde(default)]
+    #[schema(example = json!({"Authorization": "Bearer your-token", "X-Custom-Header": "custom-value"}))]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Request timeout in seconds. Defaults to 30.
+    #[serde(default = "default_timeout_secs")]
+    #[schema(example = 30)]
+    pub timeout_secs: u64,
+}
+
+fn default_http_method() -> String {
+    "POST".to_string()
+}
+
+fn default_timeout_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateWebhookProviderRequest {
+    pub name: String,
+    pub config: WebhookConfig,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct UpdateWebhookProviderRequest {
+    pub name: Option<String>,
+    pub config: WebhookConfig,
     pub enabled: Option<bool>,
 }
 
@@ -799,6 +846,183 @@ async fn update_email_provider(
     }
 }
 
+/// Create a new Webhook notification provider
+///
+/// Webhook providers send notifications as JSON payloads to any HTTP endpoint.
+/// You can configure custom headers for authentication (Bearer tokens, API keys, etc.).
+/// The webhook will receive a JSON payload with notification details including:
+/// id, title, message, type, priority, severity, timestamp, and metadata.
+#[utoipa::path(
+    post,
+    path = "/notification-providers/webhook",
+    request_body = CreateWebhookProviderRequest,
+    responses(
+        (status = 201, description = "Successfully created Webhook provider", body = NotificationProviderResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Notification Providers",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+async fn create_webhook_provider(
+    State(app_state): State<Arc<NotificationState>>,
+    RequireAuth(auth): RequireAuth,
+    Json(request): Json<CreateWebhookProviderRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, NotificationProvidersCreate);
+    info!("Creating Webhook notification provider {}", request.name);
+
+    // Validate URL format
+    if !request.config.url.starts_with("http://") && !request.config.url.starts_with("https://") {
+        return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+            .title("Invalid webhook URL")
+            .detail("Webhook URL must start with http:// or https://")
+            .build());
+    }
+
+    // Validate HTTP method
+    let method = request.config.method.to_uppercase();
+    if !["POST", "PUT", "PATCH"].contains(&method.as_str()) {
+        return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+            .title("Invalid HTTP method")
+            .detail("HTTP method must be POST, PUT, or PATCH")
+            .build());
+    }
+
+    let config = serde_json::to_value(&request.config).unwrap_or_default();
+    match app_state
+        .notification_service
+        .add_provider(request.name, "webhook".to_string(), config)
+        .await
+    {
+        Ok(provider) => {
+            let config = app_state
+                .notification_service
+                .decrypt_provider_config(&provider.config)
+                .map_err(|e| {
+                    error!("Failed to decrypt provider config: {}", e);
+                    ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                        .title("Failed to decrypt provider configuration")
+                        .detail(format!("Error: {}", e))
+                        .build()
+                })?;
+            let response = NotificationProviderResponse {
+                id: provider.id,
+                name: provider.name,
+                provider_type: provider.provider_type,
+                config,
+                enabled: provider.enabled,
+                created_at: provider.created_at.timestamp_millis(),
+                updated_at: provider.updated_at.timestamp_millis(),
+            };
+            Ok((StatusCode::CREATED, Json(response)))
+        }
+        Err(e) => {
+            error!("Failed to create Webhook notification provider: {}", e);
+            Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to create Webhook notification provider")
+                .detail(format!("Error: {}", e))
+                .build())
+        }
+    }
+}
+
+/// Update a Webhook notification provider
+#[utoipa::path(
+    put,
+    path = "/notification-providers/webhook/{id}",
+    request_body = UpdateWebhookProviderRequest,
+    responses(
+        (status = 200, description = "Successfully updated Webhook provider", body = NotificationProviderResponse),
+        (status = 404, description = "Provider not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("id" = i32, Path, description = "Provider ID")
+    ),
+    tag = "Notification Providers",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+async fn update_webhook_provider(
+    State(app_state): State<Arc<NotificationState>>,
+    Path(id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+    Json(request): Json<UpdateWebhookProviderRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, NotificationProvidersWrite);
+    info!("Updating Webhook notification provider {}", id);
+
+    // Validate URL format
+    if !request.config.url.starts_with("http://") && !request.config.url.starts_with("https://") {
+        return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+            .title("Invalid webhook URL")
+            .detail("Webhook URL must start with http:// or https://")
+            .build());
+    }
+
+    // Validate HTTP method
+    let method = request.config.method.to_uppercase();
+    if !["POST", "PUT", "PATCH"].contains(&method.as_str()) {
+        return Err(ErrorBuilder::new(StatusCode::BAD_REQUEST)
+            .title("Invalid HTTP method")
+            .detail("HTTP method must be POST, PUT, or PATCH")
+            .build());
+    }
+
+    let config = serde_json::to_value(request.config).unwrap_or_default();
+    let update_request = UpdateProviderRequest {
+        name: request.name,
+        config: Some(config),
+        enabled: request.enabled,
+    };
+    match app_state
+        .notification_service
+        .update_provider(id, update_request.into())
+        .await
+    {
+        Ok(Some(provider)) => {
+            let config = app_state
+                .notification_service
+                .decrypt_provider_config(&provider.config)
+                .map_err(|e| {
+                    error!("Failed to decrypt provider config: {}", e);
+                    ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                        .title("Failed to decrypt provider configuration")
+                        .detail(format!("Error: {}", e))
+                        .build()
+                })?;
+            let response = NotificationProviderResponse {
+                id: provider.id,
+                name: provider.name,
+                provider_type: provider.provider_type,
+                config,
+                enabled: provider.enabled,
+                created_at: provider.created_at.timestamp_millis(),
+                updated_at: provider.updated_at.timestamp_millis(),
+            };
+            Ok((StatusCode::OK, Json(response)))
+        }
+        Ok(None) => Err(ErrorBuilder::new(StatusCode::NOT_FOUND)
+            .title("Provider not found")
+            .detail("The requested Webhook notification provider does not exist")
+            .build()),
+        Err(e) => {
+            error!(
+                "Failed to update Webhook notification provider {}: {}",
+                id, e
+            );
+            Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Failed to update Webhook notification provider")
+                .detail(format!("Error: {}", e))
+                .build())
+        }
+    }
+}
+
 // Notification Preferences Types and Handlers
 
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
@@ -1102,6 +1326,10 @@ pub fn configure_routes() -> Router<Arc<NotificationState>> {
         .route("/notification-providers/slack", post(create_slack_provider))
         .route("/notification-providers/email", post(create_email_provider))
         .route(
+            "/notification-providers/webhook",
+            post(create_webhook_provider),
+        )
+        .route(
             "/notification-providers/{id}",
             get(get_notification_provider),
         )
@@ -1113,6 +1341,10 @@ pub fn configure_routes() -> Router<Arc<NotificationState>> {
         .route(
             "/notification-providers/email/{id}",
             put(update_email_provider),
+        )
+        .route(
+            "/notification-providers/webhook/{id}",
+            put(update_webhook_provider),
         )
         .route("/notification-providers/{id}", delete(delete_provider))
         .route("/notification-providers/{id}/test", post(test_provider))

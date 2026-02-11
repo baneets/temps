@@ -94,6 +94,31 @@ pub struct WhatsAppProvider {
     pub to_numbers: Vec<String>,
 }
 
+fn default_http_method() -> String {
+    "POST".to_string()
+}
+
+fn default_timeout_secs() -> u64 {
+    30
+}
+
+/// Generic webhook provider for custom integrations
+/// Sends notification data as JSON payload to any HTTP endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookProvider {
+    /// The URL to send webhook requests to
+    pub url: String,
+    /// HTTP method (POST, PUT, PATCH). Defaults to POST.
+    #[serde(default = "default_http_method")]
+    pub method: String,
+    /// Custom headers to include in the request (e.g., for authentication)
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    /// Request timeout in seconds. Defaults to 30.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
 #[async_trait]
 pub trait NotificationProvider: Send + Sync {
     async fn initialize(&mut self, db: Arc<DatabaseConnection>) -> Result<()>;
@@ -430,6 +455,115 @@ impl NotificationProvider for SlackProvider {
     }
 }
 
+#[async_trait]
+impl NotificationProvider for WebhookProvider {
+    async fn initialize(&mut self, _db: Arc<DatabaseConnection>) -> Result<()> {
+        // Validate webhook URL format
+        if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
+            return Err(anyhow::anyhow!(
+                "Invalid webhook URL: must start with http:// or https://"
+            ));
+        }
+
+        // Validate HTTP method
+        let method = self.method.to_uppercase();
+        if !["POST", "PUT", "PATCH"].contains(&method.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Invalid HTTP method: {}. Must be POST, PUT, or PATCH",
+                self.method
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn send(&self, notification: &Notification) -> Result<()> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
+            .build()?;
+
+        // Build the payload with all notification data
+        let payload = serde_json::json!({
+            "id": notification.id,
+            "title": notification.title,
+            "message": notification.message,
+            "type": notification.notification_type.to_string(),
+            "priority": notification.priority.to_string(),
+            "severity": notification.effective_severity().to_string(),
+            "timestamp": notification.timestamp.to_rfc3339(),
+            "metadata": notification.metadata,
+        });
+
+        // Build the request with configured method
+        let method: reqwest::Method = self
+            .method
+            .to_uppercase()
+            .parse()
+            .unwrap_or(reqwest::Method::POST);
+        let mut request = client
+            .request(method, &self.url)
+            .header("Content-Type", "application/json")
+            .json(&payload);
+
+        // Add custom headers (useful for auth tokens, API keys, etc.)
+        for (key, value) in &self.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        let response = request.send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Webhook request failed with status {}: {}", status, body);
+            return Err(anyhow::anyhow!(
+                "Webhook request failed with status {}: {}",
+                status,
+                body
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn health_check(&self) -> Result<bool> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
+            .build()?;
+
+        // Send a test payload
+        let test_payload = serde_json::json!({
+            "test": true,
+            "type": "health_check",
+            "message": "Temps webhook health check",
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+
+        let method: reqwest::Method = self
+            .method
+            .to_uppercase()
+            .parse()
+            .unwrap_or(reqwest::Method::POST);
+        let mut request = client
+            .request(method, &self.url)
+            .header("Content-Type", "application/json")
+            .json(&test_payload);
+
+        // Add custom headers
+        for (key, value) in &self.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        match request.send().await {
+            Ok(response) => Ok(response.status().is_success()),
+            Err(e) => {
+                error!("Webhook provider health check failed: {}", e);
+                Ok(false)
+            }
+        }
+    }
+}
+
 pub struct NotificationService {
     db: Arc<DatabaseConnection>,
     encryption_service: Arc<temps_core::EncryptionService>,
@@ -617,7 +751,11 @@ impl NotificationService {
                 config.initialize(self.db.clone()).await?;
                 Box::new(config)
             }
-            // Add other provider types here
+            "webhook" => {
+                let mut config: WebhookProvider = serde_json::from_str(&decrypted_config)?;
+                config.initialize(self.db.clone()).await?;
+                Box::new(config)
+            }
             _ => return Err(anyhow::anyhow!("Unsupported provider type")),
         };
         Ok(provider)
@@ -836,6 +974,17 @@ pub struct EmailProviderConfig {
 pub struct SlackProviderConfig {
     pub webhook_url: String,
     pub channel: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WebhookProviderConfig {
+    pub url: String,
+    #[serde(default = "default_http_method")]
+    pub method: String,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 // Notification Preferences Service
@@ -1170,6 +1319,97 @@ mod tests {
         let json_str = json.unwrap();
         assert!(json_str.contains("https://hooks.slack.com/services/TEST"));
         assert!(json_str.contains("#general"));
+    }
+
+    #[test]
+    fn test_webhook_provider_configuration() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer test-token".to_string());
+        headers.insert("X-Custom-Header".to_string(), "custom-value".to_string());
+
+        let config = WebhookProviderConfig {
+            url: "https://example.com/webhook".to_string(),
+            method: "POST".to_string(),
+            headers,
+            timeout_secs: 30,
+        };
+
+        assert_eq!(config.url, "https://example.com/webhook");
+        assert_eq!(config.method, "POST");
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.headers.len(), 2);
+        assert_eq!(
+            config.headers.get("Authorization"),
+            Some(&"Bearer test-token".to_string())
+        );
+    }
+
+    #[test]
+    fn test_webhook_config_serialization() {
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer test".to_string());
+
+        let config = WebhookProviderConfig {
+            url: "https://api.example.com/notifications".to_string(),
+            method: "POST".to_string(),
+            headers,
+            timeout_secs: 60,
+        };
+
+        let json = serde_json::to_string(&config);
+        assert!(json.is_ok());
+
+        let json_str = json.unwrap();
+        assert!(json_str.contains("https://api.example.com/notifications"));
+        assert!(json_str.contains("POST"));
+        assert!(json_str.contains("Authorization"));
+        assert!(json_str.contains("Bearer test"));
+    }
+
+    #[test]
+    fn test_webhook_config_deserialization_with_defaults() {
+        // Test that defaults are applied when fields are missing
+        let json = r#"{
+            "url": "https://example.com/webhook"
+        }"#;
+
+        let config: WebhookProviderConfig =
+            serde_json::from_str(json).expect("Failed to deserialize");
+
+        assert_eq!(config.url, "https://example.com/webhook");
+        assert_eq!(config.method, "POST"); // default
+        assert_eq!(config.timeout_secs, 30); // default
+        assert!(config.headers.is_empty()); // default empty
+    }
+
+    #[test]
+    fn test_webhook_url_validation() {
+        // Test valid URLs
+        let valid_https = "https://example.com/webhook";
+        let valid_http = "http://localhost:8080/webhook";
+
+        assert!(valid_https.starts_with("http://") || valid_https.starts_with("https://"));
+        assert!(valid_http.starts_with("http://") || valid_http.starts_with("https://"));
+
+        // Test invalid URLs
+        let invalid_url = "ftp://example.com/webhook";
+        assert!(!invalid_url.starts_with("http://") && !invalid_url.starts_with("https://"));
+    }
+
+    #[test]
+    fn test_webhook_method_validation() {
+        let valid_methods = ["POST", "PUT", "PATCH", "post", "put", "patch"];
+        let invalid_methods = ["GET", "DELETE", "HEAD", "OPTIONS"];
+
+        for method in valid_methods {
+            let upper = method.to_uppercase();
+            assert!(["POST", "PUT", "PATCH"].contains(&upper.as_str()));
+        }
+
+        for method in invalid_methods {
+            let upper = method.to_uppercase();
+            assert!(!["POST", "PUT", "PATCH"].contains(&upper.as_str()));
+        }
     }
 
     #[test]
