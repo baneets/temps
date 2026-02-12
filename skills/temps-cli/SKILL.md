@@ -1643,6 +1643,320 @@ temps cloud vps types --json
   cx52  │ CX52         │   16 │          32 │       320 │ €29.99/mo │ no
 ```
 
+### Cloud ACME Certificates (acme.sh)
+
+Provision TLS certificates for `*.temps.dev` subdomains using `acme.sh` with DNS-01 validation through the Temps Cloud ACME API. This is designed for **self-hosted Temps instances behind NAT/firewalls** that cannot complete HTTP-01 challenges because port 80 is not publicly accessible.
+
+#### How It Works
+
+1. `acme.sh` requests a certificate from Let's Encrypt for your `*.temps.dev` subdomain
+2. Let's Encrypt asks for a DNS TXT record at `_acme-challenge.your-host.username.temps.dev`
+3. The custom DNS hook calls `temps cloud acme set` to create the TXT record on Cloudflare
+4. Let's Encrypt verifies the record and issues the certificate
+5. `acme.sh` saves the certificate locally and handles auto-renewal
+
+#### Prerequisites
+
+- **Temps CLI** installed (`npm install -g @temps-sdk/cli` or use `bunx @temps-sdk/cli`)
+- **Temps Cloud account** — authenticate with `temps cloud login`
+- **acme.sh** installed (see installation below)
+
+#### Hostname Format
+
+Your self-hosted Temps instance uses a subdomain of `temps.dev`:
+
+```
+{server-name}.{username}.temps.dev
+```
+
+**Examples:**
+- `myserver.david.temps.dev` — main domain
+- `*.myserver.david.temps.dev` — wildcard for deployed apps
+
+The ACME API uses the **short hostname** (without `.temps.dev`): `myserver.david`
+
+#### Cloud ACME CLI Commands
+
+Manage `_acme-challenge` TXT records on Cloudflare for DNS-01 validation via the Temps CLI:
+
+**Set TXT record:**
+
+```bash
+# Set ACME challenge TXT record for a hostname
+temps cloud acme set --hostname myserver.david --token "token-value-from-acme"
+```
+
+**Example output:**
+```
+  ACME Challenge Set
+  ────────────────────────
+  Hostname:    myserver.david.temps.dev
+  TXT Record:  _acme-challenge.myserver.david.temps.dev
+  Status:      ✓ Record created
+```
+
+**Check propagation status:**
+
+```bash
+temps cloud acme status --hostname myserver.david
+temps cloud acme status --hostname myserver.david --json
+```
+
+**Example output:**
+```
+  ACME Challenge Status
+  ────────────────────────
+  Hostname:    myserver.david.temps.dev
+  Propagated:  ✓ Yes
+```
+
+**JSON output:**
+```json
+{
+  "hostname": "myserver.david",
+  "propagated": true
+}
+```
+
+**Clean up TXT record:**
+
+```bash
+temps cloud acme clean --hostname myserver.david
+```
+
+**Example output:**
+```
+  ACME challenge record removed for myserver.david.temps.dev
+```
+
+**Wait for propagation (set + poll):**
+
+```bash
+# Set record and wait until DNS propagation is confirmed (polls every 5s, max 120s)
+temps cloud acme set --hostname myserver.david --token "token-value" --wait
+```
+
+#### acme.sh DNS Hook Script
+
+Create the file `~/.acme.sh/dnsapi/dns_temps.sh`:
+
+```bash
+#!/usr/bin/env bash
+
+# Temps Cloud DNS hook for acme.sh
+# Uses the Temps CLI (temps cloud acme) to manage _acme-challenge TXT records
+# for *.temps.dev subdomains.
+#
+# Prerequisites:
+#   - temps CLI installed and on PATH
+#   - Authenticated to Temps Cloud: temps cloud login
+
+dns_temps_add() {
+  local fulldomain="$1"
+  local txtvalue="$2"
+
+  _info "Adding TXT record for $fulldomain"
+
+  # Extract hostname: _acme-challenge.server.user.temps.dev -> server.user
+  local hostname
+  hostname=$(echo "$fulldomain" | sed -E 's/^_acme-challenge\.(.+)\.temps\.dev$/\1/')
+
+  if [ "$hostname" = "$fulldomain" ]; then
+    _err "Could not extract hostname from $fulldomain"
+    return 1
+  fi
+
+  # Set TXT record and wait for DNS propagation
+  if ! temps cloud acme set --hostname "$hostname" --token "$txtvalue" --wait; then
+    _err "Failed to set TXT record via temps CLI"
+    return 1
+  fi
+
+  _info "TXT record set and propagation confirmed"
+  return 0
+}
+
+dns_temps_rm() {
+  local fulldomain="$1"
+
+  _info "Removing TXT record for $fulldomain"
+
+  local hostname
+  hostname=$(echo "$fulldomain" | sed -E 's/^_acme-challenge\.(.+)\.temps\.dev$/\1/')
+
+  if [ "$hostname" = "$fulldomain" ]; then
+    _err "Could not extract hostname from $fulldomain"
+    return 1
+  fi
+
+  if ! temps cloud acme clean --hostname "$hostname"; then
+    _err "Failed to remove TXT record via temps CLI"
+    return 1
+  fi
+
+  _info "TXT record removed"
+  return 0
+}
+```
+
+Make the script executable:
+
+```bash
+chmod +x ~/.acme.sh/dnsapi/dns_temps.sh
+```
+
+#### Full Certificate Flow
+
+**1. Install acme.sh:**
+
+```bash
+curl https://get.acme.sh | sh -s email=your-email@example.com
+source ~/.bashrc  # or ~/.zshrc
+```
+
+**2. Authenticate to Temps Cloud:**
+
+```bash
+temps cloud login
+```
+
+The hook script uses the Temps CLI, which reads credentials from `~/.temps/.secrets` automatically.
+
+**3. Issue the certificate:**
+
+```bash
+acme.sh --issue --dns dns_temps \
+  -d 'myserver.david.temps.dev' \
+  -d '*.myserver.david.temps.dev'
+```
+
+This will:
+- Request a certificate from Let's Encrypt
+- Call `dns_temps_add()` which runs `temps cloud acme set --wait`
+- Wait for DNS propagation
+- Complete the ACME challenge
+- Save the certificate
+
+**4. Certificate output location:**
+
+```
+~/.acme.sh/myserver.david.temps.dev/
+├── ca.cer                    # CA certificate chain
+├── fullchain.cer             # Full chain (cert + CA)
+├── myserver.david.temps.dev.cer  # Domain certificate
+└── myserver.david.temps.dev.key  # Private key
+```
+
+**5. Import the certificate into Temps:**
+
+Temps stores certificates in the database (encrypted at rest) and loads them dynamically via SNI during TLS handshake. Use the `temps domain import` command to import the certificate:
+
+```bash
+# Import the wildcard certificate
+temps domain import \
+  -d '*.myserver.david.temps.dev' \
+  --certificate ~/.acme.sh/myserver.david.temps.dev/fullchain.cer \
+  --private-key ~/.acme.sh/myserver.david.temps.dev/myserver.david.temps.dev.key \
+  --database-url "$TEMPS_DATABASE_URL"
+
+# Import the base domain certificate
+temps domain import \
+  -d 'myserver.david.temps.dev' \
+  --certificate ~/.acme.sh/myserver.david.temps.dev/fullchain.cer \
+  --private-key ~/.acme.sh/myserver.david.temps.dev/myserver.david.temps.dev.key \
+  --database-url "$TEMPS_DATABASE_URL"
+```
+
+Use `--force` to overwrite an existing certificate (e.g., on renewal):
+
+```bash
+temps domain import \
+  -d '*.myserver.david.temps.dev' \
+  --certificate ~/.acme.sh/myserver.david.temps.dev/fullchain.cer \
+  --private-key ~/.acme.sh/myserver.david.temps.dev/myserver.david.temps.dev.key \
+  --database-url "$TEMPS_DATABASE_URL" \
+  --force
+```
+
+**6. Verify the certificate is loaded:**
+
+```bash
+temps domain list --database-url "$TEMPS_DATABASE_URL"
+```
+
+**Example output:**
+```
+  DOMAIN                                   STATUS          TYPE         EXPIRES
+  ──────────────────────────────────────────────────────────────────────────────────────────
+  *.myserver.david.temps.dev               active          wildcard     2025-05-15
+  myserver.david.temps.dev                 active          single       2025-05-15
+```
+
+The Temps proxy (listening on `--tls-address`) will automatically serve these certificates for matching SNI hostnames — no restart required.
+
+#### DNS Propagation Verification
+
+The hook script automatically polls for propagation via `--wait`. To verify manually:
+
+```bash
+# Using Temps CLI
+temps cloud acme status --hostname myserver.david
+
+# Using dig
+dig TXT _acme-challenge.myserver.david.temps.dev @1.1.1.1
+```
+
+#### Auto-Renewal
+
+`acme.sh` automatically renews certificates via cron (every 60 days by default). To also re-import the renewed certificate into Temps, use the `--install-cert` hook with a `--reloadcmd`:
+
+```bash
+acme.sh --install-cert -d 'myserver.david.temps.dev' \
+  --reloadcmd 'temps domain import -d "*.myserver.david.temps.dev" \
+    --certificate ~/.acme.sh/myserver.david.temps.dev/fullchain.cer \
+    --private-key ~/.acme.sh/myserver.david.temps.dev/myserver.david.temps.dev.key \
+    --database-url "$TEMPS_DATABASE_URL" --force && \
+  temps domain import -d "myserver.david.temps.dev" \
+    --certificate ~/.acme.sh/myserver.david.temps.dev/fullchain.cer \
+    --private-key ~/.acme.sh/myserver.david.temps.dev/myserver.david.temps.dev.key \
+    --database-url "$TEMPS_DATABASE_URL" --force'
+```
+
+This registers a reload command that `acme.sh` runs after every successful renewal, automatically importing the fresh certificate into Temps.
+
+Verify the cron job is installed:
+
+```bash
+crontab -l | grep acme
+```
+
+Force a renewal test:
+
+```bash
+acme.sh --renew -d 'myserver.david.temps.dev' --force
+```
+
+#### Troubleshooting
+
+**Authentication error (401/403):**
+- Verify you're logged in: `temps cloud whoami`
+- Re-authenticate: `temps cloud login`
+
+**DNS propagation timeout:**
+- Cloudflare TTL is usually 60–120s; the `--wait` flag polls up to 120s
+- Verify the record was created: `temps cloud acme status --hostname myserver.david`
+- Check manually with `dig TXT _acme-challenge.myserver.david.temps.dev @1.1.1.1`
+
+**Let's Encrypt rate limits:**
+- 50 certificates per registered domain per week
+- Use `--staging` flag for testing: `acme.sh --issue --staging --dns dns_temps -d '...'`
+- Remove `--staging` for production certificates
+
+**Hook script not found:**
+- Ensure the file is at `~/.acme.sh/dnsapi/dns_temps.sh`
+- Ensure it's executable: `chmod +x ~/.acme.sh/dnsapi/dns_temps.sh`
+- The `--dns dns_temps` argument maps to the filename `dns_temps.sh`
+
 ---
 
 ## Common Patterns
