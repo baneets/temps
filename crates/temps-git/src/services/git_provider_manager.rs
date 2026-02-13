@@ -732,7 +732,7 @@ impl GitProviderManager {
         // Create a connection for this installation
         self.create_connection(
             provider.id,
-            0, // No specific user, it's org-level
+            0, // System user, it's org-level
             account_name,
             account_type,
             Some(access_token),

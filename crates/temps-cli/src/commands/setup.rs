@@ -261,6 +261,46 @@ fn setup_encryption_key(data_dir: &PathBuf) -> anyhow::Result<String> {
     }
 }
 
+/// Ensure the system user (id=0) exists in the database.
+/// This user is referenced by webhook-created resources (e.g., GitHub App installations)
+/// that don't have an authenticated user context.
+async fn ensure_system_user(db: &sea_orm::DatabaseConnection) -> anyhow::Result<()> {
+    let system_user_exists = users::Entity::find_by_id(0)
+        .one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check system user: {}", e))?
+        .is_some();
+
+    if !system_user_exists {
+        let now = chrono::Utc::now();
+        let system_user = users::ActiveModel {
+            id: Set(0),
+            name: Set("System".to_string()),
+            email: Set("system@localhost".to_string()),
+            password_hash: Set(None),
+            email_verified: Set(true),
+            email_verification_token: Set(None),
+            email_verification_expires: Set(None),
+            password_reset_token: Set(None),
+            password_reset_expires: Set(None),
+            deleted_at: Set(None),
+            mfa_enabled: Set(false),
+            mfa_secret: Set(None),
+            mfa_recovery_codes: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        system_user
+            .insert(db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create system user: {}", e))?;
+        debug!("Created system user (id=0)");
+    }
+
+    Ok(())
+}
+
 /// Result type indicating whether the user was created or password was reset
 pub enum AdminUserResult {
     Created(users::Model, String),
@@ -1275,6 +1315,10 @@ impl SetupCommand {
         rt.block_on(user_service.initialize_roles())
             .map_err(|e| anyhow::anyhow!("Failed to initialize roles: {}", e))?;
         print_success("Default roles initialized (admin, user)");
+
+        // Create system user (id=0) if not exists — needed for webhook-created
+        // resources (e.g., GitHub App installations) that reference user_id=0
+        rt.block_on(ensure_system_user(db.as_ref()))?;
 
         // Create admin user (or reset password if user exists)
         print_section("Admin User Setup");

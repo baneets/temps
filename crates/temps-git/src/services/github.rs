@@ -876,7 +876,7 @@ impl GithubAppService {
             .git_provider_manager
             .create_connection(
                 github_app_data.provider_id,
-                0, // No user_id for app installations
+                0, // System user for app installations (webhook context)
                 installation.account.login.clone(),
                 installation.account.r#type.clone(),
                 Some(access.token),

@@ -62,6 +62,46 @@ use utoipa_swagger_ui::SwaggerUi;
 // Embed the dist directory at compile time
 static WEBSITE: Dir = include_dir!("$CARGO_MANIFEST_DIR/dist");
 
+/// Ensure the system user (id=0) exists in the database.
+/// This user is referenced by webhook-created resources (e.g., GitHub App installations)
+/// that don't have an authenticated user context.
+async fn ensure_system_user(db: &sea_orm::DatabaseConnection) -> anyhow::Result<()> {
+    let system_user_exists = users::Entity::find_by_id(0)
+        .one(db)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check system user: {}", e))?
+        .is_some();
+
+    if !system_user_exists {
+        let now = chrono::Utc::now();
+        let system_user = users::ActiveModel {
+            id: Set(0),
+            name: Set("System".to_string()),
+            email: Set("system@localhost".to_string()),
+            password_hash: Set(None),
+            email_verified: Set(true),
+            email_verification_token: Set(None),
+            email_verification_expires: Set(None),
+            password_reset_token: Set(None),
+            password_reset_expires: Set(None),
+            deleted_at: Set(None),
+            mfa_enabled: Set(false),
+            mfa_secret: Set(None),
+            mfa_recovery_codes: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        system_user
+            .insert(db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create system user: {}", e))?;
+        debug!("Created system user (id=0)");
+    }
+
+    Ok(())
+}
+
 fn generate_secure_password() -> String {
     const CHARSET: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
@@ -746,13 +786,17 @@ pub async fn start_console_api(
     // Check if any users exist, if not prompt for admin email
     let service_context = plugin_manager.service_context();
     if let Some(user_service) = service_context.get_service::<temps_auth::UserService>() {
+        // Always ensure the system user (id=0) exists — needed for webhook-created
+        // resources (e.g., GitHub App installations) that reference user_id=0
+        ensure_system_user(db.as_ref()).await?;
+
         let users = user_service
             .get_all_users(false) // Don't include deleted users
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get users: {}", e))?;
 
         if users.is_empty() {
-            debug!("No users found, creating system user and prompting for admin email");
+            debug!("No users found, prompting for admin email");
 
             // Initialize roles first to ensure they exist
             user_service
@@ -760,42 +804,6 @@ pub async fn start_console_api(
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to initialize roles: {}", e))?;
             debug!("Initialized user roles");
-
-            // First, check if system user exists (id = 0)
-            let system_user_exists = users::Entity::find_by_id(0)
-                .one(db.as_ref())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to check system user: {}", e))?
-                .is_some();
-
-            if !system_user_exists {
-                let now = chrono::Utc::now();
-                let system_user = users::ActiveModel {
-                    id: Set(0),
-                    name: Set("System".to_string()),
-                    email: Set("system@localhost".to_string()),
-                    password_hash: Set(None),
-                    email_verified: Set(true),
-                    email_verification_token: Set(None),
-                    email_verification_expires: Set(None),
-                    password_reset_token: Set(None),
-                    password_reset_expires: Set(None),
-                    deleted_at: Set(None),
-                    mfa_enabled: Set(false),
-                    mfa_secret: Set(None),
-                    mfa_recovery_codes: Set(None),
-                    created_at: Set(now),
-                    updated_at: Set(now),
-                };
-
-                system_user
-                    .insert(db.as_ref())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to create system user: {}", e))?;
-                debug!("Created system user");
-            } else {
-                debug!("System user already exists, skipping creation");
-            }
 
             if let Some(admin_email) = prompt_for_admin_email()? {
                 create_initial_admin_user(db.as_ref(), &admin_email).await?;
