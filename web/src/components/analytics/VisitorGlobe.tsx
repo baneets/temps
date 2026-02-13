@@ -8,11 +8,19 @@ import type { ProjectResponse, VisitorInfo } from '@/api/client/types.gen'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Calendar } from '@/components/ui/calendar'
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Users,
   ArrowLeft,
@@ -21,8 +29,12 @@ import {
   Monitor,
   Clock,
   FileText,
+  Calendar as CalendarIcon,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { format, subDays } from 'date-fns'
+import type { DateRange } from 'react-day-picker'
+import { cn } from '@/lib/utils'
 import { EarthGlobe, type ProjectedMarker } from './EarthGlobe'
 
 interface VisitorGlobePageProps {
@@ -379,6 +391,80 @@ function RecentVisitorItem({ visitor, projectSlug }: RecentVisitorItemProps) {
   )
 }
 
+// ─── Date filter types ───────────────────────────────────────────
+
+const GLOBE_QUICK_FILTERS = [
+  { label: 'Today', value: 'today' },
+  { label: 'Yesterday', value: 'yesterday' },
+  { label: 'Last 7 Days', value: '7days' },
+  { label: 'Last 15 Days', value: '15days' },
+  { label: 'Last 30 Days', value: '30days' },
+  { label: 'Custom', value: 'custom' },
+] as const
+
+type GlobeQuickFilter = (typeof GLOBE_QUICK_FILTERS)[number]['value']
+
+interface GlobeDateFilter {
+  quickFilter: GlobeQuickFilter
+  dateRange: DateRange | undefined
+}
+
+function resolveGlobeDateRange(filter: GlobeDateFilter): {
+  startDate: Date
+  endDate: Date
+} {
+  const now = new Date()
+
+  if (filter.quickFilter === 'custom' && filter.dateRange?.from) {
+    return {
+      startDate: filter.dateRange.from,
+      endDate: filter.dateRange.to ?? filter.dateRange.from,
+    }
+  }
+
+  switch (filter.quickFilter) {
+    case 'today': {
+      const start = new Date(now)
+      start.setHours(0, 0, 0, 0)
+      return { startDate: start, endDate: now }
+    }
+    case 'yesterday': {
+      const yesterday = new Date(now)
+      yesterday.setDate(yesterday.getDate() - 1)
+      const start = new Date(yesterday)
+      start.setHours(0, 0, 0, 0)
+      const end = new Date(yesterday)
+      end.setHours(23, 59, 59, 999)
+      return { startDate: start, endDate: end }
+    }
+    case '7days':
+      return { startDate: subDays(now, 7), endDate: now }
+    case '15days':
+      return { startDate: subDays(now, 15), endDate: now }
+    case '30days':
+      return { startDate: subDays(now, 30), endDate: now }
+    default:
+      return { startDate: subDays(now, 30), endDate: now }
+  }
+}
+
+function formatFilterLabel(filter: GlobeDateFilter): string {
+  if (filter.quickFilter !== 'custom') {
+    return (
+      GLOBE_QUICK_FILTERS.find((f) => f.value === filter.quickFilter)?.label ??
+      'Last 30 Days'
+    )
+  }
+  if (filter.dateRange?.from) {
+    const from = format(filter.dateRange.from, 'MMM d, yyyy')
+    const to = filter.dateRange.to
+      ? format(filter.dateRange.to, 'MMM d, yyyy')
+      : from
+    return `${from} - ${to}`
+  }
+  return 'Custom range'
+}
+
 // ─── Main page component ─────────────────────────────────────────
 
 export function VisitorGlobePage({ project }: VisitorGlobePageProps) {
@@ -387,21 +473,22 @@ export function VisitorGlobePage({ project }: VisitorGlobePageProps) {
     []
   )
   const [isHovered, setIsHovered] = useState(false)
+  const [dateFilter, setDateFilter] = useState<GlobeDateFilter>({
+    quickFilter: '30days',
+    dateRange: undefined,
+  })
 
-  // Last 30 days
-  const dateRange = useMemo(() => {
-    const now = new Date()
-    const thirtyDaysAgo = new Date(now)
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-    return { startDate: thirtyDaysAgo, endDate: now }
-  }, [])
+  const { startDate, endDate } = useMemo(
+    () => resolveGlobeDateRange(dateFilter),
+    [dateFilter]
+  )
 
   const { data: visitorsData } = useQuery({
     ...getVisitorsOptions({
       query: {
         project_id: project.id,
-        start_date: dateRange.startDate.toISOString(),
-        end_date: dateRange.endDate.toISOString(),
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
         limit: 200,
         has_activity_only: true,
       },
@@ -473,6 +560,14 @@ export function VisitorGlobePage({ project }: VisitorGlobePageProps) {
     []
   )
 
+  const handleQuickFilter = useCallback((value: GlobeQuickFilter) => {
+    setDateFilter({ quickFilter: value, dateRange: undefined })
+  }, [])
+
+  const handleCustomDateRange = useCallback((range: DateRange | undefined) => {
+    setDateFilter({ quickFilter: 'custom', dateRange: range })
+  }, [])
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -491,8 +586,8 @@ export function VisitorGlobePage({ project }: VisitorGlobePageProps) {
               Visitor Globe
             </h2>
             <p className="text-sm text-muted-foreground">
-              {visitorsData?.filtered_count ?? 0} visitors from around the world
-              in the last 30 days
+              {visitorsData?.filtered_count ?? 0} visitors &middot;{' '}
+              {formatFilterLabel(dateFilter)}
             </p>
           </div>
         </div>
@@ -514,6 +609,83 @@ export function VisitorGlobePage({ project }: VisitorGlobePageProps) {
             {allVisitors.length} on globe
           </Badge>
         </div>
+      </div>
+
+      {/* Date filters */}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+        {/* Quick filter buttons — desktop */}
+        <div className="hidden sm:flex gap-1">
+          {GLOBE_QUICK_FILTERS.filter((f) => f.value !== 'custom').map(
+            (filter) => (
+              <Button
+                key={filter.value}
+                variant={
+                  dateFilter.quickFilter === filter.value ? 'default' : 'outline'
+                }
+                size="sm"
+                onClick={() => handleQuickFilter(filter.value)}
+              >
+                {filter.label}
+              </Button>
+            )
+          )}
+        </div>
+
+        {/* Quick filter dropdown — mobile */}
+        <div className="sm:hidden">
+          <Select
+            value={dateFilter.quickFilter}
+            onValueChange={(v) => handleQuickFilter(v as GlobeQuickFilter)}
+          >
+            <SelectTrigger className="w-[160px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {GLOBE_QUICK_FILTERS.filter((f) => f.value !== 'custom').map(
+                (filter) => (
+                  <SelectItem key={filter.value} value={filter.value}>
+                    {filter.label}
+                  </SelectItem>
+                )
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Custom date range calendar */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              variant={
+                dateFilter.quickFilter === 'custom' ? 'default' : 'outline'
+              }
+              size="sm"
+              className={cn(
+                'min-w-[140px]',
+                dateFilter.quickFilter !== 'custom' && 'text-muted-foreground'
+              )}
+            >
+              <CalendarIcon className="mr-2 h-4 w-4" />
+              {dateFilter.quickFilter === 'custom' && dateFilter.dateRange?.from
+                ? dateFilter.dateRange.to
+                  ? `${format(dateFilter.dateRange.from, 'LLL dd, y')} - ${format(dateFilter.dateRange.to, 'LLL dd, y')}`
+                  : format(dateFilter.dateRange.from, 'LLL dd, y')
+                : 'Custom range'}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0" align="start">
+            <Calendar
+              initialFocus
+              mode="range"
+              defaultMonth={subDays(new Date(), 30)}
+              selected={dateFilter.dateRange}
+              onSelect={handleCustomDateRange}
+              numberOfMonths={2}
+              disabled={(date) => date > new Date()}
+              toDate={new Date()}
+            />
+          </PopoverContent>
+        </Popover>
       </div>
 
       {/* Globe + Sidebar layout */}
