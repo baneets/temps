@@ -47,6 +47,7 @@ pub struct AppState {
         get_visitor_by_guid,
         get_general_stats,
         get_page_flow,
+        get_recent_activity,
     ),
     components(schemas(
         AnalyticsMetrics,
@@ -137,6 +138,10 @@ pub struct AppState {
         PageFlowEntry,
         PageTransition,
         DropOffPoint,
+        // Recent activity types
+        RecentActivityQuery,
+        RecentActivityResponse,
+        ActivityEvent,
     )),
     info(
         title = "Analytics API",
@@ -202,6 +207,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             get(get_visitor_by_guid),
         )
         .route("/analytics/page-flow", get(get_page_flow))
+        .route("/analytics/recent-activity", get(get_recent_activity))
 }
 
 #[utoipa::path(
@@ -1363,5 +1369,63 @@ pub async fn get_page_flow(
     {
         Ok(result) => Ok(Json(result)),
         Err(e) => Err(handle_analytics_error(e)),
+    }
+}
+
+/// Query parameters for recent activity endpoint
+#[derive(Debug, Deserialize, ToSchema, Clone)]
+pub struct RecentActivityQuery {
+    /// Project ID
+    pub project_id: i32,
+    /// Environment ID (optional)
+    pub environment_id: Option<i32>,
+    /// Return events with ID greater than this (for cursor-based polling)
+    pub since_id: Option<i64>,
+    /// Max number of events to return (default: 50, max: 100)
+    pub limit: Option<i32>,
+}
+
+/// Get recent activity events for real-time activity feed
+#[utoipa::path(
+    tag = "Analytics",
+    get,
+    path = "/analytics/recent-activity",
+    params(
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("environment_id" = Option<i32>, Query, description = "Environment ID (optional)"),
+        ("since_id" = Option<i64>, Query, description = "Return events with ID greater than this (cursor-based polling)"),
+        ("limit" = Option<i32>, Query, description = "Max events to return (default: 50, max: 100)")
+    ),
+    responses(
+        (status = 200, description = "Successfully retrieved recent activity events", body = RecentActivityResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_recent_activity(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Query(query): Query<RecentActivityQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, AnalyticsRead);
+
+    match app_state
+        .analytics_service
+        .get_recent_activity(
+            query.project_id,
+            query.environment_id,
+            query.since_id,
+            query.limit,
+        )
+        .await
+    {
+        Ok(result) => Ok(Json(result)),
+        Err(e) => {
+            error!("Analytics error: {:?}", e);
+            Err(handle_analytics_error(e))
+        }
     }
 }

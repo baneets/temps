@@ -2829,6 +2829,111 @@ WHERE project_id = $1
         })
     }
 
+    async fn get_recent_activity(
+        &self,
+        project_id: i32,
+        environment_id: Option<i32>,
+        since_id: Option<i64>,
+        limit: Option<i32>,
+    ) -> Result<crate::types::responses::RecentActivityResponse, AnalyticsError> {
+        let limit = std::cmp::min(limit.unwrap_or(50), 100);
+
+        // If since_id is provided, fetch events newer than that ID.
+        // Otherwise, fetch the most recent events from the last 60 seconds.
+        let sql = r#"
+            SELECT
+                e.id,
+                e.timestamp,
+                e.event_type,
+                e.event_name,
+                e.page_path,
+                e.page_title,
+                e.visitor_id,
+                e.browser,
+                e.operating_system,
+                e.device_type,
+                e.referrer,
+                e.is_crawler,
+                ig.city,
+                ig.country,
+                ig.country_code,
+                ig.latitude,
+                ig.longitude
+            FROM events e
+            LEFT JOIN ip_geolocations ig ON e.ip_geolocation_id = ig.id
+            WHERE e.project_id = $1
+              AND ($2::int IS NULL OR e.environment_id = $2)
+              AND (
+                  ($3::bigint IS NOT NULL AND e.id > $3)
+                  OR
+                  ($3::bigint IS NULL AND e.timestamp >= NOW() - INTERVAL '60 seconds')
+              )
+            ORDER BY e.id DESC
+            LIMIT $4
+        "#;
+
+        #[derive(FromQueryResult)]
+        struct ActivityRow {
+            id: i64,
+            timestamp: UtcDateTime,
+            event_type: String,
+            event_name: Option<String>,
+            page_path: String,
+            page_title: Option<String>,
+            visitor_id: Option<i32>,
+            browser: Option<String>,
+            operating_system: Option<String>,
+            device_type: Option<String>,
+            referrer: Option<String>,
+            is_crawler: bool,
+            city: Option<String>,
+            country: Option<String>,
+            country_code: Option<String>,
+            latitude: Option<f64>,
+            longitude: Option<f64>,
+        }
+
+        let rows = ActivityRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![
+                project_id.into(),
+                environment_id.into(),
+                since_id.into(),
+                (limit as i64).into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+
+        let events = rows
+            .into_iter()
+            .map(|row| crate::types::responses::ActivityEvent {
+                id: row.id,
+                timestamp: row.timestamp,
+                event_type: row.event_type,
+                event_name: row.event_name,
+                page_path: row.page_path,
+                page_title: row.page_title,
+                visitor_id: row.visitor_id,
+                browser: row.browser,
+                operating_system: row.operating_system,
+                device_type: row.device_type,
+                referrer: row.referrer,
+                city: row.city,
+                country: row.country,
+                country_code: row.country_code,
+                latitude: row.latitude,
+                longitude: row.longitude,
+                is_crawler: row.is_crawler,
+            })
+            .collect::<Vec<_>>();
+
+        let count = events.len();
+
+        Ok(crate::types::responses::RecentActivityResponse { events, count })
+    }
+
     /// Get detailed analytics for a specific page path
     async fn get_page_path_detail(
         &self,

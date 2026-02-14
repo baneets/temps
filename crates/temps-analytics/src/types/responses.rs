@@ -779,6 +779,55 @@ pub struct DropOffPoint {
     pub exit_rate: f64,
 }
 
+/// A single activity event for the real-time activity feed
+#[derive(Debug, Serialize, Deserialize, ToSchema, Clone)]
+pub struct ActivityEvent {
+    /// Event ID
+    pub id: i64,
+    /// When the event occurred
+    #[schema(value_type = String, format = "date-time")]
+    pub timestamp: UtcDateTime,
+    /// Event type: "page_view", "custom", etc.
+    pub event_type: String,
+    /// Event name (for custom events)
+    pub event_name: Option<String>,
+    /// Page path where the event happened
+    pub page_path: String,
+    /// Page title
+    pub page_title: Option<String>,
+    /// Visitor numeric ID
+    pub visitor_id: Option<i32>,
+    /// Browser
+    pub browser: Option<String>,
+    /// Operating system
+    pub operating_system: Option<String>,
+    /// Device type
+    pub device_type: Option<String>,
+    /// Referrer
+    pub referrer: Option<String>,
+    /// Visitor's city (from ip_geolocations)
+    pub city: Option<String>,
+    /// Visitor's country (from ip_geolocations)
+    pub country: Option<String>,
+    /// Visitor's country code (from ip_geolocations)
+    pub country_code: Option<String>,
+    /// Latitude
+    pub latitude: Option<f64>,
+    /// Longitude
+    pub longitude: Option<f64>,
+    /// Whether this event was from a crawler
+    pub is_crawler: bool,
+}
+
+/// Response for recent activity events endpoint
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RecentActivityResponse {
+    /// Recent events, newest first
+    pub events: Vec<ActivityEvent>,
+    /// Total events returned
+    pub count: usize,
+}
+
 /// Complete page flow analytics response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PageFlowResponse {

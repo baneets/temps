@@ -369,19 +369,12 @@ impl SessionReplayService {
         let events: Value = serde_json::from_str(&decompressed)?;
 
         let mut event_count = 0;
-        let mut min_timestamp: Option<i64> = None;
-        let mut max_timestamp: Option<i64> = None;
 
         // Extract events handling both formats
         let events_to_store = self.extract_events_from_json(&events)?;
 
         for event in &events_to_store {
             let timestamp = event.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
-            // Track min/max timestamps for duration calculation
-            min_timestamp = Some(min_timestamp.map_or(timestamp, |min| min.min(timestamp)));
-            max_timestamp = Some(max_timestamp.map_or(timestamp, |max| max.max(timestamp)));
-
             let event_type = event.get("type").and_then(|t| t.as_i64()).map(|t| t as i32);
 
             let event_model = session_replay_events::ActiveModel {
@@ -397,18 +390,10 @@ impl SessionReplayService {
             event_count += 1;
         }
 
-        // Update session duration if we have timestamps
-        if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
-            let duration_ms = (max - min) as i32;
-
-            // Get current duration if exists
-            let current_duration = session.duration.unwrap_or(0);
-            let new_duration = current_duration.max(duration_ms);
-
-            if new_duration > current_duration {
-                self.update_session_duration(session_id, new_duration)
-                    .await?;
-            }
+        // Recompute duration from ALL stored events (not just this batch)
+        if event_count > 0 {
+            self.compute_and_update_session_duration(session_id, session.id)
+                .await?;
         }
 
         info!("Added {} events to session {}", event_count, session_id);
@@ -488,20 +473,17 @@ impl SessionReplayService {
         let events_to_store = self.extract_events_from_json(&unpacked.events)?;
         let event_count = events_to_store.len();
 
+        // Look up session integer ID once (not per-event)
+        let session_int_id = session_replay_sessions::Entity::find()
+            .filter(session_replay_sessions::Column::SessionReplayId.eq(&packed_data.session_id))
+            .one(self.db.as_ref())
+            .await?
+            .map(|s| s.id)
+            .unwrap_or(0); // This should exist since we just created it
+
         for event in events_to_store {
             let timestamp = event.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
             let event_type = event.get("type").and_then(|t| t.as_i64()).map(|t| t as i32);
-
-            // Need to get the session's integer ID first
-            let session_int_id = session_replay_sessions::Entity::find()
-                .filter(
-                    session_replay_sessions::Column::SessionReplayId.eq(&packed_data.session_id),
-                )
-                .one(self.db.as_ref())
-                .await?
-                .map(|s| s.id)
-                .unwrap_or(0); // This should exist since we just created it
 
             let event_model = session_replay_events::ActiveModel {
                 id: sea_orm::NotSet,
@@ -513,6 +495,12 @@ impl SessionReplayService {
             };
 
             event_model.insert(self.db.as_ref()).await?;
+        }
+
+        // Compute duration from all stored events
+        if event_count > 0 {
+            self.compute_and_update_session_duration(&packed_data.session_id, session_int_id)
+                .await?;
         }
 
         info!(
@@ -624,25 +612,17 @@ impl SessionReplayService {
         let events_to_store = self.extract_events_from_json(&unpacked.events)?;
 
         if !events_to_store.is_empty() {
-            let mut min_timestamp: Option<i64> = None;
-            let mut max_timestamp: Option<i64> = None;
+            // Look up session integer ID once (not per-event)
+            let session_int_id = session_replay_sessions::Entity::find()
+                .filter(session_replay_sessions::Column::SessionReplayId.eq(session_id))
+                .one(self.db.as_ref())
+                .await?
+                .map(|s| s.id)
+                .unwrap_or(0); // This should exist
 
             for event in &events_to_store {
                 let timestamp = event.get("timestamp").and_then(|t| t.as_i64()).unwrap_or(0);
-
-                // Track min/max timestamps for duration calculation
-                min_timestamp = Some(min_timestamp.map_or(timestamp, |min| min.min(timestamp)));
-                max_timestamp = Some(max_timestamp.map_or(timestamp, |max| max.max(timestamp)));
-
                 let event_type = event.get("type").and_then(|t| t.as_i64()).map(|t| t as i32);
-
-                // Get the session's integer ID
-                let session_int_id = session_replay_sessions::Entity::find()
-                    .filter(session_replay_sessions::Column::SessionReplayId.eq(session_id))
-                    .one(self.db.as_ref())
-                    .await?
-                    .map(|s| s.id)
-                    .unwrap_or(0); // This should exist
 
                 let event_model = session_replay_events::ActiveModel {
                     id: sea_orm::NotSet,
@@ -656,12 +636,9 @@ impl SessionReplayService {
                 event_model.insert(self.db.as_ref()).await?;
             }
 
-            // Update session duration if we have timestamps
-            if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
-                let duration_ms = (max - min) as i32;
-                self.update_session_duration(session_id, duration_ms)
-                    .await?;
-            }
+            // Recompute duration from ALL stored events (not just this batch)
+            self.compute_and_update_session_duration(session_id, session_int_id)
+                .await?;
 
             info!(
                 "Stored {} events for session {}",
@@ -1323,6 +1300,45 @@ impl SessionReplayService {
         packed_data: &PackedEvents,
     ) -> Result<UnpackedEvents, SessionReplayError> {
         self.unpack_events(packed_data)
+    }
+
+    /// Compute session duration from all stored events (global min/max timestamps).
+    /// This queries the actual events table to get the true session span,
+    /// not just the span of a single batch.
+    async fn compute_and_update_session_duration(
+        &self,
+        session_replay_id: &str,
+        session_int_id: i32,
+    ) -> Result<(), SessionReplayError> {
+        #[derive(Debug, FromQueryResult)]
+        struct TimestampRange {
+            min_ts: Option<i64>,
+            max_ts: Option<i64>,
+        }
+
+        let statement = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            r#"SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts
+               FROM session_replay_events
+               WHERE session_id = $1 AND is_active = true"#,
+            vec![session_int_id.into()],
+        );
+
+        let result = TimestampRange::find_by_statement(statement)
+            .one(self.db.as_ref())
+            .await?;
+
+        if let Some(TimestampRange {
+            min_ts: Some(min),
+            max_ts: Some(max),
+        }) = result
+        {
+            let duration_ms = (max - min) as i32;
+            self.update_session_duration(session_replay_id, duration_ms)
+                .await?;
+        }
+
+        Ok(())
     }
 
     /// Update session duration

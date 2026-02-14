@@ -113,6 +113,7 @@ const baseNavItems: NavItem[] = [
       { title: 'Pages', url: 'analytics/pages' },
       { title: 'Replays', url: 'analytics/replays' },
       { title: 'Journey', url: 'analytics/journey' },
+      { title: 'Live', url: 'analytics/live' },
       { title: 'Globe', url: 'analytics/globe' },
       { title: 'Funnels', url: 'analytics/funnels' },
       { title: 'Speed Insights', url: 'speed' },

@@ -234,6 +234,15 @@ pub trait Analytics: Send + Sync {
         min_views_for_dropoff: Option<i32>,
     ) -> Result<PageFlowResponse, AnalyticsError>;
 
+    /// Get recent activity events for the live feed
+    async fn get_recent_activity(
+        &self,
+        project_id: i32,
+        environment_id: Option<i32>,
+        since_id: Option<i64>,
+        limit: Option<i32>,
+    ) -> Result<crate::types::responses::RecentActivityResponse, AnalyticsError>;
+
     /// Get detailed analytics for a specific page path
     /// Returns visitors, page views, activity over time, geographic distribution, and referrers
     async fn get_page_path_detail(

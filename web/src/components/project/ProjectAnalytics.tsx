@@ -13,6 +13,7 @@ import {
   ReferrersChart,
 } from '@/components/analytics/overview'
 import { VisitorGlobePage } from '@/components/analytics/VisitorGlobe'
+import { LiveGlobePage } from '@/components/analytics/LiveGlobe'
 import { PageFlow } from '@/components/analytics/PageFlow'
 import { PageDetail } from '@/components/analytics/PageDetail'
 import { Pages } from '@/components/analytics/Pages'
@@ -836,6 +837,10 @@ export function ProjectAnalytics({ project }: ProjectAnalyticsProps) {
       <Route path="pages" element={<PagesTab project={project} />} />
       <Route path="replays" element={<SessionReplaysTab project={project} />} />
       <Route path="setup" element={<AnalyticsSetup project={project} />} />
+      <Route
+        path="live"
+        element={<LiveGlobePage project={project} />}
+      />
       <Route
         path="globe"
         element={<VisitorGlobePage project={project} />}

@@ -60,6 +60,80 @@ export type ActivityDay = {
 };
 
 /**
+ * A single activity event for the real-time activity feed
+ */
+export type ActivityEvent = {
+    /**
+     * Browser
+     */
+    browser?: string | null;
+    /**
+     * Visitor's city (from ip_geolocations)
+     */
+    city?: string | null;
+    /**
+     * Visitor's country (from ip_geolocations)
+     */
+    country?: string | null;
+    /**
+     * Visitor's country code (from ip_geolocations)
+     */
+    country_code?: string | null;
+    /**
+     * Device type
+     */
+    device_type?: string | null;
+    /**
+     * Event name (for custom events)
+     */
+    event_name?: string | null;
+    /**
+     * Event type: "page_view", "custom", etc.
+     */
+    event_type: string;
+    /**
+     * Event ID
+     */
+    id: number;
+    /**
+     * Whether this event was from a crawler
+     */
+    is_crawler: boolean;
+    /**
+     * Latitude
+     */
+    latitude?: number | null;
+    /**
+     * Longitude
+     */
+    longitude?: number | null;
+    /**
+     * Operating system
+     */
+    operating_system?: string | null;
+    /**
+     * Page path where the event happened
+     */
+    page_path: string;
+    /**
+     * Page title
+     */
+    page_title?: string | null;
+    /**
+     * Referrer
+     */
+    referrer?: string | null;
+    /**
+     * When the event occurred
+     */
+    timestamp: string;
+    /**
+     * Visitor numeric ID
+     */
+    visitor_id?: number | null;
+};
+
+/**
  * Query parameters for activity graph endpoint
  */
 export type ActivityGraphQuery = {
@@ -4719,20 +4793,6 @@ export type PageHourlySessionsResponse = {
     total_sessions: number;
 };
 
-export type PagePathSparklinePoint = {
-    session_count: number;
-    timestamp: string;
-};
-
-export type PagePathSparkline = {
-    page_path: string;
-    points: Array<PagePathSparklinePoint>;
-};
-
-export type PagePathsSparklineResponse = {
-    sparklines: Array<PagePathSparkline>;
-};
-
 /**
  * Query parameters for page path detail analytics
  */
@@ -4810,6 +4870,16 @@ export type PagePathInfo = {
     session_count: number;
 };
 
+export type PagePathSparkline = {
+    page_path: string;
+    points: Array<PagePathSparklinePoint>;
+};
+
+export type PagePathSparklinePoint = {
+    session_count: number;
+    timestamp: string;
+};
+
 /**
  * Query parameters for page path visitors
  */
@@ -4869,6 +4939,24 @@ export type PagePathsQuery = {
 export type PagePathsResponse = {
     page_paths: Array<PagePathInfo>;
     total_count: number;
+};
+
+/**
+ * Query parameters for batch page paths sparkline endpoint
+ */
+export type PagePathsSparklineQuery = {
+    end_time: string;
+    environment_id?: number | null;
+    /**
+     * Comma-separated list of page paths
+     */
+    page_paths: string;
+    project_id: number;
+    start_time: string;
+};
+
+export type PagePathsSparklineResponse = {
+    sparklines: Array<PagePathSparkline>;
 };
 
 /**
@@ -5840,6 +5928,42 @@ export type RateLimitSettings = {
  * Email reachability status
  */
 export type ReachabilityStatus = 'safe' | 'risky' | 'invalid' | 'unknown';
+
+/**
+ * Query parameters for recent activity endpoint
+ */
+export type RecentActivityQuery = {
+    /**
+     * Environment ID (optional)
+     */
+    environment_id?: number | null;
+    /**
+     * Max number of events to return (default: 50, max: 100)
+     */
+    limit?: number | null;
+    /**
+     * Project ID
+     */
+    project_id: number;
+    /**
+     * Return events with ID greater than this (for cursor-based polling)
+     */
+    since_id?: number | null;
+};
+
+/**
+ * Response for recent activity events endpoint
+ */
+export type RecentActivityResponse = {
+    /**
+     * Total events returned
+     */
+    count: number;
+    /**
+     * Recent events, newest first
+     */
+    events: Array<ActivityEvent>;
+};
 
 /**
  * Record list response
@@ -8769,45 +8893,6 @@ export type GetPageHourlySessionsResponses = {
 
 export type GetPageHourlySessionsResponse = GetPageHourlySessionsResponses[keyof GetPageHourlySessionsResponses];
 
-export type GetPagePathsSparklineData = {
-    body?: never;
-    path?: never;
-    query: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Environment ID (optional)
-         */
-        environment_id?: number;
-        /**
-         * Start time in ISO 8601 format
-         */
-        start_time: string;
-        /**
-         * End time in ISO 8601 format
-         */
-        end_time: string;
-        /**
-         * Comma-separated list of page paths
-         */
-        page_paths: string;
-    };
-    url: '/analytics/page-paths-sparklines';
-};
-
-export type GetPagePathsSparklineErrors = {
-    400: unknown;
-    500: unknown;
-};
-
-export type GetPagePathsSparklineResponses = {
-    200: PagePathsSparklineResponse;
-};
-
-export type GetPagePathsSparklineResponse = GetPagePathsSparklineResponses[keyof GetPagePathsSparklineResponses];
-
 export type GetPagePathDetailData = {
     body?: never;
     path?: never;
@@ -8963,6 +9048,98 @@ export type GetPagePathsResponses = {
 };
 
 export type GetPagePathsResponse = GetPagePathsResponses[keyof GetPagePathsResponses];
+
+export type GetPagePathsSparklinesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Start time in ISO 8601 format
+         */
+        start_time: string;
+        /**
+         * End time in ISO 8601 format
+         */
+        end_time: string;
+        /**
+         * Comma-separated list of page paths
+         */
+        page_paths: string;
+    };
+    url: '/analytics/page-paths-sparklines';
+};
+
+export type GetPagePathsSparklinesErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPagePathsSparklinesResponses = {
+    /**
+     * Sparkline data for all requested page paths
+     */
+    200: PagePathsSparklineResponse;
+};
+
+export type GetPagePathsSparklinesResponse = GetPagePathsSparklinesResponses[keyof GetPagePathsSparklinesResponses];
+
+export type GetRecentActivityData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Environment ID (optional)
+         */
+        environment_id?: number;
+        /**
+         * Return events with ID greater than this (cursor-based polling)
+         */
+        since_id?: number;
+        /**
+         * Max events to return (default: 50, max: 100)
+         */
+        limit?: number;
+    };
+    url: '/analytics/recent-activity';
+};
+
+export type GetRecentActivityErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetRecentActivityResponses = {
+    /**
+     * Successfully retrieved recent activity events
+     */
+    200: RecentActivityResponse;
+};
+
+export type GetRecentActivityResponse = GetRecentActivityResponses[keyof GetRecentActivityResponses];
 
 export type GetSessionDetailsData = {
     body?: never;

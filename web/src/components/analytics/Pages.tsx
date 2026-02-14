@@ -1,6 +1,6 @@
 import {
   getPagePathsOptions,
-  getPagePathsSparklineOptions,
+  getPagePathsSparklinesOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { PagePathSparkline, ProjectResponse } from '@/api/client/types.gen'
 import { Badge } from '@/components/ui/badge'
@@ -56,7 +56,7 @@ export function Pages({
 
   // Fetch all sparklines in a single batch request
   const { data: sparklineData } = useQuery({
-    ...getPagePathsSparklineOptions({
+    ...getPagePathsSparklinesOptions({
       query: {
         project_id: project.id,
         environment_id: environment,

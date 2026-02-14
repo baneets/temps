@@ -54,7 +54,8 @@ function formatOsInfo(replay: SessionReplayWithVisitorDto): string | null {
   return replay.operating_system
 }
 
-function formatDuration(seconds: number): string {
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`
   const mins = Math.floor(seconds / 60)
   const secs = seconds % 60
