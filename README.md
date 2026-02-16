@@ -169,6 +169,7 @@ For detailed setup options, see the [Installation Guide](https://temps.sh/docs/i
 | [`@temps-sdk/react-analytics`](https://www.npmjs.com/package/@temps-sdk/react-analytics) | React analytics, session replay, error tracking |
 | [`@temps-sdk/kv`](https://www.npmjs.com/package/@temps-sdk/kv) | Key-value store |
 | [`@temps-sdk/blob`](https://www.npmjs.com/package/@temps-sdk/blob) | Blob storage |
+| [`@temps-sdk/node-sdk`](https://www.npmjs.com/package/@temps-sdk/node-sdk) | Blob storage |
 
 ---
 
