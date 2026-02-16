@@ -11,6 +11,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
+//! use temps_query::DataSource;
 //! use temps_query_mongodb::MongoDBSource;
 //!
 //! # async fn example() -> temps_query::Result<()> {

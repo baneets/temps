@@ -680,6 +680,8 @@ impl DeploymentService {
 
             // Step 1: Execute DeployImageJob with external image
             // CRITICAL: Use "deploy_container" as job_id so MarkDeploymentCompleteJob can find the outputs
+            // Skip HTTP health checks for rollbacks: the image was already deployed and
+            // verified healthy before, so we only need to confirm the container starts.
             let mut deploy_builder = crate::jobs::DeployImageJobBuilder::new()
                 .job_id("deploy_container".to_string())
                 .build_job_id("external-image".to_string()) // Placeholder, will use external image instead
@@ -688,6 +690,7 @@ impl DeploymentService {
                     network: Some(temps_core::NETWORK_NAME.to_string()),
                 })
                 .service_name(target_deployment.slug.clone())
+                .health_check_path(None)
                 .replicas(
                     environment
                         .deployment_config

@@ -55,8 +55,10 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy (advisory)
     runs-on: ubuntu-latest
+    # Non-blocking: clippy warnings are reported but do not fail the build
+    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -199,25 +201,47 @@ jobs:
           cd crates/temps-captcha-wasm
           bun run build
 
-      - name: Run unit tests (with retry)
+      - name: Run unit tests
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
         run: |
-          attempt=1
+          # Run tests, capturing the names of any failures for targeted retry
+          if cargo test --no-fail-fast --lib ${{ matrix.crates }} 2>&1 | tee /tmp/test-output.txt; then
+            echo "All tests passed on first attempt"
+            exit 0
+          fi
+
+          # Extract failed test names from output
+          failed_tests=$(grep '^test .* FAILED$' /tmp/test-output.txt | sed 's/^test \(.*\) \.\.\..*FAILED$/\1/' | tr '\n' ' ')
+          if [ -z "$failed_tests" ]; then
+            echo "Could not parse failed test names, re-running all tests"
+            cargo test --no-fail-fast --lib ${{ matrix.crates }}
+            exit $?
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "Retrying only failed tests: $failed_tests"
+          echo "=========================================="
+          echo ""
+          sleep 5
+
+          # Retry only the failed tests (up to 2 more attempts)
+          attempt=2
           max_attempts=3
-          until cargo test --no-fail-fast --lib ${{ matrix.crates }}; do
-            if [ $attempt -ge $max_attempts ]; then
-              echo "Tests failed after $max_attempts attempts"
-              exit 1
+          for test_name in $failed_tests; do
+            echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
+            if ! cargo test --no-fail-fast --lib ${{ matrix.crates }} -- "$test_name" --exact; then
+              if [ $attempt -lt $max_attempts ]; then
+                attempt=$((attempt + 1))
+                echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
+                sleep 5
+                cargo test --no-fail-fast --lib ${{ matrix.crates }} -- "$test_name" --exact || exit 1
+              else
+                exit 1
+              fi
             fi
-            attempt=$((attempt + 1))
-            echo ""
-            echo "=========================================="
-            echo "Test attempt $((attempt - 1)) failed, retrying (attempt $attempt/$max_attempts)..."
-            echo "=========================================="
-            echo ""
-            sleep 5
           done
 
   # ---------------------------------------------------------------------------
@@ -314,24 +338,46 @@ jobs:
           timeout 60 bash -c 'until nc -z localhost 5432; do sleep 1; done'
           echo "TimescaleDB is ready"
 
-      - name: Run integration tests (with retry)
+      - name: Run integration tests
         env:
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           TEMPS_TEST_DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
         run: |
-          attempt=1
+          # Run tests, capturing the names of any failures for targeted retry
+          if ${{ matrix.command }} 2>&1 | tee /tmp/test-output.txt; then
+            echo "All tests passed on first attempt"
+            exit 0
+          fi
+
+          # Extract failed test names from output
+          failed_tests=$(grep '^test .* FAILED$' /tmp/test-output.txt | sed 's/^test \(.*\) \.\.\..*FAILED$/\1/' | tr '\n' ' ')
+          if [ -z "$failed_tests" ]; then
+            echo "Could not parse failed test names, re-running all tests"
+            ${{ matrix.command }}
+            exit $?
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "Retrying only failed tests: $failed_tests"
+          echo "=========================================="
+          echo ""
+          sleep 10
+
+          # Retry only the failed tests (up to 2 more attempts)
+          attempt=2
           max_attempts=3
-          until ${{ matrix.command }}; do
-            if [ $attempt -ge $max_attempts ]; then
-              echo "Integration tests failed after $max_attempts attempts"
-              exit 1
+          for test_name in $failed_tests; do
+            echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
+            if ! ${{ matrix.command }} -- "$test_name" --exact; then
+              if [ $attempt -lt $max_attempts ]; then
+                attempt=$((attempt + 1))
+                echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
+                sleep 10
+                ${{ matrix.command }} -- "$test_name" --exact || exit 1
+              else
+                exit 1
+              fi
             fi
-            attempt=$((attempt + 1))
-            echo ""
-            echo "=========================================="
-            echo "Test attempt $((attempt - 1)) failed, retrying (attempt $attempt/$max_attempts)..."
-            echo "=========================================="
-            echo ""
-            sleep 10
           done

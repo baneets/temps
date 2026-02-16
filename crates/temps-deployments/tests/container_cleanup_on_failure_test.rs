@@ -247,6 +247,7 @@ async fn test_container_cleanup_on_deployment_failure() {
         .port(3000)
         .replicas(1)
         .environment_variables(env_vars)
+        .health_check_timeout_secs(15) // Short timeout for test -- container will never be healthy
         .build(container_deployer.clone())
         .expect("Should create deploy job");
 
