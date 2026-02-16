@@ -32,7 +32,7 @@ curl -fsSL https://temps.sh/deploy.sh | sh
 
 ![Temps Dashboard](assets/screenshots/dashboard.png)
 
-Stop paying for 5 different SaaS tools. Temps replaces your deployment platform, analytics, error tracking, session replay, and uptime monitoring -- all self-hosted, all in one binary.
+Stop paying for 6 different SaaS tools. Temps replaces your deployment platform, analytics, error tracking, session replay, uptime monitoring, and transactional email -- all self-hosted, all in one binary.
 
 ---
 
@@ -93,6 +93,20 @@ Monitors for deploy failures, runtime crashes, certificate expiry, and backup he
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+**Transactional Email**
+Add sender domains with DKIM records through the UI. Send transactional emails via `@temps-sdk/node-sdk`. No external email service needed.
+
+</td>
+<td width="50%">
+
+**AI-Ready (MCP Server)**
+Ship with a Model Context Protocol server (`@temps-sdk/mcp`) so AI agents can deploy, monitor, and manage your infrastructure through natural language.
+
+</td>
+</tr>
 </table>
 
 ### Works with your stack
@@ -119,6 +133,8 @@ Monitors for deploy failures, runtime crashes, certificate expiry, and backup he
 curl -fsSL https://temps.sh/deploy.sh | sh
 ```
 
+**Tested on:** Ubuntu 24.04 / 22.04 &nbsp;|&nbsp; Also works on macOS
+
 ---
 
 ## What Temps replaces
@@ -131,6 +147,7 @@ curl -fsSL https://temps.sh/deploy.sh | sh
 | Error tracking | Sentry ($26+/mo) |
 | Uptime monitoring | Better Uptime / Pingdom ($20+/mo) |
 | Managed Postgres/Redis/S3 | AWS RDS / ElastiCache ($50+/mo) |
+| Transactional email + DKIM | Resend / SendGrid ($20-100/mo) |
 | Request logs + proxy | Cloudflare ($0-200/mo) |
 | **Total with Temps** | **$0 (self-hosted)** |
 
@@ -147,6 +164,7 @@ curl -fsSL https://temps.sh/deploy.sh | sh
 | Session replay | Yes | No | No | No | No | No |
 | Error tracking (Sentry-compatible) | Yes | No | No | No | No | No |
 | Uptime monitoring | Yes | No | No | No | No | No |
+| Transactional email + DKIM | Yes | No | No | No | No | No |
 | Managed Postgres/Redis/S3 | Yes | Yes | Partial | Plugin | Yes | Add-on |
 | Pingora proxy (Cloudflare-grade) | Yes | No | No | No | No | No |
 | Auto TLS (HTTP-01 + DNS-01) | Yes | Yes | Yes | Plugin | Yes | Yes |

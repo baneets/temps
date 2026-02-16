@@ -421,16 +421,6 @@ impl LoadBalancer {
     ) -> Result<()> {
         upstream_response.insert_header("X-Request-ID", &ctx.request_id)?;
 
-        if let Some(project) = &ctx.project {
-            upstream_response.insert_header("X-Project-ID", project.id.to_string())?;
-        }
-        if let Some(environment) = &ctx.environment {
-            upstream_response.insert_header("X-Environment-ID", environment.id.to_string())?;
-        }
-        if let Some(deployment) = &ctx.deployment {
-            upstream_response.insert_header("X-Deployment-ID", deployment.id.to_string())?;
-        }
-
         // Apply security headers from project settings or global config
         self.apply_security_headers(upstream_response, ctx.project.as_deref())
             .await?;
