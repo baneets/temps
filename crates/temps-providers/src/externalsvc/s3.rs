@@ -408,9 +408,10 @@ impl S3Service {
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
-        let mut delay = Duration::from_millis(100);
+        let mut delay = Duration::from_millis(500);
         let mut total_wait = Duration::from_secs(0);
-        let max_wait = Duration::from_secs(60);
+        let max_wait = Duration::from_secs(90);
+        let max_delay = Duration::from_secs(2);
 
         while total_wait < max_wait {
             let info = docker
@@ -423,10 +424,19 @@ impl S3Service {
                 {
                     return Ok(());
                 }
+                if state.status == Some(bollard::models::ContainerStateStatusEnum::EXITED)
+                    || state.status == Some(bollard::models::ContainerStateStatusEnum::DEAD)
+                {
+                    let exit_code = state.exit_code.unwrap_or(-1);
+                    return Err(anyhow::anyhow!(
+                        "MinIO container exited unexpectedly with code {}",
+                        exit_code
+                    ));
+                }
             }
             sleep(delay).await;
             total_wait += delay;
-            delay = delay.mul_f32(1.5);
+            delay = std::cmp::min(delay.mul_f32(1.5), max_delay);
         }
 
         Err(anyhow::anyhow!("MinIO container health check timed out"))
