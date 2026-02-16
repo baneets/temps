@@ -32,13 +32,13 @@ Stop paying for 5 different SaaS tools. Temps replaces your deployment platform,
 
 Push to Git. Temps builds and deploys. Framework auto-detection handles the rest -- Next.js, Vite, Go, Python, Rust, Java, .NET, NestJS, or any custom Dockerfile. Every push creates a deployment with build logs, rollback support, and zero-downtime updates.
 
-![Deployment Detail](assets/screenshots/deployment-detail.png)
+![Deployments](assets/screenshots/deployments.png)
 
 ### Built-in observability
 
 Web analytics with funnels and visitor tracking. Session replay powered by rrweb. Error tracking with a Sentry-compatible SDK. Speed insights. Uptime monitoring. All of it ships inside Temps -- no external services, no extra billing, no data leaving your infrastructure.
 
-![Analytics Setup](assets/screenshots/analytics-setup.png)
+![Analytics](assets/screenshots/analytics.png)
 
 ### Production infrastructure
 
@@ -60,7 +60,7 @@ Every HTTP request that flows through the proxy is logged with method, path, sta
 
 Configure monitors for deployment failures, build errors, runtime crashes, domain and certificate expiry, and backup health. Get notified through your preferred channels before problems reach your users.
 
-![Monitoring](assets/screenshots/monitoring.png)
+![Monitoring](assets/screenshots/monitoring-detail.png)
 
 ---
 
@@ -68,7 +68,7 @@ Configure monitors for deployment failures, build errors, runtime crashes, domai
 
 ```bash
 # Install
-curl -fsSL https://temps.sh/install.sh | sh
+curl -fsSL https://temps.sh/deploy.sh | sh
 
 # Setup (interactive -- configures database, admin user, TLS, DNS)
 temps setup

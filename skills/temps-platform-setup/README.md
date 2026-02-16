@@ -18,7 +18,7 @@ Install, configure, and manage the Temps self-hosted deployment platform and CLI
 
 ```bash
 # 1. Install Temps
-curl -fsSL https://temps.sh/install.sh | sh
+curl -fsSL https://temps.sh/deploy.sh | sh
 
 # 2. Start PostgreSQL
 docker run -d --name temps-postgres \

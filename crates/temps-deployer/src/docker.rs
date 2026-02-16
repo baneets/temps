@@ -1089,7 +1089,7 @@ impl ContainerDeployer for DockerRuntime {
 
         // Extract memory stats
         let memory_stats = stats_data.memory_stats.as_ref();
-        let memory_bytes = memory_stats.and_then(|ms| ms.usage).unwrap_or(0) as u64;
+        let memory_bytes = memory_stats.and_then(|ms| ms.usage).unwrap_or(0);
         let memory_limit_bytes = memory_stats.and_then(|ms| ms.limit);
 
         let memory_percent = if let Some(limit) = memory_limit_bytes {
