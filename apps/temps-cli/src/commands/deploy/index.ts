@@ -143,10 +143,9 @@ export function registerDeployCommands(program: Command): void {
     .option('-f, --force', 'Skip confirmation')
     .action(teardownDeploymentAction)
 
-  // Logs command at root level
-  program
+  deployments
     .command('logs')
-    .description('Stream deployment logs')
+    .description('Show deployment build logs')
     .option('-p, --project <project>', 'Project slug or ID')
     .option('-e, --environment <env>', 'Environment', 'production')
     .option('-f, --follow', 'Follow log output')

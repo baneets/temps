@@ -1,6 +1,7 @@
 import type { Command } from 'commander'
 import { requireAuth, config, credentials } from '../config/store.js'
-import { setupClient, client } from '../lib/api-client.js'
+import { setupClient, client, normalizeApiUrl } from '../lib/api-client.js'
+import { resolveProjectSlug } from '../config/resolve-project.js'
 import { getProjectBySlug, listContainers, getEnvironments } from '../api/sdk.gen.js'
 import { colors, info, warning, newline } from '../ui/output.js'
 import { startSpinner, succeedSpinner, failSpinner } from '../ui/spinner.js'
@@ -30,11 +31,19 @@ async function runtimeLogs(options: RuntimeLogsOptions): Promise<void> {
   const apiKey = await requireAuth()
   await setupClient()
 
-  const projectName = options.project ?? config.get('defaultProject')
+  const resolved = await resolveProjectSlug(options.project)
 
-  if (!projectName) {
+  if (!resolved) {
     warning('No project specified')
+    info('Use: bunx @temps-sdk/cli runtime-logs --project <slug>')
+    info('Or link this directory: bunx @temps-sdk/cli link <slug>')
     return
+  }
+
+  const projectName = resolved.slug
+
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(projectName)} (from ${resolved.source})`)
   }
 
   // Get project by slug
@@ -117,7 +126,7 @@ async function runtimeLogs(options: RuntimeLogsOptions): Promise<void> {
   newline()
 
   // Build WebSocket URL
-  const apiUrl = config.get('apiUrl')
+  const apiUrl = normalizeApiUrl(config.get('apiUrl'))
   const wsProtocol = apiUrl.startsWith('https') ? 'wss' : 'ws'
   // Remove protocol and any trailing slash, keep the path (e.g., /api)
   const urlWithoutProtocol = apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
@@ -153,7 +162,11 @@ async function connectWebSocket(url: string, apiKey: string): Promise<void> {
     }
 
     ws.onmessage = (event) => {
-      const data = event.data.toString()
+      const raw = event.data.toString()
+
+      // Docker log lines include trailing newlines; strip them so
+      // console.log doesn't produce double-spaced output.
+      const data = raw.replace(/\r?\n$/, '')
 
       // Try to parse as JSON for structured logs
       try {
@@ -164,7 +177,7 @@ async function connectWebSocket(url: string, apiKey: string): Promise<void> {
             console.log(colors.muted(`  ${parsed.detail}`))
           }
         } else if (parsed.message) {
-          console.log(parsed.message)
+          console.log(parsed.message.replace(/\r?\n$/, ''))
         } else {
           console.log(data)
         }

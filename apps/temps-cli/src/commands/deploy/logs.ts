@@ -1,5 +1,6 @@
-import { requireAuth, config } from '../../config/store.js'
+import { requireAuth } from '../../config/store.js'
 import { setupClient, client } from '../../lib/api-client.js'
+import { resolveProjectSlug } from '../../config/resolve-project.js'
 import {
   getProjectBySlug,
   getProjectDeployments,
@@ -25,16 +26,51 @@ interface LogEntry {
   line?: number
 }
 
+/**
+ * Parse JSONL log content (string) into LogEntry[].
+ * The API returns raw file content where each line is a JSON object.
+ * Falls back to treating each line as a plain-text message if parsing fails.
+ */
+function parseLogEntries(data: unknown): LogEntry[] {
+  if (Array.isArray(data)) {
+    return data as LogEntry[]
+  }
+
+  if (typeof data !== 'string') {
+    return []
+  }
+
+  const lines = data.split('\n').filter(line => line.trim() !== '')
+  return lines.map((line, index) => {
+    try {
+      const parsed = JSON.parse(line)
+      return {
+        timestamp: parsed.timestamp,
+        level: parsed.level,
+        message: parsed.message ?? line,
+        line: parsed.line ?? (index + 1),
+      } as LogEntry
+    } catch {
+      // Plain text line — treat as info-level message
+      return { message: line, line: index + 1 } as LogEntry
+    }
+  })
+}
+
 export async function logs(options: LogsOptions): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const projectName = options.project ?? config.get('defaultProject')
+  const resolved = await resolveProjectSlug(options.project)
 
-  if (!projectName) {
-    warning('No project specified. Use: temps logs --project <project>')
+  if (!resolved) {
+    warning('No project specified')
+    info('Use: bunx @temps-sdk/cli deployments logs --project <slug>')
+    info('Or link this directory: bunx @temps-sdk/cli link <slug>')
     return
   }
+
+  const projectName = resolved.slug
 
   // Get project ID
   const { data: projectData, error: projectError } = await getProjectBySlug({
@@ -133,7 +169,7 @@ async function fetchLogs(
       continue
     }
 
-    const logs = (Array.isArray(data) ? data : [data]) as LogEntry[]
+    const logs = parseLogEntries(data)
     const limitedLogs = logs.slice(-limit)
 
     for (const log of limitedLogs) {
@@ -167,7 +203,7 @@ async function streamLogs(
         })
 
         if (data) {
-          const logs = (Array.isArray(data) ? data : [data]) as LogEntry[]
+          const logs = parseLogEntries(data)
           const lastLine = lastLines[job.id] || 0
 
           for (const log of logs) {
@@ -175,15 +211,6 @@ async function streamLogs(
               console.log(colors.muted(`[${job.name}]`), formatLogMessage(log))
               lastLines[job.id] = log.line
             }
-          }
-
-          // If no line numbers, just print new logs based on count
-          if (logs.length > 0 && logs[0]?.line) {
-            const newLogs = logs.slice(lastLine)
-            for (const log of newLogs) {
-              console.log(colors.muted(`[${job.name}]`), formatLogMessage(log))
-            }
-            lastLines[job.id] = logs.length
           }
         }
       } catch {
