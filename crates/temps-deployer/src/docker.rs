@@ -1193,6 +1193,19 @@ impl ContainerDeployer for DockerRuntime {
 
         Ok(Box::new(Box::pin(logs_stream)))
     }
+
+    async fn image_exists(&self, image_name: &str) -> Result<bool, DeployerError> {
+        match self.docker.inspect_image(image_name).await {
+            Ok(_) => Ok(true),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(false),
+            Err(e) => Err(DeployerError::Other(format!(
+                "Failed to check image '{}': {}",
+                image_name, e
+            ))),
+        }
+    }
 }
 
 #[async_trait]

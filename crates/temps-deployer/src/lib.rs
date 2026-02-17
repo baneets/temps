@@ -468,6 +468,13 @@ pub trait ContainerDeployer: Send + Sync {
         &self,
         container_id: &str,
     ) -> Result<Box<dyn futures::Stream<Item = String> + Unpin + Send>, DeployerError>;
+
+    /// Check if a Docker image exists locally.
+    /// Returns Ok(true) if the image exists, Ok(false) if it does not.
+    /// Default implementation returns true (assumes image exists) for backward compatibility.
+    async fn image_exists(&self, _image_name: &str) -> Result<bool, DeployerError> {
+        Ok(true)
+    }
 }
 
 /// Combined trait for both building and deploying

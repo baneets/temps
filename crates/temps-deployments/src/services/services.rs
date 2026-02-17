@@ -659,6 +659,32 @@ impl DeploymentService {
                 environment_id, deployment_id
             );
         } else {
+            // Pre-flight check: verify the Docker image still exists locally before
+            // attempting rollback. Without this check, rollback would fail mid-way
+            // (during container creation) after potentially disrupting the current deployment.
+            match self.deployer.image_exists(&image_name).await {
+                Ok(true) => {
+                    info!(
+                        "Rollback: Image '{}' exists locally, proceeding",
+                        image_name
+                    );
+                }
+                Ok(false) => {
+                    return Err(DeploymentError::Other(format!(
+                        "Cannot rollback: Docker image '{}' no longer exists locally. \
+                         The image may have been removed by Docker pruning. \
+                         Consider redeploying from source instead.",
+                        image_name
+                    )));
+                }
+                Err(e) => {
+                    return Err(DeploymentError::Other(format!(
+                        "Cannot rollback: failed to verify Docker image '{}' exists: {}",
+                        image_name, e
+                    )));
+                }
+            }
+
             // Rollback workflow for non-static presets:
             // 1. Deploy the image using DeployImageJob (will deploy/redeploy containers as needed)
             // 2. Mark deployment as complete using MarkDeploymentCompleteJob (will stop previous deployments)
@@ -2081,6 +2107,7 @@ mod tests {
             async fn list_containers(&self) -> Result<Vec<temps_deployer::ContainerInfo>, temps_deployer::DeployerError>;
             async fn get_container_logs(&self, container_id: &str) -> Result<String, temps_deployer::DeployerError>;
             async fn stream_container_logs(&self, container_id: &str) -> Result<Box<dyn futures::Stream<Item = String> + Unpin + Send>, temps_deployer::DeployerError>;
+            async fn image_exists(&self, image_name: &str) -> Result<bool, temps_deployer::DeployerError>;
         }
     }
     fn create_test_external_service_manager(
@@ -2310,6 +2337,7 @@ mod tests {
             let stream = stream::empty();
             Ok(Box::new(stream))
         });
+        deployer.expect_image_exists().returning(|_| Ok(true));
         let deployer: Arc<dyn temps_deployer::ContainerDeployer> = Arc::new(deployer);
 
         // For tests, we'll create a service that directly accepts the trait
@@ -2490,6 +2518,98 @@ mod tests {
                 assert!(msg.contains("deployed"));
             }
             e => panic!("Expected InvalidDeploymentState error, got: {:?}", e),
+        }
+
+        Ok(())
+    }
+
+    /// Creates a DeploymentService where image_exists returns false,
+    /// simulating a pruned/missing Docker image.
+    fn create_deployment_service_with_missing_image(
+        db: Arc<temps_database::DbConnection>,
+    ) -> DeploymentService {
+        let log_service = Arc::new(temps_logs::LogService::new(std::env::temp_dir()));
+        let test_db_url = "postgresql://test_user:test_password@localhost:5432/test_db";
+        let server_config = Arc::new(
+            temps_config::ServerConfig::new(
+                "127.0.0.1:8080".to_string(),
+                test_db_url.to_string(),
+                None,
+                None,
+            )
+            .expect("Failed to create test server config"),
+        );
+        let config_service = Arc::new(temps_config::ConfigService::new(server_config, db.clone()));
+
+        let mut queue_service = MockQueueService::new();
+        queue_service.expect_send().returning(|_| Ok(()));
+        queue_service
+            .expect_subscribe()
+            .returning(|| Box::new(MockJobReceiver::new()));
+        let queue_service: Arc<dyn temps_core::JobQueue> = Arc::new(queue_service);
+
+        let docker = Arc::new(bollard::Docker::connect_with_local_defaults().unwrap());
+        let docker_log_service = Arc::new(temps_logs::DockerLogService::new(docker));
+
+        let mut deployer = MockContainerDeployer::new();
+        deployer.expect_deploy_container().returning(|_| {
+            Ok(temps_deployer::DeployResult {
+                container_id: "test-container".to_string(),
+                container_name: "test-container".to_string(),
+                container_port: 3000,
+                host_port: 3000,
+                status: temps_deployer::ContainerStatus::Running,
+            })
+        });
+        deployer.expect_stop_container().returning(|_| Ok(()));
+        deployer.expect_remove_container().returning(|_| Ok(()));
+        deployer.expect_image_exists().returning(|_| Ok(false));
+        let deployer: Arc<dyn temps_deployer::ContainerDeployer> = Arc::new(deployer);
+
+        DeploymentService {
+            db,
+            log_service,
+            config_service,
+            queue_service,
+            docker_log_service,
+            deployer,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rollback_fails_when_image_missing() -> Result<(), Box<dyn std::error::Error>> {
+        let test_db = TestDatabase::with_migrations().await?;
+        let db = test_db.connection_arc();
+
+        // Setup test data (creates a non-static project with a deployed deployment)
+        let (_project, _environment, target_deployment) = setup_test_data(&db).await?;
+
+        // Use a service where image_exists returns false
+        let deployment_service = create_deployment_service_with_missing_image(db.clone());
+
+        // Attempt rollback — should fail with a clear error before any containers are touched
+        let result = deployment_service
+            .rollback_to_deployment(target_deployment.project_id, target_deployment.id)
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DeploymentError::Other(msg) => {
+                assert!(
+                    msg.contains("no longer exists locally"),
+                    "Expected 'no longer exists locally' in error message, got: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains("Docker image"),
+                    "Expected 'Docker image' in error message, got: {}",
+                    msg
+                );
+            }
+            e => panic!(
+                "Expected DeploymentError::Other with image-not-found message, got: {:?}",
+                e
+            ),
         }
 
         Ok(())
