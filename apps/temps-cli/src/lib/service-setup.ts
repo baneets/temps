@@ -224,6 +224,17 @@ function sanitizeToIdentifier(name: string): string {
 }
 
 /**
+ * Known required fields per service type.
+ * Used as a fallback when the schema API call fails or returns no data.
+ * Must be kept in sync with the backend parameter_strategies.rs.
+ */
+const KNOWN_REQUIRED_FIELDS: Partial<Record<ServiceTypeRoute, string[]>> = {
+  postgres: ['database', 'username'],
+  mongodb: ['database', 'username'],
+  // redis and s3 have no required fields
+}
+
+/**
  * Auto-generate sensible defaults for required parameters based on service type and name.
  * This avoids prompting the user for values that can be derived automatically.
  */
@@ -265,21 +276,28 @@ export async function createNewServiceOfType(serviceType: ServiceTypeRoute): Pro
     required: true,
   })
 
-  // Fetch parameter schema to discover required fields
+  // Fetch parameter schema to discover required fields, with hardcoded fallback
   let requiredFields: string[] = []
   try {
-    const { data: schemaData } = await getServiceTypeParameters({
+    const { data: schemaData, error: schemaError } = await getServiceTypeParameters({
       client,
       path: { service_type: serviceType },
     })
 
-    // The schema is a JSON Schema object with a "required" array
-    const schema = schemaData as Record<string, unknown> | undefined
-    if (schema?.required && Array.isArray(schema.required)) {
-      requiredFields = schema.required as string[]
+    if (!schemaError && schemaData) {
+      // The schema is a JSON Schema object with a "required" array
+      const schema = schemaData as Record<string, unknown>
+      if (schema.required && Array.isArray(schema.required)) {
+        requiredFields = schema.required as string[]
+      }
     }
   } catch {
-    // If schema fetch fails, proceed without it — the backend will validate
+    // Network-level failure — fall through to fallback
+  }
+
+  // Fallback to hardcoded known required fields if schema fetch returned nothing
+  if (requiredFields.length === 0) {
+    requiredFields = KNOWN_REQUIRED_FIELDS[serviceType] ?? []
   }
 
   // Auto-generate required parameters from the service name
