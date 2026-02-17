@@ -813,7 +813,7 @@ async fn execute_list_api(cmd: ListDomainsApiCommand) -> anyhow::Result<()> {
 
         let expiration = domain
             .expiration_time
-            .map(|t| format_millis_date(t))
+            .map(format_millis_date)
             .unwrap_or_else(|| "N/A".to_string());
 
         println!(
