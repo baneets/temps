@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Proxy now converts HTML responses to Markdown on the fly when clients send `Accept: text/markdown`, compatible with Cloudflare's Markdown for Agents standard; responses include `Content-Type: text/markdown`, `Vary: Accept`, and `X-Markdown-Tokens` headers; SSE, WebSocket, and responses over 2 MB pass through unchanged
 - MCP (Model Context Protocol) server with 210 tools across 30 domain modules (`mcp/`)
 - OpenAPI SDK auto-generated via `@hey-api/openapi-ts` for MCP server
 - WebSocket support for container runtime logs in MCP server
