@@ -109,39 +109,29 @@ impl QueryService {
 
                 Arc::new(pg_source)
             }
+            // S3 now uses RustFS by default - same connection pattern as Blob/Rustfs
             crate::externalsvc::ServiceType::S3 => {
-                // Deserialize parameters into typed S3InputConfig
-                let config: S3InputConfig = serde_json::from_value(service.parameters.clone())
+                let config: RustfsConfig = serde_json::from_value(service.parameters.clone())
                     .map_err(|e| {
                         DataError::InvalidConfiguration(format!(
-                            "Failed to parse S3 configuration: {}",
+                            "Failed to parse S3 (RustFS) configuration: {}",
                             e
                         ))
                     })?;
 
-                // Build endpoint URL
-                let endpoint = format!(
-                    "http://{}:{}",
-                    config.host,
-                    config.port.unwrap_or_else(|| "9000".to_string())
-                );
+                let endpoint = format!("http://{}:{}", config.host, config.port);
 
-                // Get credentials
-                let access_key = config.access_key.ok_or_else(|| {
-                    DataError::InvalidConfiguration("S3 access_key is required".to_string())
+                let s3_source = S3Source::new(
+                    &config.region,
+                    Some(&endpoint),
+                    &config.access_key,
+                    &config.secret_key,
+                )
+                .await
+                .map_err(|e| {
+                    error!("Failed to connect to S3 service {}: {}", service_id, e);
+                    e
                 })?;
-                let secret_key = config.secret_key.ok_or_else(|| {
-                    DataError::InvalidConfiguration("S3 secret_key is required".to_string())
-                })?;
-
-                // Create S3 source
-                let s3_source =
-                    S3Source::new(&config.region, Some(&endpoint), &access_key, &secret_key)
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to connect to S3 service {}: {}", service_id, e);
-                            e
-                        })?;
 
                 Arc::new(s3_source)
             }
@@ -287,6 +277,40 @@ impl QueryService {
                     error!("Failed to connect to RustFS service {}: {}", service_id, e);
                     e
                 })?;
+
+                Arc::new(s3_source)
+            }
+            // MinIO (deprecated) - uses legacy S3InputConfig
+            #[allow(deprecated)]
+            crate::externalsvc::ServiceType::Minio => {
+                let config: S3InputConfig = serde_json::from_value(service.parameters.clone())
+                    .map_err(|e| {
+                        DataError::InvalidConfiguration(format!(
+                            "Failed to parse MinIO configuration: {}",
+                            e
+                        ))
+                    })?;
+
+                let endpoint = format!(
+                    "http://{}:{}",
+                    config.host,
+                    config.port.unwrap_or_else(|| "9000".to_string())
+                );
+
+                let access_key = config.access_key.ok_or_else(|| {
+                    DataError::InvalidConfiguration("MinIO access_key is required".to_string())
+                })?;
+                let secret_key = config.secret_key.ok_or_else(|| {
+                    DataError::InvalidConfiguration("MinIO secret_key is required".to_string())
+                })?;
+
+                let s3_source =
+                    S3Source::new(&config.region, Some(&endpoint), &access_key, &secret_key)
+                        .await
+                        .map_err(|e| {
+                            error!("Failed to connect to MinIO service {}: {}", service_id, e);
+                            e
+                        })?;
 
                 Arc::new(s3_source)
             }
@@ -439,6 +463,9 @@ impl QueryService {
             crate::externalsvc::ServiceType::Blob => "_blob_root".to_string(),
             // RustFS standalone S3-compatible storage
             crate::externalsvc::ServiceType::Rustfs => "_rustfs_root".to_string(),
+            // MinIO (deprecated) S3-compatible storage
+            #[allow(deprecated)]
+            crate::externalsvc::ServiceType::Minio => "_minio_root".to_string(),
         };
 
         // Use retry mechanism for connection errors
@@ -525,11 +552,13 @@ impl QueryService {
             let continuation_token = continuation_token.clone();
             async move {
                 // Check if this is S3-compatible (S3, Blob, or RustFS) and use pagination
+                #[allow(deprecated)]
                 if matches!(
                     service_type,
                     crate::externalsvc::ServiceType::S3
                         | crate::externalsvc::ServiceType::Blob
                         | crate::externalsvc::ServiceType::Rustfs
+                        | crate::externalsvc::ServiceType::Minio
                 ) {
                     if let Some(s3_source) = conn.downcast_ref::<S3Source>() {
                         return s3_source

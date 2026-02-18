@@ -17,8 +17,12 @@ const serviceLogos: Record<ServiceType, { src: string; alt: string }> = {
     alt: 'Redis logo',
   },
   s3: {
+    src: '/storage/rustfs.svg',
+    alt: 'S3 / RustFS logo',
+  },
+  minio: {
     src: '/storage/minio.svg',
-    alt: 'S3 logo',
+    alt: 'MinIO logo',
   },
   libsql: {
     src: '/storage/libsql.svg',

@@ -25,7 +25,7 @@ export function extractServiceTypeFromImage(image: string): ServiceTypeRoute | n
     mongodb: 'mongodb',
     redis: 'redis',
     rustfs: 'rustfs',
-    minio: 's3', // Legacy support
+    minio: 'minio', // Deprecated - existing MinIO containers
   }
 
   return serviceTypeMap[imageName] || null

@@ -458,6 +458,34 @@ pub async fn check_explorer_support(
                 None,
             )
         }
+        // MinIO (deprecated): Same as S3/Blob (object store)
+        #[allow(deprecated)]
+        crate::externalsvc::ServiceType::Minio => {
+            let hierarchy = vec![
+                HierarchyLevel {
+                    level: 0,
+                    name: "root".to_string(),
+                    container_type: "bucket".to_string(),
+                    can_list_containers: true,
+                    can_list_entities: false,
+                },
+                HierarchyLevel {
+                    level: 1,
+                    name: "bucket".to_string(),
+                    container_type: "object".to_string(),
+                    can_list_containers: false,
+                    can_list_entities: true,
+                },
+            ];
+
+            (
+                true,
+                vec!["object-store".to_string()],
+                None,
+                hierarchy,
+                None,
+            )
+        }
     };
 
     let response = ExplorerSupportResponse {

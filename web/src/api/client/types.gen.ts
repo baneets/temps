@@ -6879,7 +6879,7 @@ export type ServiceTypeInfo = {
     service_type: ServiceTypeRoute;
 };
 
-export type ServiceTypeRoute = 'mongodb' | 'postgres' | 'redis' | 's3' | 'kv' | 'blob' | 'rustfs';
+export type ServiceTypeRoute = 'mongodb' | 'postgres' | 'redis' | 's3' | 'kv' | 'blob' | 'rustfs' | 'minio';
 
 export type SesCredentialsRequest = {
     access_key_id: string;

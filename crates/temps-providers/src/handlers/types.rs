@@ -59,6 +59,7 @@ pub enum ServiceTypeRoute {
     Mongodb,
     Postgres,
     Redis,
+    /// S3-compatible object storage (RustFS-backed by default)
     S3,
     /// Temps KV service (Redis-backed key-value store)
     Kv,
@@ -66,6 +67,8 @@ pub enum ServiceTypeRoute {
     Blob,
     /// RustFS S3-compatible object storage (standalone)
     Rustfs,
+    /// MinIO S3-compatible object storage (deprecated, use S3/RustFS instead)
+    Minio,
 }
 
 impl ServiceTypeRoute {
@@ -79,6 +82,7 @@ impl ServiceTypeRoute {
             "kv" => Ok(ServiceTypeRoute::Kv),
             "blob" => Ok(ServiceTypeRoute::Blob),
             "rustfs" => Ok(ServiceTypeRoute::Rustfs),
+            "minio" => Ok(ServiceTypeRoute::Minio),
             _ => Err(anyhow::anyhow!("Invalid service type: {}", s)),
         }
     }
@@ -93,6 +97,7 @@ impl ServiceTypeRoute {
             ServiceTypeRoute::Kv,
             ServiceTypeRoute::Blob,
             ServiceTypeRoute::Rustfs,
+            ServiceTypeRoute::Minio,
         ]
     }
 
@@ -114,11 +119,13 @@ impl std::fmt::Display for ServiceTypeRoute {
             ServiceTypeRoute::Kv => write!(f, "kv"),
             ServiceTypeRoute::Blob => write!(f, "blob"),
             ServiceTypeRoute::Rustfs => write!(f, "rustfs"),
+            ServiceTypeRoute::Minio => write!(f, "minio"),
         }
     }
 }
 
 impl From<ServiceTypeRoute> for crate::externalsvc::ServiceType {
+    #[allow(deprecated)]
     fn from(service_type: ServiceTypeRoute) -> Self {
         match service_type {
             ServiceTypeRoute::Mongodb => crate::externalsvc::ServiceType::Mongodb,
@@ -128,11 +135,13 @@ impl From<ServiceTypeRoute> for crate::externalsvc::ServiceType {
             ServiceTypeRoute::Kv => crate::externalsvc::ServiceType::Kv,
             ServiceTypeRoute::Blob => crate::externalsvc::ServiceType::Blob,
             ServiceTypeRoute::Rustfs => crate::externalsvc::ServiceType::Rustfs,
+            ServiceTypeRoute::Minio => crate::externalsvc::ServiceType::Minio,
         }
     }
 }
 
 impl From<crate::externalsvc::ServiceType> for ServiceTypeRoute {
+    #[allow(deprecated)]
     fn from(service_type: crate::externalsvc::ServiceType) -> Self {
         match service_type {
             crate::externalsvc::ServiceType::Mongodb => ServiceTypeRoute::Mongodb,
@@ -142,6 +151,7 @@ impl From<crate::externalsvc::ServiceType> for ServiceTypeRoute {
             crate::externalsvc::ServiceType::Kv => ServiceTypeRoute::Kv,
             crate::externalsvc::ServiceType::Blob => ServiceTypeRoute::Blob,
             crate::externalsvc::ServiceType::Rustfs => ServiceTypeRoute::Rustfs,
+            crate::externalsvc::ServiceType::Minio => ServiceTypeRoute::Minio,
         }
     }
 }
@@ -208,8 +218,16 @@ impl ProviderMetadata {
             },
             Self {
                 service_type: ServiceTypeRoute::S3,
-                display_name: "S3 / MinIO".to_string(),
-                description: "Object storage service".to_string(),
+                display_name: "S3 / RustFS".to_string(),
+                description: "S3-compatible object storage (RustFS)".to_string(),
+                icon_url: "/providers/s3.svg".to_string(),
+                color: "#C72E49".to_string(),
+            },
+            Self {
+                service_type: ServiceTypeRoute::Minio,
+                display_name: "MinIO (Deprecated)".to_string(),
+                description: "S3-compatible object storage (deprecated, use S3/RustFS instead)"
+                    .to_string(),
                 icon_url: "/providers/s3.svg".to_string(),
                 color: "#C72E49".to_string(),
             },

@@ -100,7 +100,7 @@ temps incidents list --project-id 5
 ## Configuration
 
 **Config file**: `~/.temps/config.json`
-**Credentials**: `~/.temps/.secrets` (mode 0600)
+**Credentials**: Stored securely in `~/.temps/` with restricted file permissions (mode 0600)
 
 ```bash
 # View configuration
@@ -150,7 +150,7 @@ temps services list --json | jq '.[] | select(.status == "running")'
 Use `-y/--yes` to skip prompts:
 
 ```bash
-export TEMPS_TOKEN=tk_abc123
+export TEMPS_TOKEN=$TEMPS_TOKEN
 export TEMPS_API_URL=https://temps.example.com
 
 temps deploy my-app -b main -e production -y

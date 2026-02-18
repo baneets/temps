@@ -93,7 +93,13 @@ function extractCommandInfo(cmd: Command, parentName = ''): CommandInfo {
   }
 }
 
-function generateMarkdown(commands: CommandInfo[], level = 2): string {
+function escapeForMdx(text: string): string {
+  // Wrap substrings containing curly braces in backticks so MDX
+  // doesn't interpret them as JSX expressions.
+  return text.replace(/('[^']*\{[^']*')/g, '`$1`')
+}
+
+function generateMarkdown(commands: CommandInfo[], level = 2, format: 'markdown' | 'mdx' = 'markdown'): string {
   let md = ''
 
   for (const cmd of commands) {
@@ -114,7 +120,10 @@ function generateMarkdown(commands: CommandInfo[], level = 2): string {
       for (const opt of cmd.options) {
         const defaultVal = opt.defaultValue !== undefined ? `\`${opt.defaultValue}\`` : '-'
         const required = opt.required ? 'Yes' : 'No'
-        const escapedDesc = opt.description.replace(/\|/g, '\\|')
+        let escapedDesc = opt.description.replace(/\|/g, '\\|')
+        if (format === 'mdx') {
+          escapedDesc = escapeForMdx(escapedDesc)
+        }
         md += `| \`${opt.flags}\` | ${escapedDesc} | ${defaultVal} | ${required} |\n`
       }
       md += '\n'
@@ -129,7 +138,7 @@ function generateMarkdown(commands: CommandInfo[], level = 2): string {
       md += '\n'
 
       // Generate detailed docs for subcommands
-      md += generateMarkdown(cmd.subcommands, level + 1)
+      md += generateMarkdown(cmd.subcommands, level + 1, format)
     }
   }
 
@@ -155,11 +164,7 @@ function generateHeader(format: 'markdown' | 'mdx' = 'markdown'): string {
 ## Installation
 
 \`\`\`bash
-# Install globally
-npm install -g @temps/cli
-
-# Or use with npx
-npx @temps/cli [command]
+bunx @temps-sdk/cli [command]
 \`\`\`
 
 ## Authentication
@@ -168,10 +173,10 @@ Before using most commands, you need to authenticate:
 
 \`\`\`bash
 # Login with API key
-temps login
+bunx @temps-sdk/cli login
 
 # Or configure with wizard
-temps configure
+bunx @temps-sdk/cli configure
 \`\`\`
 
 ## Global Options
@@ -198,48 +203,48 @@ function generateFooter(): string {
 
 \`\`\`bash
 # Login to Temps
-temps login
+bunx @temps-sdk/cli login
 
 # Create a new project
-temps projects create --name my-app
+bunx @temps-sdk/cli projects create --name my-app
 
 # Deploy to production
-temps deploy --project my-app --environment production
+bunx @temps-sdk/cli deploy --project my-app --environment production
 
 # View deployment logs
-temps logs --project my-app --follow
+bunx @temps-sdk/cli logs --project my-app --follow
 
 # Stream runtime container logs
-temps runtime-logs --project my-app
+bunx @temps-sdk/cli runtime-logs --project my-app
 
 # List containers
-temps containers list --project-id 1 --environment-id 1
+bunx @temps-sdk/cli containers list --project-id 1 --environment-id 1
 \`\`\`
 
 ### Managing Environments
 
 \`\`\`bash
 # List environments
-temps environments list --project my-app
+bunx @temps-sdk/cli environments list --project my-app
 
 # Set environment variables
-temps environments vars set --project my-app --key DATABASE_URL --value "postgres://..."
+bunx @temps-sdk/cli environments vars set --project my-app --key DATABASE_URL --value "postgres://..."
 
 # View environment variables
-temps environments vars list --project my-app
+bunx @temps-sdk/cli environments vars list --project my-app
 \`\`\`
 
 ### Managing Domains
 
 \`\`\`bash
 # Add a custom domain
-temps domains add --project my-app --domain app.example.com
+bunx @temps-sdk/cli domains add --project my-app --domain app.example.com
 
 # List domains
-temps domains list --project my-app
+bunx @temps-sdk/cli domains list --project my-app
 
 # Remove a domain
-temps domains remove --project my-app --domain app.example.com
+bunx @temps-sdk/cli domains remove --project my-app --domain app.example.com
 \`\`\`
 
 ## Environment Variables
@@ -257,9 +262,9 @@ The CLI respects the following environment variables:
 
 Configuration is stored in:
 - **Config file**: \`~/.temps/config.json\`
-- **Credentials**: \`~/.temps/.secrets\`
+- **Credentials**: Stored securely in \`~/.temps/\` with restricted file permissions
 
-Use \`temps configure show\` to view current configuration.
+Use \`bunx @temps-sdk/cli configure show\` to view current configuration.
 
 ## Support
 
@@ -308,7 +313,7 @@ async function main() {
   } else {
     const format = args.format === 'mdx' ? 'mdx' : 'markdown'
     output = generateHeader(format)
-    output += generateMarkdown(commands)
+    output += generateMarkdown(commands, 2, format)
     output += generateFooter()
   }
 
