@@ -63,14 +63,14 @@ const services: ServiceOption[] = [
   },
   {
     id: 's3',
-    name: 'S3 Compatible Storage',
+    name: 'S3 / RustFS',
     icon: HardDrive,
-    description: 'Object storage for files and media',
+    description: 'S3-compatible object storage for files and media',
     features: [
       'File uploads',
       'Media storage',
       'Static asset hosting',
-      'Automatic scaling',
+      'High-performance S3-compatible API',
     ],
   },
 ]

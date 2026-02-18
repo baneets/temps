@@ -40,6 +40,7 @@ pub enum ServiceType {
     Mongodb,
     Postgres,
     Redis,
+    /// S3-compatible object storage (RustFS-backed by default)
     S3,
     /// RustFS S3-compatible object storage (standalone)
     Rustfs,
@@ -47,9 +48,15 @@ pub enum ServiceType {
     Kv,
     /// Temps Blob service (RustFS-backed object storage)
     Blob,
+    /// MinIO S3-compatible object storage (deprecated, use S3/RustFS instead)
+    #[deprecated(
+        note = "Use S3 (RustFS-backed) instead. MinIO is kept for backward compatibility with existing services."
+    )]
+    Minio,
 }
 
 impl std::fmt::Display for ServiceType {
+    #[allow(deprecated)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServiceType::Mongodb => write!(f, "mongodb"),
@@ -59,12 +66,14 @@ impl std::fmt::Display for ServiceType {
             ServiceType::Rustfs => write!(f, "rustfs"),
             ServiceType::Kv => write!(f, "kv"),
             ServiceType::Blob => write!(f, "blob"),
+            ServiceType::Minio => write!(f, "minio"),
         }
     }
 }
 
 impl ServiceType {
     #[allow(clippy::should_implement_trait)]
+    #[allow(deprecated)]
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "mongodb" => Ok(ServiceType::Mongodb),
@@ -74,11 +83,13 @@ impl ServiceType {
             "rustfs" => Ok(ServiceType::Rustfs),
             "kv" => Ok(ServiceType::Kv),
             "blob" => Ok(ServiceType::Blob),
+            "minio" => Ok(ServiceType::Minio),
             _ => Err(anyhow::anyhow!("Invalid service type: {}", s)),
         }
     }
 
     /// Returns a Vec containing all available service types
+    #[allow(deprecated)]
     pub fn get_all() -> Vec<ServiceType> {
         vec![
             ServiceType::Mongodb,
@@ -88,6 +99,7 @@ impl ServiceType {
             ServiceType::Rustfs,
             ServiceType::Kv,
             ServiceType::Blob,
+            ServiceType::Minio,
         ]
     }
 

@@ -149,13 +149,13 @@ export function CreateS3Source() {
                   className="flex items-baseline justify-between"
                 >
                   <span>Endpoint URL</span>
-                  <span className="text-xs text-muted-foreground">
-                    (Optional, for MinIO)
+                   <span className="text-xs text-muted-foreground">
+                    (Optional, for RustFS/MinIO)
                   </span>
                 </Label>
                 <Input
                   id="endpoint"
-                  placeholder="http://minio.example.com:9000"
+                   placeholder="http://rustfs.example.com:9000"
                   value={formData.endpoint || ''}
                   onChange={(e) =>
                     setFormData({ ...formData, endpoint: e.target.value })
@@ -183,7 +183,7 @@ export function CreateS3Source() {
                   <div>
                     <span>Force Path Style</span>
                     <p className="text-xs text-muted-foreground">
-                      Enable for MinIO compatibility
+                      Enable for RustFS/MinIO compatibility
                     </p>
                   </div>
                 </Label>

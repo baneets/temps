@@ -193,15 +193,21 @@ export function statusBadge(status: string): string {
     active: chalk.green,
     success: chalk.green,
     healthy: chalk.green,
+    completed: chalk.green,
+    deployed: chalk.green,
+    ready: chalk.green,
     pending: chalk.yellow,
     building: chalk.yellow,
     deploying: chalk.yellow,
     warning: chalk.yellow,
+    built: chalk.yellow,
     stopped: chalk.gray,
     inactive: chalk.gray,
+    paused: chalk.gray,
     failed: chalk.red,
     error: chalk.red,
     unhealthy: chalk.red,
+    cancelled: chalk.red,
   }
 
   const colorFn = statusColors[status.toLowerCase()] ?? chalk.white

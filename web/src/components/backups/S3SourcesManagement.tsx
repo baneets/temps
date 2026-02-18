@@ -126,12 +126,12 @@ function S3SourceForm({
           >
             <span>Endpoint URL</span>
             <span className="text-xs text-muted-foreground">
-              (Optional, for MinIO)
+              (Optional, for RustFS/MinIO)
             </span>
           </Label>
           <Input
             id="endpoint"
-            placeholder="http://minio.example.com:9000"
+            placeholder="http://rustfs.example.com:9000"
             value={formData.endpoint || ''}
             onChange={(e) =>
               setFormData({ ...formData, endpoint: e.target.value })
@@ -155,7 +155,7 @@ function S3SourceForm({
             <div>
               <span>Force Path Style</span>
               <p className="text-xs text-muted-foreground">
-                Enable for MinIO compatibility
+                Enable for RustFS/MinIO compatibility
               </p>
             </div>
           </Label>

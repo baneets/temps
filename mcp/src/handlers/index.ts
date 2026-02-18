@@ -1,7 +1,6 @@
 /**
  * Handlers registry
- * Exports prompt and tools handlers
+ * Exports prompt handlers (tools are now in tools/index.ts)
  */
 
-export * from './prompts-handler.js';
-export * from './tools-handler.js';
+export { listPrompts, getPrompt } from './prompts-handler.js';

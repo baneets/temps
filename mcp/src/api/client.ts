@@ -1,56 +1,40 @@
 /**
  * Temps API Client
- * Uses environment variables for configuration
+ *
+ * Generic REST client that uses TEMPS_API_URL and TEMPS_API_KEY
+ * to communicate with the Temps platform API.
  */
 
 export interface TempsConfig {
   apiUrl: string;
-  apiToken: string;
+  apiKey: string;
+}
+
+function normalizeApiUrl(url: string): string {
+  let normalized = url.replace(/\/+$/, '');
+  if (!normalized.endsWith('/api')) {
+    normalized += '/api';
+  }
+  return normalized;
 }
 
 export function getConfig(): TempsConfig {
   const apiUrl = process.env.TEMPS_API_URL;
-  const apiToken = process.env.TEMPS_API_TOKEN;
+  const apiKey = process.env.TEMPS_API_KEY;
 
   if (!apiUrl) {
-    throw new Error('TEMPS_API_URL environment variable is required');
+    throw new Error(
+      'TEMPS_API_URL environment variable is required. Set it to your Temps instance URL (e.g. https://temps.example.com)'
+    );
   }
 
-  if (!apiToken) {
-    throw new Error('TEMPS_API_TOKEN environment variable is required');
+  if (!apiKey) {
+    throw new Error(
+      'TEMPS_API_KEY environment variable is required. Create an API key in the Temps dashboard under Settings > API Keys'
+    );
   }
 
-  return { apiUrl, apiToken };
-}
-
-export interface Project {
-  id: number;
-  name: string;
-  slug: string;
-  repo_owner: string | null;
-  repo_name: string | null;
-  main_branch: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ProjectsResponse {
-  projects: Project[];
-}
-
-export interface Deployment {
-  id: number;
-  project_id: number;
-  status: string;
-  branch: string | null;
-  commit_hash: string | null;
-  commit_message: string | null;
-  url: string | null;
-  created_at: number;
-}
-
-export interface DeploymentsResponse {
-  deployments: Deployment[];
+  return { apiUrl: normalizeApiUrl(apiUrl), apiKey };
 }
 
 export class TempsClient {
@@ -60,48 +44,156 @@ export class TempsClient {
     this.config = config || getConfig();
   }
 
-  private async request<T>(path: string, options?: RequestInit): Promise<T> {
-    const url = `${this.config.apiUrl}${path}`;
+  async get<T = unknown>(path: string, query?: Record<string, unknown>): Promise<T> {
+    const url = this.buildUrl(path, query);
+    return this.request<T>(url, { method: 'GET' });
+  }
 
+  async post<T = unknown>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(this.buildUrl(path), {
+      method: 'POST',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  async put<T = unknown>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(this.buildUrl(path), {
+      method: 'PUT',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  async patch<T = unknown>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(this.buildUrl(path), {
+      method: 'PATCH',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  async delete<T = unknown>(path: string): Promise<T> {
+    return this.request<T>(this.buildUrl(path), { method: 'DELETE' });
+  }
+
+  /**
+   * Connect to a WebSocket endpoint, collect messages until the server
+   * closes the connection, and return them as a string array.
+   * Use `follow: false` in query params for a finite snapshot.
+   */
+  async ws(
+    path: string,
+    query?: Record<string, unknown>,
+    options?: { timeoutMs?: number }
+  ): Promise<string[]> {
+    const httpUrl = this.buildUrl(path, query);
+    const wsUrl = httpUrl
+      .replace(/^https:/, 'wss:')
+      .replace(/^http:/, 'ws:');
+    const timeoutMs = options?.timeoutMs ?? 15_000;
+
+    return new Promise<string[]>((resolve, reject) => {
+      const messages: string[] = [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const ws = new WebSocket(wsUrl, {
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+        },
+      } as any);
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        try { ws.close(); } catch { /* already closed */ }
+      };
+
+      timer = setTimeout(() => {
+        cleanup();
+        resolve(messages);
+      }, timeoutMs);
+
+      ws.onmessage = (event: MessageEvent) => {
+        const data = typeof event.data === 'string'
+          ? event.data
+          : String(event.data);
+
+        // Parse JSON messages — the server may send errors or plain log lines
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) {
+            cleanup();
+            reject(new Error(parsed.error + (parsed.detail ? `: ${parsed.detail}` : '')));
+            return;
+          }
+          if (parsed.message !== undefined) {
+            messages.push(String(parsed.message).replace(/\r?\n$/, ''));
+            return;
+          }
+        } catch { /* plain text */ }
+
+        messages.push(data.replace(/\r?\n$/, ''));
+      };
+
+      ws.onerror = () => {
+        cleanup();
+        reject(new Error(`WebSocket connection failed for ${path}`));
+      };
+
+      ws.onclose = () => {
+        if (timer) clearTimeout(timer);
+        resolve(messages);
+      };
+    });
+  }
+
+  private buildUrl(path: string, query?: Record<string, unknown>): string {
+    const url = new URL(`${this.config.apiUrl}${path}`);
+    if (query) {
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined && value !== null && value !== '') {
+          url.searchParams.set(key, String(value));
+        }
+      }
+    }
+    return url.toString();
+  }
+
+  private async request<T>(url: string, options: RequestInit): Promise<T> {
     const response = await fetch(url, {
       ...options,
       headers: {
-        'Authorization': `Bearer ${this.config.apiToken}`,
+        Authorization: `Bearer ${this.config.apiKey}`,
         'Content-Type': 'application/json',
-        ...options?.headers,
+        Accept: 'application/json',
+        ...options.headers,
       },
     });
 
+    // Always read body as text first to avoid "body already read" errors
+    const text = await response.text();
+
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`API Error (${response.status}): ${error}`);
+      let detail = text;
+      try {
+        const body = JSON.parse(text) as Record<string, unknown>;
+        detail =
+          (body.detail as string) || (body.message as string) || (body.error as string) || text;
+      } catch {
+        // text is already the raw body
+      }
+      throw new Error(
+        `API Error ${response.status} ${response.statusText}: ${detail}`
+      );
     }
 
-    return response.json() as Promise<T>;
-  }
+    // Handle 204 No Content or empty body
+    if (response.status === 204 || !text) {
+      return undefined as T;
+    }
 
-  async listProjects(page = 1, pageSize = 20): Promise<ProjectsResponse> {
-    return this.request<ProjectsResponse>(
-      `/projects?page=${page}&page_size=${pageSize}`
-    );
-  }
-
-  async getProject(projectId: number): Promise<Project> {
-    return this.request<Project>(`/projects/${projectId}`);
-  }
-
-  async listDeployments(
-    projectId: number,
-    page = 1,
-    pageSize = 20
-  ): Promise<DeploymentsResponse> {
-    return this.request<DeploymentsResponse>(
-      `/projects/${projectId}/deployments?page=${page}&page_size=${pageSize}`
-    );
+    return JSON.parse(text) as T;
   }
 }
 
-// Singleton instance
+// Singleton
 let client: TempsClient | null = null;
 
 export function getClient(): TempsClient {

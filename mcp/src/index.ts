@@ -9,23 +9,24 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import {
-  listPrompts,
-  getPrompt,
-  listTools,
-  callTool,
-} from './handlers/index.js';
+import { listPrompts, getPrompt } from './handlers/prompts-handler.js';
+import { listTools, callTool, toolCount } from './tools/index.js';
 
 /**
  * Temps MCP Server
  *
- * Provides MCP prompts and tools for Temps platform operations
+ * Provides full Temps platform management through MCP tools and prompts.
+ * Requires TEMPS_API_URL and TEMPS_API_KEY environment variables.
+ *
+ * Usage:
+ *   npx @temps-sdk/mcp
+ *   bunx @temps-sdk/mcp
  */
 
 const server = new Server(
   {
     name: '@temps-sdk/mcp',
-    version: '0.0.1',
+    version: '0.1.0',
   },
   {
     capabilities: {
@@ -35,46 +36,41 @@ const server = new Server(
   }
 );
 
-/**
- * List available prompts
- */
+// Prompts
 server.setRequestHandler(ListPromptsRequestSchema, async () => {
   return listPrompts();
 });
 
-/**
- * Get prompt content
- */
 server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   return await getPrompt(name, args || {});
 });
 
-/**
- * List available tools
- */
+// Tools
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return listTools();
 });
 
-/**
- * Call a tool
- */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-  return await callTool(name, args || {});
+  const result = await callTool(name, args || {});
+  return {
+    content: result.content,
+    isError: result.isError,
+  };
 });
 
-/**
- * Start the server
- */
+// Start
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error('Temps MCP Server running on stdio');
+  console.error(`Temps MCP Server running on stdio (${toolCount} tools available)`);
   console.error(
     `API URL: ${process.env.TEMPS_API_URL || '(not configured)'}`
+  );
+  console.error(
+    `API Key: ${process.env.TEMPS_API_KEY ? '***configured***' : '(not configured)'}`
   );
 }
 

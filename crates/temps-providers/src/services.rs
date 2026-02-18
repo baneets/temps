@@ -263,6 +263,7 @@ impl ExternalServiceManager {
     ) -> Box<dyn ExternalService> {
         self.create_service_instance(name, service_type)
     }
+    #[allow(deprecated)]
     fn create_service_instance(
         &self,
         name: String,
@@ -272,7 +273,8 @@ impl ExternalServiceManager {
             ServiceType::Mongodb => Box::new(MongodbService::new(name, self.docker.clone())),
             ServiceType::Postgres => Box::new(PostgresService::new(name, self.docker.clone())),
             ServiceType::Redis => Box::new(RedisService::new(name, self.docker.clone())),
-            ServiceType::S3 => Box::new(S3Service::new(
+            // S3 now uses RustFS by default (high-performance S3-compatible storage)
+            ServiceType::S3 => Box::new(RustfsService::new(
                 name,
                 self.docker.clone(),
                 self.encryption_service.clone(),
@@ -290,6 +292,12 @@ impl ExternalServiceManager {
             )),
             // RustFS standalone S3-compatible storage
             ServiceType::Rustfs => Box::new(RustfsService::new(
+                name,
+                self.docker.clone(),
+                self.encryption_service.clone(),
+            )),
+            // MinIO (deprecated) - kept for backward compatibility with existing services
+            ServiceType::Minio => Box::new(S3Service::new(
                 name,
                 self.docker.clone(),
                 self.encryption_service.clone(),
@@ -1879,6 +1887,7 @@ impl ExternalServiceManager {
             };
 
             // Detect service type based on image name
+            #[allow(deprecated)]
             let service_type = if image.contains("postgres")
                 || image.contains("timescaledb")
                 || image.contains("pgvector")
@@ -1890,8 +1899,9 @@ impl ExternalServiceManager {
                 ServiceType::Mongodb
             } else if image.contains("rustfs") {
                 ServiceType::Rustfs
-            } else if image.contains("minio") || image.contains("s3") {
-                ServiceType::S3
+            } else if image.contains("minio") {
+                // Existing MinIO containers are detected as deprecated Minio type
+                ServiceType::Minio
             } else {
                 continue; // Skip unknown service types
             };
@@ -1982,6 +1992,7 @@ impl ExternalServiceManager {
         }
 
         // Get the appropriate service instance and call import
+        #[allow(deprecated)]
         let service_config = match request.service_type {
             ServiceType::Postgres => {
                 let postgres = PostgresService::new(request.name.clone(), Arc::clone(&self.docker));
@@ -2016,19 +2027,21 @@ impl ExternalServiceManager {
                     )
                     .await?
             }
+            // S3 now uses RustFS by default
             ServiceType::S3 => {
-                let s3 = S3Service::new(
+                let rustfs = RustfsService::new(
                     request.name.clone(),
                     Arc::clone(&self.docker),
                     Arc::clone(&self.encryption_service),
                 );
-                s3.import_from_container(
-                    request.container_id.clone(),
-                    request.name.clone(),
-                    credentials,
-                    additional_config,
-                )
-                .await?
+                rustfs
+                    .import_from_container(
+                        request.container_id.clone(),
+                        request.name.clone(),
+                        credentials,
+                        additional_config,
+                    )
+                    .await?
             }
             // Temps KV uses Redis backend
             ServiceType::Kv => {
@@ -2074,6 +2087,21 @@ impl ExternalServiceManager {
                         additional_config,
                     )
                     .await?
+            }
+            // MinIO (deprecated) - kept for backward compatibility
+            ServiceType::Minio => {
+                let s3 = S3Service::new(
+                    request.name.clone(),
+                    Arc::clone(&self.docker),
+                    Arc::clone(&self.encryption_service),
+                );
+                s3.import_from_container(
+                    request.container_id.clone(),
+                    request.name.clone(),
+                    credentials,
+                    additional_config,
+                )
+                .await?
             }
         };
 
@@ -3502,19 +3530,28 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_service_type_detection_s3() {
-        let images = vec![
+        // S3 type is now backed by RustFS - MinIO images are detected as Minio (deprecated)
+        let minio_images = vec![
             "minio/minio:latest",
             "minio/minio:RELEASE.2025-01-01T00-00-00Z",
         ];
 
-        for image in images {
-            let detected = if image.contains("minio") || image.contains("s3") {
-                ServiceType::S3
+        for image in minio_images {
+            let detected = if image.contains("rustfs") {
+                ServiceType::Rustfs
+            } else if image.contains("minio") {
+                ServiceType::Minio
             } else {
                 ServiceType::Postgres
             };
-            assert_eq!(detected, ServiceType::S3, "Failed for image: {}", image);
+            assert_eq!(
+                detected,
+                ServiceType::Minio,
+                "MinIO image should be detected as Minio (deprecated): {}",
+                image
+            );
         }
     }
 
