@@ -429,9 +429,11 @@ impl BackupService {
         Ok(major_version.to_string())
     }
 
-    /// Returns the Docker image tag for the given PostgreSQL major version
+    /// Returns the Docker image tag for the pg_dump sidecar container.
+    /// Temps requires TimescaleDB as its database, so the sidecar always uses the
+    /// timescaledb-ha image to ensure pg_dump has the extension available.
     fn get_postgres_image_tag(&self, major_version: &str) -> String {
-        format!("postgres:{}", major_version)
+        format!("timescale/timescaledb-ha:pg{}", major_version)
     }
 
     /// Pulls the specified PostgreSQL Docker image
@@ -3128,14 +3130,64 @@ mod tests {
             object_result.err()
         );
 
+        // Download the backup and verify it is a valid gzip-compressed pg_dump custom format.
+        //
+        // This is the key assertion for the TimescaleDB fix: if the sidecar image were plain
+        // postgres (missing the timescaledb extension), pg_dump would either fail with a non-zero
+        // exit code (caught earlier) or produce a corrupt/truncated dump. A valid dump must:
+        //   1. Start with gzip magic bytes 0x1f 0x8b
+        //   2. Decompress to a pg_dump custom-format file starting with "PGDMP"
+        //
+        // This rules out zero-byte files, plain-text error output, and partial dumps that
+        // happen to be non-zero in size.
+        let backup_bytes = s3_client
+            .get_object()
+            .bucket(bucket_name)
+            .key(&backup_result.s3_location)
+            .send()
+            .await
+            .expect("Failed to download backup file from S3")
+            .body
+            .collect()
+            .await
+            .expect("Failed to read backup body")
+            .into_bytes();
+
+        assert!(
+            backup_bytes.len() >= 2,
+            "Backup file too small to contain gzip magic bytes"
+        );
+        assert_eq!(
+            &backup_bytes[..2],
+            &[0x1f, 0x8b],
+            "Backup file does not start with gzip magic bytes — not a valid gzip file"
+        );
+
+        let mut decoder = flate2::read::GzDecoder::new(&backup_bytes[..]);
+        let mut decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decompressed)
+            .expect("Failed to decompress backup — gzip stream is corrupt");
+
+        assert!(
+            decompressed.len() >= 5,
+            "Decompressed backup too small to contain pg_dump magic"
+        );
+        assert_eq!(
+            &decompressed[..5],
+            b"PGDMP",
+            "Decompressed backup does not start with PGDMP — not a valid pg_dump custom format file"
+        );
+
         println!("\n✓ Integration test passed:");
-        println!("  - Database container started");
+        println!("  - Database container started (timescale/timescaledb-ha)");
         println!("  - MinIO container started");
         println!("  - Backup created with ID: {}", backup_result.id);
         println!(
-            "  - Backup size: {} bytes",
+            "  - Backup size: {} bytes (compressed)",
             backup_result.size_bytes.unwrap_or(0)
         );
+        println!("  - Decompressed size: {} bytes", decompressed.len());
+        println!("  - Backup format: valid gzip-compressed pg_dump custom format (PGDMP)");
         println!("  - Objects in bucket: {}", object_count);
     }
 
@@ -3660,5 +3712,60 @@ mod tests {
             }
             _ => panic!("Expected validation error for empty name"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // TimescaleDB sidecar image selection
+    // -------------------------------------------------------------------------
+
+    fn make_backup_service() -> BackupService {
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        )
+    }
+
+    /// The main Temps database always runs on TimescaleDB, so the pg_dump sidecar
+    /// must always use the timescaledb-ha image — never plain postgres.
+    #[test]
+    fn test_pg_dump_sidecar_always_uses_timescaledb_image() {
+        let svc = make_backup_service();
+
+        for major in ["15", "16", "17", "18"] {
+            let image = svc.get_postgres_image_tag(major);
+            assert!(
+                image.starts_with("timescale/timescaledb-ha:pg"),
+                "Expected timescaledb-ha image for version {major}, got: {image}"
+            );
+            assert!(
+                image.ends_with(major),
+                "Image tag should end with the major version {major}, got: {image}"
+            );
+        }
+    }
+
+    /// The TimescaleDB version string format is "PostgreSQL 17.x on ..." — identical to
+    /// plain Postgres. Verify that parse_postgres_version correctly extracts the major
+    /// version from a real TimescaleDB SELECT version() output.
+    #[test]
+    fn test_parse_postgres_version_from_timescaledb_version_string() {
+        let svc = make_backup_service();
+
+        let timescaledb_version_string =
+            "PostgreSQL 17.4 on aarch64-unknown-linux-gnu, compiled by gcc (GCC) 13.2.0, 64-bit";
+
+        let major = svc
+            .parse_postgres_version(timescaledb_version_string)
+            .expect("Should parse TimescaleDB version string");
+
+        assert_eq!(major, "17");
+
+        // Confirm the full image tag is correct end-to-end
+        let image = svc.get_postgres_image_tag(&major);
+        assert_eq!(image, "timescale/timescaledb-ha:pg17");
     }
 }
