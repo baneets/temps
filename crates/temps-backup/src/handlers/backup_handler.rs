@@ -880,7 +880,10 @@ async fn run_backup_for_source(
         .backup_service
         .run_backup_for_source(id, &request.backup_type, auth.user_id())
         .await
-        .map_err(Problem::from)?;
+        .map_err(|e| {
+            error!("Failed to run backup for S3 source {}: {}", id, e);
+            Problem::from(e)
+        })?;
 
     let audit = BackupRunAudit {
         context: AuditContext {
@@ -1044,7 +1047,10 @@ async fn run_external_service_backup(
         .backup_service
         .get_external_service(id)
         .await
-        .map_err(Problem::from)?;
+        .map_err(|e| {
+            error!("Failed to get external service {} for backup: {}", id, e);
+            Problem::from(e)
+        })?;
 
     let backup_type = request.backup_type.as_deref().unwrap_or("full");
 
@@ -1053,7 +1059,13 @@ async fn run_external_service_backup(
         .backup_service
         .backup_external_service(&service, request.s3_source_id, backup_type, auth.user_id())
         .await
-        .map_err(Problem::from)?;
+        .map_err(|e| {
+            error!(
+                "Failed to backup external service {} ({}): {}",
+                service.name, service.service_type, e
+            );
+            Problem::from(e)
+        })?;
 
     // Create audit log
     let audit = ExternalServiceBackupRunAudit {

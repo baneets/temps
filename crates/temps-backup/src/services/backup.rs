@@ -220,7 +220,13 @@ impl BackupService {
         let mut temp_file = NamedTempFile::new().map_err(BackupError::Io)?;
 
         // Perform database backup
-        self.backup_database(&mut temp_file).await?;
+        self.backup_database(&mut temp_file).await.map_err(|e| {
+            error!(
+                "Database backup failed for S3 source {}: {}",
+                s3_source_id, e
+            );
+            e
+        })?;
 
         // Generate unique backup ID
         let backup_id = Uuid::new_v4().to_string();
@@ -252,7 +258,14 @@ impl BackupService {
 
         // Compress and upload the backup
         self.upload_backup(&s3_client, &s3_source, &temp_file, &s3_location)
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to upload backup to S3 source {} at {}: {}",
+                    s3_source_id, s3_location, e
+                );
+                e
+            })?;
 
         // Create backup record
         let new_backup = temps_entities::backups::ActiveModel {
@@ -560,12 +573,14 @@ impl BackupService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start container: {}", e))?;
 
-        // Build pg_dump command with proper lifetimes
+        // Build pg_dump command with proper lifetimes.
+        // --format=plain streams SQL text (COPY statements) row-by-row with constant memory.
+        // Previous --format=custom buffered per-table data in both pg_dump and the temps process
+        // (via Bollard's HTTP stream), causing 2-3 GB memory peaks on large TimescaleDB databases.
         let port_str = port.to_string();
         let pg_dump_cmd = vec![
             "pg_dump",
-            "--format=custom",
-            "--compress=0",
+            "--format=plain",
             "--no-password",
             "--host",
             host,
@@ -1017,13 +1032,16 @@ impl BackupService {
         temp_file: &NamedTempFile,
         s3_location: &str,
     ) -> Result<()> {
-        let file_content = tokio::fs::read(temp_file.path()).await?;
+        // Stream from file instead of reading entire contents into memory
+        let body = aws_sdk_s3::primitives::ByteStream::from_path(temp_file.path())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create byte stream from backup file: {}", e))?;
 
         match s3_client
             .put_object()
             .bucket(&s3_source.bucket_name)
             .key(s3_location)
-            .body(file_content.into())
+            .body(body)
             .content_type("application/x-gzip")
             .send()
             .await
@@ -1507,39 +1525,69 @@ impl BackupService {
         let username = url.username();
         let password = url.password();
 
-        // Build pg_restore command
-        let mut cmd = tokio::process::Command::new("pg_restore");
-        cmd.arg("--verbose")
-            .arg("--clean") // Drop existing objects before recreating
-            .arg("--if-exists") // Don't error if objects don't exist
-            .arg("--no-password")
-            .arg("--host")
-            .arg(host)
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--username")
-            .arg(username)
-            .arg("--dbname")
-            .arg(database)
-            .arg(temp_file.path());
+        // Detect backup format from S3 location path:
+        // - .pgdump.gz / backup.postgresql.gz = custom format (pg_restore)
+        // - .sql.gz = plain SQL format (psql)
+        let is_plain_format = backup.s3_location.ends_with(".sql.gz");
+
+        let mut cmd;
+        if is_plain_format {
+            // Plain SQL format: pipe decompressed SQL through psql
+            cmd = tokio::process::Command::new("psql");
+            cmd.arg("--no-password")
+                .arg("--host")
+                .arg(host)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--username")
+                .arg(username)
+                .arg("--dbname")
+                .arg(database)
+                .arg("--file")
+                .arg(temp_file.path());
+        } else {
+            // Custom format: use pg_restore
+            cmd = tokio::process::Command::new("pg_restore");
+            cmd.arg("--verbose")
+                .arg("--clean") // Drop existing objects before recreating
+                .arg("--if-exists") // Don't error if objects don't exist
+                .arg("--no-password")
+                .arg("--host")
+                .arg(host)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--username")
+                .arg(username)
+                .arg("--dbname")
+                .arg(database)
+                .arg(temp_file.path());
+        }
 
         // Set password via environment variable if provided
         if let Some(pwd) = password {
             cmd.env("PGPASSWORD", pwd);
         }
 
-        info!("Running pg_restore command");
+        let restore_tool = if is_plain_format {
+            "psql"
+        } else {
+            "pg_restore"
+        };
+        info!(
+            "Running {} command for backup {}",
+            restore_tool, backup.backup_id
+        );
         let output = cmd.output().await.map_err(|e| BackupError::Internal {
             message: format!(
-                "Failed to execute pg_restore: {}. Make sure pg_restore is installed and in PATH",
-                e
+                "Failed to execute {}: {}. Make sure {} is installed and in PATH",
+                restore_tool, e, restore_tool
             ),
         })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(BackupError::Internal {
-                message: format!("pg_restore failed: {}", stderr),
+                message: format!("{} failed: {}", restore_tool, stderr),
             });
         }
 
@@ -1853,7 +1901,11 @@ impl BackupService {
                 backup_type,
                 created_by,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                error!("Backup failed for S3 source {}: {}", s3_source_id, e);
+                e
+            })?;
 
         info!(
             "Successfully created backup {} for S3 source {}",
@@ -2212,7 +2264,13 @@ impl BackupService {
                 service_config,
             )
             .await
-            .map_err(|e| BackupError::ExternalService(e.to_string()))?;
+            .map_err(|e| {
+                error!(
+                    "External service backup failed for service '{}' (type={}, id={}): {}",
+                    service.name, service.service_type, service.id, e
+                );
+                BackupError::ExternalService(e.to_string())
+            })?;
         info!("Backup created at location: {}", backup_location);
         // Get the external service backup record
         let external_backup = temps_entities::external_service_backups::Entity::find()

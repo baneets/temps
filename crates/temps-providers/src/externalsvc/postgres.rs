@@ -14,7 +14,7 @@ use std::time::Duration;
 use temps_entities::external_service_backups;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use urlencoding;
 
 use crate::utils::ensure_network_exists;
@@ -956,6 +956,83 @@ impl PostgresService {
         Ok(())
     }
 
+    /// Restore a custom-format pg_dump backup via pg_restore inside the container.
+    /// Used for backward compatibility with backups created before the switch to plain format.
+    async fn restore_custom_backup_file(
+        &self,
+        docker: &Docker,
+        container_name: &str,
+        backup_data: Vec<u8>,
+        username: &str,
+        password: &str,
+    ) -> Result<()> {
+        let temp_file = tempfile::NamedTempFile::new()?;
+        tokio::fs::write(temp_file.path(), &backup_data).await?;
+
+        // Create a tar archive containing the backup file
+        let mut tar = tar::Builder::new(Vec::new());
+        tar.append_path_with_name(temp_file.path(), "backup.pgdump")?;
+        let tar_data = tar.into_inner()?;
+
+        // Copy the tar archive into the container
+        docker
+            .upload_to_container(
+                container_name,
+                Some(bollard::query_parameters::UploadToContainerOptions {
+                    path: "/".to_string(),
+                    ..Default::default()
+                }),
+                body_full(bytes::Bytes::from(tar_data)),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to upload backup file to container: {}", e))?;
+
+        // Execute pg_restore inside the container
+        let password_env = format!("PGPASSWORD={}", password);
+        let exec = docker
+            .create_exec(
+                container_name,
+                bollard::exec::CreateExecOptions {
+                    cmd: Some(vec![
+                        "pg_restore",
+                        "--verbose",
+                        "--clean",
+                        "--if-exists",
+                        "--no-password",
+                        "-U",
+                        username,
+                        "-d",
+                        username, // default database is same as username
+                        "/backup.pgdump",
+                    ]),
+                    env: Some(vec![password_env.as_str()]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create pg_restore exec: {}", e))?;
+
+        let output = docker.start_exec(&exec.id, None).await?;
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } = output {
+            while let Some(Ok(output)) = output.next().await {
+                match output {
+                    bollard::container::LogOutput::StdOut { message } => {
+                        info!("pg_restore stdout: {}", String::from_utf8_lossy(&message));
+                    }
+                    bollard::container::LogOutput::StdErr { message } => {
+                        // pg_restore emits progress info on stderr, log at debug level
+                        debug!("pg_restore stderr: {}", String::from_utf8_lossy(&message));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Verify that a Docker image can be pulled without actually downloading the full image
     /// Attempts to pull the image - fails if it doesn't exist or cannot be accessed
     async fn verify_image_pullable(&self, image: &str) -> Result<()> {
@@ -1177,14 +1254,15 @@ impl ExternalService for PostgresService {
         };
 
         // pg_dump connects to the DB container over the Docker network using its container name
-        // as the hostname. --format=custom produces a binary dump suitable for pg_restore.
-        // --compress=0 disables pg_dump's internal compression; we apply gzip ourselves while
-        // streaming to avoid buffering the entire dump in memory (prevents OOM / exit code 137).
+        // as the hostname. --format=plain streams SQL text (COPY statements) row-by-row with
+        // constant memory usage. We apply gzip compression ourselves while streaming to disk.
+        // Previous --format=custom buffered per-table data in both pg_dump and the temps process
+        // (via Bollard's HTTP stream), causing multi-GB memory peaks and OOM kills (exit 137)
+        // on large databases, especially with TimescaleDB hypertable chunks.
         let port_str = POSTGRES_INTERNAL_PORT.to_string();
         let pg_dump_cmd = vec![
             "pg_dump",
-            "--format=custom",
-            "--compress=0",
+            "--format=plain",
             "--no-password",
             "--host",
             &db_container_name,
@@ -1312,7 +1390,7 @@ impl ExternalService for PostgresService {
         // Generate backup path in S3
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let backup_key = format!(
-            "{}/postgres_backup_{}.pgdump.gz",
+            "{}/postgres_backup_{}.sql.gz",
             subpath.trim_matches('/'),
             timestamp
         );
@@ -1798,15 +1876,32 @@ impl ExternalService for PostgresService {
         // Get container name
         let container_name = self.get_container_name();
 
-        // Restore the backup using Docker with actual credentials
-        self.restore_backup_file(
-            &self.docker,
-            &container_name,
-            decompressed_data,
-            &postgres_config.username,
-            &postgres_config.password,
-        )
-        .await?;
+        // Detect backup format from the S3 location:
+        // - .pgdump.gz = custom format (pg_restore)
+        // - .sql.gz = plain SQL format (psql)
+        let is_plain_format = backup_location.ends_with(".sql.gz");
+
+        if is_plain_format {
+            // Plain SQL: restore via psql -f
+            self.restore_backup_file(
+                &self.docker,
+                &container_name,
+                decompressed_data,
+                &postgres_config.username,
+                &postgres_config.password,
+            )
+            .await?;
+        } else {
+            // Custom format: restore via pg_restore
+            self.restore_custom_backup_file(
+                &self.docker,
+                &container_name,
+                decompressed_data,
+                &postgres_config.username,
+                &postgres_config.password,
+            )
+            .await?;
+        }
 
         info!("PostgreSQL restore completed successfully");
         Ok(())
