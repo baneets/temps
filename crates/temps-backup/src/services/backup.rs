@@ -3,7 +3,7 @@ use anyhow::Result;
 use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::{Client as S3Client, Config};
 use chrono::{DateTime, Duration, Timelike, Utc};
-use flate2::Compression;
+
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
     QueryOrder,
@@ -21,7 +21,6 @@ use urlencoding;
 use uuid::Uuid;
 
 use cron::Schedule;
-use flate2::write::GzEncoder;
 use temps_core::notifications::{BackupFailureData, NotificationService};
 use temps_entities::{backup_schedules::Model as BackupSchedule, s3_sources::Model as S3Source};
 use temps_providers::ExternalServiceManager;
@@ -554,23 +553,25 @@ impl BackupService {
         })?;
         let backup_filename = format!("{}.sql.gz", uuid::Uuid::new_v4());
         let host_backup_path = backup_dir.join(&backup_filename);
-        let container_backup_path = format!("/tmp/{}", backup_filename);
+        let container_backup_path = format!("/backup/{}", backup_filename);
 
         // Create container config with version-matched postgres image (includes pg_dump).
         // Override the entrypoint to prevent the timescaledb-ha image from starting a full
         // PostgreSQL server instance inside the sidecar.
-        // Bind-mount the host backup directory into the container so pg_dump writes
-        // directly to the host filesystem without any data flowing through the Temps process.
+        // Bind-mount the host backup directory to /backup inside the container. We use
+        // /backup instead of /tmp because the timescaledb-ha image runs as the postgres
+        // user which may not have write access to a bind-mounted /tmp.
         let config = Config {
             image: Some(image_tag),
             entrypoint: Some(vec!["/bin/sleep".to_string()]),
             cmd: Some(vec!["86400".to_string()]), // 24h: must outlive pg_dump on large DBs (42+ GB)
             env: Some(env_vars),
+            user: Some("root".to_string()), // Run as root to ensure write access to bind mount
             host_config: Some(bollard::models::HostConfig {
                 network_mode: Some("host".to_string()),
                 auto_remove: Some(true),
                 oom_score_adj: Some(-500),
-                binds: Some(vec![format!("{}:/tmp:rw", backup_dir.display())]),
+                binds: Some(vec![format!("{}:/backup:rw", backup_dir.display())]),
                 ..Default::default()
             }),
             ..Default::default()
