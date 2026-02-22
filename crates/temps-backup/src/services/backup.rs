@@ -538,24 +538,39 @@ impl BackupService {
         let pgpassword_env = format!("PGPASSWORD={}", decoded_password);
         let env_vars = vec![pgpassword_env];
 
+        // Create a host directory for the bind mount so the backup file is written
+        // directly to disk by the sidecar container, bypassing the Temps process entirely.
+        // Previous approach streamed pg_dump output through Bollard's exec HTTP stream
+        // into the Temps process, which caused unbounded memory growth (2-6+ GB) because
+        // hyper/Bollard buffers the chunked HTTP response internally even though we write
+        // each chunk to disk immediately.
+        let backup_dir = self.config_service.data_dir().join("backups").join("tmp");
+        tokio::fs::create_dir_all(&backup_dir).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create backup temp directory {}: {}",
+                backup_dir.display(),
+                e
+            )
+        })?;
+        let backup_filename = format!("{}.sql.gz", uuid::Uuid::new_v4());
+        let host_backup_path = backup_dir.join(&backup_filename);
+        let container_backup_path = format!("/tmp/{}", backup_filename);
+
         // Create container config with version-matched postgres image (includes pg_dump).
         // Override the entrypoint to prevent the timescaledb-ha image from starting a full
-        // PostgreSQL server instance inside the sidecar. The default entrypoint
-        // (docker-entrypoint.sh) initializes a PG cluster and allocates shared_buffers,
-        // consuming 1-2 GB of RAM that competes with the actual database server for memory
-        // and triggers OOM kills (exit code 137).
+        // PostgreSQL server instance inside the sidecar.
+        // Bind-mount the host backup directory into the container so pg_dump writes
+        // directly to the host filesystem without any data flowing through the Temps process.
         let config = Config {
             image: Some(image_tag),
             entrypoint: Some(vec!["/bin/sleep".to_string()]),
             cmd: Some(vec!["300".to_string()]),
             env: Some(env_vars),
             host_config: Some(bollard::models::HostConfig {
-                network_mode: Some("host".to_string()), // Use host network to access database
+                network_mode: Some("host".to_string()),
                 auto_remove: Some(true),
-                // Protect the sidecar from the OOM killer. Without this, the kernel may
-                // kill the sidecar (which has no oom_score_adj) instead of less important
-                // processes when the system is under memory pressure during large dumps.
                 oom_score_adj: Some(-500),
+                binds: Some(vec![format!("{}:/tmp:rw", backup_dir.display())]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -576,6 +591,19 @@ impl BackupService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create container: {}", e))?;
 
+        // Helper to remove the sidecar on any error path
+        let remove_sidecar = |docker: bollard::Docker, name: String| async move {
+            let _ = docker
+                .remove_container(
+                    &name,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        };
+
         // Start container
         docker
             .start_container(
@@ -583,40 +611,34 @@ impl BackupService {
                 Some(bollard::query_parameters::StartContainerOptionsBuilder::new().build()),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to start container: {}", e))?;
+            .map_err(|e| {
+                let docker = docker.clone();
+                let name = container_name.clone();
+                tokio::spawn(async move { remove_sidecar(docker, name).await });
+                anyhow::anyhow!("Failed to start container: {}", e)
+            })?;
 
-        // Build pg_dump command with proper lifetimes.
-        // --format=plain streams SQL text (COPY statements) row-by-row with constant memory.
-        // Previous --format=custom buffered per-table data in both pg_dump and the temps process
-        // (via Bollard's HTTP stream), causing 2-3 GB memory peaks on large TimescaleDB databases.
+        // Run pg_dump | gzip inside the sidecar, writing directly to the bind-mounted
+        // host filesystem. This keeps the Temps process memory flat regardless of DB size.
         let port_str = port.to_string();
-        let pg_dump_cmd = vec![
-            "pg_dump",
-            "--format=plain",
-            "--no-password",
-            "--host",
-            host,
-            "--port",
-            &port_str,
-            "--username",
-            username,
-            "--dbname",
-            database,
-        ];
+        let pg_dump_shell_cmd = format!(
+            "pg_dump --format=plain --no-password --host={} --port={} --username={} --dbname={} | gzip > {}",
+            host, port_str, username, database, container_backup_path
+        );
 
-        info!("Running pg_dump command in Docker container");
+        info!("Running pg_dump command in Docker container (bind-mount mode)");
 
-        // Create exec instance
-        // URL-decode password (it's stored URL-encoded in database for connection strings)
+        // URL-decode password for exec env
         let decoded_password = urlencoding::decode(password)
             .map(|s| s.to_string())
             .unwrap_or_else(|_| password.to_string());
         let pgpassword = format!("PGPASSWORD={}", decoded_password);
+
         let exec = docker
             .create_exec(
                 &container_name,
                 CreateExecOptions {
-                    cmd: Some(pg_dump_cmd),
+                    cmd: Some(vec!["sh", "-c", &pg_dump_shell_cmd]),
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     env: Some(vec![pgpassword.as_str()]),
@@ -626,10 +648,9 @@ impl BackupService {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create exec: {}", e))?;
 
-        // Stream pg_dump output directly to gzip-compressed temp file.
-        // Previous implementation buffered the entire dump in memory which
-        // caused OOM kills (exit code 137) on large databases.
-        let mut encoder = GzEncoder::new(temp_file, Compression::default());
+        // Consume the exec stream to let the command run. Only capture stderr for error
+        // reporting. stdout is empty because pg_dump output is piped to gzip > file
+        // inside the container.
         let mut stderr_data = Vec::new();
 
         if let StartExecResults::Attached { mut output, .. } =
@@ -637,42 +658,20 @@ impl BackupService {
         {
             while let Some(chunk) = FuturesStreamExt::next(&mut output).await {
                 match chunk {
-                    Ok(bollard::container::LogOutput::StdOut { message }) => {
-                        std::io::Write::write_all(&mut encoder, &message)?;
-                    }
                     Ok(bollard::container::LogOutput::StdErr { message }) => {
                         stderr_data.extend_from_slice(&message);
                     }
-                    Ok(bollard::container::LogOutput::Console { message }) => {
-                        std::io::Write::write_all(&mut encoder, &message)?;
-                    }
                     Err(e) => {
-                        // Clean up container before returning error
-                        let _ = docker
-                            .remove_container(
-                                &container_name,
-                                Some(RemoveContainerOptions {
-                                    force: true,
-                                    ..Default::default()
-                                }),
-                            )
-                            .await;
+                        remove_sidecar(docker.clone(), container_name.clone()).await;
+                        let _ = tokio::fs::remove_file(&host_backup_path).await;
                         return Err(anyhow::anyhow!("Error reading pg_dump output: {}", e));
                     }
-                    _ => {}
+                    _ => {} // stdout/console are empty (piped to file inside container)
                 }
             }
         } else {
-            // Clean up container
-            let _ = docker
-                .remove_container(
-                    &container_name,
-                    Some(RemoveContainerOptions {
-                        force: true,
-                        ..Default::default()
-                    }),
-                )
-                .await;
+            remove_sidecar(docker.clone(), container_name.clone()).await;
+            let _ = tokio::fs::remove_file(&host_backup_path).await;
             return Err(anyhow::anyhow!("Unexpected exec result type"));
         }
 
@@ -681,16 +680,8 @@ impl BackupService {
         if let Some(exit_code) = exec_inspect.exit_code {
             if exit_code != 0 {
                 let stderr = String::from_utf8_lossy(&stderr_data);
-                // Clean up container
-                let _ = docker
-                    .remove_container(
-                        &container_name,
-                        Some(RemoveContainerOptions {
-                            force: true,
-                            ..Default::default()
-                        }),
-                    )
-                    .await;
+                remove_sidecar(docker.clone(), container_name.clone()).await;
+                let _ = tokio::fs::remove_file(&host_backup_path).await;
                 return Err(anyhow::anyhow!(
                     "pg_dump failed with exit code {}: {}",
                     exit_code,
@@ -699,20 +690,23 @@ impl BackupService {
             }
         }
 
-        // Clean up container
-        docker
-            .remove_container(
-                &container_name,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to remove container: {}", e))?;
+        // Clean up sidecar container
+        remove_sidecar(docker.clone(), container_name.clone()).await;
 
-        // Finalize gzip stream
-        encoder.finish()?;
+        // Copy the backup file from the bind-mount location to the temp_file that the
+        // caller uses for S3 upload. This is a local file copy (not through memory).
+        tokio::fs::copy(&host_backup_path, temp_file.path())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to copy backup from {} to temp file: {}",
+                    host_backup_path.display(),
+                    e
+                )
+            })?;
+
+        // Clean up the bind-mount backup file
+        let _ = tokio::fs::remove_file(&host_backup_path).await;
 
         info!("PostgreSQL backup completed successfully");
         Ok(())
