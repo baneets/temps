@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use temps_entities::backups::Model as Backup;
 use thiserror::Error;
 use tokio::time;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use urlencoding;
 use uuid::Uuid;
 
@@ -215,58 +215,72 @@ impl BackupService {
                 detail: "S3 source not found".to_string(),
             })?;
 
-        // Create a temporary file for the backup
-        let mut temp_file = NamedTempFile::new().map_err(BackupError::Io)?;
-
-        // Perform database backup
-        self.backup_database(&mut temp_file).await.map_err(|e| {
-            error!(
-                "Database backup failed for S3 source {}: {}",
-                s3_source_id, e
-            );
-            e
-        })?;
-
         // Generate unique backup ID
         let backup_id = Uuid::new_v4().to_string();
 
-        // Calculate file size
-        let size_bytes = temp_file
-            .as_file()
-            .metadata()
-            .map_err(BackupError::Io)?
-            .len() as i32;
-
-        // Validate backup size - a zero-size backup indicates failure
-        if size_bytes == 0 {
-            return Err(BackupError::Validation(
-                "Backup failed: backup file has zero size".to_string(),
-            ));
-        }
-
-        // Generate S3 location. Use .sql.gz extension to match the plain-format pg_dump
-        // output (--format=plain). The restore logic uses this extension to decide whether
-        // to pipe through psql (plain) or pg_restore (custom).
-        let s3_location = format!(
-            "{}/backups/{}/{}/backup.sql.gz",
-            s3_source.bucket_path.trim_matches('/'),
-            Utc::now().format("%Y/%m/%d"),
-            backup_id
-        );
-
-        // Create S3 client
+        // Create S3 client (needed for metadata upload and legacy fallback)
         let s3_client = self.create_s3_client(&s3_source).await?;
 
-        // Compress and upload the backup
-        self.upload_backup(&s3_client, &s3_source, &temp_file, &s3_location)
-            .await
-            .map_err(|e| {
-                error!(
-                    "Failed to upload backup to S3 source {} at {}: {}",
-                    s3_source_id, s3_location, e
-                );
-                e
-            })?;
+        // Try WAL-G backup first (requires the internal DB container to have WAL-G installed).
+        // Falls back to pg_dump sidecar if the DB is not running in a Docker container we can exec into.
+        let (s3_location, size_bytes, compression_type) =
+            match self.backup_postgres_walg(&s3_source, &backup_id).await {
+                Ok((location, size)) => {
+                    info!("WAL-G backup completed: {}", location);
+                    (location, size, "lz4".to_string())
+                }
+                Err(e) => {
+                    // WAL-G not available (e.g., DB on localhost, no Docker container found).
+                    // Fall back to pg_dump sidecar approach.
+                    warn!(
+                        "WAL-G backup not available ({}), falling back to pg_dump sidecar",
+                        e
+                    );
+
+                    let mut temp_file = NamedTempFile::new().map_err(BackupError::Io)?;
+
+                    self.backup_postgres_database(&mut temp_file)
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                "Database backup failed for S3 source {}: {}",
+                                s3_source_id, e
+                            );
+                            e
+                        })?;
+
+                    let size_bytes = temp_file
+                        .as_file()
+                        .metadata()
+                        .map_err(BackupError::Io)?
+                        .len() as i32;
+
+                    if size_bytes == 0 {
+                        return Err(BackupError::Validation(
+                            "Backup failed: backup file has zero size".to_string(),
+                        ));
+                    }
+
+                    let s3_location = format!(
+                        "{}/backups/{}/{}/backup.sql.gz",
+                        s3_source.bucket_path.trim_matches('/'),
+                        Utc::now().format("%Y/%m/%d"),
+                        backup_id
+                    );
+
+                    self.upload_backup(&s3_client, &s3_source, &temp_file, &s3_location)
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                "Failed to upload backup to S3 source {} at {}: {}",
+                                s3_source_id, s3_location, e
+                            );
+                            e
+                        })?;
+
+                    (s3_location, size_bytes, "gzip".to_string())
+                }
+            };
 
         // Create backup record
         let new_backup = temps_entities::backups::ActiveModel {
@@ -280,7 +294,7 @@ impl BackupService {
             finished_at: sea_orm::Set(Some(chrono::Utc::now())),
             s3_source_id: sea_orm::Set(s3_source_id),
             s3_location: sea_orm::Set(s3_location.clone()),
-            compression_type: sea_orm::Set("gzip".to_string()),
+            compression_type: sea_orm::Set(compression_type),
             created_by: sea_orm::Set(created_by),
             tags: sea_orm::Set("[]".to_string()),
             size_bytes: sea_orm::Set(Some(size_bytes)),
@@ -385,20 +399,558 @@ impl BackupService {
         Ok(backup)
     }
 
-    async fn backup_database(&self, temp_file: &mut NamedTempFile) -> Result<()> {
-        use sea_orm::{ConnectionTrait, DatabaseBackend};
+    /// Find the Docker container that hosts the internal database by matching the hostname
+    /// from DATABASE_URL against Docker container names and network aliases.
+    ///
+    /// Returns `(container_id, pgdata_path)` if found.
+    async fn find_internal_db_container(&self) -> Result<(String, String), BackupError> {
+        use bollard::query_parameters::ListContainersOptions;
+        use bollard::Docker;
 
-        info!("Creating database backup");
+        let database_url = self.config_service.get_database_url();
+        let url = url::Url::parse(&database_url).map_err(|e| BackupError::Internal {
+            message: format!("Invalid DATABASE_URL: {}", e),
+        })?;
 
-        let backend = self.db.get_database_backend();
-        match backend {
-            DatabaseBackend::Postgres => self.backup_postgres_database(temp_file).await,
-            _ => {
-                anyhow::bail!(
-                    "Database backup is currently supported only for SQLite and PostgreSQL"
-                );
+        let db_host = url.host_str().unwrap_or("localhost").to_string();
+
+        // Skip Docker discovery for local connections
+        if db_host == "localhost" || db_host == "127.0.0.1" || db_host == "::1" {
+            return Err(BackupError::Internal {
+                message: format!(
+                    "Database host '{}' is local — cannot exec into a Docker container",
+                    db_host
+                ),
+            });
+        }
+
+        let docker = Docker::connect_with_local_defaults().map_err(|e| BackupError::Internal {
+            message: format!("Failed to connect to Docker: {}", e),
+        })?;
+
+        // List all running containers
+        let containers = docker
+            .list_containers(Some(ListContainersOptions {
+                all: false, // only running
+                ..Default::default()
+            }))
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to list Docker containers: {}", e),
+            })?;
+
+        // Find container matching the database hostname by:
+        // 1. Container name (e.g., /temps-postgres matches "temps-postgres")
+        // 2. Docker Compose service name in network aliases (e.g., "postgres" on compose network)
+        for container in &containers {
+            let container_id = container.id.as_deref().unwrap_or("");
+            if container_id.is_empty() {
+                continue;
+            }
+
+            // Check container names (Docker prefixes with '/')
+            if let Some(names) = &container.names {
+                for name in names {
+                    let clean_name = name.trim_start_matches('/');
+                    if clean_name == db_host {
+                        return self
+                            .resolve_pgdata_for_container(&docker, container_id)
+                            .await;
+                    }
+                }
+            }
+
+            // Check network aliases (Docker Compose sets the service name as an alias)
+            if let Some(network_settings) = &container.network_settings {
+                if let Some(networks) = &network_settings.networks {
+                    for (_net_name, net_config) in networks {
+                        if let Some(aliases) = &net_config.aliases {
+                            if aliases.iter().any(|a| a == &db_host) {
+                                return self
+                                    .resolve_pgdata_for_container(&docker, container_id)
+                                    .await;
+                            }
+                        }
+                    }
+                }
             }
         }
+
+        Err(BackupError::Internal {
+            message: format!(
+                "No Docker container found for database host '{}'. \
+                 Ensure the database is running in a Docker container with WAL-G installed.",
+                db_host
+            ),
+        })
+    }
+
+    /// Resolve the PGDATA path for a container by inspecting its environment variables.
+    async fn resolve_pgdata_for_container(
+        &self,
+        docker: &bollard::Docker,
+        container_id: &str,
+    ) -> Result<(String, String), BackupError> {
+        let inspect = docker
+            .inspect_container(
+                container_id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to inspect container {}: {}", container_id, e),
+            })?;
+
+        // Try to find PGDATA from container environment
+        let mut pgdata = String::from("/var/lib/postgresql/data");
+        if let Some(config) = &inspect.config {
+            if let Some(env) = &config.env {
+                for var in env {
+                    if let Some(val) = var.strip_prefix("PGDATA=") {
+                        pgdata = val.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok((container_id.to_string(), pgdata))
+    }
+
+    /// Perform a WAL-G backup by exec'ing into the internal database container.
+    /// WAL-G uploads directly to S3 — no data flows through the Temps process.
+    ///
+    /// Returns `(s3_location, size_bytes)` on success. The `s3_location` is the WAL-G
+    /// S3 prefix (starts with `s3://`), used by the restore logic to detect WAL-G backups.
+    async fn backup_postgres_walg(
+        &self,
+        s3_source: &S3Source,
+        _backup_id: &str,
+    ) -> Result<(String, i32), BackupError> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        use bollard::Docker;
+
+        let (container_id, pgdata) = self.find_internal_db_container().await?;
+
+        info!(
+            "Starting WAL-G backup via container {} (PGDATA={})",
+            container_id, pgdata
+        );
+
+        let docker = Docker::connect_with_local_defaults().map_err(|e| BackupError::Internal {
+            message: format!("Failed to connect to Docker: {}", e),
+        })?;
+
+        // Verify WAL-G is installed in the container
+        let check_exec = docker
+            .create_exec(
+                &container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["which", "wal-g"]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to check WAL-G in container: {}", e),
+            })?;
+
+        docker
+            .start_exec(
+                &check_exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to run WAL-G check: {}", e),
+            })?;
+
+        // Wait for check to complete
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&check_exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect WAL-G check exec: {}", e),
+                    })?;
+            if let Some(running) = inspect.running {
+                if !running {
+                    if let Some(exit_code) = inspect.exit_code {
+                        if exit_code != 0 {
+                            return Err(BackupError::Internal {
+                                message: format!(
+                                    "WAL-G is not installed in container {}. \
+                                     Use the gotempsh/timescaledb-walg image.",
+                                    container_id
+                                ),
+                            });
+                        }
+                    }
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        // Build WAL-G S3 prefix using a STABLE path (no date or backup_id).
+        // WAL-G requires all backups and WAL segments to share the same prefix so that:
+        // - wal-g wal-push archives WAL to {prefix}/wal_005/
+        // - wal-g backup-push stores base backups in {prefix}/basebackups_005/
+        // - wal-g backup-fetch LATEST finds the right backup + WAL chain
+        // - wal-g delete retain works across all backups
+        let walg_s3_prefix = format!(
+            "s3://{}/{}/internal_db/walg",
+            s3_source.bucket_name,
+            s3_source.bucket_path.trim_matches('/'),
+        );
+
+        // Decrypt S3 credentials for WAL-G environment variables
+        let decrypted_access_key = self
+            .encryption_service
+            .decrypt_string(&s3_source.access_key_id)
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to decrypt S3 access key: {}", e),
+            })?;
+
+        let decrypted_secret_key = self
+            .encryption_service
+            .decrypt_string(&s3_source.secret_key)
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to decrypt S3 secret key: {}", e),
+            })?;
+
+        // Build environment variables for WAL-G
+        let mut env_vars: Vec<String> = vec![
+            format!("WALG_S3_PREFIX={}", walg_s3_prefix),
+            format!("AWS_ACCESS_KEY_ID={}", decrypted_access_key),
+            format!("AWS_SECRET_ACCESS_KEY={}", decrypted_secret_key),
+            format!("AWS_REGION={}", s3_source.region),
+            format!("PGDATA={}", pgdata),
+        ];
+
+        // Resolve S3 endpoint for use inside the Docker container.
+        // localhost/127.0.0.1 endpoints are translated to Docker-resolvable addresses.
+        let s3_creds = temps_providers::S3Credentials {
+            access_key_id: decrypted_access_key.clone(),
+            secret_key: decrypted_secret_key.clone(),
+            region: s3_source.region.clone(),
+            endpoint: s3_source.endpoint.clone(),
+            bucket_name: s3_source.bucket_name.clone(),
+            bucket_path: s3_source.bucket_path.clone(),
+            force_path_style: s3_source.force_path_style.unwrap_or(true),
+        };
+        if let Some(resolved_endpoint) = s3_creds
+            .resolve_endpoint_for_container(&docker, &container_id)
+            .await
+        {
+            env_vars.push(format!("AWS_ENDPOINT={}", resolved_endpoint));
+        }
+
+        if s3_source.force_path_style.unwrap_or(true) {
+            env_vars.push("AWS_S3_FORCE_PATH_STYLE=true".to_string());
+        }
+
+        let env_refs: Vec<&str> = env_vars.iter().map(|s| s.as_str()).collect();
+
+        // Run wal-g backup-push
+        info!("Running wal-g backup-push in container {}", container_id);
+
+        let exec = docker
+            .create_exec(
+                &container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["wal-g", "backup-push", &pgdata]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    env: Some(env_refs.clone()),
+                    user: Some("postgres"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create WAL-G exec: {}", e),
+            })?;
+
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start WAL-G exec: {}", e),
+            })?;
+
+        // Poll for completion
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect WAL-G exec: {}", e),
+                    })?;
+            if let Some(running) = inspect.running {
+                if !running {
+                    if let Some(exit_code) = inspect.exit_code {
+                        if exit_code != 0 {
+                            return Err(BackupError::Internal {
+                                message: format!(
+                                    "wal-g backup-push failed with exit code {} in container {}",
+                                    exit_code, container_id
+                                ),
+                            });
+                        }
+                    }
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // Calculate total backup size by listing objects under the WAL-G prefix
+        let s3_client = self.create_s3_client(s3_source).await?;
+        let prefix = format!(
+            "{}/internal_db/walg/basebackups_005/",
+            s3_source.bucket_path.trim_matches('/'),
+        );
+
+        let mut total_size: i64 = 0;
+        let mut continuation_token: Option<String> = None;
+        loop {
+            let mut req = s3_client
+                .list_objects_v2()
+                .bucket(&s3_source.bucket_name)
+                .prefix(&prefix);
+
+            if let Some(token) = continuation_token.take() {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| BackupError::S3(format!("Failed to list WAL-G objects: {}", e)))?;
+
+            for obj in resp.contents() {
+                total_size += obj.size().unwrap_or(0);
+            }
+
+            if resp.is_truncated() == Some(true) {
+                continuation_token = resp.next_continuation_token().map(|s| s.to_string());
+            } else {
+                break;
+            }
+        }
+
+        info!(
+            "WAL-G backup completed: {} ({} bytes)",
+            walg_s3_prefix, total_size
+        );
+
+        // Enable continuous WAL archiving for the internal database.
+        // Write S3 credentials to an env file on the shared volume, then configure
+        // archive_command to source it before running wal-g wal-push.
+        // Failures here are logged but do NOT fail the backup.
+        if let Err(e) = self
+            .enable_internal_wal_archiving(&docker, &container_id, &env_vars, &pgdata)
+            .await
+        {
+            error!(
+                "Failed to enable WAL archiving for internal DB in container '{}': {}. \
+                 Base backup succeeded but continuous WAL archiving is not active.",
+                container_id, e
+            );
+        }
+
+        Ok((walg_s3_prefix, total_size as i32))
+    }
+
+    /// Write WAL-G credentials to an env file on the shared volume and enable
+    /// continuous WAL archiving for the internal database via `ALTER SYSTEM`.
+    ///
+    /// Same approach as external PostgreSQL services: the env file is refreshed on
+    /// every backup so credential rotations are picked up automatically.
+    async fn enable_internal_wal_archiving(
+        &self,
+        docker: &bollard::Docker,
+        container_id: &str,
+        env_vars: &[String],
+        pgdata: &str,
+    ) -> Result<(), BackupError> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+
+        // Determine the volume mount root (parent of PGDATA) for the env file location.
+        // E.g., PGDATA=/var/lib/postgresql/data -> env file at /var/lib/postgresql/walg.env
+        let volume_root = std::path::Path::new(pgdata)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/var/lib/postgresql".to_string());
+        let walg_env_path = format!("{}/walg.env", volume_root);
+
+        // Filter to only S3/WAL-G env vars (no PGDATA, no PG connection vars)
+        let env_file_lines: Vec<&String> = env_vars
+            .iter()
+            .filter(|line| line.starts_with("WALG_") || line.starts_with("AWS_"))
+            .collect();
+
+        // Write the env file via docker exec
+        let write_cmd = format!(
+            "printf '%s\\n' {} > {} && chmod 600 {}",
+            env_file_lines
+                .iter()
+                .map(|line| format!("'export {}'", line.replace('\'', "'\\''")))
+                .collect::<Vec<_>>()
+                .join(" "),
+            walg_env_path,
+            walg_env_path,
+        );
+
+        let exec = docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh", "-c", &write_cmd]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    user: Some("postgres"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create env file write exec: {}", e),
+            })?;
+
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start env file write exec: {}", e),
+            })?;
+
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect env file write exec: {}", e),
+                    })?;
+            if inspect.running == Some(false) {
+                if inspect.exit_code != Some(0) {
+                    return Err(BackupError::Internal {
+                        message: format!(
+                            "Failed to write walg.env (exit code {:?})",
+                            inspect.exit_code
+                        ),
+                    });
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        info!(
+            "Written WAL-G credentials to {} in container '{}'",
+            walg_env_path, container_id
+        );
+
+        // Parse DATABASE_URL for psql credentials
+        let database_url = self.config_service.get_database_url();
+        let url = url::Url::parse(&database_url).map_err(|e| BackupError::Internal {
+            message: format!("Invalid DATABASE_URL for ALTER SYSTEM: {}", e),
+        })?;
+        let pg_user = url.username();
+        let pg_password = url.password().unwrap_or("");
+
+        // Enable archive_command via ALTER SYSTEM + pg_reload_conf().
+        // Use two separate -c flags because ALTER SYSTEM cannot run inside a
+        // transaction block, and psql wraps multiple statements in a single -c
+        // into a transaction.
+        let archive_command = format!(". {} && wal-g wal-push %p", walg_env_path);
+        let alter_sql = format!(
+            "ALTER SYSTEM SET archive_command = '{}'",
+            archive_command.replace('\'', "''")
+        );
+        let reload_sql = "SELECT pg_reload_conf()";
+
+        let password_env = format!("PGPASSWORD={}", pg_password);
+        let exec = docker
+            .create_exec(
+                container_id,
+                CreateExecOptions {
+                    cmd: Some(vec![
+                        "psql", "-U", pg_user, "-c", &alter_sql, "-c", reload_sql,
+                    ]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    env: Some(vec![&password_env]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create ALTER SYSTEM exec: {}", e),
+            })?;
+
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start ALTER SYSTEM exec: {}", e),
+            })?;
+
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect ALTER SYSTEM exec: {}", e),
+                    })?;
+            if inspect.running == Some(false) {
+                if inspect.exit_code != Some(0) {
+                    return Err(BackupError::Internal {
+                        message: format!(
+                            "ALTER SYSTEM SET archive_command failed (exit code {:?})",
+                            inspect.exit_code
+                        ),
+                    });
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        info!(
+            "Enabled continuous WAL archiving for internal DB in container '{}'",
+            container_id
+        );
+
+        Ok(())
     }
 
     /// Fetches the PostgreSQL version from the database
@@ -637,7 +1189,7 @@ impl BackupService {
         // Instead we redirect stderr to a file inside the container and poll for completion.
         let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
         let pg_dump_shell_cmd = format!(
-            "pg_dump --format=plain --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
+            "pg_dump --format=plain --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
             host, port_str, username, database, stderr_path, container_backup_path
         );
 
@@ -1489,6 +2041,16 @@ impl BackupService {
         backup: &temps_entities::backups::Model,
         s3_source: &temps_entities::s3_sources::Model,
     ) -> Result<(), BackupError> {
+        // Route to WAL-G restore if the backup was created with WAL-G (s3:// prefix)
+        if backup.s3_location.starts_with("s3://") {
+            return self.restore_postgres_walg(backup, s3_source).await;
+        }
+
+        // Legacy restore path: pg_dump SQL via psql/pg_restore sidecar
+        use bollard::exec::CreateExecOptions;
+        use bollard::models::ContainerCreateBody as Config;
+        use bollard::query_parameters::RemoveContainerOptions;
+        use bollard::Docker;
         use std::io::Read;
 
         info!("Restoring PostgreSQL backup: {}", backup.backup_id);
@@ -1499,7 +2061,7 @@ impl BackupService {
             .await
             .map_err(|e| BackupError::S3(e.to_string()))?;
 
-        // Download backup
+        // Download backup (gzipped SQL)
         let response = s3_client
             .get_object()
             .bucket(&s3_source.bucket_name)
@@ -1520,12 +2082,6 @@ impl BackupService {
         let mut decompressed_data = Vec::new();
         decoder.read_to_end(&mut decompressed_data)?;
 
-        // Write decompressed backup to a temporary file
-        let mut temp_file = NamedTempFile::new()?;
-        use std::io::Write;
-        temp_file.write_all(&decompressed_data)?;
-        temp_file.flush()?;
-
         // Get database URL from server configuration
         let database_url = &self.config_service.get_database_url();
 
@@ -1538,75 +2094,720 @@ impl BackupService {
         let port = url.port().unwrap_or(5432);
         let database = url.path().trim_start_matches('/');
         let username = url.username();
-        let password = url.password();
+        let password = url.password().unwrap_or("");
 
         // Detect backup format from S3 location path:
         // - .pgdump.gz / backup.postgresql.gz = custom format (pg_restore) [legacy backups]
         // - .sql.gz = plain SQL format (psql) [current format]
         let is_plain_format = backup.s3_location.ends_with(".sql.gz");
 
-        let mut cmd;
-        if is_plain_format {
-            // Plain SQL format: pipe decompressed SQL through psql
-            cmd = tokio::process::Command::new("psql");
-            cmd.arg("--no-password")
-                .arg("--host")
-                .arg(host)
-                .arg("--port")
-                .arg(port.to_string())
-                .arg("--username")
-                .arg(username)
-                .arg("--dbname")
-                .arg(database)
-                .arg("--file")
-                .arg(temp_file.path());
-        } else {
-            // Custom format: use pg_restore
-            cmd = tokio::process::Command::new("pg_restore");
-            cmd.arg("--verbose")
-                .arg("--clean") // Drop existing objects before recreating
-                .arg("--if-exists") // Don't error if objects don't exist
-                .arg("--no-password")
-                .arg("--host")
-                .arg(host)
-                .arg("--port")
-                .arg(port.to_string())
-                .arg("--username")
-                .arg(username)
-                .arg("--dbname")
-                .arg(database)
-                .arg(temp_file.path());
-        }
-
-        // Set password via environment variable if provided
-        if let Some(pwd) = password {
-            cmd.env("PGPASSWORD", pwd);
-        }
-
-        let restore_tool = if is_plain_format {
-            "psql"
-        } else {
-            "pg_restore"
-        };
-        info!(
-            "Running {} command for backup {}",
-            restore_tool, backup.backup_id
-        );
-        let output = cmd.output().await.map_err(|e| BackupError::Internal {
-            message: format!(
-                "Failed to execute {}: {}. Make sure {} is installed and in PATH",
-                restore_tool, e, restore_tool
-            ),
+        // Connect to Docker — restore uses a sidecar container to ensure
+        // psql/pg_restore version matches the database, avoiding host dependency
+        let docker = Docker::connect_with_local_defaults().map_err(|e| BackupError::Internal {
+            message: format!("Failed to connect to Docker: {}", e),
         })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BackupError::Internal {
-                message: format!("{} failed: {}", restore_tool, stderr),
-            });
+        // Get PostgreSQL version to match the sidecar image
+        let version_str = self
+            .get_postgres_version()
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to get PostgreSQL version: {}", e),
+            })?;
+        let major_version =
+            self.parse_postgres_version(&version_str)
+                .map_err(|e| BackupError::Internal {
+                    message: format!("Failed to parse PostgreSQL version: {}", e),
+                })?;
+        let image_tag = self.get_postgres_image_tag(&major_version);
+
+        // Pull the matching PostgreSQL Docker image
+        self.pull_postgres_image(&image_tag)
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to pull Docker image: {}", e),
+            })?;
+
+        // Write decompressed backup to a bind-mount directory so the sidecar can read it
+        let restore_dir = self
+            .config_service
+            .data_dir()
+            .join("backups")
+            .join("restore_tmp");
+        tokio::fs::create_dir_all(&restore_dir)
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!(
+                    "Failed to create restore temp directory {}: {}",
+                    restore_dir.display(),
+                    e
+                ),
+            })?;
+
+        let restore_filename = format!("{}.sql", uuid::Uuid::new_v4());
+        let host_restore_path = restore_dir.join(&restore_filename);
+        let container_restore_path = format!("/restore/{}", restore_filename);
+
+        tokio::fs::write(&host_restore_path, &decompressed_data)
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!(
+                    "Failed to write restore file {}: {}",
+                    host_restore_path.display(),
+                    e
+                ),
+            })?;
+
+        // Create sidecar container name
+        let container_name = format!("temps-pg-restore-{}", uuid::Uuid::new_v4());
+
+        // URL-decode password for env var
+        let decoded_password = urlencoding::decode(password)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| password.to_string());
+        let pgpassword_env = format!("PGPASSWORD={}", decoded_password);
+
+        let config = Config {
+            image: Some(image_tag),
+            entrypoint: Some(vec!["/bin/sleep".to_string()]),
+            cmd: Some(vec!["3600".to_string()]),
+            env: Some(vec![pgpassword_env.clone()]),
+            user: Some("root".to_string()),
+            host_config: Some(bollard::models::HostConfig {
+                network_mode: Some("host".to_string()),
+                auto_remove: Some(true),
+                binds: Some(vec![format!("{}:/restore:rw", restore_dir.display())]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Helper to remove the sidecar on any error path
+        let remove_sidecar = |docker: bollard::Docker, name: String| async move {
+            let _ = docker
+                .remove_container(
+                    &name,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        };
+
+        info!("Creating temporary Docker container for PostgreSQL restore");
+
+        docker
+            .create_container(
+                Some(
+                    bollard::query_parameters::CreateContainerOptionsBuilder::new()
+                        .name(&container_name)
+                        .build(),
+                ),
+                config,
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create restore container: {}", e),
+            })?;
+
+        docker
+            .start_container(
+                &container_name,
+                Some(bollard::query_parameters::StartContainerOptionsBuilder::new().build()),
+            )
+            .await
+            .map_err(|e| {
+                let docker = docker.clone();
+                let name = container_name.clone();
+                tokio::spawn(async move { remove_sidecar(docker, name).await });
+                BackupError::Internal {
+                    message: format!("Failed to start restore container: {}", e),
+                }
+            })?;
+
+        let port_str = port.to_string();
+
+        // Build the restore command based on backup format
+        let (restore_tool, restore_cmd) = if is_plain_format {
+            // Plain SQL: use psql to execute the dump.
+            // NOTE: We intentionally do NOT use ON_ERROR_STOP=on because pg_dump --clean
+            // generates "DROP ... ONLY" statements that TimescaleDB rejects for hypertables.
+            // These errors are benign — the actual CREATE TABLE and COPY statements succeed.
+            let cmd = format!(
+                "psql --no-password --host={} --port={} --username={} --dbname={} --file={}",
+                host, port_str, username, database, container_restore_path
+            );
+            ("psql", cmd)
+        } else {
+            // Custom format: use pg_restore
+            let cmd = format!(
+                "pg_restore --verbose --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} {}",
+                host, port_str, username, database, container_restore_path
+            );
+            ("pg_restore", cmd)
+        };
+
+        info!(
+            "Running {} in Docker sidecar for backup {}",
+            restore_tool, backup.backup_id
+        );
+
+        // Capture stderr in a file for diagnostics
+        let stderr_path = format!("/restore/{}.stderr", uuid::Uuid::new_v4());
+        let full_cmd = format!("{} 2>{}", restore_cmd, stderr_path);
+
+        let exec = docker
+            .create_exec(
+                &container_name,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh", "-c", &full_cmd]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    env: Some(vec![pgpassword_env.as_str()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create exec for {}: {}", restore_tool, e),
+            })?;
+
+        // Start detached — no streaming through Temps process
+        use bollard::exec::StartExecOptions;
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start exec for {}: {}", restore_tool, e),
+            })?;
+
+        // Poll for completion
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect exec: {}", e),
+                    })?;
+            if let Some(running) = inspect.running {
+                if !running {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        info!("PostgreSQL backup restored successfully");
+        // Read stderr from bind mount for diagnostics
+        let host_stderr_path =
+            restore_dir.join(std::path::Path::new(&stderr_path).file_name().unwrap());
+        let stderr_data = tokio::fs::read(&host_stderr_path).await.unwrap_or_default();
+        let _ = tokio::fs::remove_file(&host_stderr_path).await;
+
+        // Check exit code
+        let exec_inspect =
+            docker
+                .inspect_exec(&exec.id)
+                .await
+                .map_err(|e| BackupError::Internal {
+                    message: format!("Failed to inspect exec result: {}", e),
+                })?;
+
+        let exit_code = exec_inspect.exit_code.unwrap_or(-1);
+
+        // Clean up sidecar and restore file
+        remove_sidecar(docker.clone(), container_name.clone()).await;
+        let _ = tokio::fs::remove_file(&host_restore_path).await;
+
+        let stderr = String::from_utf8_lossy(&stderr_data);
+
+        if exit_code != 0 {
+            // For psql, exit code 1 = SQL errors in the script (may include benign
+            // TimescaleDB hypertable warnings from --clean). Exit code 2 = connection error.
+            // Exit code 3 = script error. For pg_restore, exit code 1 with "errors ignored"
+            // is common for --clean on existing schemas.
+            if is_plain_format && exit_code == 1 {
+                // psql exit 1 = some SQL statements failed. This is expected when
+                // pg_dump --clean generates "DROP ... ONLY" on TimescaleDB hypertables.
+                // Log as warning, not error.
+                warn!(
+                    "{} completed with warnings (exit code {}): {}",
+                    restore_tool, exit_code, stderr
+                );
+            } else if !is_plain_format && exit_code == 1 && stderr.contains("errors ignored") {
+                warn!("{} completed with ignored errors: {}", restore_tool, stderr);
+            } else {
+                return Err(BackupError::Internal {
+                    message: format!(
+                        "{} failed with exit code {}: {}",
+                        restore_tool, exit_code, stderr
+                    ),
+                });
+            }
+        } else if !stderr.is_empty() {
+            debug!("{} stderr output: {}", restore_tool, stderr);
+        }
+
+        info!("PostgreSQL backup restored successfully via Docker sidecar");
+        Ok(())
+    }
+
+    /// Restore internal database from a WAL-G backup.
+    ///
+    /// Multi-step process (same as external service WAL-G restore):
+    /// 1. Fetch backup to temp directory on the shared volume (while PG still runs)
+    /// 2. Add recovery.signal + recovery config, copy pg_wal
+    /// 3. Disable restart policy, stop container
+    /// 4. Swap PGDATA via ephemeral helper container (volumes_from)
+    /// 5. Re-enable restart policy, start container → PG recovers → promotes
+    async fn restore_postgres_walg(
+        &self,
+        backup: &temps_entities::backups::Model,
+        s3_source: &temps_entities::s3_sources::Model,
+    ) -> Result<(), BackupError> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+        use bollard::Docker;
+
+        info!(
+            "Restoring internal database from WAL-G backup: {}",
+            backup.s3_location
+        );
+
+        let (container_id, pgdata) = self.find_internal_db_container().await?;
+
+        let docker = Docker::connect_with_local_defaults().map_err(|e| BackupError::Internal {
+            message: format!("Failed to connect to Docker: {}", e),
+        })?;
+
+        // Build WAL-G environment variables
+        let decrypted_access_key = self
+            .encryption_service
+            .decrypt_string(&s3_source.access_key_id)
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to decrypt S3 access key: {}", e),
+            })?;
+        let decrypted_secret_key = self
+            .encryption_service
+            .decrypt_string(&s3_source.secret_key)
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to decrypt S3 secret key: {}", e),
+            })?;
+
+        let walg_s3_prefix = &backup.s3_location;
+        let mut walg_env: Vec<String> = vec![
+            format!("WALG_S3_PREFIX={}", walg_s3_prefix),
+            format!("AWS_ACCESS_KEY_ID={}", decrypted_access_key),
+            format!("AWS_SECRET_ACCESS_KEY={}", decrypted_secret_key),
+            format!("AWS_REGION={}", s3_source.region),
+            format!("PGDATA={}", pgdata),
+        ];
+
+        // Resolve S3 endpoint for use inside the Docker container.
+        let s3_creds = temps_providers::S3Credentials {
+            access_key_id: decrypted_access_key.clone(),
+            secret_key: decrypted_secret_key.clone(),
+            region: s3_source.region.clone(),
+            endpoint: s3_source.endpoint.clone(),
+            bucket_name: s3_source.bucket_name.clone(),
+            bucket_path: s3_source.bucket_path.clone(),
+            force_path_style: s3_source.force_path_style.unwrap_or(true),
+        };
+        if let Some(resolved_endpoint) = s3_creds
+            .resolve_endpoint_for_container(&docker, &container_id)
+            .await
+        {
+            walg_env.push(format!("AWS_ENDPOINT={}", resolved_endpoint));
+        }
+        if s3_source.force_path_style.unwrap_or(true) {
+            walg_env.push("AWS_S3_FORCE_PATH_STYLE=true".to_string());
+        }
+
+        let walg_env_refs: Vec<&str> = walg_env.iter().map(|s| s.as_str()).collect();
+
+        // Step 1: Fetch backup to temp directory on the shared volume.
+        // Must be on the volume (not /tmp) so the helper container can see it via volumes_from.
+        // The parent of PGDATA is typically the volume mount point (e.g., /var/lib/postgresql).
+        let volume_root = std::path::Path::new(&pgdata)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/var/lib/postgresql".to_string());
+        let restore_temp = format!("{}/restore_temp", volume_root);
+
+        info!(
+            "Step 1: Fetching WAL-G backup to {} in container {}",
+            restore_temp, container_id
+        );
+        let fetch_cmd_str = format!(
+            "mkdir -p {restore_temp} && rm -rf {restore_temp}/* && wal-g backup-fetch {restore_temp} LATEST > /tmp/walg_restore.log 2>&1",
+            restore_temp = restore_temp,
+        );
+
+        let exec = docker
+            .create_exec(
+                &container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh", "-c", &fetch_cmd_str]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    env: Some(walg_env_refs.clone()),
+                    user: Some("postgres"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create WAL-G fetch exec: {}", e),
+            })?;
+
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start WAL-G fetch exec: {}", e),
+            })?;
+
+        // Poll for fetch completion
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect WAL-G fetch exec: {}", e),
+                    })?;
+            if let Some(running) = inspect.running {
+                if !running {
+                    if let Some(exit_code) = inspect.exit_code {
+                        if exit_code != 0 {
+                            return Err(BackupError::Internal {
+                                message: format!(
+                                    "WAL-G backup-fetch failed with exit code {} in container {}",
+                                    exit_code, container_id
+                                ),
+                            });
+                        }
+                    }
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        info!("WAL-G backup fetched to {}", restore_temp);
+
+        // Step 2: Prepare restored PGDATA for recovery.
+        // - recovery.signal: tells PG to enter recovery mode
+        // - restore_command = '/bin/true': no archived WAL to fetch
+        // - recovery_target = 'immediate': stop at backup consistency point
+        // - recovery_target_action = 'promote': promote to primary after recovery
+        // - Copy pg_wal from running PGDATA (WAL not archived to S3)
+        info!("Step 2: Preparing recovery configuration");
+        let prepare_cmd_str = format!(
+            concat!(
+                "touch {restore_temp}/recovery.signal && ",
+                "echo \"restore_command = '/bin/true'\" >> {restore_temp}/postgresql.auto.conf && ",
+                "echo \"recovery_target = 'immediate'\" >> {restore_temp}/postgresql.auto.conf && ",
+                "echo \"recovery_target_action = 'promote'\" >> {restore_temp}/postgresql.auto.conf && ",
+                "rm -rf {restore_temp}/pg_wal && ",
+                "cp -a {pgdata}/pg_wal {restore_temp}/pg_wal"
+            ),
+            restore_temp = restore_temp,
+            pgdata = pgdata,
+        );
+
+        let exec = docker
+            .create_exec(
+                &container_id,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh", "-c", &prepare_cmd_str]),
+                    attach_stdout: Some(false),
+                    attach_stderr: Some(false),
+                    user: Some("postgres"),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create recovery prep exec: {}", e),
+            })?;
+
+        docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start recovery prep exec: {}", e),
+            })?;
+
+        loop {
+            let inspect =
+                docker
+                    .inspect_exec(&exec.id)
+                    .await
+                    .map_err(|e| BackupError::Internal {
+                        message: format!("Failed to inspect recovery prep exec: {}", e),
+                    })?;
+            if inspect.running == Some(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        // Step 3: Disable restart policy and stop container.
+        // The container has restart_policy=always, so Docker would immediately restart it.
+        info!("Step 3: Disabling restart policy and stopping container for PGDATA swap");
+        docker
+            .update_container(
+                &container_id,
+                bollard::models::ContainerUpdateBody {
+                    restart_policy: Some(bollard::models::RestartPolicy {
+                        name: Some(bollard::models::RestartPolicyNameEnum::NO),
+                        maximum_retry_count: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to disable restart policy: {}", e),
+            })?;
+
+        docker
+            .stop_container(
+                &container_id,
+                Some(bollard::query_parameters::StopContainerOptions {
+                    t: Some(30),
+                    signal: None,
+                }),
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to stop container for restore: {}", e),
+            })?;
+
+        // Step 4: Swap PGDATA via ephemeral helper container.
+        // Can't exec into a stopped container, so we create a helper with volumes_from.
+        info!("Step 4: Swapping PGDATA via helper container");
+        let swap_script = format!(
+            "rm -rf {pgdata}/* && cp -a {restore_temp}/* {pgdata}/ && rm -rf {restore_temp}",
+            pgdata = pgdata,
+            restore_temp = restore_temp,
+        );
+
+        // Get the image from the container's config to use the same image for the helper
+        let container_inspect = docker
+            .inspect_container(
+                &container_id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to inspect container for helper image: {}", e),
+            })?;
+
+        let container_image = container_inspect
+            .config
+            .as_ref()
+            .and_then(|c| c.image.clone())
+            .unwrap_or_else(|| "postgres:latest".to_string());
+
+        let helper_name = format!(
+            "{}-restore-helper",
+            container_id.chars().take(12).collect::<String>()
+        );
+        let helper_config = bollard::models::ContainerCreateBody {
+            image: Some(container_image),
+            cmd: Some(vec!["sh".to_string(), "-c".to_string(), swap_script]),
+            host_config: Some(bollard::models::HostConfig {
+                volumes_from: Some(vec![container_id.clone()]),
+                ..Default::default()
+            }),
+            user: Some("root".to_string()),
+            ..Default::default()
+        };
+
+        let helper = docker
+            .create_container(
+                Some(
+                    bollard::query_parameters::CreateContainerOptionsBuilder::new()
+                        .name(&helper_name)
+                        .build(),
+                ),
+                helper_config,
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to create restore helper container: {}", e),
+            })?;
+
+        docker
+            .start_container(
+                &helper.id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start restore helper container: {}", e),
+            })?;
+
+        // Wait for helper to finish
+        let wait_result = docker
+            .wait_container(
+                &helper.id,
+                None::<bollard::query_parameters::WaitContainerOptions>,
+            )
+            .next()
+            .await;
+
+        // Capture helper logs before cleanup
+        let helper_logs = {
+            use futures::TryStreamExt;
+            let log_stream = docker.logs(
+                &helper.id,
+                Some(bollard::query_parameters::LogsOptions {
+                    stdout: true,
+                    stderr: true,
+                    ..Default::default()
+                }),
+            );
+            let logs: Vec<_> = log_stream.try_collect().await.unwrap_or_default();
+            logs.iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+
+        // Clean up helper
+        let _ = docker
+            .remove_container(
+                &helper.id,
+                Some(bollard::query_parameters::RemoveContainerOptions {
+                    force: true,
+                    v: false,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        if let Some(Ok(wait_response)) = wait_result {
+            if wait_response.status_code != 0 {
+                // Re-enable restart policy even on failure
+                let _ = docker
+                    .update_container(
+                        &container_id,
+                        bollard::models::ContainerUpdateBody {
+                            restart_policy: Some(bollard::models::RestartPolicy {
+                                name: Some(bollard::models::RestartPolicyNameEnum::ALWAYS),
+                                maximum_retry_count: None,
+                            }),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                let _ = docker
+                    .start_container(
+                        &container_id,
+                        None::<bollard::query_parameters::StartContainerOptions>,
+                    )
+                    .await;
+
+                return Err(BackupError::Internal {
+                    message: format!(
+                        "PGDATA swap helper exited with code {}. Logs:\n{}",
+                        wait_response.status_code, helper_logs
+                    ),
+                });
+            }
+        }
+
+        // Step 5: Re-enable restart policy and start the container.
+        // PostgreSQL will enter recovery mode, reach consistency point, and promote.
+        info!("Step 5: Re-enabling restart policy and starting container");
+        docker
+            .update_container(
+                &container_id,
+                bollard::models::ContainerUpdateBody {
+                    restart_policy: Some(bollard::models::RestartPolicy {
+                        name: Some(bollard::models::RestartPolicyNameEnum::ALWAYS),
+                        maximum_retry_count: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to re-enable restart policy: {}", e),
+            })?;
+
+        docker
+            .start_container(
+                &container_id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to start container after restore: {}", e),
+            })?;
+
+        // Wait for PostgreSQL to become healthy by polling the database connection.
+        info!("Waiting for PostgreSQL to become ready after restore...");
+        let max_wait = std::time::Duration::from_secs(120);
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > max_wait {
+                return Err(BackupError::Internal {
+                    message: format!(
+                        "PostgreSQL did not become ready within {}s after restore",
+                        max_wait.as_secs()
+                    ),
+                });
+            }
+            // Try connecting to the database
+            let database_url = self.config_service.get_database_url();
+            match sea_orm::Database::connect(&database_url).await {
+                Ok(conn) => {
+                    // Try a simple query to verify it's fully operational
+                    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+                    match conn
+                        .execute(Statement::from_string(
+                            DatabaseBackend::Postgres,
+                            "SELECT 1".to_string(),
+                        ))
+                        .await
+                    {
+                        Ok(_) => {
+                            info!("PostgreSQL is ready after WAL-G restore");
+                            break;
+                        }
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+
+        info!("Internal database WAL-G restore completed successfully");
         Ok(())
     }
 
@@ -2209,6 +3410,29 @@ impl BackupService {
             .await
             .map_err(|e| BackupError::S3(e.to_string()))?;
 
+        // Decrypt S3 credentials for services that pass them to external tools (e.g., WAL-G)
+        let decrypted_access_key = self
+            .encryption_service
+            .decrypt_string(&s3_source.access_key_id)
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to decrypt access key for backup: {}", e),
+            })?;
+        let decrypted_secret_key = self
+            .encryption_service
+            .decrypt_string(&s3_source.secret_key)
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to decrypt secret key for backup: {}", e),
+            })?;
+        let s3_credentials = temps_providers::S3Credentials {
+            access_key_id: decrypted_access_key,
+            secret_key: decrypted_secret_key,
+            region: s3_source.region.clone(),
+            endpoint: s3_source.endpoint.clone(),
+            bucket_name: s3_source.bucket_name.clone(),
+            bucket_path: s3_source.bucket_path.clone(),
+            force_path_style: s3_source.force_path_style.unwrap_or(true),
+        };
+
         // Generate unique backup ID
         let backup_id = Uuid::new_v4().to_string();
 
@@ -2272,6 +3496,7 @@ impl BackupService {
         let backup_location = service_instance
             .backup_to_s3(
                 &s3_client,
+                &s3_credentials,
                 backup.clone(),
                 &s3_source,
                 &subpath,
