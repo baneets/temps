@@ -1904,6 +1904,7 @@ impl PostgresService {
     /// Legacy fallback for containers without WAL-G (e.g., `postgres:18-alpine`,
     /// `pgvector/pgvector:pg17`). Runs pg_dump in a sidecar container on the same
     /// Docker network, streams output through gzip to a temp file, then uploads to S3.
+    #[allow(clippy::too_many_arguments)]
     async fn backup_to_s3_pgdump(
         &self,
         s3_client: &aws_sdk_s3::Client,

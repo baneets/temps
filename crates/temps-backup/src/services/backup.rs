@@ -463,7 +463,7 @@ impl BackupService {
             // Check network aliases (Docker Compose sets the service name as an alias)
             if let Some(network_settings) = &container.network_settings {
                 if let Some(networks) = &network_settings.networks {
-                    for (_net_name, net_config) in networks {
+                    for net_config in networks.values() {
                         if let Some(aliases) = &net_config.aliases {
                             if aliases.iter().any(|a| a == &db_host) {
                                 return self

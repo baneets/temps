@@ -995,7 +995,7 @@ impl ExternalServiceManager {
         })?;
 
         let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum.clone());
+            self.create_service_instance(service.name.clone(), service_type_enum);
 
         // Try to start the existing container first
         match service_instance.start().await {
