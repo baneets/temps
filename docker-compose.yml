@@ -3,11 +3,6 @@ version: '3.9'
 services:
   # PostgreSQL Database (with TimescaleDB + WAL-G for backups)
   postgres:
-    build:
-      context: ./images/timescaledb-walg
-      args:
-        PG_VERSION: 18
-        WALG_VERSION: v3.0.8
     image: gotempsh/timescaledb-walg:pg18
     container_name: temps-postgres
     restart: always
