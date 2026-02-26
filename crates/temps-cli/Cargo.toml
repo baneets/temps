@@ -38,6 +38,7 @@ temps-geo = { path = "../temps-geo" }
 temps-git = { path = "../temps-git" }
 temps-import = { path = "../temps-import" }
 temps-infra = { path = "../temps-infra" }
+temps-log-aggregator = { path = "../temps-log-aggregator" }
 temps-logs = { path = "../temps-logs" }
 # temps-mcp = { path = "../temps-mcp" }
 temps-migrations = { path = "../temps-migrations" }

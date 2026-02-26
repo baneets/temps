@@ -100,6 +100,7 @@ pub enum Permission {
 
     // Logs permissions
     LogsRead,
+    LogsDelete,
 
     // Metrics permissions
     MetricsRead,
@@ -266,6 +267,7 @@ impl fmt::Display for Permission {
             Permission::LoadBalancerRead => "load_balancer:read",
             Permission::LoadBalancerWrite => "load_balancer:write",
             Permission::LogsRead => "logs:read",
+            Permission::LogsDelete => "logs:delete",
             Permission::MetricsRead => "metrics:read",
             Permission::NotificationsRead => "notifications:read",
             Permission::NotificationsWrite => "notifications:write",
@@ -402,6 +404,7 @@ impl Permission {
             "load_balancer:read" => Some(Permission::LoadBalancerRead),
             "load_balancer:write" => Some(Permission::LoadBalancerWrite),
             "logs:read" => Some(Permission::LogsRead),
+            "logs:delete" => Some(Permission::LogsDelete),
             "metrics:read" => Some(Permission::MetricsRead),
             "notifications:read" => Some(Permission::NotificationsRead),
             "notifications:write" => Some(Permission::NotificationsWrite),
@@ -533,6 +536,7 @@ impl Permission {
             Permission::LoadBalancerRead,
             Permission::LoadBalancerWrite,
             Permission::LogsRead,
+            Permission::LogsDelete,
             Permission::MetricsRead,
             Permission::NotificationsRead,
             Permission::NotificationsWrite,
@@ -702,6 +706,7 @@ impl Role {
                 Permission::LoadBalancerRead,
                 Permission::LoadBalancerWrite,
                 Permission::LogsRead,
+                Permission::LogsDelete,
                 Permission::McpConnect,
                 Permission::McpExecute,
                 Permission::McpRead,
@@ -824,6 +829,7 @@ impl Role {
                 Permission::LoadBalancerRead,
                 Permission::LoadBalancerWrite,
                 Permission::LogsRead,
+                Permission::LogsDelete,
                 Permission::MetricsRead,
                 Permission::NotificationsRead,
                 Permission::NotificationsWrite,

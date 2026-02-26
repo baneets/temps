@@ -51,6 +51,7 @@ members = [
     "crates/temps-vulnerability-scanner",
     "crates/temps-kv",
     "crates/temps-blob",
+    "crates/temps-log-aggregator",
 ]
 
 [workspace.package]
@@ -99,7 +100,7 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "std", "fmt
 # Date/Time & UUID
 # ============================================================================
 chrono = { version = "0.4.38", features = ["serde"] }
-uuid = { version = "1.10.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
+uuid = { version = "1.10.0", features = ["v4", "v5", "fast-rng", "macro-diagnostics"] }
 
 # ============================================================================
 # Database - ORM & Migrations
@@ -222,6 +223,7 @@ regex = "1.11"
 flate2 = "1.0"
 tar = "0.4"
 zip = "2.2"
+zstd = "0.13"
 
 # ============================================================================
 # CLI Framework

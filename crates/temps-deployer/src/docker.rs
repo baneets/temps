@@ -859,6 +859,13 @@ impl ContainerDeployer for DockerRuntime {
             ..Default::default()
         };
 
+        // Build container labels (used by log aggregator for container discovery)
+        let container_labels = if request.labels.is_empty() {
+            None
+        } else {
+            Some(request.labels.clone())
+        };
+
         // Create container config
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(request.image_name.clone()),
@@ -872,6 +879,7 @@ impl ContainerDeployer for DockerRuntime {
             exposed_ports: Some(exposed_ports),
             host_config: Some(host_config),
             cmd: request.command.clone(),
+            labels: container_labels,
             ..Default::default()
         };
 
@@ -1396,6 +1404,7 @@ CMD ["cat", "/hello.txt"]
                     log_path: PathBuf::from("/tmp/lifecycle-test.log"),
                     command: Some(vec!["sleep".to_string(), "30".to_string()]),
                     log_config: Some(ContainerLogConfig::app_default()),
+                    labels: HashMap::new(),
                 };
 
                 let deploy_result = runtime.deploy_container(deploy_request).await;

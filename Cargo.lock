@@ -10723,6 +10723,7 @@ dependencies = [
  "temps-import",
  "temps-infra",
  "temps-kv",
+ "temps-log-aggregator",
  "temps-logs",
  "temps-migrations",
  "temps-monitoring",
@@ -10897,6 +10898,7 @@ dependencies = [
  "temps-entities",
  "temps-error-tracking",
  "temps-git",
+ "temps-log-aggregator",
  "temps-logs",
  "temps-presets",
  "temps-providers",
@@ -11316,6 +11318,41 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "temps-log-aggregator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-sdk-s3",
+ "axum 0.8.6",
+ "axum-test 18.1.0",
+ "bollard",
+ "bytes",
+ "chrono",
+ "futures",
+ "futures-util",
+ "hex",
+ "reqwest",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "tempfile",
+ "temps-auth",
+ "temps-core",
+ "temps-database",
+ "temps-entities",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "utoipa",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -12192,6 +12229,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -12913,6 +12951,7 @@ dependencies = [
  "js-sys",
  "rand 0.9.2",
  "serde",
+ "sha1_smol",
  "uuid-macro-internal",
  "wasm-bindgen",
 ]

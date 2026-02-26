@@ -1,0 +1,95 @@
+//! Storage trait definition for log chunk backends
+
+use async_trait::async_trait;
+
+use crate::error::LogAggregatorError;
+
+/// Pluggable storage backend for compressed log chunks.
+///
+/// Implementations must be safe to share across threads and async tasks.
+/// Both filesystem and S3 backends implement this trait identically.
+#[async_trait]
+pub trait LogStorage: Send + Sync + 'static {
+    /// Write a compressed chunk to storage at the given key.
+    ///
+    /// The `data` is already zstd-compressed NDJSON. The implementation stores it as-is.
+    /// Returns the number of bytes written (compressed size).
+    async fn write_chunk(&self, key: &str, data: &[u8]) -> Result<u64, LogAggregatorError>;
+
+    /// Read a compressed chunk from storage by key.
+    ///
+    /// Returns the raw zstd-compressed bytes. The caller is responsible for decompression.
+    async fn read_chunk(&self, key: &str) -> Result<Vec<u8>, LogAggregatorError>;
+
+    /// Read a byte range from a chunk for partial retrieval.
+    ///
+    /// Used with line offset indices to decompress only the needed portion.
+    /// If `end` is None, reads from `start` to the end of the chunk.
+    async fn read_chunk_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+    ) -> Result<Vec<u8>, LogAggregatorError>;
+
+    /// List all chunk keys under a prefix.
+    ///
+    /// The prefix follows the storage layout: `logs/{project_id}/{service}/{YYYY-MM-DD}/{HH}/`
+    async fn list_chunks(&self, prefix: &str) -> Result<Vec<String>, LogAggregatorError>;
+
+    /// Delete a chunk from storage by key.
+    ///
+    /// Returns Ok(()) even if the key does not exist (idempotent deletion).
+    async fn delete_chunk(&self, key: &str) -> Result<(), LogAggregatorError>;
+
+    /// Check if a chunk exists at the given key.
+    async fn chunk_exists(&self, key: &str) -> Result<bool, LogAggregatorError>;
+}
+
+/// Build the storage key for a log chunk.
+///
+/// Layout: `logs/{project_id}/{service}/{YYYY-MM-DD}/{HH}/{container_id}-{sequence}.ndjson.zst`
+pub fn build_storage_key(
+    project_id: &uuid::Uuid,
+    service: &str,
+    date: &chrono::NaiveDate,
+    hour: u32,
+    container_id: &str,
+    sequence: u64,
+) -> String {
+    format!(
+        "logs/{project_id}/{service}/{date}/{hour:02}/{container_id}-{sequence:06}.ndjson.zst",
+        project_id = project_id,
+        service = service,
+        date = date.format("%Y-%m-%d"),
+        hour = hour,
+        container_id = &container_id[..std::cmp::min(12, container_id.len())],
+        sequence = sequence,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_build_storage_key() {
+        let project_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 2, 25).unwrap();
+        let key = build_storage_key(&project_id, "web", &date, 14, "abc123def456", 1);
+        assert_eq!(
+            key,
+            "logs/550e8400-e29b-41d4-a716-446655440000/web/2026-02-25/14/abc123def456-000001.ndjson.zst"
+        );
+    }
+
+    #[test]
+    fn test_build_storage_key_truncates_long_container_id() {
+        let project_id = Uuid::new_v4();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let key = build_storage_key(&project_id, "api", &date, 0, "abcdef123456789extra", 42);
+        assert!(key.contains("abcdef123456-000042.ndjson.zst"));
+    }
+}

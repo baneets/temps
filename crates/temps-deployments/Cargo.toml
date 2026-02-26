@@ -15,6 +15,7 @@ temps-core = { path = "../temps-core" }
 temps-database = { path = "../temps-database" }
 temps-deployer = { path = "../temps-deployer" }
 temps-entities = { path = "../temps-entities" }
+temps-log-aggregator = { path = "../temps-log-aggregator" }
 temps-error-tracking = { path = "../temps-error-tracking" }
 temps-git = { path = "../temps-git" }
 temps-logs = { path = "../temps-logs" }
