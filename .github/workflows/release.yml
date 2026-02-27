@@ -27,7 +27,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libssl-dev
+          sudo apt-get install -y cmake pkg-config libssl-dev protobuf-compiler
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -136,6 +136,9 @@ jobs:
           cd web
           bun install
 
+      - name: Install system dependencies
+        run: brew install protobuf
+
       - name: Install wasm-pack and Build WASM
         run: |
           cargo install wasm-pack
@@ -209,6 +212,9 @@ jobs:
         run: |
           cd web
           bun install
+
+      - name: Install system dependencies
+        run: brew install protobuf
 
       - name: Install wasm-pack and Build WASM
         run: |
