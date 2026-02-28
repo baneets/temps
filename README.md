@@ -155,24 +155,24 @@ curl -fsSL https://temps.sh/deploy.sh | bash
 
 ## Temps vs. Alternatives
 
-| Feature | Temps | Coolify | CapRover | Dokku | Railway | Vercel |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| Self-hosted | Yes | Yes | Yes | Yes | No | No |
-| Single binary install | Yes | No | No | No | -- | -- |
-| Git push deploy | Yes | Yes | Yes | Yes | Yes | Yes |
-| Multi-node / clustering | No | No | Yes | No | Yes | Yes |
-| Web analytics | Yes | No | No | No | No | No |
-| Session replay | Yes | No | No | No | No | No |
-| Error tracking (Sentry-compatible) | Yes | No | No | No | No | No |
-| Uptime monitoring | Yes | No | No | No | No | No |
-| Transactional email + DKIM | Yes | No | No | No | No | No |
-| Managed Postgres/Redis/S3 | Yes | Yes | Partial | Plugin | Yes | Add-on |
-| Pingora proxy (Cloudflare-grade) | Yes | No | No | No | No | No |
-| Auto TLS (HTTP-01 + DNS-01) | Yes | Yes | Yes | Plugin | Yes | Yes |
-| Request-level logging | Yes | No | No | No | Partial | Partial |
-| Preview deployments | Yes | Yes | No | No | Yes | Yes |
-| Built with Rust | Yes | No | No | No | No | No |
-| Free & open source | Yes | Yes | Yes | Yes | No | No |
+| Feature | Temps | Coolify | Dokploy | CapRover | Dokku | Railway | Vercel |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Self-hosted | Yes | Yes | Yes | Yes | Yes | No | No |
+| Single binary install | Yes | No | No | No | No | -- | -- |
+| Git push deploy | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Multi-node / clustering | No | Yes | Yes | Yes | No | Yes | Yes |
+| Web analytics | Yes | No | No | No | No | Yes | Yes |
+| Session replay | Yes | No | No | No | No | No | No |
+| Error tracking (Sentry-compatible) | Yes | No | No | No | No | No | No |
+| Uptime monitoring | Yes | No | No | No | No | No | No |
+| Transactional email + DKIM | Yes | No | No | No | No | No | No |
+| Managed Postgres/Redis/S3 | Yes | Yes | Yes | Partial | Plugin | Yes | Add-on |
+| Pingora proxy (Cloudflare-grade) | Yes | No | No | No | No | No | No |
+| Auto TLS (HTTP-01 + DNS-01) | Yes | Yes | Yes | Yes | Plugin | Yes | Yes |
+| Request-level logging | Yes | No | No | No | No | Partial | Partial |
+| Preview deployments | Yes | Yes | Yes | No | No | Yes | Yes |
+| Built with Rust | Yes | No | No | No | No | No | No |
+| Free & open source | Yes | Yes | Yes | Yes | Yes | No | No |
 
 ---
 

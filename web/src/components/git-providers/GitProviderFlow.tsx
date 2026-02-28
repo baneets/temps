@@ -101,9 +101,11 @@ export function GitProviderFlow({
     refetchInterval: isPollingInstallations ? 2000 : false, // Poll every 2s when active
   })
 
-  // Fetch domains to check if there's a wildcard domain configured
+  // Fetch wildcard domains to check if there's one configured
   const { data: domainsData } = useQuery({
-    ...listDomainsOptions({}),
+    ...listDomainsOptions({
+      query: { search: '*.', page_size: 10 },
+    }),
     retry: false,
   })
 

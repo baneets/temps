@@ -72,11 +72,13 @@ export function AddRoute() {
   const isLocalMode = useMemo(() => accessMode === 'local', [accessMode])
 
   const { data: domainsData } = useQuery({
-    ...listDomainsOptions(),
+    ...listDomainsOptions({
+      query: { page_size: 1 },
+    }),
   })
 
   const hasAvailableDomains = useMemo(
-    () => domainsData?.domains && domainsData.domains.length > 0,
+    () => (domainsData?.total ?? 0) > 0,
     [domainsData]
   )
 

@@ -33,17 +33,19 @@ export function DomainChallengeStep({
 
   const wildcardDomain = `*.${baseDomain}`
 
-  // Check if domain already exists
-  const { data: domains, isLoading: domainsLoading } = useQuery({
-    ...listDomainsOptions({}),
+  // Check if domain already exists (search by exact wildcard name)
+  const { data: domainsData, isLoading: domainsLoading } = useQuery({
+    ...listDomainsOptions({
+      query: { search: wildcardDomain, page_size: 1 },
+    }),
     retry: false,
   })
 
   // Check if wildcard domain exists
   useEffect(() => {
-    if (domains?.domains) {
-      const existingDomain = domains.domains.find(
-        (d: any) => d.domain === wildcardDomain
+    if (domainsData?.domains) {
+      const existingDomain = domainsData.domains.find(
+        (d) => d.domain === wildcardDomain
       )
       if (existingDomain) {
         // Use queueMicrotask to defer state updates and avoid cascading renders
@@ -56,7 +58,7 @@ export function DomainChallengeStep({
         })
       }
     }
-  }, [domains, wildcardDomain])
+  }, [domainsData, wildcardDomain])
 
   const createDomain = useMutation({
     ...createDomainMutation(),

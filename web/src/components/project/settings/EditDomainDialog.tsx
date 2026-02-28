@@ -1,8 +1,5 @@
 import { CustomDomainResponse, ProjectResponse } from '@/api/client'
-import {
-  getEnvironmentsOptions,
-  listDomainsOptions,
-} from '@/api/client/@tanstack/react-query.gen'
+import { getEnvironmentsOptions } from '@/api/client/@tanstack/react-query.gen'
 import {
   Dialog,
   DialogContent,
@@ -27,10 +24,6 @@ export function EditDomainDialog({
   domain,
   onSuccess,
 }: EditDomainDialogProps) {
-  const { data: domains } = useQuery({
-    ...listDomainsOptions({}),
-  })
-
   const { data: environments } = useQuery({
     ...getEnvironmentsOptions({
       path: {
@@ -45,14 +38,10 @@ export function EditDomainDialog({
         <DialogHeader>
           <DialogTitle>Edit Domain</DialogTitle>
         </DialogHeader>
-        {environments && domains?.domains && domain && (
+        {environments && domain && (
           <DomainForm
             project_id={project.id}
             environments={environments}
-            domains={domains.domains.map((domain) => ({
-              id: domain.id.toString(),
-              domain: domain.domain,
-            }))}
             onSuccess={onSuccess}
             onCancel={() => onOpenChange(false)}
             initialData={domain}

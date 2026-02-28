@@ -4,6 +4,7 @@ import {
 } from '@/api/client'
 import {
   createCustomDomainMutation,
+  listDomainsOptions,
   updateCustomDomainMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
@@ -24,9 +25,9 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
@@ -43,62 +44,64 @@ type DomainFormValues = z.infer<typeof domainFormSchema>
 interface DomainFormProps {
   project_id: number
   environments: DomainEnvironmentResponse[]
-  domains: { id: string; domain: string }[]
   onSuccess: () => void
   onCancel: () => void
   initialData?: CustomDomainResponse
 }
 
+/**
+ * Given a full domain (e.g. "app.example.com") and a list of wildcard domains,
+ * find the matching wildcard and extract the subdomain part.
+ */
+function matchWildcardDomain(
+  fullDomain: string,
+  wildcardDomains: { domain: string }[]
+): { subdomain: string; selectedDomain: string } {
+  for (const wd of wildcardDomains) {
+    const wildcardPattern = wd.domain.replace('*', '(.+)')
+    const regex = new RegExp(`^${wildcardPattern}$`)
+    if (regex.test(fullDomain)) {
+      const wildcardBase = wd.domain.split('*.')?.[1]
+      const subdomain = fullDomain.split(`.${wildcardBase}`)?.[0]
+      return { subdomain: subdomain ?? '', selectedDomain: wd.domain }
+    }
+  }
+  return { subdomain: '', selectedDomain: fullDomain }
+}
+
 export function DomainForm({
   project_id,
   environments,
-  domains,
   onSuccess,
   onCancel,
   initialData,
 }: DomainFormProps) {
-  const getInitialDomainState = () => {
-    if (!initialData?.domain) return { subdomain: '', selectedDomain: '' }
+  // Fetch wildcard domains for initial state matching when editing
+  const { data: wildcardData } = useQuery({
+    ...listDomainsOptions({
+      query: { search: '*.', page_size: 100 },
+    }),
+    enabled: !!initialData,
+  })
 
-    const wildcardDomain = domains.find((d) => {
-      const wildcardPattern = d.domain.replace('*', '(.+)')
-      const regex = new RegExp(`^${wildcardPattern}$`)
-      return regex.test(initialData.domain)
-    })
-
-    if (wildcardDomain) {
-      const wildcardBase = wildcardDomain.domain.split('*.')?.[1]
-      const subdomain = initialData.domain.split(`.${wildcardBase}`)?.[0]
-      return { subdomain, selectedDomain: wildcardDomain.domain }
-    }
-
-    return { subdomain: '', selectedDomain: initialData.domain }
-  }
-
-  const getInitialRedirectDomainState = () => {
-    if (!initialData?.redirect_to) return { subdomain: '', selectedDomain: '' }
-
-    const wildcardDomain = domains.find((d) => {
-      const wildcardPattern = d.domain.replace('*', '(.+)')
-      const regex = new RegExp(`^${wildcardPattern}$`)
-      return regex.test(initialData.redirect_to ?? '')
-    })
-
-    if (wildcardDomain) {
-      const wildcardBase = wildcardDomain.domain.split('*.')?.[1]
-      const subdomain = initialData.redirect_to.split(`.${wildcardBase}`)?.[0]
-      return { subdomain, selectedDomain: wildcardDomain.domain }
-    }
-
-    return { subdomain: '', selectedDomain: initialData.redirect_to }
-  }
+  const wildcardDomains = useMemo(
+    () => wildcardData?.domains?.filter((d) => d.domain.startsWith('*.')) ?? [],
+    [wildcardData]
+  )
 
   const { subdomain: initialSubdomain, selectedDomain: initialSelectedDomain } =
-    getInitialDomainState()
+    useMemo(() => {
+      if (!initialData?.domain) return { subdomain: '', selectedDomain: '' }
+      return matchWildcardDomain(initialData.domain, wildcardDomains)
+    }, [initialData?.domain, wildcardDomains])
+
   const {
     subdomain: initialRedirectSubdomain,
     selectedDomain: initialSelectedRedirectDomain,
-  } = getInitialRedirectDomainState()
+  } = useMemo(() => {
+    if (!initialData?.redirect_to) return { subdomain: '', selectedDomain: '' }
+    return matchWildcardDomain(initialData.redirect_to, wildcardDomains)
+  }, [initialData?.redirect_to, wildcardDomains])
 
   const [subdomain, setSubdomain] = useState(initialSubdomain)
   const [selectedDomain, setSelectedDomain] = useState(initialSelectedDomain)

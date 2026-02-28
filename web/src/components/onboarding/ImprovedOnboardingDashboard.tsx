@@ -106,7 +106,10 @@ export function ImprovedOnboardingDashboard() {
   const { data: gitProviders } = useQuery(listGitProvidersOptions({}))
   const { data: connections } = useQuery(listConnectionsOptions({}))
   const { data: projectsData } = useQuery(getProjectsOptions({}))
-  const { data: domains } = useQuery(listDomainsOptions({}))
+  // Fetch domains with pagination -- onboarding users typically have few domains
+  const { data: domainsData } = useQuery(
+    listDomainsOptions({ query: { page_size: 100 } })
+  )
 
   const hasConnections = (connections?.connections?.length || 0) > 0
   const hasProjects = (projectsData?.projects?.length || 0) > 0
@@ -114,23 +117,23 @@ export function ImprovedOnboardingDashboard() {
   const hasPreviewDomain = !!settings?.preview_domain
   // Check if access URLs are already configured (for auto-skip)
   const hasAccessUrls = hasExternalUrl && hasPreviewDomain
-  const hasDomain = (domains?.domains?.length || 0) > 0
+  const hasDomain = (domainsData?.total ?? 0) > 0
   // Check if there's an active/provisioned domain (not just pending)
   const hasActiveDomain =
-    domains?.domains?.some((domain) => domain.status === 'active') || false
+    domainsData?.domains?.some((domain) => domain.status === 'active') || false
   const hasPendingDomain =
-    domains?.domains?.some(
+    domainsData?.domains?.some(
       (domain) => domain.status !== 'active' && domain.status !== 'failed'
     ) || false
   // Check for active wildcard domain specifically
-  const activeWildcardDomain = domains?.domains?.find(
+  const activeWildcardDomain = domainsData?.domains?.find(
     (domain) => domain.status === 'active' && domain.is_wildcard
   )
 
   // Auto-reset onboarding if user refreshes with no resources
   useEffect(() => {
     // Only check after initial data load
-    if (hasAutoSkipped || !domains || !gitProviders || !projectsData) return
+    if (hasAutoSkipped || !domainsData || !gitProviders || !projectsData) return
 
     // If user has saved onboarding state but no resources exist, reset
     const hasSavedState = savedState.currentStep || completedSteps.length > 0
@@ -151,7 +154,7 @@ export function ImprovedOnboardingDashboard() {
     }
   }, [
     hasAutoSkipped,
-    domains,
+    domainsData,
     gitProviders,
     projectsData,
     savedState.currentStep,
@@ -164,7 +167,7 @@ export function ImprovedOnboardingDashboard() {
   // Smart initialization: infer progress from system state on first load
   useEffect(() => {
     // Only run if we haven't set up state yet and data is loaded
-    if (hasAutoSkipped || !domains) return
+    if (hasAutoSkipped || !domainsData) return
 
     const noSavedState = !savedState.currentStep && completedSteps.length === 0
 
@@ -183,7 +186,7 @@ export function ImprovedOnboardingDashboard() {
           )
 
           // Get the first domain to populate state
-          const firstDomain = domains.domains?.[0]
+          const firstDomain = domainsData.domains?.[0]
           if (firstDomain) {
             setCreatedDomain(firstDomain)
             // Extract base domain from wildcard domain (*.example.com -> example.com)
@@ -228,7 +231,7 @@ export function ImprovedOnboardingDashboard() {
       })
     }
   }, [
-    domains,
+    domainsData,
     hasAutoSkipped,
     hasDomain,
     hasPendingDomain,
@@ -242,7 +245,7 @@ export function ImprovedOnboardingDashboard() {
 
   // Check for pending domain and redirect back to domain-challenge step
   useEffect(() => {
-    const pendingDomain = domains?.domains?.find(
+    const pendingDomain = domainsData?.domains?.find(
       (domain) => domain.status !== 'active' && domain.status !== 'failed'
     )
 
@@ -253,7 +256,7 @@ export function ImprovedOnboardingDashboard() {
         setCreatedDomain(pendingDomain)
       })
     }
-  }, [domains, currentStep, hasActiveDomain])
+  }, [domainsData, currentStep, hasActiveDomain])
 
   // Auto-skip to screenshot-setup when active wildcard domain exists
   // This handles the case where user already has a provisioned wildcard domain

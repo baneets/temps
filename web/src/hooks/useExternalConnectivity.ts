@@ -12,8 +12,10 @@ import { useSettings } from './useSettings'
  */
 export function useExternalConnectivity() {
   const { data: settings } = useSettings()
-  const { data: domains } = useQuery({
-    ...listDomainsOptions({}),
+  const { data: wildcardData } = useQuery({
+    ...listDomainsOptions({
+      query: { search: '*.', page_size: 100 },
+    }),
     retry: false,
   })
 
@@ -30,9 +32,12 @@ export function useExternalConnectivity() {
     return isHttps && !isIpAddress
   }
 
+  // Filter to actual wildcard domains (server search is substring match)
+  const wildcardDomains =
+    wildcardData?.domains?.filter((d) => d.domain.startsWith('*.')) || []
+
   // Check if we have a wildcard domain
-  const hasWildcardDomain =
-    domains?.domains?.some((d: any) => d.domain.startsWith('*.')) || false
+  const hasWildcardDomain = wildcardDomains.length > 0
 
   // Check if external URL is configured
   const hasExternalUrl = !!settings?.external_url
@@ -57,9 +62,8 @@ export function useExternalConnectivity() {
     hasExternalUrl,
     isAccessingViaHttpsDomain,
     missingConfigs,
-    domains: domains?.domains || [],
-    wildcardDomains:
-      domains?.domains?.filter((d: any) => d.domain.startsWith('*.')) || [],
+    domains: wildcardData?.domains || [],
+    wildcardDomains,
   }
 }
 

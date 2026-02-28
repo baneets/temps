@@ -1,8 +1,5 @@
 import { ProjectResponse } from '@/api/client'
-import {
-  getEnvironmentsOptions,
-  listDomainsOptions,
-} from '@/api/client/@tanstack/react-query.gen'
+import { getEnvironmentsOptions } from '@/api/client/@tanstack/react-query.gen'
 import {
   Dialog,
   DialogContent,
@@ -25,10 +22,6 @@ export function AddDomainDialog({
   project,
   onSuccess,
 }: AddDomainDialogProps) {
-  const { data: domains } = useQuery({
-    ...listDomainsOptions({}),
-  })
-
   const { data: environments } = useQuery({
     ...getEnvironmentsOptions({
       path: {
@@ -43,14 +36,10 @@ export function AddDomainDialog({
         <DialogHeader>
           <DialogTitle>Add Domain</DialogTitle>
         </DialogHeader>
-        {environments && domains?.domains && (
+        {environments && (
           <DomainForm
             project_id={project.id}
             environments={environments}
-            domains={domains.domains.map((domain) => ({
-              id: domain.id.toString(),
-              domain: domain.domain,
-            }))}
             onSuccess={onSuccess}
             onCancel={() => onOpenChange(false)}
           />
