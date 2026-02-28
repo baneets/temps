@@ -925,6 +925,35 @@ impl PresetConfig {
         }
     }
 
+    /// Parse a JSON value into a PresetConfig for the given preset.
+    ///
+    /// The JSON value should contain the config fields for the preset
+    /// (e.g., `{"dockerfilePath": "docker/Dockerfile"}` for Dockerfile preset).
+    /// The `preset` tag is added automatically based on the provided preset enum.
+    pub fn parse_for_preset(preset: &Preset, value: &serde_json::Value) -> Result<Self, String> {
+        // Build a tagged JSON object by injecting the "preset" discriminator
+        let preset_tag = preset.as_str();
+        let tagged = match value {
+            serde_json::Value::Object(map) => {
+                let mut tagged_map = map.clone();
+                tagged_map.insert(
+                    "preset".to_string(),
+                    serde_json::Value::String(preset_tag.to_string()),
+                );
+                serde_json::Value::Object(tagged_map)
+            }
+            _ => {
+                return Err(format!(
+                    "Expected JSON object for preset config, got: {}",
+                    value
+                ));
+            }
+        };
+
+        serde_json::from_value(tagged)
+            .map_err(|e| format!("Failed to parse preset config for '{}': {}", preset_tag, e))
+    }
+
     /// Get the preset type from this configuration
     pub fn preset_type(&self) -> Preset {
         match self {
@@ -998,5 +1027,52 @@ mod tests {
     fn test_preset_display() {
         assert_eq!(Preset::NextJs.to_string(), "nextjs");
         assert_eq!(Preset::NextJs.display_name(), "Next.js");
+    }
+
+    #[test]
+    fn test_parse_for_preset_dockerfile() {
+        let value =
+            serde_json::json!({"dockerfilePath": "docker/Dockerfile", "buildContext": "./api"});
+        let config = PresetConfig::parse_for_preset(&Preset::Dockerfile, &value).unwrap();
+        match config {
+            PresetConfig::Dockerfile(cfg) => {
+                assert_eq!(cfg.dockerfile_path, Some("docker/Dockerfile".to_string()));
+                assert_eq!(cfg.build_context, Some("./api".to_string()));
+            }
+            _ => panic!("Expected Dockerfile config"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_preset_dockerfile_empty() {
+        let value = serde_json::json!({});
+        let config = PresetConfig::parse_for_preset(&Preset::Dockerfile, &value).unwrap();
+        match config {
+            PresetConfig::Dockerfile(cfg) => {
+                assert_eq!(cfg.dockerfile_path, None);
+                assert_eq!(cfg.build_context, None);
+            }
+            _ => panic!("Expected Dockerfile config"),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_preset_rejects_non_object() {
+        let value = serde_json::json!("not an object");
+        let result = PresetConfig::parse_for_preset(&Preset::Dockerfile, &value);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Expected JSON object"));
+    }
+
+    #[test]
+    fn test_parse_for_preset_nextjs() {
+        let value = serde_json::json!({"buildCommand": "next build"});
+        let config = PresetConfig::parse_for_preset(&Preset::NextJs, &value).unwrap();
+        match config {
+            PresetConfig::NextJs(cfg) => {
+                assert_eq!(cfg.build_command, Some("next build".to_string()));
+            }
+            _ => panic!("Expected NextJs config"),
+        }
     }
 }

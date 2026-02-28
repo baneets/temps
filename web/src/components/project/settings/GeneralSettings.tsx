@@ -49,7 +49,6 @@ interface GeneralSettingsProps {
 
 const projectSchema = z.object({
   name: z.string().min(1, 'Project name is required'),
-  dockerfilePath: z.string().optional(),
 })
 
 type ProjectFormValues = z.infer<typeof projectSchema>
@@ -95,7 +94,6 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
     resolver: zodResolver(projectSchema),
     defaultValues: {
       name: project?.slug || '',
-      dockerfilePath: 'Dockerfile',
     },
   })
 
@@ -270,27 +268,7 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
                 )}
               />
 
-              {project?.preset?.toLowerCase().includes('docker') && (
-                <FormField
-                  control={projectForm.control}
-                  name="dockerfilePath"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Dockerfile Path</FormLabel>
-                      <FormControl>
-                        <Input
-                          {...field}
-                          placeholder="Dockerfile"
-                          className="max-w-[400px]"
-                        />
-                      </FormControl>
-                      <FormDescription className="text-muted-foreground">
-                        Path to your Dockerfile relative to the root directory
-                      </FormDescription>
-                    </FormItem>
-                  )}
-                />
-              )}
+
             </CardContent>
             <CardFooter>
               <Button type="submit" disabled={updateProjectSettings.isPending}>
