@@ -97,8 +97,6 @@ impl DockerRuntime {
         .map_err(|e| BuilderError::Other(format!("Tar task panicked: {}", e)))??;
 
         // Read the completed tar file back into memory for Bollard.
-        // This is still an allocation, but happens after the tar builder is dropped,
-        // so peak memory is (tar file on disk) instead of (directory walk + tar buffer).
         let tar_data = tokio::fs::read(&tmp_path)
             .await
             .map_err(BuilderError::IoError)?;
@@ -317,7 +315,10 @@ impl ImageBuilder for DockerRuntime {
                         let _ = log_file.write_all(stream.as_bytes()).await;
                         debug!("Build: {}", stream.trim());
                     }
-                    if let Some(error) = info.error {
+                    if let Some(error_detail) = info.error_detail {
+                        let error = error_detail
+                            .message
+                            .unwrap_or_else(|| "Unknown build error".to_string());
                         error!("Build error: {}", error);
                         let _ = log_file
                             .write_all(format!("ERROR: {}\n", error).as_bytes())
@@ -478,7 +479,10 @@ impl ImageBuilder for DockerRuntime {
                             callback(stream.clone()).await;
                         }
                     }
-                    if let Some(error) = info.error {
+                    if let Some(error_detail) = info.error_detail {
+                        let error = error_detail
+                            .message
+                            .unwrap_or_else(|| "Unknown build error".to_string());
                         error!("Build error: {}", error);
                         let error_line = format!("ERROR: {}\n", error);
                         let _ = log_file.write_all(error_line.as_bytes()).await;
@@ -491,12 +495,43 @@ impl ImageBuilder for DockerRuntime {
                         return Err(BuilderError::BuildFailed(error));
                     }
                     if let Some(bollard::models::BuildInfoAux::BuildKit(res)) = info.aux {
+                        // Emit vertex names (build step descriptions) when they
+                        // start or complete.  This gives visibility into cached
+                        // layers and overall build progress even when there is
+                        // no command output (logs).
+                        for vertex in &res.vertexes {
+                            if vertex.name.is_empty() {
+                                continue;
+                            }
+                            let status = if vertex.error.is_empty() {
+                                if vertex.completed.is_some() {
+                                    if vertex.cached {
+                                        "CACHED"
+                                    } else {
+                                        "DONE"
+                                    }
+                                } else if vertex.started.is_some() {
+                                    "RUNNING"
+                                } else {
+                                    continue; // Not started yet, skip
+                                }
+                            } else {
+                                "ERROR"
+                            };
+                            let line = format!("[{}] {}\n", status, vertex.name);
+                            let _ = log_file.write_all(line.as_bytes()).await;
+                            debug!("BuildKit vertex: {}", line.trim());
+
+                            if let Some(ref callback) = log_callback {
+                                callback(line).await;
+                            }
+                        }
+
+                        // Emit actual command output from build steps
                         for log in res.logs {
-                            // Write to file
                             let _ = log_file.write_all(&log.msg[..]).await;
                             debug!("BuildKit: {}", String::from_utf8_lossy(&log.msg));
 
-                            // Call log callback if provided
                             if let Some(ref callback) = log_callback {
                                 callback(String::from_utf8_lossy(&log.msg[..]).to_string()).await;
                             }
@@ -558,7 +593,7 @@ impl ImageBuilder for DockerRuntime {
 
         let byte_stream =
             tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new())
-                .map(|r| r.unwrap().freeze());
+                .map(|r| r.map(|b| b.freeze()));
 
         let import_stream = self.docker.import_image_stream(
             bollard::query_parameters::ImportImageOptions {
@@ -761,7 +796,10 @@ impl ImageBuilder for DockerRuntime {
         // Get tags from repo_tags
         let tags = inspect.repo_tags.unwrap_or_default();
 
-        let created = inspect.created.map(|dt| dt.to_rfc3339());
+        let created = inspect.created.and_then(|dt| {
+            chrono::DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond())
+                .map(|c| c.to_rfc3339())
+        });
 
         // Extract WORKDIR from the image config
         let working_dir = inspect
@@ -836,7 +874,7 @@ impl ContainerDeployer for DockerRuntime {
 
         // Create port bindings
         let mut port_bindings = HashMap::new();
-        let mut exposed_ports = HashMap::new();
+        let mut exposed_ports = Vec::new();
 
         for port_mapping in &request.port_mappings {
             let container_port_key =
@@ -847,7 +885,7 @@ impl ContainerDeployer for DockerRuntime {
             };
 
             port_bindings.insert(container_port_key.clone(), Some(vec![host_port_binding]));
-            exposed_ports.insert(container_port_key, HashMap::new());
+            exposed_ports.push(container_port_key);
         }
 
         // Create host config with log rotation to prevent unbounded disk growth
@@ -875,6 +913,13 @@ impl ContainerDeployer for DockerRuntime {
             ..Default::default()
         };
 
+        // Build container labels (used by log aggregator for container discovery)
+        let container_labels = if request.labels.is_empty() {
+            None
+        } else {
+            Some(request.labels.clone())
+        };
+
         // Create container config
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(request.image_name.clone()),
@@ -888,6 +933,7 @@ impl ContainerDeployer for DockerRuntime {
             exposed_ports: Some(exposed_ports),
             host_config: Some(host_config),
             cmd: request.command.clone(),
+            labels: container_labels,
             ..Default::default()
         };
 
@@ -1052,7 +1098,12 @@ impl ContainerDeployer for DockerRuntime {
             status: Self::map_container_status(
                 &state.status.map(|s| s.to_string()).unwrap_or_default(),
             ),
-            created_at: container.created.unwrap_or_else(chrono::Utc::now),
+            created_at: container
+                .created
+                .and_then(|dt| {
+                    chrono::DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond())
+                })
+                .unwrap_or_else(chrono::Utc::now),
             ports: port_mappings,
             environment_vars: env_vars,
         })
@@ -1433,6 +1484,7 @@ CMD ["cat", "/hello.txt"]
                     log_path: PathBuf::from("/tmp/lifecycle-test.log"),
                     command: Some(vec!["sleep".to_string(), "30".to_string()]),
                     log_config: Some(ContainerLogConfig::app_default()),
+                    labels: HashMap::new(),
                 };
 
                 let deploy_result = runtime.deploy_container(deploy_request).await;

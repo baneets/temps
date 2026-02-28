@@ -195,7 +195,7 @@ impl MongodbService {
         let container_name = self.get_container_name();
         let volume_name = format!("temps-mongodb-{}-data", self.name);
 
-        let create_volume_options = bollard::models::VolumeCreateOptions {
+        let create_volume_options = bollard::models::VolumeCreateRequest {
             name: Some(volume_name.clone()),
             driver: Some("local".to_string()),
             ..Default::default()
@@ -267,7 +267,7 @@ impl MongodbService {
 
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(image_tag),
-            exposed_ports: Some(HashMap::from([("27017/tcp".to_string(), HashMap::new())])),
+            exposed_ports: Some(Vec::from(["27017/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.to_string()).collect()),
             labels: Some(container_labels),
             host_config: Some(bollard::models::HostConfig {

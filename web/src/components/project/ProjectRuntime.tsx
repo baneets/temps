@@ -1,5 +1,6 @@
 import { ProjectResponse } from '@/api/client'
 import LogViewer from '../runtime-logs/log-viewer'
+import HistoryLogViewer from '../runtime-logs/history-log-viewer'
 import {
   Card,
   CardContent,
@@ -7,9 +8,19 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
-import { FileText, Rocket } from 'lucide-react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { FileText, Radio, Rocket, ScrollText } from 'lucide-react'
+import {
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from 'react-router-dom'
 
 interface ProjectRuntimeProps {
   project: ProjectResponse
@@ -18,6 +29,19 @@ interface ProjectRuntimeProps {
 export function ProjectRuntime({ project }: ProjectRuntimeProps) {
   const navigate = useNavigate()
   const { slug } = useParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Sync tab with ?tab= search param (defaults to "live")
+  const activeTab = searchParams.get('tab') === 'history' ? 'history' : 'live'
+
+  const handleTabChange = (value: string) => {
+    if (value === 'live') {
+      searchParams.delete('tab')
+    } else {
+      searchParams.set('tab', value)
+    }
+    setSearchParams(searchParams, { replace: true })
+  }
 
   // Check if project has any deployments
   if (!project.last_deployment) {
@@ -47,5 +71,26 @@ export function ProjectRuntime({ project }: ProjectRuntimeProps) {
     )
   }
 
-  return <LogViewer project={project} />
+  return (
+    <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
+      <div className="px-4 pt-4">
+        <TabsList>
+          <TabsTrigger value="live" className="gap-1.5">
+            <Radio className="h-3.5 w-3.5" />
+            Live
+          </TabsTrigger>
+          <TabsTrigger value="history" className="gap-1.5">
+            <ScrollText className="h-3.5 w-3.5" />
+            History
+          </TabsTrigger>
+        </TabsList>
+      </div>
+      <TabsContent value="live" className="mt-0">
+        <LogViewer project={project} />
+      </TabsContent>
+      <TabsContent value="history" className="mt-0">
+        <HistoryLogViewer project={project} />
+      </TabsContent>
+    </Tabs>
+  )
 }

@@ -365,7 +365,7 @@ impl RedisService {
         });
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(config.docker_image.clone()),
-            exposed_ports: Some(HashMap::from([("6379/tcp".to_string(), HashMap::new())])),
+            exposed_ports: Some(Vec::from(["6379/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.as_str().to_string()).collect()),
             labels: Some(
                 container_labels
@@ -395,7 +395,7 @@ impl RedisService {
 
         // Create volume if it doesn't exist
         match docker
-            .create_volume(bollard::models::VolumeCreateOptions {
+            .create_volume(bollard::models::VolumeCreateRequest {
                 name: Some(volume_name.clone()),
                 ..Default::default()
             })

@@ -208,18 +208,10 @@ impl WorkflowTask for VerifyLocalImageJob {
         // Log image details
         if let Some(config) = &image_inspect.config {
             if let Some(exposed_ports) = &config.exposed_ports {
-                let ports: Vec<&String> = exposed_ports.keys().collect();
-                if !ports.is_empty() {
+                if !exposed_ports.is_empty() {
                     self.log(
                         LogLevel::Info,
-                        &format!(
-                            "📡 Exposed ports: {}",
-                            ports
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
+                        &format!("📡 Exposed ports: {}", exposed_ports.join(", ")),
                     )
                     .await;
                 }

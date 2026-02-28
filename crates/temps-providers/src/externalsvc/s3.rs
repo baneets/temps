@@ -227,7 +227,7 @@ impl S3Service {
 
         // Create volume if it doesn't exist
         docker
-            .create_volume(bollard::models::VolumeCreateOptions {
+            .create_volume(bollard::models::VolumeCreateRequest {
                 name: Some(volume_name.clone()),
                 ..Default::default()
             })
@@ -327,7 +327,7 @@ impl S3Service {
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(config.docker_image.to_string()),
             networking_config,
-            exposed_ports: Some(HashMap::from([("9000/tcp".to_string(), HashMap::new())])),
+            exposed_ports: Some(Vec::from(["9000/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.as_str().to_string()).collect()),
             labels: Some(
                 container_labels

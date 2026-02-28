@@ -42,6 +42,7 @@ use temps_git::GitPlugin;
 use temps_import::ImportPlugin;
 use temps_infra::InfraPlugin;
 use temps_kv::KvPlugin;
+use temps_log_aggregator::{LogAggregatorPlugin, StorageConfig};
 use temps_logs::LogsPlugin;
 use temps_monitoring::{DiskSpaceMonitor, OutageDetectionService};
 use temps_notifications::NotificationsPlugin;
@@ -725,6 +726,37 @@ pub async fn start_console_api(
     debug!("Registering DeploymentsPlugin");
     let deployments_plugin = Box::new(DeploymentsPlugin::new());
     plugin_manager.register_plugin(deployments_plugin);
+
+    // 9.1. LogAggregatorPlugin - structured log collection, storage, search, and streaming
+    // Depends on database, Docker (from DeployerPlugin), and AuditLogger (from AuditPlugin)
+    debug!("Registering LogAggregatorPlugin");
+    let log_aggregator_storage_config = match std::env::var("TEMPS_LOG_STORAGE_BACKEND")
+        .unwrap_or_else(|_| "filesystem".to_string())
+        .as_str()
+    {
+        "s3" => StorageConfig::S3 {
+            bucket: std::env::var("TEMPS_LOG_S3_BUCKET")
+                .expect("TEMPS_LOG_S3_BUCKET must be set when using S3 storage backend"),
+            region: std::env::var("TEMPS_LOG_S3_REGION")
+                .unwrap_or_else(|_| "us-east-1".to_string()),
+            endpoint: std::env::var("TEMPS_LOG_S3_ENDPOINT").ok(),
+            access_key_id: std::env::var("TEMPS_LOG_S3_ACCESS_KEY_ID")
+                .expect("TEMPS_LOG_S3_ACCESS_KEY_ID must be set when using S3 storage backend"),
+            secret_access_key: std::env::var("TEMPS_LOG_S3_SECRET_ACCESS_KEY")
+                .expect("TEMPS_LOG_S3_SECRET_ACCESS_KEY must be set when using S3 storage backend"),
+            prefix: Some(
+                std::env::var("TEMPS_LOG_S3_PREFIX").unwrap_or_else(|_| "logs/".to_string()),
+            ),
+            force_path_style: std::env::var("TEMPS_LOG_S3_FORCE_PATH_STYLE")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+        },
+        _ => StorageConfig::Filesystem {
+            base_path: config.data_dir.join("log-aggregator"),
+        },
+    };
+    let log_aggregator_plugin = Box::new(LogAggregatorPlugin::new(log_aggregator_storage_config));
+    plugin_manager.register_plugin(log_aggregator_plugin);
 
     // 9.5. ImportPlugin - provides workload import functionality (depends on GitPlugin, ProjectsPlugin, DeploymentsPlugin)
     debug!("Registering ImportPlugin");

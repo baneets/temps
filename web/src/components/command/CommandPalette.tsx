@@ -286,7 +286,13 @@ const projectNavItems: NavigationItem[] = [
     title: 'Runtime Logs',
     url: 'runtime',
     icon: ScrollText,
-    keywords: ['logs', 'runtime', 'console', 'output'],
+    keywords: ['logs', 'runtime', 'console', 'output', 'live'],
+  },
+  {
+    title: 'Log History',
+    url: 'runtime?tab=history',
+    icon: ScrollText,
+    keywords: ['logs', 'history', 'search', 'archive', 'past'],
   },
   {
     title: 'Speed Insights',

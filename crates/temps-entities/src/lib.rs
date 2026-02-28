@@ -85,4 +85,8 @@ pub mod webhooks;
 pub mod vulnerabilities;
 pub mod vulnerability_scans;
 
+// Log aggregator entities
+pub mod log_chunks;
+pub mod log_events;
+
 pub mod prelude;

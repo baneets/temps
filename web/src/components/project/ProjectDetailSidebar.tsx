@@ -155,7 +155,7 @@ const baseNavItems: NavItem[] = [
 
   // Debugging (Medium Frequency)
   {
-    title: 'Runtime Logs',
+    title: 'Logs',
     url: 'runtime',
     icon: ScrollText,
     kbd: 'L',

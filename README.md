@@ -160,6 +160,7 @@ curl -fsSL https://temps.sh/deploy.sh | bash
 | Self-hosted | Yes | Yes | Yes | Yes | No | No |
 | Single binary install | Yes | No | No | No | -- | -- |
 | Git push deploy | Yes | Yes | Yes | Yes | Yes | Yes |
+| Multi-node / clustering | No | No | Yes | No | Yes | Yes |
 | Web analytics | Yes | No | No | No | No | No |
 | Session replay | Yes | No | No | No | No | No |
 | Error tracking (Sentry-compatible) | Yes | No | No | No | No | No |

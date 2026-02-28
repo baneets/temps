@@ -135,6 +135,11 @@ pub struct DeployRequest {
     pub command: Option<Vec<String>>,
     /// Docker log rotation config (max-size, max-file). If None, uses Docker daemon defaults.
     pub log_config: Option<ContainerLogConfig>,
+    /// Docker labels to apply to the container.
+    /// The log aggregator expects `sh.temps.project_id`, `sh.temps.environment`,
+    /// `sh.temps.service`, and optionally `sh.temps.deploy_id`.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 /// Docker container log rotation configuration
@@ -593,6 +598,7 @@ mod tests {
             log_path,
             command: Some(vec!["node".to_string(), "server.js".to_string()]),
             log_config: Some(ContainerLogConfig::app_default()),
+            labels: HashMap::new(),
         };
 
         assert_eq!(request.image_name, "test-image:latest");
@@ -895,6 +901,7 @@ CMD ["echo", "Hello from container"]
             log_path: temp_dir.path().join("deploy.log"),
             command: None, // No custom command, use default from image
             log_config: Some(ContainerLogConfig::app_default()),
+            labels: HashMap::new(),
         };
 
         assert_eq!(request.environment_vars.len(), 3);

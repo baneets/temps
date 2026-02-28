@@ -203,9 +203,15 @@ impl WorkflowTask for PullExternalImageJob {
                     // Log progress
                     if let Some(status) = &info.status {
                         let progress = info
-                            .progress
+                            .progress_detail
                             .as_ref()
-                            .map(|p| format!(" {}", p))
+                            .and_then(|pd| match (pd.current, pd.total) {
+                                (Some(current), Some(total)) => {
+                                    Some(format!(" {}/{}", current, total))
+                                }
+                                (Some(current), None) => Some(format!(" {}", current)),
+                                _ => None,
+                            })
                             .unwrap_or_default();
 
                         debug!("Pull progress: {}{}", status, progress);

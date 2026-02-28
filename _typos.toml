@@ -1,3 +1,4 @@
 [default.extend-words]
-# flate2 is a Rust crate name (zlib/deflate bindings)
-flate2 = "flate2"
+# Bollard (Docker API client) uses "vertexes" as the field name,
+# matching the upstream Go/BuildKit API naming convention.
+vertexes = "vertexes"

@@ -631,6 +631,26 @@ impl DeployImageJob {
             self.config.service_name.clone()
         };
 
+        // Build Docker labels for the log aggregator to discover this container.
+        // The collector inspects these labels to enrich log lines with project/env/service context.
+        let mut labels = HashMap::new();
+        labels.insert(
+            "sh.temps.project_id".to_string(),
+            context.project_id.to_string(),
+        );
+        labels.insert(
+            "sh.temps.environment".to_string(),
+            context.environment_id.to_string(),
+        );
+        labels.insert(
+            "sh.temps.service".to_string(),
+            self.config.service_name.clone(),
+        );
+        labels.insert(
+            "sh.temps.deploy_id".to_string(),
+            context.deployment_id.to_string(),
+        );
+
         let deploy_request = DeployRequest {
             image_name: image_output.image_tag.clone(),
             container_name,
@@ -642,6 +662,7 @@ impl DeployImageJob {
             log_path,
             command: None,
             log_config: self.log_config.clone(),
+            labels,
         };
 
         let deploy_result = self

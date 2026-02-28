@@ -277,7 +277,7 @@ impl PostgresService {
 
         // Create volume if it doesn't exist
         match docker
-            .create_volume(bollard::models::VolumeCreateOptions {
+            .create_volume(bollard::models::VolumeCreateRequest {
                 name: Some(volume_name.clone()),
                 ..Default::default()
             })
@@ -389,7 +389,7 @@ impl PostgresService {
         });
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(config.docker_image.clone()),
-            exposed_ports: Some(HashMap::from([("5432/tcp".to_string(), HashMap::new())])),
+            exposed_ports: Some(Vec::from(["5432/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.to_string()).collect()),
             labels: Some(container_labels),
             // NOTE: archive_command is NOT set here on purpose.
@@ -908,7 +908,7 @@ impl PostgresService {
             .context("Failed to pull busybox image")?;
 
         self.docker
-            .create_volume(bollard::models::VolumeCreateOptions {
+            .create_volume(bollard::models::VolumeCreateRequest {
                 name: Some(backup_volume.clone()),
                 ..Default::default()
             })
@@ -993,7 +993,7 @@ impl PostgresService {
         // STEP 2: Create volume for upgraded data
         let newdata_volume = format!("{}_newdata", container_name);
         self.docker
-            .create_volume(bollard::models::VolumeCreateOptions {
+            .create_volume(bollard::models::VolumeCreateRequest {
                 name: Some(newdata_volume.clone()),
                 ..Default::default()
             })

@@ -265,7 +265,11 @@ impl BuildCommand {
                     let _ = &info.aux; // Acknowledge aux but don't process it
 
                     // Handle error in build info
-                    if let Some(ref error) = info.error {
+                    if let Some(ref error_detail) = info.error_detail {
+                        let error = error_detail
+                            .message
+                            .as_deref()
+                            .unwrap_or("Unknown build error");
                         eprintln!("  {} Build error: {}", "❌".bright_red(), error);
                         if let Some(ref mut file) = log_file {
                             use tokio::io::AsyncWriteExt;
@@ -534,12 +538,22 @@ impl BuildCommand {
         while let Some(result) = push_stream.next().await {
             match result {
                 Ok(info) => {
-                    if let Some(error) = info.error {
+                    if let Some(ref error_detail) = info.error_detail {
+                        let error = error_detail
+                            .message
+                            .as_deref()
+                            .unwrap_or("Unknown push error");
                         return Err(anyhow::anyhow!("Push failed: {}", error));
                     }
                     if !quiet {
-                        if let Some(status) = info.status {
-                            if let Some(progress) = info.progress {
+                        if let Some(status) = &info.status {
+                            let progress = info.progress_detail.as_ref().and_then(|pd| {
+                                match (pd.current, pd.total) {
+                                    (Some(c), Some(t)) => Some(format!("{}/{}", c, t)),
+                                    _ => None,
+                                }
+                            });
+                            if let Some(progress) = progress {
                                 print!("\r  {} {} {}", "📤".bright_yellow(), status, progress);
                             } else {
                                 println!("  {} {}", "📤".bright_yellow(), status);
