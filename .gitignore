@@ -28,3 +28,9 @@ target_old
 
 *.mp4
 *.rec
+
+.env
+.env.local
+
+# Content / blog drafts
+content/

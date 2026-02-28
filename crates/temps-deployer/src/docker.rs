@@ -315,7 +315,10 @@ impl ImageBuilder for DockerRuntime {
                         let _ = log_file.write_all(stream.as_bytes()).await;
                         debug!("Build: {}", stream.trim());
                     }
-                    if let Some(error) = info.error {
+                    if let Some(error_detail) = info.error_detail {
+                        let error = error_detail
+                            .message
+                            .unwrap_or_else(|| "Unknown build error".to_string());
                         error!("Build error: {}", error);
                         let _ = log_file
                             .write_all(format!("ERROR: {}\n", error).as_bytes())
@@ -476,7 +479,10 @@ impl ImageBuilder for DockerRuntime {
                             callback(stream.clone()).await;
                         }
                     }
-                    if let Some(error) = info.error {
+                    if let Some(error_detail) = info.error_detail {
+                        let error = error_detail
+                            .message
+                            .unwrap_or_else(|| "Unknown build error".to_string());
                         error!("Build error: {}", error);
                         let error_line = format!("ERROR: {}\n", error);
                         let _ = log_file.write_all(error_line.as_bytes()).await;
@@ -493,7 +499,7 @@ impl ImageBuilder for DockerRuntime {
                         // start or complete.  This gives visibility into cached
                         // layers and overall build progress even when there is
                         // no command output (logs).
-                        for vertex in &res.vertices {
+                        for vertex in &res.vertexes {
                             if vertex.name.is_empty() {
                                 continue;
                             }
@@ -587,7 +593,7 @@ impl ImageBuilder for DockerRuntime {
 
         let byte_stream =
             tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new())
-                .map(|r| r.unwrap().freeze());
+                .map(|r| r.map(|b| b.freeze()));
 
         let import_stream = self.docker.import_image_stream(
             bollard::query_parameters::ImportImageOptions {
@@ -790,7 +796,10 @@ impl ImageBuilder for DockerRuntime {
         // Get tags from repo_tags
         let tags = inspect.repo_tags.unwrap_or_default();
 
-        let created = inspect.created.map(|dt| dt.to_rfc3339());
+        let created = inspect.created.and_then(|dt| {
+            chrono::DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond())
+                .map(|c| c.to_rfc3339())
+        });
 
         // Extract WORKDIR from the image config
         let working_dir = inspect
@@ -865,7 +874,7 @@ impl ContainerDeployer for DockerRuntime {
 
         // Create port bindings
         let mut port_bindings = HashMap::new();
-        let mut exposed_ports = HashMap::new();
+        let mut exposed_ports = Vec::new();
 
         for port_mapping in &request.port_mappings {
             let container_port_key =
@@ -876,7 +885,7 @@ impl ContainerDeployer for DockerRuntime {
             };
 
             port_bindings.insert(container_port_key.clone(), Some(vec![host_port_binding]));
-            exposed_ports.insert(container_port_key, HashMap::new());
+            exposed_ports.push(container_port_key);
         }
 
         // Create host config with log rotation to prevent unbounded disk growth
@@ -978,9 +987,17 @@ impl ContainerDeployer for DockerRuntime {
 
     async fn stop_container(&self, container_id: &str) -> Result<(), DeployerError> {
         self.docker
-            .stop_container(container_id, None::<StopContainerOptions>)
+            .stop_container(
+                container_id,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
             .await
-            .map_err(|e| DeployerError::Other(format!("Failed to stop container: {}", e)))?;
+            .map_err(|e| {
+                DeployerError::Other(format!("Failed to stop container {}: {}", container_id, e))
+            })?;
         Ok(())
     }
 
@@ -1081,7 +1098,12 @@ impl ContainerDeployer for DockerRuntime {
             status: Self::map_container_status(
                 &state.status.map(|s| s.to_string()).unwrap_or_default(),
             ),
-            created_at: container.created.unwrap_or_else(chrono::Utc::now),
+            created_at: container
+                .created
+                .and_then(|dt| {
+                    chrono::DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond())
+                })
+                .unwrap_or_else(chrono::Utc::now),
             ports: port_mappings,
             environment_vars: env_vars,
         })
@@ -1112,32 +1134,44 @@ impl ContainerDeployer for DockerRuntime {
             .map_err(|e| DeployerError::Other(format!("Failed to get container stats: {}", e)))?
             .ok_or_else(|| DeployerError::Other("No stats available".to_string()))?;
 
-        // Extract CPU percentage
-        let cpu_percent = if let (Some(cpu), Some(system)) = (
-            stats_data
+        // Extract CPU percentage using delta between cpu_stats and precpu_stats
+        let cpu_percent = {
+            let current_cpu = stats_data
                 .cpu_stats
                 .as_ref()
-                .and_then(|cs| cs.cpu_usage.as_ref()),
-            stats_data
+                .and_then(|cs| cs.cpu_usage.as_ref())
+                .and_then(|cu| cu.total_usage);
+            let current_system = stats_data
                 .cpu_stats
                 .as_ref()
-                .and_then(|cs| cs.system_cpu_usage),
-        ) {
-            let cpu_total = cpu.total_usage.unwrap_or(0);
-            if system > 0 && cpu_total > 0 {
-                let cpu_delta = cpu_total as f64;
-                let system_delta = system as f64;
-                let num_cpus = stats_data
-                    .cpu_stats
-                    .as_ref()
-                    .and_then(|cs| cs.online_cpus)
-                    .unwrap_or(1) as f64;
-                ((cpu_delta / system_delta) * num_cpus * 100.0).clamp(0.0, 100.0)
-            } else {
-                0.0
+                .and_then(|cs| cs.system_cpu_usage);
+            let prev_cpu = stats_data
+                .precpu_stats
+                .as_ref()
+                .and_then(|cs| cs.cpu_usage.as_ref())
+                .and_then(|cu| cu.total_usage);
+            let prev_system = stats_data
+                .precpu_stats
+                .as_ref()
+                .and_then(|cs| cs.system_cpu_usage);
+
+            match (current_cpu, current_system, prev_cpu, prev_system) {
+                (Some(cur_cpu), Some(cur_sys), Some(pre_cpu), Some(pre_sys)) => {
+                    let cpu_delta = cur_cpu as f64 - pre_cpu as f64;
+                    let system_delta = cur_sys as f64 - pre_sys as f64;
+                    if system_delta > 0.0 && cpu_delta >= 0.0 {
+                        let num_cpus = stats_data
+                            .cpu_stats
+                            .as_ref()
+                            .and_then(|cs| cs.online_cpus)
+                            .unwrap_or(1) as f64;
+                        ((cpu_delta / system_delta) * num_cpus * 100.0).clamp(0.0, 100.0)
+                    } else {
+                        0.0
+                    }
+                }
+                _ => 0.0,
             }
-        } else {
-            0.0
         };
 
         // Extract memory stats
@@ -1213,6 +1247,7 @@ impl ContainerDeployer for DockerRuntime {
                 Some(LogsOptions {
                     stdout: true,
                     stderr: true,
+                    tail: "10000".to_string(),
                     ..Default::default()
                 }),
             )

@@ -471,7 +471,7 @@ async fn purge_project_logs(
             ip_address: Some(metadata.ip_address.clone()),
             user_agent: metadata.user_agent.clone(),
         },
-        project_id: project_id as i32,
+        project_id,
         before_timestamp: request.before,
         chunks_deleted: result.chunks_deleted,
     };

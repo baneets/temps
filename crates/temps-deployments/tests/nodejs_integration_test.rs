@@ -7,6 +7,7 @@
 //! 3. Deploy Image (simulated deployment)
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -352,7 +353,7 @@ async fn test_nodejs_three_stage_deployment() {
                 println!("  Container ID: {}", container_id);
 
                 // 1. Check if container exists and is running
-                use bollard::container::InspectContainerOptions;
+                use bollard::query_parameters::InspectContainerOptions;
                 match docker
                     .inspect_container(&container_id, None::<InspectContainerOptions>)
                     .await
@@ -394,14 +395,7 @@ async fn test_nodejs_three_stage_deployment() {
                                     }
                                 }
                                 if let Some(exposed_ports) = config.exposed_ports {
-                                    println!(
-                                        "    - Exposed ports: {}",
-                                        exposed_ports
-                                            .keys()
-                                            .map(|k| k.as_str())
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    );
+                                    println!("    - Exposed ports: {}", exposed_ports.join(", "));
                                 }
                             }
 
@@ -428,10 +422,10 @@ async fn test_nodejs_three_stage_deployment() {
 
                             // 4. Check container logs (last few lines)
                             println!("\n  📄 Container Logs (last 10 lines):");
-                            use bollard::container::LogsOptions;
+                            use bollard::query_parameters::{ListContainersOptions, LogsOptions};
                             use futures_util::stream::StreamExt;
 
-                            let log_options = Some(LogsOptions::<String> {
+                            let log_options = Some(LogsOptions {
                                 stdout: true,
                                 stderr: true,
                                 tail: "10".to_string(),
@@ -452,8 +446,7 @@ async fn test_nodejs_three_stage_deployment() {
 
                             // 5. List all running containers to confirm visibility
                             println!("\n  📦 All Running Containers:");
-                            use bollard::container::ListContainersOptions;
-                            let list_options = Some(ListContainersOptions::<String> {
+                            let list_options = Some(ListContainersOptions {
                                 all: false, // Only running containers
                                 ..Default::default()
                             });
@@ -496,10 +489,9 @@ async fn test_nodejs_three_stage_deployment() {
 
                             // Print container logs for debugging
                             println!("\n  📄 Container Logs:");
-                            use bollard::container::LogsOptions;
-                            use futures_util::stream::StreamExt;
 
-                            let log_options = Some(LogsOptions::<String> {
+                            use bollard::query_parameters::LogsOptions;
+                            let log_options = Some(LogsOptions {
                                 stdout: true,
                                 stderr: true,
                                 tail: "50".to_string(),
@@ -572,7 +564,7 @@ async fn test_nodejs_three_stage_deployment() {
 
     // Verify Docker image was created (if workflow succeeded)
     if result.is_ok() {
-        use bollard::image::{ListImagesOptions, RemoveImageOptions};
+        use bollard::query_parameters::{ListImagesOptions, RemoveImageOptions};
 
         println!("🐳 Verifying Docker image exists...");
 
@@ -582,8 +574,8 @@ async fn test_nodejs_three_stage_deployment() {
             "reference".to_string(),
             vec!["nodejs-test-app:latest".to_string()],
         );
-        let options = Some(ListImagesOptions::<String> {
-            filters,
+        let options = Some(ListImagesOptions {
+            filters: Some(filters),
             ..Default::default()
         });
 
@@ -622,10 +614,10 @@ async fn test_nodejs_three_stage_deployment() {
                 final_context.get_output::<String>("deploy_nodejs", "deployment_id")
             {
                 println!("🧹 Cleaning up deployed container...");
-                use bollard::container::RemoveContainerOptions;
+                use bollard::query_parameters::RemoveContainerOptions;
 
                 // Stop container first
-                use bollard::container::StopContainerOptions;
+                use bollard::query_parameters::StopContainerOptions;
                 let _ = docker
                     .stop_container(&container_id, None::<StopContainerOptions>)
                     .await;

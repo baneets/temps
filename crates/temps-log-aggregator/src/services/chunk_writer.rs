@@ -66,7 +66,7 @@ impl ContainerBuffer {
 
     fn add_line(&mut self, line: LogLine) {
         // Track byte offsets for every 100th line
-        if self.lines.len() % LINE_OFFSET_INTERVAL == 0 {
+        if self.lines.len().is_multiple_of(LINE_OFFSET_INTERVAL) {
             self.line_offsets.push(self.running_byte_count as i32);
         }
 

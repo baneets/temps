@@ -934,7 +934,7 @@ impl DockerImporter {
         // Extract port mappings
         let mut ports = HashMap::new();
         if let Some(exposed_ports) = &config.exposed_ports {
-            for port_spec in exposed_ports.keys() {
+            for port_spec in exposed_ports {
                 if let Some(port_str) = port_spec.split('/').next() {
                     if let Ok(port) = port_str.parse::<u16>() {
                         ports.insert(port, None); // No host port mapping yet
@@ -1061,7 +1061,12 @@ impl DockerImporter {
                 .as_ref()
                 .map(|hc| serde_json::to_value(hc).unwrap_or_default()),
             restart_policy,
-            created_at: inspect.created.unwrap_or_else(chrono::Utc::now),
+            created_at: inspect
+                .created
+                .and_then(|dt| {
+                    chrono::DateTime::from_timestamp(dt.unix_timestamp(), dt.nanosecond())
+                })
+                .unwrap_or_else(chrono::Utc::now),
             source_metadata: serde_json::to_value(&inspect).unwrap_or_default(),
         })
     }

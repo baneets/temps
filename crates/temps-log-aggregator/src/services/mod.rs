@@ -9,7 +9,7 @@ mod tail;
 
 pub use chunk_writer::{ChunkWriterService, FlushResult};
 pub use collector::CollectorService;
-pub use metadata::LogMetadataService;
+pub use metadata::{LogEventsQuery, LogMetadataService};
 pub use retention::RetentionService;
 pub use search::LogSearchService;
 pub use tail::TailService;

@@ -1,5 +1,7 @@
 import { ProjectResponse } from '@/api/client'
 import { useAuth } from '@/contexts/AuthContext'
+import { usePluginsContext } from '@/contexts/PluginsContext'
+import { resolvePluginIcon } from '@/lib/pluginIcons'
 import { cn } from '@/lib/utils'
 import {
   Activity,
@@ -8,6 +10,7 @@ import {
   ChevronRight,
   Database,
   FileText,
+  Gauge,
   GitBranch,
   Home,
   Layers,
@@ -18,11 +21,13 @@ import {
   Key,
   Globe,
   Boxes,
+  Workflow,
 } from 'lucide-react'
 import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useState,
   createContext,
 } from 'react'
@@ -137,6 +142,16 @@ const baseNavItems: NavItem[] = [
     icon: Activity,
     kbd: 'M',
   },
+  {
+    title: 'Monitoring',
+    url: 'monitoring',
+    icon: Gauge,
+  },
+  {
+    title: 'Traces',
+    url: 'traces',
+    icon: Workflow,
+  },
 
   // Debugging (Medium Frequency)
   {
@@ -221,12 +236,24 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
   const location = useLocation()
   const navigate = useNavigate()
   const { isDemoMode } = useAuth()
+  const { projectNavEntries } = usePluginsContext()
   const [expandedItems, setExpandedItems] = useState<string[]>([
     'analytics',
     'settings',
   ])
 
-  // Build nav items including environments
+  // Convert plugin project nav entries to NavItem format
+  const pluginProjectItems: NavItem[] = useMemo(
+    () =>
+      projectNavEntries.map((entry) => ({
+        title: entry.label,
+        url: entry.path,
+        icon: resolvePluginIcon(entry.icon),
+      })),
+    [projectNavEntries]
+  )
+
+  // Build nav items including environments and plugin entries
   const settingsIndex = baseNavItems.length - 1
   const allNavItems: NavItem[] = [
     ...baseNavItems.slice(0, settingsIndex),
@@ -235,6 +262,7 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
       url: 'environments',
       icon: Layers,
     },
+    ...pluginProjectItems,
     baseNavItems[settingsIndex],
   ]
 

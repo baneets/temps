@@ -8,12 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use temps_core::{JobResult, WorkflowContext, WorkflowError, WorkflowTask};
+use temps_core::{
+    JobResult, WorkflowCancellationProvider, WorkflowContext, WorkflowError, WorkflowTask,
+};
 use temps_deployer::{
     ContainerDeployer, ContainerLogConfig, ContainerStatus as DeployerContainerStatus,
     DeployRequest, PortMapping, Protocol, ResourceLimits, RestartPolicy,
 };
 use temps_logs::{LogLevel, LogService};
+use tokio::time::{sleep, Duration};
 
 /// Typed output from BuildImageJob
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +81,8 @@ pub struct DeploymentOutput {
     pub container_ids: Vec<String>,
     /// List of all allocated host ports (one per replica)
     pub host_ports: Vec<u16>,
+    /// The resolved container port (from image EXPOSE, config, or default)
+    pub container_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -474,6 +479,7 @@ impl DeployImageJob {
         // Deploy multiple replicas
         let mut all_container_ids = Vec::new();
         let mut all_host_ports = Vec::new();
+        let mut resolved_container_port: Option<u16> = None;
         let mut deployment_error: Option<WorkflowError> = None;
 
         for replica_index in 0..self.config.replicas {
@@ -491,9 +497,11 @@ impl DeployImageJob {
                 .deploy_single_replica(image_output, context, replica_index)
                 .await
             {
-                Ok((container_id, host_port)) => {
+                Ok((container_id, host_port, container_port)) => {
                     all_container_ids.push(container_id);
                     all_host_ports.push(host_port);
+                    // All replicas share the same container port
+                    resolved_container_port = Some(container_port);
                 }
                 Err(e) => {
                     self.log(
@@ -547,6 +555,7 @@ impl DeployImageJob {
             resources: self.config.resources.clone(),
             container_ids: all_container_ids,
             host_ports: all_host_ports,
+            container_port: resolved_container_port.unwrap_or(self.config.port as u16),
         })
     }
 
@@ -556,7 +565,7 @@ impl DeployImageJob {
         image_output: &BuildImageOutput,
         context: &WorkflowContext,
         replica_index: u32,
-    ) -> Result<(String, u16), WorkflowError> {
+    ) -> Result<(String, u16, u16), WorkflowError> {
         // Prepare deployment request using temps-deployer types
         self.log(context, "Deploying container image...".to_string())
             .await?;
@@ -1045,8 +1054,12 @@ impl DeployImageJob {
         )
         .await?;
 
-        // Return container ID and host port
-        Ok((deploy_result.container_id, deploy_result.host_port))
+        // Return container ID, host port, and container port
+        Ok((
+            deploy_result.container_id,
+            deploy_result.host_port,
+            deploy_result.container_port,
+        ))
     }
 
     async fn validate_deployment_config(
@@ -1143,7 +1156,7 @@ impl WorkflowTask for DeployImageJob {
             context.set_output(
                 &self.job_id,
                 "container_port",
-                deployment_output.host_ports[0] as i32,
+                deployment_output.container_port as i32,
             )?;
 
             // Set artifact for first container
@@ -1155,6 +1168,67 @@ impl WorkflowTask for DeployImageJob {
         }
 
         Ok(JobResult::success(context))
+    }
+
+    async fn execute_with_cancellation(
+        &self,
+        context: WorkflowContext,
+        cancellation_provider: &dyn WorkflowCancellationProvider,
+    ) -> Result<JobResult, WorkflowError> {
+        let workflow_run_id = context.workflow_run_id.clone();
+
+        // Check if already cancelled before starting
+        if cancellation_provider.is_cancelled(&workflow_run_id).await? {
+            self.log(
+                &context,
+                "Deploy cancelled before starting - deployment was cancelled by user".to_string(),
+            )
+            .await
+            .ok();
+            return Err(WorkflowError::BuildCancelled);
+        }
+
+        // Create cancellation check future that polls every 2 seconds
+        let cancellation_check = async {
+            loop {
+                sleep(Duration::from_secs(2)).await;
+
+                match cancellation_provider.is_cancelled(&workflow_run_id).await {
+                    Ok(true) => {
+                        // Cancellation detected
+                        return;
+                    }
+                    Ok(false) => {
+                        // Continue checking
+                    }
+                    Err(_) => {
+                        // Error checking cancellation - stop polling
+                        break;
+                    }
+                }
+            }
+        };
+
+        // Race between deploy execution and cancellation detection
+        let deploy_future = self.execute(context.clone());
+
+        tokio::select! {
+            result = deploy_future => {
+                // Deploy completed (success or failure)
+                result
+            }
+            _ = cancellation_check => {
+                // Cancellation detected during deploy
+                self.log(
+                    &context,
+                    "Deploy cancelled by user - stopping container deployment".to_string(),
+                )
+                .await
+                .ok();
+
+                Err(WorkflowError::BuildCancelled)
+            }
+        }
     }
 
     async fn validate_prerequisites(&self, context: &WorkflowContext) -> Result<(), WorkflowError> {

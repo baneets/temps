@@ -11,7 +11,6 @@ use futures::FutureExt;
 use include_dir::{include_dir, Dir};
 use rand::Rng;
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
-use std::future::IntoFuture;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -47,6 +46,7 @@ use temps_log_aggregator::{LogAggregatorPlugin, StorageConfig};
 use temps_logs::LogsPlugin;
 use temps_monitoring::{DiskSpaceMonitor, OutageDetectionService};
 use temps_notifications::NotificationsPlugin;
+use temps_otel::plugin::OtelPlugin;
 use temps_projects::ProjectsPlugin;
 use temps_providers::ProvidersPlugin;
 use temps_proxy::ProxyPlugin;
@@ -372,7 +372,6 @@ fn prompt_for_admin_email() -> anyhow::Result<Option<String>> {
 }
 
 fn create_openapi(plugin_manager: &PluginManager) -> anyhow::Result<utoipa::openapi::OpenApi> {
-    // Get the unified OpenAPI schema from all plugins - fail if it can't be built
     plugin_manager
         .get_unified_openapi()
         .map_err(|e| anyhow::anyhow!("Failed to build unified OpenAPI schema: {}", e))
@@ -769,6 +768,11 @@ pub async fn start_console_api(
     let status_page_plugin = Box::new(StatusPagePlugin::new());
     plugin_manager.register_plugin(status_page_plugin);
 
+    // 9.7. OtelPlugin - provides OpenTelemetry metrics, traces, and logs collection (depends on database)
+    debug!("Registering OtelPlugin");
+    let otel_plugin = Box::new(OtelPlugin::new());
+    plugin_manager.register_plugin(otel_plugin);
+
     // 10. AuthPlugin - provides authentication and authorization (depends on notification service)
     debug!("Registering AuthPlugin");
     let auth_plugin = Box::new(AuthPlugin::new());
@@ -793,6 +797,17 @@ pub async fn start_console_api(
     debug!("Registering StaticFilesPlugin");
     let static_files_plugin = Box::new(StaticFilesPlugin::new());
     plugin_manager.register_plugin(static_files_plugin);
+
+    // 15. ExternalPluginsPlugin - discovers and manages standalone binary plugins
+    debug!("Registering ExternalPluginsPlugin");
+    let external_plugin_config = temps_external_plugins::manager::ExternalPluginConfig::new(
+        config.data_dir.clone(),
+        config.database_url.clone(),
+    );
+    let external_plugins_plugin = Box::new(temps_external_plugins::ExternalPluginsPlugin::new(
+        external_plugin_config,
+    ));
+    plugin_manager.register_plugin(external_plugins_plugin);
 
     // Initialize all plugins
     debug!("Initializing plugins");
@@ -953,6 +968,16 @@ pub async fn start_console_api(
         );
     }
 
+    // OTel background tasks: anomaly detection and health computation require
+    // iterating over active project IDs, which will be wired up when project
+    // discovery is integrated. The rate limiter is self-cleaning (evicts on check).
+    if service_context
+        .get_service::<temps_otel::OtelService>()
+        .is_some()
+    {
+        debug!("OTel plugin registered successfully; background tasks pending project discovery integration");
+    }
+
     // Build the application with all plugin routes and OpenAPI schemas
     debug!("Building application with plugin routes");
     let app = plugin_manager
@@ -973,7 +998,22 @@ pub async fn start_console_api(
         debug!("Console API ready signal sent");
     }
 
-    axum::serve(listener, app).into_future().await?;
+    // Graceful shutdown: listen for Ctrl+C, then shut down external plugins before exiting.
+    // Note: The proxy server has its own CtrlCShutdownSignal. The console API server
+    // shuts down external plugins when it receives the same signal.
+    let external_plugins_service = plugin_manager
+        .service_context()
+        .get_service::<temps_external_plugins::ExternalPluginsService>();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Console API received shutdown signal, stopping external plugins...");
+            if let Some(service) = external_plugins_service {
+                service.shutdown_all().await;
+                info!("External plugins shut down");
+            }
+        })
+        .await?;
     info!("Console API server exited");
     Ok(())
 }

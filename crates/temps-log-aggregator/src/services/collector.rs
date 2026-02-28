@@ -39,6 +39,10 @@ const LABEL_DEPLOY_ID: &str = "sh.temps.deploy_id";
 /// At 30s max backoff this is roughly 10 minutes of retrying.
 const MAX_CONSECUTIVE_ERRORS: u32 = 20;
 
+/// Callback type invoked when a chunk is flushed during streaming.
+type OnChunkFlushedCallback =
+    Arc<dyn Fn(crate::types::ChunkMeta, Vec<LogLine>) + Send + Sync + 'static>;
+
 /// State of a streaming task for a single container
 struct StreamTask {
     handle: JoinHandle<()>,
@@ -58,8 +62,7 @@ pub struct CollectorService {
     /// Active streaming tasks per container_id
     active_streams: Mutex<HashMap<String, StreamTask>>,
     /// Callback for chunk metadata (to write to DB)
-    on_chunk_flushed:
-        Option<Arc<dyn Fn(crate::types::ChunkMeta, Vec<LogLine>) + Send + Sync + 'static>>,
+    on_chunk_flushed: Option<OnChunkFlushedCallback>,
 }
 
 impl CollectorService {
@@ -84,10 +87,7 @@ impl CollectorService {
     ///
     /// The callback receives the chunk metadata and the lines that were written,
     /// allowing the caller to insert metadata into the database and create log_events.
-    pub fn set_on_chunk_flushed(
-        &mut self,
-        callback: Arc<dyn Fn(crate::types::ChunkMeta, Vec<LogLine>) + Send + Sync + 'static>,
-    ) {
+    pub fn set_on_chunk_flushed(&mut self, callback: OnChunkFlushedCallback) {
         self.on_chunk_flushed = Some(callback);
     }
 
@@ -322,9 +322,7 @@ impl CollectorService {
         tail_tx: broadcast::Sender<LogLine>,
         container_id: String,
         ctx: ContainerContext,
-        on_chunk_flushed: Option<
-            Arc<dyn Fn(crate::types::ChunkMeta, Vec<LogLine>) + Send + Sync + 'static>,
-        >,
+        on_chunk_flushed: Option<OnChunkFlushedCallback>,
         resume_after: i64,
     ) {
         // Track the timestamp of the last successfully received line.

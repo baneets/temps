@@ -453,14 +453,10 @@ impl DoctorCommand {
                 let found = networks
                     .iter()
                     .find(|n| n.name.as_deref() == Some(network_name));
-                if let Some(network) = found {
-                    let container_count = network.containers.as_ref().map(|c| c.len()).unwrap_or(0);
+                if let Some(_network) = found {
                     report.add(
                         "Network",
-                        CheckResult::Pass(format!(
-                            "'{}' exists ({} containers attached)",
-                            network_name, container_count
-                        )),
+                        CheckResult::Pass(format!("'{}' exists", network_name)),
                     );
                 } else {
                     report.add(

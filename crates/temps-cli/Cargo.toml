@@ -34,6 +34,7 @@ temps-email = { path = "../temps-email" }
 temps-entities = { path = "../temps-entities" }
 temps-environments = { path = "../temps-environments" }
 temps-error-tracking = { path = "../temps-error-tracking" }
+temps-external-plugins = { path = "../temps-external-plugins" }
 temps-geo = { path = "../temps-geo" }
 temps-git = { path = "../temps-git" }
 temps-import = { path = "../temps-import" }
@@ -44,6 +45,7 @@ temps-logs = { path = "../temps-logs" }
 temps-migrations = { path = "../temps-migrations" }
 temps-monitoring = { path = "../temps-monitoring" }
 temps-notifications = { path = "../temps-notifications" }
+temps-otel = { path = "../temps-otel" }
 temps-projects = { path = "../temps-projects" }
 temps-providers = { path = "../temps-providers" }
 temps-proxy = { path = "../temps-proxy" }

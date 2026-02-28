@@ -44,9 +44,9 @@ pub async fn get_exposed_ports(docker: &Docker, image_name: &str) -> anyhow::Res
 
     if let Some(config) = image_info.config {
         if let Some(exposed_ports_map) = config.exposed_ports {
-            // exposed_ports_map is a HashMap<String, HashMap<String, String>>
-            // Keys are in format like "80/tcp", "443/tcp", "8080/udp"
-            for (port_spec, _) in exposed_ports_map {
+            // exposed_ports_map is a Vec<String>
+            // Items are in format like "80/tcp", "443/tcp", "8080/udp"
+            for port_spec in exposed_ports_map {
                 // Parse port from format "80/tcp" or "443/tcp"
                 if let Some(port_str) = port_spec.split('/').next() {
                     if let Ok(port) = port_str.parse::<u16>() {

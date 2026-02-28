@@ -15,6 +15,17 @@ use uuid::Uuid;
 use crate::error::LogAggregatorError;
 use crate::types::{ChunkMeta, LogLevel, LogLine};
 
+/// Parameters for querying log events from the TimescaleDB hypertable.
+pub struct LogEventsQuery {
+    pub project_id: i32,
+    pub start_time: DateTime<Utc>,
+    pub end_time: DateTime<Utc>,
+    pub levels: Vec<LogLevel>,
+    pub services: Vec<String>,
+    pub deploy_id: Option<Uuid>,
+    pub limit: u64,
+}
+
 /// Service for managing log metadata in the database.
 ///
 /// Handles:
@@ -177,38 +188,32 @@ impl LogMetadataService {
     /// Query log_events (ERROR/WARN) from the TimescaleDB hypertable.
     pub async fn query_log_events(
         &self,
-        project_id: i32,
-        start_time: DateTime<Utc>,
-        end_time: DateTime<Utc>,
-        levels: &[LogLevel],
-        services: &[String],
-        deploy_id: Option<Uuid>,
-        limit: u64,
+        params: &LogEventsQuery,
     ) -> Result<Vec<temps_entities::log_events::Model>, LogAggregatorError> {
         let mut condition = Condition::all()
-            .add(temps_entities::log_events::Column::ProjectId.eq(project_id))
-            .add(temps_entities::log_events::Column::Time.gte(start_time))
-            .add(temps_entities::log_events::Column::Time.lte(end_time));
+            .add(temps_entities::log_events::Column::ProjectId.eq(params.project_id))
+            .add(temps_entities::log_events::Column::Time.gte(params.start_time))
+            .add(temps_entities::log_events::Column::Time.lte(params.end_time));
 
-        if !levels.is_empty() {
-            let level_strings: Vec<String> = levels.iter().map(|l| l.to_string()).collect();
+        if !params.levels.is_empty() {
+            let level_strings: Vec<String> = params.levels.iter().map(|l| l.to_string()).collect();
             condition =
                 condition.add(temps_entities::log_events::Column::Level.is_in(level_strings));
         }
 
-        if !services.is_empty() {
-            condition =
-                condition.add(temps_entities::log_events::Column::Service.is_in(services.to_vec()));
+        if !params.services.is_empty() {
+            condition = condition
+                .add(temps_entities::log_events::Column::Service.is_in(params.services.clone()));
         }
 
-        if let Some(deploy) = deploy_id {
+        if let Some(deploy) = params.deploy_id {
             condition = condition.add(temps_entities::log_events::Column::DeployId.eq(deploy));
         }
 
         let events = temps_entities::log_events::Entity::find()
             .filter(condition)
             .order_by(temps_entities::log_events::Column::Time, Order::Asc)
-            .limit(limit)
+            .limit(params.limit)
             .all(self.db.as_ref())
             .await?;
 
