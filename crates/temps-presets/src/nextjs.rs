@@ -108,7 +108,7 @@ RUN corepack enable
         } else if matches!(package_manager, PackageManager::Pnpm) {
             r#"# Enable corepack for pnpm
 RUN corepack enable
-RUN corepack prepare pnpxm@latest --activate
+RUN corepack prepare pnpm@latest --activate
 
 "#
         } else {

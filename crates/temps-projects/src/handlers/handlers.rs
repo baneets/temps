@@ -516,6 +516,7 @@ pub async fn update_project_settings(
             settings.directory.clone(),
             settings.attack_mode,
             settings.enable_preview_environments,
+            settings.preset_config.clone(),
         )
         .await
         .map_err(Problem::from)?;
@@ -642,6 +643,7 @@ pub async fn update_git_settings(
             settings.repo_name.clone(),
             settings.preset.clone(),
             settings.directory.clone(),
+            settings.preset_config.clone(),
         )
         .await
         .map_err(|e| {

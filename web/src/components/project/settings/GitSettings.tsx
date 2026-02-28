@@ -48,6 +48,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
   Check,
+  FileIcon,
   FolderIcon,
   GitBranchIcon,
   Loader2,
@@ -73,6 +74,7 @@ const gitSettingsSchema = z.object({
   branch: z.string(),
   preset: z.string().optional(),
   directory: z.string().optional(),
+  dockerfilePath: z.string().optional(),
 })
 
 type GitSettingsFormValues = z.infer<typeof gitSettingsSchema>
@@ -112,6 +114,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       branch: project?.main_branch || '',
       preset: project?.preset || '',
       directory: project?.directory || '',
+      dockerfilePath:
+        (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
     },
   })
 
@@ -122,6 +126,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         branch: project.main_branch || '',
         preset: project.preset || '',
         directory: project.directory || '',
+        dockerfilePath:
+          (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
       })
     }
   }, [project, form])
@@ -289,6 +295,12 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       // Extract just the preset name from "preset::path" format for backend
       const [presetName] = values.preset?.split('::') || ['']
 
+      // Build preset_config for presets that support it (e.g., Dockerfile)
+      const presetConfig =
+        presetName === 'dockerfile' && values.dockerfilePath
+          ? { dockerfilePath: values.dockerfilePath }
+          : undefined
+
       await updateGithubRepo.mutateAsync({
         body: {
           main_branch: values.branch,
@@ -300,6 +312,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
             selectedConnectionId ??
             project.git_provider_connection_id ??
             null,
+          preset_config: presetConfig,
         },
         path: { project_id: project.id },
       })
@@ -883,6 +896,30 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                           )
                         }}
                       />
+
+                      {/* Dockerfile path - only shown when Dockerfile preset is selected */}
+                      {currentPreset?.split('::')[0] === 'dockerfile' && (
+                        <FormField
+                          control={form.control}
+                          name="dockerfilePath"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Dockerfile Path</FormLabel>
+                              <FormControl>
+                                <Input
+                                  {...field}
+                                  placeholder="Dockerfile"
+                                />
+                              </FormControl>
+                              <FormDescription>
+                                Path to your Dockerfile relative to the root
+                                directory
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      )}
                     </>
                   ) : (
                     <>
@@ -921,6 +958,19 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             </span>
                           </div>
                         </div>
+
+                        {project.preset === 'dockerfile' && (
+                          <div className="space-y-2">
+                            <Label>Dockerfile Path</Label>
+                            <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
+                              <FileIcon className="h-4 w-4 text-muted-foreground" />
+                              <span className="font-mono text-sm">
+                                {(project.preset_config as any)
+                                  ?.dockerfilePath || 'Dockerfile'}
+                              </span>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </>
                   )}

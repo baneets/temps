@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Proxy memory leak caused by unbounded `tokio::spawn` fire-and-forget INSERT per request; replaced with bounded batch writer that prevents unbounded task growth under high traffic
 - Domain list pages no longer silently truncate results when there are more domains than the default page size; all consumers now paginate or use targeted search
+- Dockerfile path not saved when changed in project settings; `preset_config` was never sent in the API request, never persisted by the backend, and the input was misplaced in General Settings instead of Git Settings where the preset selector lives (#26)
+- Fix incorrect `corepack` command used for pnpm in the Next.js preset
 - BuildKit build log output now emits vertex names (build step descriptions) in addition to command output, making cached layers visible in deployment logs
 - Install script command in documentation now uses `bash` instead of `sh`, fixing failures on Ubuntu 24 where `/bin/sh` is `dash` (#15)
 - Build failures when web UI is skipped in debug mode

@@ -6189,6 +6189,10 @@ export type ProjectResponse = {
     main_branch: string;
     name: string;
     preset?: string | null;
+    /**
+     * Preset-specific configuration (Dockerfile path, build context, etc.)
+     */
+    preset_config?: PresetConfigSchema | null;
     repo_name?: string | null;
     repo_owner?: string | null;
     slug: string;
@@ -8544,6 +8548,10 @@ export type UpdateGitSettingsRequest = {
     git_provider_connection_id?: number | null;
     main_branch: string;
     preset?: string | null;
+    /**
+     * Preset-specific configuration (e.g., Dockerfile path for Docker preset)
+     */
+    preset_config?: PresetConfigSchema | null;
     repo_name: string;
     repo_owner: string;
 };
@@ -8616,6 +8624,10 @@ export type UpdateProjectSettingsRequest = {
     git_provider_connection_id?: number | null;
     main_branch?: string | null;
     preset?: string | null;
+    /**
+     * Preset-specific configuration (e.g., Dockerfile path for Docker preset)
+     */
+    preset_config?: PresetConfigSchema | null;
     repo_name?: string | null;
     repo_owner?: string | null;
     slug?: string | null;
