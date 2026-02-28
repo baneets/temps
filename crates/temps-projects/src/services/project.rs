@@ -695,9 +695,7 @@ impl ProjectService {
                 &project.preset,
                 config_value,
             )
-            .map_err(|e| {
-                ProjectError::InvalidInput(format!("Invalid preset config: {}", e))
-            })?;
+            .map_err(|e| ProjectError::InvalidInput(format!("Invalid preset config: {}", e)))?;
 
             let mut active_project: projects::ActiveModel = project.into();
             active_project.preset_config = Set(Some(parsed_config));
@@ -876,7 +874,7 @@ impl ProjectService {
         }
 
         // Capture the current preset before converting to ActiveModel
-        let project_preset = project.preset.clone();
+        let project_preset = project.preset;
 
         // Update the project
         let mut active_project: projects::ActiveModel = project.into();
@@ -905,16 +903,16 @@ impl ProjectService {
         if let Some(ref config_value) = preset_config {
             // Determine the target preset: use the newly set preset if provided, otherwise use current
             let target_preset = if active_project.preset.is_set() {
-                active_project.preset.as_ref().clone()
+                *active_project.preset.as_ref()
             } else {
                 project_preset
             };
 
-            let parsed_config =
-                temps_entities::preset::PresetConfig::parse_for_preset(&target_preset, config_value)
-                    .map_err(|e| {
-                        ProjectError::InvalidInput(format!("Invalid preset config: {}", e))
-                    })?;
+            let parsed_config = temps_entities::preset::PresetConfig::parse_for_preset(
+                &target_preset,
+                config_value,
+            )
+            .map_err(|e| ProjectError::InvalidInput(format!("Invalid preset config: {}", e)))?;
 
             active_project.preset_config = Set(Some(parsed_config));
         }
