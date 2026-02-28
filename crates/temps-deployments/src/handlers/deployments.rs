@@ -2066,7 +2066,8 @@ mod tests {
         let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
         let log_service = app_state.log_service.clone();
 
-        // Create test data
+        // Create test data - use Dockerfile preset (not Static) since container
+        // logs are only available for server-type projects
         let project = projects::ActiveModel {
             name: Set("Test Project".to_string()),
             slug: Set("test-project".to_string()),
@@ -2074,7 +2075,7 @@ mod tests {
             repo_owner: Set("test-owner".to_string()),
             directory: Set("/tmp/test-project".to_string()),
             main_branch: Set("main".to_string()),
-            preset: Set(temps_entities::preset::Preset::Static),
+            preset: Set(temps_entities::preset::Preset::Dockerfile),
             ..Default::default()
         }
         .insert(&*db)
@@ -2286,7 +2287,8 @@ mod tests {
         let app_state = create_test_app_state_for_http(db.clone(), temp_dir.clone()).await;
         let log_service = app_state.log_service.clone();
 
-        // Create test data
+        // Create test data - use Dockerfile preset (not Static) since container
+        // logs are only available for server-type projects
         let project = projects::ActiveModel {
             name: Set("Test Project".to_string()),
             slug: Set("test-project".to_string()),
@@ -2294,7 +2296,7 @@ mod tests {
             repo_owner: Set("test-owner".to_string()),
             directory: Set("/tmp/test-project".to_string()),
             main_branch: Set("main".to_string()),
-            preset: Set(temps_entities::preset::Preset::Static),
+            preset: Set(temps_entities::preset::Preset::Dockerfile),
             ..Default::default()
         }
         .insert(&*db)

@@ -251,6 +251,9 @@ pub struct ProjectResponse {
     pub directory: String,
     pub main_branch: String,
     pub preset: Option<String>,
+    /// Preset-specific configuration (Dockerfile path, build context, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_config: Option<serde_json::Value>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_deployment: Option<i64>,
@@ -283,6 +286,7 @@ impl ProjectResponse {
             directory: project.directory,
             main_branch: project.main_branch,
             preset: project.preset,
+            preset_config: project.preset_config,
             created_at: project.created_at.timestamp_millis(),
             updated_at: project.updated_at.timestamp_millis(),
             last_deployment: project.last_deployment.map(|d| d.timestamp_millis()),
@@ -463,6 +467,18 @@ pub struct UpdateProjectSettingsRequest {
     pub attack_mode: Option<bool>,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: Option<bool>,
+    /// Preset-specific configuration (e.g., Dockerfile path for Docker preset)
+    ///
+    /// Example for Dockerfile preset:
+    /// ```json
+    /// {
+    ///   "dockerfilePath": "docker/Dockerfile",
+    ///   "buildContext": "./api"
+    /// }
+    /// ```
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<PresetConfigSchema>)]
+    pub preset_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -531,6 +547,18 @@ pub struct UpdateGitSettingsRequest {
     pub repo_name: String,
     pub preset: Option<String>,
     pub directory: String,
+    /// Preset-specific configuration (e.g., Dockerfile path for Docker preset)
+    ///
+    /// Example for Dockerfile preset:
+    /// ```json
+    /// {
+    ///   "dockerfilePath": "docker/Dockerfile",
+    ///   "buildContext": "./api"
+    /// }
+    /// ```
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<PresetConfigSchema>)]
+    pub preset_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

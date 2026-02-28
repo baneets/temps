@@ -547,6 +547,7 @@ impl ProjectService {
         directory: Option<String>,
         attack_mode: Option<bool>,
         enable_preview_environments: Option<bool>,
+        preset_config: Option<serde_json::Value>,
     ) -> Result<Project, ProjectError> {
         // Get the current project
         let mut project = projects::Entity::find_by_id(project_id)
@@ -678,6 +679,29 @@ impl ProjectService {
             active_project.update(self.db.as_ref()).await?;
         }
 
+        // Update preset_config if provided
+        if let Some(ref config_value) = preset_config {
+            // Reload project to ensure we have the latest state
+            let project = projects::Entity::find_by_id(project_id)
+                .one(self.db.as_ref())
+                .await?
+                .ok_or(ProjectError::NotFound(format!(
+                    "Project {} not found",
+                    project_id
+                )))?;
+
+            // Parse the preset config based on the project's current preset
+            let parsed_config = temps_entities::preset::PresetConfig::parse_for_preset(
+                &project.preset,
+                config_value,
+            )
+            .map_err(|e| ProjectError::InvalidInput(format!("Invalid preset config: {}", e)))?;
+
+            let mut active_project: projects::ActiveModel = project.into();
+            active_project.preset_config = Set(Some(parsed_config));
+            active_project.update(self.db.as_ref()).await?;
+        }
+
         // Update git-related fields if any are provided
         let needs_git_update = main_branch.is_some()
             || repo_owner.is_some()
@@ -800,6 +824,7 @@ impl ProjectService {
         repo_name: String,
         preset: Option<String>,
         directory: String,
+        preset_config: Option<serde_json::Value>,
     ) -> Result<Project, ProjectError> {
         // Get the current project
         let project = projects::Entity::find_by_id(project_id)
@@ -848,6 +873,9 @@ impl ProjectService {
             }
         }
 
+        // Capture the current preset before converting to ActiveModel
+        let project_preset = project.preset;
+
         // Update the project
         let mut active_project: projects::ActiveModel = project.into();
         active_project.main_branch = Set(main_branch);
@@ -869,6 +897,24 @@ impl ProjectService {
             } else {
                 active_project.git_provider_connection_id = Set(None);
             }
+        }
+
+        // Update preset_config if provided (e.g., Dockerfile path for Docker preset)
+        if let Some(ref config_value) = preset_config {
+            // Determine the target preset: use the newly set preset if provided, otherwise use current
+            let target_preset = if active_project.preset.is_set() {
+                *active_project.preset.as_ref()
+            } else {
+                project_preset
+            };
+
+            let parsed_config = temps_entities::preset::PresetConfig::parse_for_preset(
+                &target_preset,
+                config_value,
+            )
+            .map_err(|e| ProjectError::InvalidInput(format!("Invalid preset config: {}", e)))?;
+
+            active_project.preset_config = Set(Some(parsed_config));
         }
 
         let updated_project = active_project.update(self.db.as_ref()).await?;
@@ -1140,6 +1186,12 @@ impl ProjectService {
             Some(db_project.repo_owner)
         };
 
+        // Serialize preset_config to JSON value for the response
+        let preset_config_json = db_project
+            .preset_config
+            .as_ref()
+            .and_then(|config| serde_json::to_value(config).ok());
+
         Project {
             id: db_project.id,
             slug: db_project.slug,
@@ -1149,6 +1201,7 @@ impl ProjectService {
             directory: db_project.directory,
             main_branch: db_project.main_branch,
             preset: Some(preset_str),
+            preset_config: preset_config_json,
             created_at: db_project.created_at,
             updated_at: db_project.updated_at,
             automatic_deploy: deployment_config
@@ -1680,6 +1733,7 @@ mod tests {
                 None,
                 None,
                 Some(Preset::Nixpacks.to_string()),
+                None,
                 None,
                 None,
                 None,
