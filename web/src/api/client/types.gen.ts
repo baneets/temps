@@ -4595,6 +4595,9 @@ export type ListCustomDomainsResponse = {
 
 export type ListDomainsResponse = {
     domains: Array<DomainResponse>;
+    page: number;
+    page_size: number;
+    total: number;
 };
 
 export type ListEntitiesQuery = {
@@ -12644,8 +12647,10 @@ export type ListDomainsData = {
          * Number of items per page (max 100)
          */
         page_size?: number | null;
-        sort_by?: string | null;
-        sort_order?: string | null;
+        /**
+         * Search domains by name (substring match)
+         */
+        search?: string | null;
     };
     url: '/domains';
 };

@@ -30,9 +30,12 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { EmptyState } from '@/components/ui/empty-state'
 import { useMutation } from '@tanstack/react-query'
+import { Input } from '@/components/ui/input'
 import {
   Calendar,
   CheckCircle,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   CopyIcon,
   Globe,
@@ -40,6 +43,7 @@ import {
   MoreHorizontal,
   Plus,
   RefreshCw,
+  Search,
   Trash2,
   AlertTriangle,
   Info,
@@ -56,6 +60,14 @@ interface DomainsManagementProps {
   domains?: DomainResponse[]
   isLoading: boolean
   reloadDomains: () => void
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
+  onPageChange: (page: number) => void
+  searchQuery: string
+  onSearchChange: (value: string) => void
+  isSearching: boolean
 }
 
 const isExpiringSoon = (expirationTime: number) => {
@@ -71,6 +83,14 @@ export function DomainsManagement({
   domains,
   isLoading,
   reloadDomains,
+  total,
+  page,
+  pageSize,
+  totalPages,
+  onPageChange,
+  searchQuery,
+  onSearchChange,
+  isSearching,
 }: DomainsManagementProps) {
   const [domainToDelete, setDomainToDelete] = useState<DomainResponse | null>(
     null
@@ -190,6 +210,24 @@ export function DomainsManagement({
     )
   }
 
+  // Helper function to generate pagination button numbers
+  const getPaginationPages = (currentPage: number, total: number) => {
+    const pageNumbers = []
+    const maxButtons = 5
+    let startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2))
+    const endPage = Math.min(total, startPage + maxButtons - 1)
+
+    if (endPage - startPage < maxButtons - 1) {
+      startPage = Math.max(1, endPage - maxButtons + 1)
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+      pageNumbers.push(i)
+    }
+
+    return pageNumbers
+  }
+
   // Count pending provisioning domains
   const pendingProvisioningCount =
     domains?.filter(
@@ -233,7 +271,7 @@ export function DomainsManagement({
         </Alert>
       )}
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-lg font-semibold">Domains</h2>
           <p className="text-sm text-muted-foreground">
@@ -248,6 +286,22 @@ export function DomainsManagement({
           {canCreateDomains ? 'Add Domain' : 'Managed by Cloudflare'}
           {canCreateDomains && <KbdBadge keys="N" className="ml-2" />}
         </Button>
+      </div>
+
+      {/* Search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+        <Input
+          value={searchQuery}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search domains..."
+          className="pl-9 pr-10"
+        />
+        {isSearching && (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2">
+            <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+          </div>
+        )}
       </div>
 
       <AlertDialog
@@ -304,17 +358,30 @@ export function DomainsManagement({
               ))}
             </div>
           ) : !domains?.length ? (
-            <EmptyState
-              icon={Globe}
-              title="No domains found"
-              description="Get started by adding a custom domain"
-              action={
-                <Button onClick={() => navigate('/domains/add')}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add Domain
-                </Button>
-              }
-            />
+            searchQuery ? (
+              <EmptyState
+                icon={Search}
+                title="No domains match your search"
+                description={`No domains found matching "${searchQuery}"`}
+                action={
+                  <Button variant="outline" onClick={() => onSearchChange('')}>
+                    Clear search
+                  </Button>
+                }
+              />
+            ) : (
+              <EmptyState
+                icon={Globe}
+                title="No domains found"
+                description="Get started by adding a custom domain"
+                action={
+                  <Button onClick={() => navigate('/domains/add')}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add Domain
+                  </Button>
+                }
+              />
+            )
           ) : (
             <div className="grid gap-4">
               {domains.map((domain) => (
@@ -554,6 +621,56 @@ export function DomainsManagement({
                   </div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6">
+              <div className="text-xs sm:text-sm text-muted-foreground text-center sm:text-left">
+                Showing {(page - 1) * pageSize + 1} to{' '}
+                {Math.min(page * pageSize, total)} of {total} domains
+              </div>
+              <div className="flex items-center gap-1 sm:gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onPageChange(Math.max(1, page - 1))}
+                  disabled={page === 1}
+                  className="h-8 px-2 sm:h-9 sm:px-3"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  <span className="hidden sm:inline ml-1">Previous</span>
+                </Button>
+                <div className="hidden sm:flex items-center gap-1">
+                  {getPaginationPages(page, totalPages).map((pageNum) => (
+                    <Button
+                      key={pageNum}
+                      variant={pageNum === page ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => onPageChange(pageNum)}
+                      className="w-10"
+                    >
+                      {pageNum}
+                    </Button>
+                  ))}
+                </div>
+                <span className="sm:hidden text-xs text-muted-foreground px-2">
+                  {page} / {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    onPageChange(Math.min(totalPages, page + 1))
+                  }
+                  disabled={page === totalPages}
+                  className="h-8 px-2 sm:h-9 sm:px-3"
+                >
+                  <span className="hidden sm:inline mr-1">Next</span>
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           )}
         </div>

@@ -223,16 +223,21 @@ pub fn setup_proxy_server(
     let ip_service = context.require_service::<temps_geo::IpAddressService>();
     let config_service = context.require_service::<temps_config::ConfigService>();
 
-    let request_logger = Arc::new(RequestLoggerImpl::new(
-        LoggingConfig::default(),
-        db.clone(),
-        ip_service.clone(),
-    )) as Arc<dyn RequestLogger>;
+    // Create batch writer for proxy logs (bounded channel + background batch INSERT)
+    let (proxy_log_handle, proxy_log_writer) =
+        crate::service::proxy_log_batch_writer::ProxyLogBatchWriter::new(
+            db.clone(),
+            ip_service.clone(),
+        );
 
-    let proxy_log_service = Arc::new(crate::service::proxy_log_service::ProxyLogService::new(
-        db.clone(),
-        ip_service.clone(),
-    ));
+    // Spawn the batch writer background task
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime for proxy log batch writer");
+        rt.block_on(proxy_log_writer.run());
+    });
 
     let ip_access_control_service = Arc::new(
         crate::service::ip_access_control_service::IpAccessControlService::new(db.clone()),
@@ -254,13 +259,10 @@ pub fn setup_proxy_server(
     let session_manager =
         Arc::new(SessionManagerImpl::new(db.clone(), crypto.clone())) as Arc<dyn SessionManager>;
 
-    // Clone db for TLS certificate loader before moving into LoadBalancer
-
     // Create the main load balancer
     let lb = LoadBalancer::new(
         upstream_resolver,
-        request_logger,
-        proxy_log_service,
+        proxy_log_handle,
         project_context_resolver,
         visitor_manager,
         session_manager,
@@ -362,16 +364,21 @@ pub fn create_proxy_service(
     let ip_service = context.require_service::<temps_geo::IpAddressService>();
     let config_service = context.require_service::<temps_config::ConfigService>();
 
-    let request_logger = Arc::new(RequestLoggerImpl::new(
-        LoggingConfig::default(),
-        db.clone(),
-        ip_service.clone(),
-    )) as Arc<dyn RequestLogger>;
+    // Create batch writer for proxy logs (bounded channel + background batch INSERT)
+    let (proxy_log_handle, proxy_log_writer) =
+        crate::service::proxy_log_batch_writer::ProxyLogBatchWriter::new(
+            db.clone(),
+            ip_service.clone(),
+        );
 
-    let proxy_log_service = Arc::new(crate::service::proxy_log_service::ProxyLogService::new(
-        db.clone(),
-        ip_service.clone(),
-    ));
+    // Spawn the batch writer background task
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime for proxy log batch writer");
+        rt.block_on(proxy_log_writer.run());
+    });
 
     let ip_access_control_service = Arc::new(
         crate::service::ip_access_control_service::IpAccessControlService::new(db.clone()),
@@ -396,8 +403,7 @@ pub fn create_proxy_service(
     // Create the main load balancer
     let lb = LoadBalancer::new(
         upstream_resolver,
-        request_logger,
-        proxy_log_service,
+        proxy_log_handle,
         project_context_resolver,
         visitor_manager,
         session_manager,

@@ -968,6 +968,28 @@ async fn delete_domain(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Query parameters for listing domains
+#[derive(Debug, Clone, serde::Deserialize, utoipa::IntoParams)]
+pub struct ListDomainsParams {
+    /// Page number (1-indexed)
+    #[param(example = 1)]
+    pub page: Option<u64>,
+    /// Number of items per page (max 100)
+    #[param(example = 20)]
+    pub page_size: Option<u64>,
+    /// Search domains by name (substring match)
+    #[param(example = "example.com")]
+    pub search: Option<String>,
+}
+
+impl ListDomainsParams {
+    pub fn normalize(&self) -> (u64, u64) {
+        let page = self.page.unwrap_or(1).max(1);
+        let page_size = self.page_size.unwrap_or(20).clamp(1, 100);
+        (page, page_size)
+    }
+}
+
 /// List all domains
 #[utoipa::path(
     get,
@@ -978,7 +1000,7 @@ async fn delete_domain(
         (status = 500, description = "Internal server error")
     ),
     params(
-        temps_core::PaginationParams,
+        ListDomainsParams,
     ),
     tag = "Domains",
     security(
@@ -988,17 +1010,17 @@ async fn delete_domain(
 async fn list_domains(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<DomainAppState>>,
-    Query(pagination): Query<temps_core::PaginationParams>,
+    Query(params): Query<ListDomainsParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, DomainsRead);
 
-    let (page, page_size) = pagination.normalize();
+    let (page, page_size) = params.normalize();
 
     debug!("Listing domains for user: {}", auth.user_id());
 
-    let domains = app_state
+    let (domains, total) = app_state
         .domain_service
-        .list_domains_paginated(page, page_size)
+        .list_domains_with_total(page, page_size, params.search.as_deref())
         .await
         .map_err(|e| {
             error!("Failed to list domains: {}", e);
@@ -1009,14 +1031,18 @@ async fn list_domains(
         domains.into_iter().map(DomainResponse::from).collect();
 
     debug!(
-        "Domains retrieved successfully. Count: {}",
-        domain_responses.len()
+        "Domains retrieved successfully. Count: {}, Total: {}",
+        domain_responses.len(),
+        total
     );
 
     Ok((
         StatusCode::OK,
         Json(ListDomainsResponse {
             domains: domain_responses,
+            total,
+            page,
+            page_size,
         }),
     ))
 }

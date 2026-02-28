@@ -1,6 +1,7 @@
 use crate::service::challenge_service::ChallengeService;
 use crate::service::ip_access_control_service::IpAccessControlService;
-use crate::service::proxy_log_service::{CreateProxyLogRequest, ProxyLogService};
+use crate::service::proxy_log_batch_writer::ProxyLogBatchHandle;
+use crate::service::proxy_log_service::CreateProxyLogRequest;
 use crate::tls_fingerprint;
 use crate::traits::*;
 use async_trait::async_trait;
@@ -371,8 +372,7 @@ impl ProxyContext {
 /// Main load balancer proxy implementation using traits
 pub struct LoadBalancer {
     upstream_resolver: Arc<dyn UpstreamResolver>,
-    request_logger: Arc<dyn RequestLogger>,
-    proxy_log_service: Arc<ProxyLogService>,
+    proxy_log_handle: ProxyLogBatchHandle,
     project_context_resolver: Arc<dyn ProjectContextResolver>,
     visitor_manager: Arc<dyn VisitorManager>,
     session_manager: Arc<dyn SessionManager>,
@@ -388,8 +388,7 @@ impl LoadBalancer {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         upstream_resolver: Arc<dyn UpstreamResolver>,
-        request_logger: Arc<dyn RequestLogger>,
-        proxy_log_service: Arc<ProxyLogService>,
+        proxy_log_handle: ProxyLogBatchHandle,
         project_context_resolver: Arc<dyn ProjectContextResolver>,
         visitor_manager: Arc<dyn VisitorManager>,
         session_manager: Arc<dyn SessionManager>,
@@ -402,8 +401,7 @@ impl LoadBalancer {
     ) -> Self {
         Self {
             upstream_resolver,
-            request_logger,
-            proxy_log_service,
+            proxy_log_handle,
             project_context_resolver,
             visitor_manager,
             session_manager,
@@ -1042,115 +1040,18 @@ impl LoadBalancer {
 
     async fn log_request(
         &self,
-        session: &PingoraSession,
+        _session: &PingoraSession,
         upstream_response: &ResponseHeader,
         ctx: &ProxyContext,
     ) -> Result<()> {
-        let headers_map: HashMap<String, String> = upstream_response
-            .headers
-            .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
-            .collect();
-
-        let response_headers_json = serde_json::to_value(&headers_map)
-            .map_err(|_| Error::new_str("Failed to serialize response headers."))?;
-
-        let request_headers_json = if ctx.request_headers.is_none() {
-            let req_headers_map: HashMap<String, String> = session
-                .req_header()
-                .headers
-                .iter()
-                .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.to_string(), val.to_string())))
-                .collect();
-            Some(
-                serde_json::to_value(&req_headers_map)
-                    .map_err(|_| Error::new_str("Failed to serialize request headers."))?,
-            )
-        } else {
-            ctx.request_headers
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|_| Error::new_str("Failed to serialize request headers."))?
-        };
-
         // Skip logging for internal temps API routes
         if ctx.path.starts_with(ROUTE_PREFIX_TEMPS) {
             return Ok(());
         }
 
-        // Log ALL requests (not just page visits)
-        let project_context = if let (Some(project), Some(environment), Some(deployment)) =
-            (&ctx.project, &ctx.environment, &ctx.deployment)
-        {
-            Some(ProjectContext {
-                project: project.clone(),
-                environment: environment.clone(),
-                deployment: deployment.clone(),
-            })
-        } else {
-            None
-        };
-
-        let visitor = if let (Some(visitor_id), Some(visitor_id_i32)) =
-            (&ctx.visitor_id, ctx.visitor_id_i32)
-        {
-            Some(Visitor {
-                visitor_id: visitor_id.clone(),
-                visitor_id_i32,
-                is_crawler: false, // We'd need to track this properly
-                crawler_name: None,
-            })
-        } else {
-            None
-        };
-
-        let session_obj = if let (Some(session_id), Some(session_id_i32), Some(visitor_id_i32)) =
-            (&ctx.session_id, ctx.session_id_i32, ctx.visitor_id_i32)
-        {
-            Some(crate::traits::Session {
-                session_id: session_id.clone(),
-                session_id_i32,
-                visitor_id_i32,
-                is_new_session: ctx.is_new_session,
-            })
-        } else {
-            None
-        };
-
         let status_code = upstream_response.status.as_u16() as i32;
-        let started_at = match chrono::Duration::from_std(ctx.start_time.elapsed()) {
-            Ok(duration) => chrono::Utc::now() - duration,
-            Err(e) => {
-                error!("Failed to convert duration: {:?}", e);
-                chrono::Utc::now()
-            }
-        };
-        let finished_at = chrono::Utc::now();
 
-        let log_data = RequestLogData {
-            request_id: ctx.request_id.clone(),
-            host: ctx.host.clone(),
-            method: ctx.method.clone(),
-            path: ctx.path.clone(),
-            status_code,
-            user_agent: ctx.user_agent.clone(),
-            referrer: ctx.referrer.clone(),
-            ip_address: ctx.ip_address.clone(),
-            started_at,
-            finished_at,
-            request_headers: request_headers_json.unwrap_or(serde_json::Value::Null),
-            response_headers: response_headers_json,
-            visitor,
-            session: session_obj,
-            project_context,
-        };
-
-        if let Err(e) = self.request_logger.log_request(log_data).await {
-            error!("Failed to log request: {:?}", e);
-        }
-
-        // Asynchronously log to proxy_logs table (skip static assets)
+        // Asynchronously log to proxy_logs table via batch writer (skip static assets)
         if Self::should_log_request(&ctx.path) {
             // Extract request size from Content-Length header
             let request_size = ctx
@@ -1173,50 +1074,6 @@ impl LoadBalancer {
                 .and_then(|h| h.get("x-cache").or_else(|| h.get("cf-cache-status")))
                 .cloned();
 
-            let proxy_log_service = self.proxy_log_service.clone();
-            let proxy_log_request = CreateProxyLogRequest {
-                method: ctx.method.clone(),
-                path: ctx.path.clone(),
-                query_string: ctx.query_string.clone(),
-                host: ctx.host.clone(),
-                status_code: status_code as i16,
-                response_time_ms: Some(ctx.start_time.elapsed().as_millis() as i32),
-                request_source: "proxy".to_string(),
-                is_system_request: ctx.path.starts_with(ROUTE_PREFIX_TEMPS),
-                routing_status: ctx.routing_status.clone(),
-                project_id: ctx.project.as_ref().map(|p| p.id),
-                environment_id: ctx.environment.as_ref().map(|e| e.id),
-                deployment_id: ctx.deployment.as_ref().map(|d| d.id),
-                session_id: ctx.session_id_i32,
-                visitor_id: ctx.visitor_id_i32,
-                container_id: ctx.container_id.clone(),
-                upstream_host: ctx.upstream_host.clone(),
-                error_message: ctx.error_message.clone(),
-                client_ip: ctx.ip_address.clone(),
-                user_agent: Some(ctx.user_agent.clone()),
-                referrer: ctx.referrer.clone(),
-                request_id: ctx.request_id.clone(),
-                // Service will enrich these fields
-                ip_geolocation_id: None,
-                browser: None,
-                browser_version: None,
-                operating_system: None,
-                device_type: None,
-                is_bot: None,
-                bot_name: None,
-                request_size_bytes: request_size,
-                response_size_bytes: response_size,
-                cache_status,
-                request_headers: ctx
-                    .request_headers
-                    .as_ref()
-                    .and_then(|h| serde_json::to_value(h).ok()),
-                response_headers: ctx
-                    .response_headers
-                    .as_ref()
-                    .and_then(|h| serde_json::to_value(h).ok()),
-            };
-
             // Only log HTML pages (skip static assets like .js, .css, .svg, etc.)
             let should_log = ctx
                 .response_headers
@@ -1226,10 +1083,54 @@ impl LoadBalancer {
                 .unwrap_or(false);
 
             if should_log {
-                // Spawn async task to avoid blocking the response
+                let proxy_log_request = CreateProxyLogRequest {
+                    method: ctx.method.clone(),
+                    path: ctx.path.clone(),
+                    query_string: ctx.query_string.clone(),
+                    host: ctx.host.clone(),
+                    status_code: status_code as i16,
+                    response_time_ms: Some(ctx.start_time.elapsed().as_millis() as i32),
+                    request_source: "proxy".to_string(),
+                    is_system_request: ctx.path.starts_with(ROUTE_PREFIX_TEMPS),
+                    routing_status: ctx.routing_status.clone(),
+                    project_id: ctx.project.as_ref().map(|p| p.id),
+                    environment_id: ctx.environment.as_ref().map(|e| e.id),
+                    deployment_id: ctx.deployment.as_ref().map(|d| d.id),
+                    session_id: ctx.session_id_i32,
+                    visitor_id: ctx.visitor_id_i32,
+                    container_id: ctx.container_id.clone(),
+                    upstream_host: ctx.upstream_host.clone(),
+                    error_message: ctx.error_message.clone(),
+                    client_ip: ctx.ip_address.clone(),
+                    user_agent: Some(ctx.user_agent.clone()),
+                    referrer: ctx.referrer.clone(),
+                    request_id: ctx.request_id.clone(),
+                    // Batch writer will enrich these fields
+                    ip_geolocation_id: None,
+                    browser: None,
+                    browser_version: None,
+                    operating_system: None,
+                    device_type: None,
+                    is_bot: None,
+                    bot_name: None,
+                    request_size_bytes: request_size,
+                    response_size_bytes: response_size,
+                    cache_status,
+                    request_headers: ctx
+                        .request_headers
+                        .as_ref()
+                        .and_then(|h| serde_json::to_value(h).ok()),
+                    response_headers: ctx
+                        .response_headers
+                        .as_ref()
+                        .and_then(|h| serde_json::to_value(h).ok()),
+                };
+
+                // Send to batch writer with backpressure (blocks briefly if buffer full)
+                let handle = self.proxy_log_handle.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = proxy_log_service.create(proxy_log_request).await {
-                        warn!("Failed to create proxy log: {:?}", e);
+                    if !handle.send(proxy_log_request).await {
+                        warn!("Proxy log batch writer is closed, log entry dropped");
                     }
                 });
             }
@@ -1303,7 +1204,6 @@ impl LoadBalancer {
             return;
         }
 
-        let proxy_log_service = self.proxy_log_service.clone();
         let proxy_log_request = CreateProxyLogRequest {
             method: ctx.method.clone(),
             path: ctx.path.clone(),
@@ -1343,11 +1243,10 @@ impl LoadBalancer {
             response_headers: None,
         };
 
-        tokio::spawn(async move {
-            if let Err(e) = proxy_log_service.create(proxy_log_request).await {
-                warn!("Failed to create proxy log for static file: {:?}", e);
-            }
-        });
+        // Send to batch writer (non-blocking, drops if buffer full)
+        if !self.proxy_log_handle.try_send(proxy_log_request) {
+            warn!("Proxy log batch writer full, static file log entry dropped");
+        }
     }
 
     /// Set visitor and session cookies on the response
@@ -2973,7 +2872,6 @@ impl ProxyHttp for LoadBalancer {
             // For failed requests, response size is the error message size
             let response_size = Some("Service Unavailable".len() as i64);
 
-            let proxy_log_service = self.proxy_log_service.clone();
             let proxy_log_request = CreateProxyLogRequest {
                 method: ctx.method.clone(),
                 path: ctx.path.clone(),
@@ -3016,12 +2914,10 @@ impl ProxyHttp for LoadBalancer {
                     .and_then(|h| serde_json::to_value(h).ok()),
             };
 
-            // Spawn async task to avoid blocking
-            tokio::spawn(async move {
-                if let Err(e) = proxy_log_service.create(proxy_log_request).await {
-                    warn!("Failed to create proxy log for failed request: {:?}", e);
-                }
-            });
+            // Send to batch writer (non-blocking, drops if buffer full)
+            if !self.proxy_log_handle.try_send(proxy_log_request) {
+                warn!("Proxy log batch writer full, failed request log entry dropped");
+            }
         }
 
         FailToProxy {

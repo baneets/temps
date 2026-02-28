@@ -237,16 +237,11 @@ pub mod proxy_tests {
 
         let ip_service = create_mock_ip_service(test_db.db.clone());
 
-        let request_logger = Arc::new(RequestLoggerImpl::new(
-            LoggingConfig::default(),
-            test_db.db.clone(),
-            ip_service.clone(),
-        )) as Arc<dyn RequestLogger>;
-
-        let proxy_log_service = Arc::new(crate::service::proxy_log_service::ProxyLogService::new(
-            test_db.db.clone(),
-            ip_service.clone(),
-        ));
+        let (proxy_log_handle, _proxy_log_writer) =
+            crate::service::proxy_log_batch_writer::ProxyLogBatchWriter::new(
+                test_db.db.clone(),
+                ip_service.clone(),
+            );
 
         let project_context_resolver = Arc::new(ProjectContextResolverImpl::new(mock_route_table))
             as Arc<dyn ProjectContextResolver>;
@@ -277,8 +272,7 @@ pub mod proxy_tests {
 
         let lb = ProxyLoadBalancer::new(
             upstream_resolver,
-            request_logger,
-            proxy_log_service,
+            proxy_log_handle,
             project_context_resolver,
             visitor_manager,
             session_manager,
@@ -756,8 +750,12 @@ pub mod proxy_tests {
         // Create LoadBalancer
         let crypto = create_test_crypto();
         let upstream_resolver = Arc::new(MockUpstreamResolver::default());
-        let request_logger = Arc::new(MockRequestLogger::default());
-        let proxy_log_service = create_test_proxy_log_service(db.clone());
+        let ip_service = create_mock_ip_service(db.clone());
+        let (proxy_log_handle, _proxy_log_writer) =
+            crate::service::proxy_log_batch_writer::ProxyLogBatchWriter::new(
+                db.clone(),
+                ip_service,
+            );
         let visitor_manager = Arc::new(MockVisitorManager::default());
         let session_manager = Arc::new(MockSessionManager::default());
 
@@ -776,8 +774,7 @@ pub mod proxy_tests {
 
         let lb = ProxyLoadBalancer::new(
             upstream_resolver,
-            request_logger,
-            proxy_log_service,
+            proxy_log_handle,
             project_context_resolver,
             visitor_manager,
             session_manager,

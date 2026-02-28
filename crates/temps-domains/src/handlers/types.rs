@@ -179,6 +179,9 @@ impl From<crate::tls::models::Certificate> for DomainResponse {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct ListDomainsResponse {
     pub domains: Vec<DomainResponse>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

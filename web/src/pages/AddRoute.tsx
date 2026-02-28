@@ -5,6 +5,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { DomainSelector } from '@/components/domains/DomainSelector'
 import {
   Form,
   FormControl,
@@ -17,13 +18,6 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { usePlatformCapabilities } from '@/hooks/usePlatformCapabilities'
@@ -372,18 +366,12 @@ export function AddRoute() {
                         {watchedDomainInputType === 'select' &&
                         hasAvailableDomains &&
                         !isLocalMode ? (
-                          <Select onValueChange={field.onChange} value={field.value}>
-                            <SelectTrigger>
-                              <SelectValue placeholder="Select a domain" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {domainsData?.domains?.map((domain) => (
-                                <SelectItem key={domain.id} value={domain.domain}>
-                                  {domain.domain}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                          <DomainSelector
+                            value={field.value}
+                            onValueChange={field.onChange}
+                            placeholder="Select a domain"
+                            className="w-full"
+                          />
                         ) : (
                           <Input
                             {...field}

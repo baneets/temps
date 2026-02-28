@@ -520,6 +520,27 @@ impl DomainService {
         Ok(domains)
     }
 
+    /// List domains with pagination, search, and total count
+    pub async fn list_domains_with_total(
+        &self,
+        page: u64,
+        page_size: u64,
+        search: Option<&str>,
+    ) -> Result<(Vec<domains::Model>, u64), DomainServiceError> {
+        let mut query = domains::Entity::find();
+
+        if let Some(search) = search {
+            if !search.is_empty() {
+                query = query.filter(domains::Column::Domain.contains(search));
+            }
+        }
+
+        let paginator = query.paginate(self.db.as_ref(), page_size);
+        let total = paginator.num_items().await?;
+        let domains = paginator.fetch_page(page - 1).await?;
+        Ok((domains, total))
+    }
+
     /// Get challenge status for a domain
     pub async fn get_challenge_status(
         &self,

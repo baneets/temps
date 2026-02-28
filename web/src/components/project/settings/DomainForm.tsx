@@ -7,6 +7,7 @@ import {
   updateCustomDomainMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
+import { DomainSelector } from '@/components/domains/DomainSelector'
 import {
   Form,
   FormControl,
@@ -184,27 +185,18 @@ export function DomainForm({
             <FormItem>
               <FormLabel>Domain</FormLabel>
               <div className="flex flex-col gap-2">
-                <Select
-                  onValueChange={(value) => {
-                    setSubdomain('')
-                    setSelectedDomain(value)
-                    field.onChange(value)
-                  }}
-                  defaultValue={selectedDomain || field.value}
-                >
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select domain" />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {domains?.map((domain) => (
-                      <SelectItem key={domain.id} value={domain.domain}>
-                        {domain.domain}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <FormControl>
+                  <DomainSelector
+                    value={selectedDomain || field.value}
+                    onValueChange={(value) => {
+                      setSubdomain('')
+                      setSelectedDomain(value)
+                      field.onChange(value)
+                    }}
+                    placeholder="Select domain"
+                    className="w-full"
+                  />
+                </FormControl>
 
                 {selectedDomain.includes('*') && (
                   <div className="flex items-center gap-2">
@@ -285,34 +277,18 @@ export function DomainForm({
                 ) : null}
               </div>
               <div className="flex flex-col gap-2">
-                <Select
-                  onValueChange={(value) => {
-                    if (value === '_none_') {
-                      setRedirectSubdomain('')
-                      setSelectedRedirectDomain('')
-                      field.onChange('')
-                    } else {
+                <FormControl>
+                  <DomainSelector
+                    value={selectedRedirectDomain || field.value || ''}
+                    onValueChange={(value) => {
                       setRedirectSubdomain('')
                       setSelectedRedirectDomain(value)
                       field.onChange(value)
-                    }
-                  }}
-                  value={selectedRedirectDomain || field.value || '_none_'}
-                >
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue placeholder="No redirect" />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    <SelectItem value="_none_">No redirect</SelectItem>
-                    {domains?.map((domain) => (
-                      <SelectItem key={domain.id} value={domain.domain}>
-                        {domain.domain}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                    }}
+                    placeholder="No redirect"
+                    className="w-full"
+                  />
+                </FormControl>
 
                 {selectedRedirectDomain?.includes('*') && (
                   <div className="flex items-center gap-2">
