@@ -4912,6 +4912,21 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
+name = "jsonwebtoken"
 version = "10.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0529410abe238729a60b108898784df8984c87f6054c9c4fcacc47e4803c1ce1"
@@ -6181,7 +6196,7 @@ dependencies = [
  "hyper-rustls 0.27.7",
  "hyper-timeout",
  "hyper-util",
- "jsonwebtoken",
+ "jsonwebtoken 10.3.0",
  "once_cell",
  "percent-encoding",
  "pin-project",
@@ -10860,7 +10875,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "hyper 1.7.0",
- "jsonwebtoken",
+ "jsonwebtoken 10.3.0",
  "log",
  "octocrab",
  "regex",
@@ -10886,6 +10901,30 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "temps-google-indexing-plugin"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.6",
+ "base64 0.22.1",
+ "chrono",
+ "include_dir",
+ "jsonwebtoken 9.3.1",
+ "mime_guess",
+ "rand 0.8.5",
+ "reqwest",
+ "rsa",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "temps-plugin-sdk",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]

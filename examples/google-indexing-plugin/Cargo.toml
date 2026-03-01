@@ -1,0 +1,33 @@
+[package]
+name = "temps-google-indexing-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Google Indexing API plugin for Temps - automatically notifies Google when pages are updated or removed"
+
+[[bin]]
+name = "temps-google-indexing-plugin"
+path = "src/main.rs"
+
+[dependencies]
+temps-plugin-sdk = { path = "../../crates/temps-plugin-sdk" }
+
+axum = { version = "0.8" }
+sea-orm = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2.5"
+thiserror = { workspace = true }
+include_dir = "0.7"
+mime_guess = "2.0"
+jsonwebtoken = "9"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"

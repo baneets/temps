@@ -61,6 +61,7 @@ members = [
     "examples/example-plugin",
     "examples/lighthouse-plugin",
     "examples/indexnow-plugin",
+    "examples/google-indexing-plugin",
 ]
 
 [workspace.package]
