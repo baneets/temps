@@ -882,14 +882,20 @@ impl CachedPeerTable {
 pub struct RouteTableListener {
     peer_table: Arc<CachedPeerTable>,
     database_url: String,
+    queue: Arc<dyn temps_core::JobQueue>,
     task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RouteTableListener {
-    pub fn new(peer_table: Arc<CachedPeerTable>, database_url: String) -> Self {
+    pub fn new(
+        peer_table: Arc<CachedPeerTable>,
+        database_url: String,
+        queue: Arc<dyn temps_core::JobQueue>,
+    ) -> Self {
         Self {
             peer_table,
             database_url,
+            queue,
             task_handle: std::sync::Mutex::new(None),
         }
     }
@@ -916,6 +922,7 @@ impl RouteTableListener {
 
         // Spawn background task to handle notifications
         let peer_table = self.peer_table.clone();
+        let queue = self.queue.clone();
         let handle = tokio::spawn(async move {
             loop {
                 match listener.recv().await {
@@ -930,7 +937,23 @@ impl RouteTableListener {
                         if let Err(e) = peer_table.load_routes().await {
                             error!("Failed to reload routes: {}", e);
                         } else {
-                            debug!("Route table synchronized ({} entries)", peer_table.len());
+                            let route_count = peer_table.len();
+                            debug!("Route table synchronized ({} entries)", route_count);
+
+                            // Notify via queue that routes have been reloaded.
+                            // This channel handles generic route_table_changes
+                            // (domains, custom_routes, etc.) so we don't have
+                            // environment/deployment context — those fields are None.
+                            let event = temps_core::Job::RouteTableUpdated(
+                                temps_core::RouteTableUpdatedJob {
+                                    environment_id: None,
+                                    deployment_id: None,
+                                    route_count,
+                                },
+                            );
+                            if let Err(e) = queue.send(event).await {
+                                error!("Failed to send RouteTableUpdated event: {}", e);
+                            }
                         }
                     }
                     Err(e) => {
@@ -986,6 +1009,21 @@ impl Drop for RouteTableListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Create a no-op queue for tests that don't need queue functionality
+    fn test_queue() -> Arc<dyn temps_core::JobQueue> {
+        struct NoOpQueue;
+        #[temps_core::async_trait::async_trait]
+        impl temps_core::JobQueue for NoOpQueue {
+            async fn send(&self, _job: temps_core::Job) -> Result<(), temps_core::QueueError> {
+                Ok(())
+            }
+            fn subscribe(&self) -> Box<dyn temps_core::JobReceiver> {
+                unimplemented!("not needed in tests")
+            }
+        }
+        Arc::new(NoOpQueue)
+    }
 
     #[test]
     fn test_route_info_creation() {
@@ -1212,6 +1250,7 @@ mod tests {
         let listener = RouteTableListener::new(
             peer_table,
             "postgresql://fake:fake@localhost/fake".to_string(),
+            test_queue(),
         );
 
         let guard = listener.task_handle.lock().unwrap();
@@ -1225,6 +1264,7 @@ mod tests {
         let listener = RouteTableListener::new(
             peer_table,
             "postgresql://fake:fake@localhost/fake".to_string(),
+            test_queue(),
         );
 
         // Calling shutdown before start should not panic
@@ -1241,6 +1281,7 @@ mod tests {
         let listener = RouteTableListener::new(
             peer_table,
             "postgresql://fake:fake@localhost/fake".to_string(),
+            test_queue(),
         );
 
         // Dropping without starting should not panic

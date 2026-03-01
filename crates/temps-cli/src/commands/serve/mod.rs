@@ -120,11 +120,17 @@ impl ServeCommand {
         // Services are now available for use
         debug!("Cookie crypto and encryption services initialized");
 
+        // Create the shared job queue FIRST — it is used by route table listeners
+        // (to publish RouteTableUpdated) and by the console API (for all other jobs).
+        let (queue, _keep_alive_receiver): (Arc<dyn temps_core::JobQueue>, _) =
+            temps_queue::BroadcastQueueService::create_job_queue_arc_with_receiver(1000);
+
         // Create shared route table instance (used by both console API and proxy)
         let route_table = Arc::new(temps_proxy::CachedPeerTable::new(db.clone()));
         let route_table_listener = Arc::new(temps_routes::RouteTableListener::new(
             route_table.clone(),
             self.database_url.clone(),
+            queue.clone(),
         ));
 
         let rt = tokio::runtime::Runtime::new()?;
@@ -141,6 +147,7 @@ impl ServeCommand {
         let project_listener = temps_routes::ProjectChangeListener::new(
             self.database_url.clone(),
             route_table.clone(),
+            queue.clone(),
         );
         rt.block_on(async {
             if let Err(e) = project_listener.start_listening().await {
@@ -156,25 +163,18 @@ impl ServeCommand {
         // but that is far better than all proxied traffic being down.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let db_clone = db.clone();
-        let serve_config_clone = serve_config.clone();
-        let cookie_crypto_clone = cookie_crypto.clone();
-        let encryption_service_clone = encryption_service.clone();
-        let route_table_clone = route_table.clone();
-        let additional_templates = self.additional_templates.clone();
-
+        let params = console::ConsoleApiParams {
+            db: db.clone(),
+            config: serve_config.clone(),
+            cookie_crypto: cookie_crypto.clone(),
+            encryption_service: encryption_service.clone(),
+            route_table: route_table.clone(),
+            queue: queue.clone(),
+            ready_signal: Some(ready_tx),
+            additional_templates: self.additional_templates.clone(),
+        };
         rt.spawn(async move {
-            match start_console_api(
-                db_clone,
-                serve_config_clone,
-                cookie_crypto_clone,
-                encryption_service_clone,
-                route_table_clone,
-                Some(ready_tx),
-                additional_templates,
-            )
-            .await
-            {
+            match start_console_api(params).await {
                 Ok(()) => {
                     info!("Console API server exited normally");
                 }

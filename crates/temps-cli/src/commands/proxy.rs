@@ -228,11 +228,16 @@ impl ProxyCommand {
             proxy_config.preview_domain
         );
 
+        // Create job queue for route table update notifications
+        let (queue, _keep_alive_receiver): (Arc<dyn temps_core::JobQueue>, _) =
+            temps_queue::BroadcastQueueService::create_job_queue_arc_with_receiver(1000);
+
         // Initialize route table with listener (preview_domain loaded from settings)
         let route_table = Arc::new(temps_proxy::CachedPeerTable::new(db.clone()));
         let listener = Arc::new(temps_routes::RouteTableListener::new(
             route_table.clone(),
             self.database_url.clone(),
+            queue.clone(),
         ));
 
         // Start route table listener
@@ -245,6 +250,7 @@ impl ProxyCommand {
         let project_listener = temps_routes::ProjectChangeListener::new(
             self.database_url.clone(),
             route_table.clone(),
+            queue.clone(),
         );
         rt.block_on(async {
             if let Err(e) = project_listener.start_listening().await {

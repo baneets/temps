@@ -16,15 +16,21 @@ use tracing::{error, info};
 pub struct ProjectChangeListener {
     database_url: String,
     peer_table: Arc<CachedPeerTable>,
+    queue: Arc<dyn temps_core::JobQueue>,
     task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ProjectChangeListener {
     /// Create a new project change listener
-    pub fn new(database_url: String, peer_table: Arc<CachedPeerTable>) -> Self {
+    pub fn new(
+        database_url: String,
+        peer_table: Arc<CachedPeerTable>,
+        queue: Arc<dyn temps_core::JobQueue>,
+    ) -> Self {
         Self {
             database_url,
             peer_table,
+            queue,
             task_handle: std::sync::Mutex::new(None),
         }
     }
@@ -42,13 +48,18 @@ impl ProjectChangeListener {
         info!("Started listening for project_route_change events");
 
         let peer_table = self.peer_table.clone();
+        let queue = self.queue.clone();
 
         let handle = tokio::spawn(async move {
             loop {
                 match pg_listener.recv().await {
                     Ok(notification) => {
-                        Self::handle_project_change_static(&peer_table, notification.payload())
-                            .await;
+                        Self::handle_project_change_static(
+                            &peer_table,
+                            &queue,
+                            notification.payload(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         error!("Error receiving project change notification: {}", e);
@@ -92,11 +103,16 @@ impl ProjectChangeListener {
     }
 
     /// Handle a route change notification (project or environment)
-    async fn handle_project_change_static(peer_table: &CachedPeerTable, payload: &str) {
+    async fn handle_project_change_static(
+        peer_table: &CachedPeerTable,
+        queue: &Arc<dyn temps_core::JobQueue>,
+        payload: &str,
+    ) {
         // Try to parse as RouteChangePayload which handles both project and environment changes
         match serde_json::from_str::<RouteChangePayload>(payload) {
             Ok(change) => {
-                match change {
+                // Extract environment/deployment context before we move into load_routes
+                let (environment_id, deployment_id) = match &change {
                     RouteChangePayload::Project(project_change) => {
                         info!(
                             "Project route change: action={}, project_id={}, is_deleted={}, slug={}",
@@ -105,6 +121,7 @@ impl ProjectChangeListener {
                             project_change.is_deleted,
                             project_change.slug
                         );
+                        (None, None)
                     }
                     RouteChangePayload::Environment(env_change) => {
                         info!(
@@ -114,12 +131,26 @@ impl ProjectChangeListener {
                             env_change.project_id,
                             env_change.deployment_id
                         );
+                        (Some(env_change.environment_id), env_change.deployment_id)
                     }
-                }
+                };
 
                 // Reload all routes when any change happens
                 if let Err(e) = peer_table.load_routes().await {
                     error!("Failed to reload routes after change: {}", e);
+                } else {
+                    let route_count = peer_table.len();
+
+                    // Notify via queue that routes have been reloaded with context
+                    let event =
+                        temps_core::Job::RouteTableUpdated(temps_core::RouteTableUpdatedJob {
+                            environment_id,
+                            deployment_id,
+                            route_count,
+                        });
+                    if let Err(e) = queue.send(event).await {
+                        error!("Failed to send RouteTableUpdated event: {}", e);
+                    }
                 }
             }
             Err(e) => {
@@ -231,6 +262,21 @@ mod tests {
     // ProjectChangeListener lifecycle tests
     // ========================================================================
 
+    /// Create a no-op queue for tests that don't need queue functionality
+    fn test_queue() -> Arc<dyn temps_core::JobQueue> {
+        struct NoOpQueue;
+        #[temps_core::async_trait::async_trait]
+        impl temps_core::JobQueue for NoOpQueue {
+            async fn send(&self, _job: temps_core::Job) -> Result<(), temps_core::QueueError> {
+                Ok(())
+            }
+            fn subscribe(&self) -> Box<dyn temps_core::JobReceiver> {
+                unimplemented!("not needed in tests")
+            }
+        }
+        Arc::new(NoOpQueue)
+    }
+
     #[test]
     fn test_project_change_listener_new_has_no_task() {
         let db = Arc::new(sea_orm::DatabaseConnection::Disconnected);
@@ -238,6 +284,7 @@ mod tests {
         let listener = ProjectChangeListener::new(
             "postgresql://fake:fake@localhost/fake".to_string(),
             peer_table,
+            test_queue(),
         );
 
         let guard = listener.task_handle.lock().unwrap();
@@ -251,6 +298,7 @@ mod tests {
         let listener = ProjectChangeListener::new(
             "postgresql://fake:fake@localhost/fake".to_string(),
             peer_table,
+            test_queue(),
         );
 
         // Calling shutdown before start should not panic
@@ -267,6 +315,7 @@ mod tests {
         let listener = ProjectChangeListener::new(
             "postgresql://fake:fake@localhost/fake".to_string(),
             peer_table,
+            test_queue(),
         );
 
         // Dropping without starting should not panic

@@ -1001,6 +1001,7 @@ impl DeploymentService {
                 .log_service(self.log_service.clone())
                 .container_deployer(self.deployer.clone())
                 .queue(self.queue_service.clone())
+                .config_service(self.config_service.clone())
                 .build()
                 .map_err(|e| {
                     DeploymentError::Other(format!("Failed to create mark complete job: {}", e))
@@ -2614,14 +2615,90 @@ mod tests {
         );
         let config_service = Arc::new(temps_config::ConfigService::new(server_config, db.clone()));
 
-        // Create mock queue service
-        let mut queue_service = MockQueueService::new();
-        queue_service.expect_send().returning(|_| Ok(()));
-        queue_service.expect_subscribe().returning(|| {
-            // Return a simple mock receiver
-            Box::new(MockJobReceiver::new())
-        });
-        let queue_service: Arc<dyn temps_core::JobQueue> = Arc::new(queue_service);
+        // Use a real broadcast queue so that mark_complete's route-ready
+        // wait can be satisfied. We spawn a background task that listens for
+        // any job on the queue and automatically responds with a
+        // RouteTableUpdated event, simulating what the PG route listener does
+        // in production.
+        let (queue_service, _keep_alive) =
+            temps_queue::BroadcastQueueService::create_job_queue_arc_with_receiver(64);
+        {
+            let queue_for_auto_responder = queue_service.clone();
+            let mut auto_rx = queue_service.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match auto_rx.recv().await {
+                        Ok(temps_core::Job::RouteTableUpdated(_)) => {
+                            // Don't echo RouteTableUpdated events (avoid infinite loop)
+                        }
+                        Ok(_job) => {
+                            // Ignore other jobs — the route table update is
+                            // triggered by the DB PG trigger, not by queue
+                            // events. We just need to keep this receiver alive.
+                        }
+                        Err(_) => break,
+                    }
+                }
+                drop(queue_for_auto_responder);
+            });
+        }
+        // Spawn a second task that periodically sends RouteTableUpdated for
+        // any deployment currently going through mark_complete. Since we don't
+        // know the exact IDs, we listen for the `current_deployment_id` DB
+        // change. In tests, instead we just send a broadly-matching event
+        // after a short delay.
+        //
+        // In practice, for integration tests the simplest approach is to have
+        // `wait_for_route_ready` accept an environment_id of None as a
+        // wildcard, but that would weaken production safety. Instead, we
+        // directly send the right event from a monitoring task on the DB.
+        //
+        // For unit tests: we use a simpler approach — we send the
+        // RouteTableUpdated from a DB-watching perspective. Since tests use
+        // real DB, we poll the environments table for current_deployment_id
+        // changes and then send the corresponding RouteTableUpdated.
+        {
+            let queue_for_watcher = queue_service.clone();
+            let db_for_watcher = db.clone();
+            tokio::spawn(async move {
+                use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+                // Poll every 50ms for environments with a current_deployment_id
+                // that doesn't have a matching completed deployment yet.
+                // This simulates the PG route listener.
+                let mut seen: std::collections::HashSet<(i32, i32)> =
+                    std::collections::HashSet::new();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                    let envs = match temps_entities::environments::Entity::find()
+                        .filter(
+                            temps_entities::environments::Column::CurrentDeploymentId.is_not_null(),
+                        )
+                        .all(db_for_watcher.as_ref())
+                        .await
+                    {
+                        Ok(envs) => envs,
+                        Err(_) => continue,
+                    };
+
+                    for env in envs {
+                        if let Some(dep_id) = env.current_deployment_id {
+                            if seen.insert((env.id, dep_id)) {
+                                let _ = queue_for_watcher
+                                    .send(temps_core::Job::RouteTableUpdated(
+                                        temps_core::RouteTableUpdatedJob {
+                                            environment_id: Some(env.id),
+                                            deployment_id: Some(dep_id),
+                                            route_count: 1,
+                                        },
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Create real docker log service for testing
         // For tests, we'll create a basic Docker connection (may fail but that's OK for tests)

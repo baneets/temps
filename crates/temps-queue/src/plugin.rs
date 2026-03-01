@@ -7,30 +7,26 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use temps_core::plugin::{
     PluginContext, PluginError, PluginRoutes, ServiceRegistrationContext, TempsPlugin,
 };
+use temps_core::JobQueue;
 
-use crate::BroadcastQueueService;
-
-// Global storage to keep the receiver alive and prevent channel closure
-static KEEP_ALIVE_RECEIVER: Mutex<Option<tokio::sync::broadcast::Receiver<temps_core::Job>>> =
-    Mutex::new(None);
-
-/// Queue Plugin for managing job queues and background processing
+/// Queue Plugin for managing job queues and background processing.
+///
+/// Accepts a pre-created `Arc<dyn JobQueue>` so the same queue instance can be
+/// shared with components that start before the plugin system (e.g., route table
+/// listeners).
 pub struct QueuePlugin {
-    queue_capacity: usize,
+    queue: Arc<dyn JobQueue>,
 }
 
 impl QueuePlugin {
-    pub fn new(queue_capacity: usize) -> Self {
-        Self { queue_capacity }
-    }
-
-    pub fn with_default_capacity() -> Self {
-        Self::new(1000)
+    /// Create a queue plugin that registers the given queue into the service context.
+    pub fn new(queue: Arc<dyn JobQueue>) -> Self {
+        Self { queue }
     }
 }
 
@@ -44,40 +40,18 @@ impl TempsPlugin for QueuePlugin {
         context: &'a ServiceRegistrationContext,
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
         Box::pin(async move {
-            tracing::debug!(
-                "🔧 QueuePlugin: Starting service registration with capacity: {}",
-                self.queue_capacity
-            );
-
-            // Create BroadcastQueueService with receiver to keep channel alive
-            let (queue_service, keep_alive_receiver) =
-                BroadcastQueueService::create_job_queue_arc_with_receiver(self.queue_capacity);
-
-            tracing::debug!("📦 QueuePlugin: Created BroadcastQueueService, storing receiver to keep channel alive");
-
-            // Store the receiver globally to prevent it from being dropped
-            {
-                let mut receiver_guard = KEEP_ALIVE_RECEIVER.lock().unwrap();
-                *receiver_guard = Some(keep_alive_receiver);
-            }
-            tracing::debug!("🔒 QueuePlugin: Keep-alive receiver stored safely");
-
-            tracing::debug!("📦 QueuePlugin: Registering JobQueue service");
-            context.register_service(queue_service);
-            tracing::debug!("✅ QueuePlugin: JobQueue service registered successfully");
-
-            tracing::debug!("🎉 Queue plugin services registered successfully");
+            tracing::debug!("QueuePlugin: Registering pre-created JobQueue service");
+            context.register_service(self.queue.clone());
+            tracing::debug!("QueuePlugin: JobQueue service registered successfully");
             Ok(())
         })
     }
 
     fn configure_routes(&self, _context: &PluginContext) -> Option<PluginRoutes> {
-        // Queue plugin doesn't expose HTTP routes
         None
     }
 
     fn openapi_schema(&self) -> Option<utoipa::openapi::OpenApi> {
-        // Queue plugin doesn't have public API endpoints
         None
     }
 }
@@ -88,13 +62,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_plugin_name() {
-        let queue_plugin = QueuePlugin::with_default_capacity();
+        let (queue, _receiver) =
+            crate::BroadcastQueueService::create_job_queue_arc_with_receiver(100);
+        let queue_plugin = QueuePlugin::new(queue);
         assert_eq!(queue_plugin.name(), "queue");
-    }
-
-    #[tokio::test]
-    async fn test_queue_plugin_custom_capacity() {
-        let queue_plugin = QueuePlugin::new(500);
-        assert_eq!(queue_plugin.queue_capacity, 500);
     }
 }

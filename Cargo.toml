@@ -60,6 +60,7 @@ members = [
     "crates/temps-external-plugins",
     "examples/example-plugin",
     "examples/lighthouse-plugin",
+    "examples/indexnow-plugin",
 ]
 
 [workspace.package]

@@ -10953,6 +10953,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "temps-indexnow-plugin"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.6",
+ "chrono",
+ "include_dir",
+ "mime_guess",
+ "reqwest",
+ "scraper",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "temps-plugin-sdk",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "temps-infra"
 version = "0.1.0"
 dependencies = [

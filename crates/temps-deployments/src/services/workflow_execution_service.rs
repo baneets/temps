@@ -688,6 +688,7 @@ impl WorkflowExecutionService {
                     .log_service(self.log_service.clone())
                     .container_deployer(self.container_deployer.clone())
                     .queue(self.queue.clone())
+                    .config_service(self.config_service.clone())
                     .build()?;
 
                 Ok(Arc::new(job))
@@ -1133,9 +1134,26 @@ impl WorkflowExecutionService {
 
         match status {
             temps_entities::types::PipelineStatus::Completed => {
-                // Get deployment URL from environment
+                // Get deployment URL from environment: prefer custom host, fall back to preview domain
                 let url = if !environment.host.is_empty() {
                     Some(format!("https://{}", environment.host))
+                } else if !environment.subdomain.is_empty() {
+                    // No custom host set — construct URL from preview domain
+                    match self
+                        .config_service
+                        .get_deployment_url_by_slug(&environment.subdomain)
+                        .await
+                    {
+                        Ok(preview_url) => Some(preview_url),
+                        Err(e) => {
+                            tracing::debug!(
+                                "Failed to construct preview domain URL for environment {}: {}",
+                                updated_deployment.environment_id,
+                                e
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

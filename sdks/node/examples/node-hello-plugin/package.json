@@ -1,0 +1,21 @@
+{
+  "name": "node-hello-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "embed": "bun run scripts/embed-assets.ts",
+    "compile": "bun run embed && bun build src/index.ts --compile --outfile dist/hello-node",
+    "build": "bun run compile",
+    "test": "bun run scripts/integration-test.ts"
+  },
+  "dependencies": {
+    "@temps-sdk/plugin": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.4"
+  }
+}

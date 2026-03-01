@@ -49,10 +49,13 @@ mod db;
 mod handlers;
 mod types;
 
+use std::sync::OnceLock;
+
 use axum::routing::{get, post};
 use include_dir::{include_dir, Dir};
 use temps_plugin_sdk::prelude::*;
 
+use crate::crawl::CrawlConfig;
 use crate::db::SeoStore;
 use crate::handlers::AppState;
 
@@ -69,8 +72,20 @@ pub fn ui_dist() -> &'static Dir<'static> {
 // Plugin Definition
 // ============================================================================
 
-#[derive(Default)]
-struct SeoPlugin;
+struct SeoPlugin {
+    /// Shared app state, initialized once in `router()`.
+    /// Used by `on_event` to trigger background crawls without
+    /// duplicating the SeoStore and HTTP client setup.
+    app_state: OnceLock<AppState>,
+}
+
+impl Default for SeoPlugin {
+    fn default() -> Self {
+        Self {
+            app_state: OnceLock::new(),
+        }
+    }
+}
 
 impl ExternalPlugin for SeoPlugin {
     fn manifest(&self) -> PluginManifest {
@@ -87,6 +102,7 @@ impl ExternalPlugin for SeoPlugin {
                 path: "/seo-reports".into(),
                 order: 42,
             })
+            .event("deployment.succeeded")
             .build()
     }
 
@@ -111,6 +127,9 @@ impl ExternalPlugin for SeoPlugin {
             .unwrap_or_default();
 
         let state = AppState { store, http_client };
+
+        // Store a copy for on_event access
+        let _ = self.app_state.set(state.clone());
 
         axum::Router::new()
             // API routes
@@ -139,6 +158,95 @@ impl ExternalPlugin for SeoPlugin {
             "SEO Analyzer plugin started"
         );
         Ok(())
+    }
+
+    fn on_event(&self, _ctx: &PluginContext, event: temps_core::external_plugin::PluginEvent) {
+        if event.event_type != "deployment.succeeded" {
+            return;
+        }
+
+        let url = match event.data.get("url").and_then(|v| v.as_str()) {
+            Some(u) if !u.is_empty() => u.to_string(),
+            _ => {
+                tracing::debug!(
+                    event_id = %event.id,
+                    "deployment.succeeded event has no URL, skipping auto-analysis"
+                );
+                return;
+            }
+        };
+
+        let Some(state) = self.app_state.get().cloned() else {
+            tracing::warn!(
+                event_id = %event.id,
+                "Cannot run auto-analysis: plugin app state not initialized yet"
+            );
+            return;
+        };
+
+        let deployment_id = event.data.get("deployment_id").and_then(|v| v.as_i64());
+        let environment_name = event
+            .data
+            .get("environment_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        tracing::info!(
+            event_id = %event.id,
+            deployment_id = ?deployment_id,
+            environment = %environment_name,
+            url = %url,
+            "Starting automatic SEO analysis for successful deployment"
+        );
+
+        // Spawn background crawl using the same store and HTTP client
+        // that the manual /analyze endpoint uses.
+        tokio::spawn(async move {
+            // The deployment.succeeded event is only emitted after the proxy has
+            // confirmed that the new routes are loaded (route-ready guarantee),
+            // so no artificial delay is needed here.
+
+            let report_id = uuid::Uuid::new_v4().to_string();
+
+            let settings = match state.store.get_settings().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to load settings for auto-analysis");
+                    return;
+                }
+            };
+
+            if let Err(e) = state.store.create_report(&report_id, &url).await {
+                tracing::error!(
+                    report_id = %report_id,
+                    url = %url,
+                    error = %e,
+                    "Failed to create auto-analysis report"
+                );
+                return;
+            }
+
+            let crawl_delay = std::time::Duration::from_millis(settings.crawl_delay_ms);
+
+            crawl::run_analysis(
+                &state.store,
+                &state.http_client,
+                &report_id,
+                &url,
+                CrawlConfig {
+                    max_pages: settings.default_max_pages,
+                    crawl_delay,
+                },
+            )
+            .await;
+
+            tracing::info!(
+                report_id = %report_id,
+                url = %url,
+                deployment_id = ?deployment_id,
+                "Automatic SEO analysis completed for deployment"
+            );
+        });
     }
 }
 

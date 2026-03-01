@@ -14,7 +14,7 @@ use hyper_util::rt::TokioIo;
 use temps_core::external_plugin::{PluginEvent, PluginManifest, PLUGIN_EVENTS_PATH};
 use temps_core::{Job, JobQueue};
 use tokio::net::UnixStream;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -25,7 +25,8 @@ use crate::manager::ExternalPluginManager;
 pub struct PluginEventListener {
     manager: Arc<ExternalPluginManager>,
     queue: Arc<dyn JobQueue>,
-    running: Arc<RwLock<bool>>,
+    /// Cancellation signal: send `true` to stop the listener loop immediately.
+    stop_tx: watch::Sender<bool>,
     task_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
@@ -39,48 +40,55 @@ struct PluginTarget {
 impl PluginEventListener {
     /// Create a new plugin event listener.
     pub fn new(manager: Arc<ExternalPluginManager>, queue: Arc<dyn JobQueue>) -> Self {
+        let (stop_tx, _) = watch::channel(false);
         Self {
             manager,
             queue,
-            running: Arc::new(RwLock::new(false)),
+            stop_tx,
             task_handle: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Start listening to events from the queue.
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut running = self.running.write().await;
-        if *running {
+        // If already running (stop_tx has active receivers from a previous start), skip.
+        if self.task_handle.read().await.is_some() {
             return Ok(());
         }
-        *running = true;
-        drop(running);
 
         info!("Starting plugin event listener");
 
         let mut receiver = self.queue.subscribe();
         let manager = self.manager.clone();
-        let running = self.running.clone();
+        let mut stop_rx = self.stop_tx.subscribe();
 
         let handle = tokio::spawn(async move {
             info!("Plugin event listener task started");
             let mut event_count: u64 = 0;
-            while *running.read().await {
-                match receiver.recv().await {
-                    Ok(job) => {
-                        if let Some(plugin_event) = Self::job_to_plugin_event(&job) {
-                            event_count += 1;
-                            debug!(
-                                event_id = %plugin_event.id,
-                                event_type = %plugin_event.event_type,
-                                "Delivering plugin event #{}", event_count
-                            );
-                            Self::deliver_to_plugins(&manager, &plugin_event).await;
+            loop {
+                tokio::select! {
+                    result = receiver.recv() => {
+                        match result {
+                            Ok(job) => {
+                                if let Some(plugin_event) = Self::job_to_plugin_event(&job) {
+                                    event_count += 1;
+                                    debug!(
+                                        event_id = %plugin_event.id,
+                                        event_type = %plugin_event.event_type,
+                                        "Delivering plugin event #{}", event_count
+                                    );
+                                    Self::deliver_to_plugins(&manager, &plugin_event).await;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to receive job from queue: {}", e);
+                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            }
                         }
                     }
-                    Err(e) => {
-                        error!("Failed to receive job from queue: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    _ = stop_rx.changed() => {
+                        // stop_tx sent a signal — exit the loop immediately.
+                        break;
                     }
                 }
             }
@@ -96,10 +104,13 @@ impl PluginEventListener {
     }
 
     /// Stop the event listener.
+    ///
+    /// Signals the background task via a watch channel and awaits its
+    /// completion. This returns immediately (no longer blocked waiting
+    /// for the next job from the broadcast queue).
     pub async fn stop(&self) {
-        let mut running = self.running.write().await;
-        *running = false;
-        drop(running);
+        // Signal the loop to break out of the select!
+        let _ = self.stop_tx.send(true);
 
         if let Some(handle) = self.task_handle.write().await.take() {
             let _ = handle.await;
@@ -110,7 +121,7 @@ impl PluginEventListener {
 
     /// Check if the listener is running.
     pub async fn is_running(&self) -> bool {
-        *self.running.read().await
+        self.task_handle.read().await.is_some()
     }
 
     /// Map a `Job` to a `PluginEvent`, returning `None` for jobs that
@@ -233,6 +244,10 @@ impl PluginEventListener {
     }
 
     /// Deliver an event to all plugins that subscribe to its event type.
+    ///
+    /// Prefers the WebSocket channel for delivery (lower latency, already
+    /// connected).  Falls back to `POST /_events` over HTTP if the channel
+    /// is unavailable or dead.
     async fn deliver_to_plugins(manager: &ExternalPluginManager, event: &PluginEvent) {
         let targets = Self::resolve_targets(manager, &event.event_type).await;
 
@@ -245,6 +260,18 @@ impl PluginEventListener {
         }
 
         for target in &targets {
+            // Try the WebSocket channel first (faster, already connected)
+            if manager.send_event_via_channel(&target.name, event).await {
+                debug!(
+                    plugin = %target.name,
+                    event_type = %event.event_type,
+                    event_id = %event.id,
+                    "Event delivered to plugin via channel"
+                );
+                continue;
+            }
+
+            // Fall back to HTTP POST /_events
             if let Err(e) =
                 Self::deliver_event(&target.socket_path, &target.auth_secret, event).await
             {
@@ -259,7 +286,7 @@ impl PluginEventListener {
                     plugin = %target.name,
                     event_type = %event.event_type,
                     event_id = %event.id,
-                    "Event delivered to plugin"
+                    "Event delivered to plugin via HTTP fallback"
                 );
             }
         }
@@ -372,6 +399,8 @@ impl PluginEventListener {
 
 impl Drop for PluginEventListener {
     fn drop(&mut self) {
+        // Signal stop so the task exits its select! loop
+        let _ = self.stop_tx.send(true);
         match self.task_handle.try_write() {
             Ok(mut guard) => {
                 if let Some(handle) = guard.take() {

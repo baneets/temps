@@ -303,6 +303,52 @@ function NavObserve({
   )
 }
 
+function NavPlugins({
+  items,
+}: {
+  items: { title: string; url: string; icon: LucideIcon }[]
+}) {
+  const location = useLocation()
+  const { isMinimal, isMobile } = useSidebar()
+
+  if (items.length === 0) return null
+
+  return (
+    <SidebarGroup
+      className={
+        isMinimal && !isMobile ? '' : 'group-data-[collapsible=icon]:hidden'
+      }
+    >
+      <SidebarGroupLabel className={isMinimal && !isMobile ? 'hidden' : ''}>
+        Plugins
+      </SidebarGroupLabel>
+      <SidebarMenu>
+        {items.map((item) => {
+          const isActive = location.pathname.startsWith(item.url)
+          return (
+            <SidebarMenuItem key={item.title}>
+              <SidebarMenuButton
+                asChild
+                tooltip={isMinimal && !isMobile ? item.title : undefined}
+                className={cn(
+                  'justify-center',
+                  (!isMinimal || isMobile) && 'justify-start',
+                  isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
+                )}
+              >
+                <Link to={item.url}>
+                  <item.icon />
+                  {(!isMinimal || isMobile) && <span>{item.title}</span>}
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )
+        })}
+      </SidebarMenu>
+    </SidebarGroup>
+  )
+}
+
 function NavSettingsLink() {
   const location = useLocation()
   const { isMinimal, isMobile } = useSidebar()
@@ -343,8 +389,8 @@ export default function AppSidebar() {
   const { platformNavEntries } = usePluginsContext()
   const location = useLocation()
 
-  // Merge plugin nav entries into the platform section
-  const pluginPlatformItems = useMemo(
+  // Convert plugin nav entries to sidebar item format
+  const pluginItems = useMemo(
     () =>
       platformNavEntries.map((entry) => ({
         title: entry.label,
@@ -355,9 +401,7 @@ export default function AppSidebar() {
   )
 
   // Use restricted navigation in demo mode (accessed via demo.<preview_domain> subdomain)
-  const navMainItems = isDemoMode
-    ? navMainDemo
-    : [...navMainAll, ...pluginPlatformItems]
+  const navMainItems = isDemoMode ? navMainDemo : navMainAll
 
   // Auto-collapse sidebar when on project detail pages
   useEffect(() => {
@@ -408,10 +452,11 @@ export default function AppSidebar() {
         <SidebarContent>
           <NavMain items={navMainItems} />
           <NavProjects projects={projects} />
-          {/* Hide observe and settings in demo mode */}
+          {/* Hide observe, plugins, and settings in demo mode */}
           {!isDemoMode && (
             <>
               <NavObserve items={navObserve} />
+              <NavPlugins items={pluginItems} />
               <NavSettingsLink />
             </>
           )}

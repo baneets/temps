@@ -6,11 +6,12 @@
 //! is live before they run.
 
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use temps_core::{
-    Job, JobQueue, JobResult, UtcDateTime, WorkflowContext, WorkflowError, WorkflowTask,
+    Job, JobQueue, JobReceiver, JobResult, UtcDateTime, WorkflowContext, WorkflowError,
+    WorkflowTask,
 };
 use temps_database::DbConnection;
 use temps_entities::{deployment_containers, deployments, environments, projects};
@@ -33,6 +34,7 @@ pub struct MarkDeploymentCompleteJob {
     log_service: Option<Arc<LogService>>,
     container_deployer: Arc<dyn temps_deployer::ContainerDeployer>,
     queue: Arc<dyn JobQueue>,
+    config_service: Option<Arc<temps_config::ConfigService>>,
 }
 
 impl std::fmt::Debug for MarkDeploymentCompleteJob {
@@ -60,7 +62,13 @@ impl MarkDeploymentCompleteJob {
             log_service: None,
             container_deployer,
             queue,
+            config_service: None,
         }
+    }
+
+    pub fn with_config_service(mut self, config_service: Arc<temps_config::ConfigService>) -> Self {
+        self.config_service = Some(config_service);
+        self
     }
 
     pub fn with_log_id(mut self, log_id: String) -> Self {
@@ -277,27 +285,14 @@ impl MarkDeploymentCompleteJob {
             }
         }
 
-        // Update deployment status to completed
-        active_deployment.state = Set("completed".to_string());
-        let now = chrono::Utc::now();
-        active_deployment.finished_at = Set(Some(now));
-        active_deployment.updated_at = Set(now);
+        // ── Phase 1: Switch route table to the new deployment ────────────
+        //
+        // Subscribe to the queue BEFORE updating current_deployment_id so we
+        // cannot miss the RouteTableUpdated notification that the PG trigger +
+        // route listener will produce.
+        let mut route_receiver = self.queue.subscribe();
 
-        active_deployment
-            .update(self.db.as_ref())
-            .await
-            .map_err(|e| {
-                WorkflowError::JobExecutionFailed(format!("Failed to update deployment: {}", e))
-            })?;
-
-        info!("Deployment {} marked as complete", self.deployment_id);
-        self.log(format!(
-            "Deployment {} status updated to Completed",
-            self.deployment_id
-        ))
-        .await?;
-
-        // Update environment's current_deployment_id (only if environment is not soft-deleted)
+        // Load environment (only if not soft-deleted)
         let environment = environments::Entity::find_by_id(environment_id)
             .filter(environments::Column::DeletedAt.is_null())
             .one(self.db.as_ref())
@@ -311,6 +306,24 @@ impl MarkDeploymentCompleteJob {
                     environment_id
                 ))
             })?;
+
+        // Find the last *successful* deployment for this environment so we can
+        // roll back to it if the route-table update fails. We query for
+        // "completed" or "deployed" state (both represent a deployment that was
+        // fully live at some point), excluding the current deployment.
+        let last_successful_deployment_id = Self::find_last_successful_deployment(
+            self.db.as_ref(),
+            environment_id,
+            self.deployment_id,
+        )
+        .await;
+
+        debug!(
+            environment_id,
+            current_deployment_id = ?environment.current_deployment_id,
+            last_successful_deployment_id = ?last_successful_deployment_id,
+            "Rollback target resolved for route-table timeout"
+        );
 
         let mut active_environment: environments::ActiveModel = environment.into();
         active_environment.current_deployment_id = Set(Some(self.deployment_id));
@@ -328,8 +341,111 @@ impl MarkDeploymentCompleteJob {
             environment_id, self.deployment_id
         );
         self.log(format!(
-            "Environment {} now points to deployment {}",
+            "Environment {} now points to deployment {} — waiting for route table confirmation...",
             environment_id, self.deployment_id
+        ))
+        .await?;
+
+        // ── Phase 2: Wait for route table confirmation ───────────────────
+        //
+        // The PG trigger on environments.current_deployment_id fires a NOTIFY,
+        // the route listener calls load_routes(), and on success publishes
+        // RouteTableUpdated to the queue with environment_id + deployment_id.
+        // We wait here until we see the matching event or timeout.
+        const ROUTE_READY_TIMEOUT_SECS: u64 = 30;
+        let route_ready = Self::wait_for_route_ready(
+            &mut route_receiver,
+            environment_id,
+            self.deployment_id,
+            std::time::Duration::from_secs(ROUTE_READY_TIMEOUT_SECS),
+        )
+        .await;
+
+        if let Err(ref reason) = route_ready {
+            // ── Timeout / failure path ───────────────────────────────────
+            //
+            // The proxy did not confirm the route update in time. Revert
+            // current_deployment_id so the proxy keeps serving the old
+            // deployment. Do NOT tear down old containers. Mark this
+            // deployment as failed.
+            tracing::warn!(
+                deployment_id = self.deployment_id,
+                environment_id,
+                "Route table confirmation timed out after {}s: {}",
+                ROUTE_READY_TIMEOUT_SECS,
+                reason
+            );
+
+            self.log(format!(
+                "Route table confirmation timed out after {}s — reverting to last successful deployment ({:?})",
+                ROUTE_READY_TIMEOUT_SECS,
+                last_successful_deployment_id
+            ))
+            .await?;
+
+            // Revert current_deployment_id to the last deployment that actually
+            // succeeded (has running containers), NOT just whatever was in the
+            // column before. This handles edge cases where the previous value
+            // points to a failed or torn-down deployment.
+            let revert_env = environments::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(environment_id),
+                current_deployment_id: Set(last_successful_deployment_id),
+                ..Default::default()
+            };
+            if let Err(e) = revert_env.update(self.db.as_ref()).await {
+                tracing::error!(
+                    "Failed to revert current_deployment_id for environment {}: {}",
+                    environment_id,
+                    e
+                );
+            }
+
+            // Mark deployment as failed
+            let failed_deployment = deployments::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(self.deployment_id),
+                state: Set("failed".to_string()),
+                finished_at: Set(Some(chrono::Utc::now())),
+                updated_at: Set(chrono::Utc::now()),
+                cancelled_reason: Set(Some(format!(
+                    "Route table confirmation timed out after {}s",
+                    ROUTE_READY_TIMEOUT_SECS
+                ))),
+                ..Default::default()
+            };
+            if let Err(e) = failed_deployment.update(self.db.as_ref()).await {
+                tracing::error!(
+                    "Failed to mark deployment {} as failed: {}",
+                    self.deployment_id,
+                    e
+                );
+            }
+
+            return Err(WorkflowError::JobExecutionFailed(format!(
+                "Route table did not confirm new routes within {}s — deployment rolled back",
+                ROUTE_READY_TIMEOUT_SECS
+            )));
+        }
+
+        self.log("Route table confirmed — new deployment is routable".to_string())
+            .await?;
+
+        // ── Phase 3: Mark deployment as completed ────────────────────────
+        let now = chrono::Utc::now();
+        active_deployment.state = Set("completed".to_string());
+        active_deployment.finished_at = Set(Some(now));
+        active_deployment.updated_at = Set(now);
+
+        active_deployment
+            .update(self.db.as_ref())
+            .await
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!("Failed to update deployment: {}", e))
+            })?;
+
+        info!("Deployment {} marked as complete", self.deployment_id);
+        self.log(format!(
+            "Deployment {} status updated to Completed",
+            self.deployment_id
         ))
         .await?;
 
@@ -365,10 +481,33 @@ impl MarkDeploymentCompleteJob {
         self.log("Deployment is now LIVE and ready for traffic!".to_string())
             .await?;
 
-        // Emit DeploymentSucceeded event
-        // Get deployment URL from environment
+        // ── Phase 4: Emit DeploymentSucceeded event ──────────────────────
+        // Get deployment URL from environment: prefer custom host, fall back to preview domain
         let url = if !active_environment.host.as_ref().is_empty() {
             Some(format!("https://{}", active_environment.host.as_ref()))
+        } else if !active_environment.subdomain.as_ref().is_empty() {
+            // No custom host set — construct URL from preview domain
+            if let Some(ref config_service) = self.config_service {
+                match config_service
+                    .get_deployment_url_by_slug(active_environment.subdomain.as_ref())
+                    .await
+                {
+                    Ok(preview_url) => Some(preview_url),
+                    Err(e) => {
+                        debug!(
+                            "Failed to construct preview domain URL for environment {}: {}",
+                            environment_id, e
+                        );
+                        None
+                    }
+                }
+            } else {
+                debug!(
+                    "No config_service available to construct preview URL for environment {}",
+                    environment_id
+                );
+                None
+            }
         } else {
             None
         };
@@ -392,13 +531,97 @@ impl MarkDeploymentCompleteJob {
             );
         }
 
-        // Cancel and teardown all previous deployments for this environment
+        // ── Phase 5: Tear down previous deployments ──────────────────────
+        // Safe to do now — the route table is confirmed pointing at the new
+        // deployment, so tearing down old containers won't cause 503s.
         self.cancel_previous_deployments(environment_id).await;
 
         Ok(MarkCompleteOutput {
             completed_at: now,
             environment_id,
         })
+    }
+
+    /// Wait for a `RouteTableUpdated` job matching the given environment and
+    /// deployment. Returns `Ok(())` when confirmed, or `Err(reason)` on timeout
+    /// or queue failure.
+    async fn wait_for_route_ready(
+        receiver: &mut Box<dyn JobReceiver>,
+        environment_id: i32,
+        deployment_id: i32,
+        timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            match tokio::time::timeout_at(deadline, receiver.recv()).await {
+                Ok(Ok(Job::RouteTableUpdated(ref update)))
+                    if update.environment_id == Some(environment_id)
+                        && update.deployment_id == Some(deployment_id) =>
+                {
+                    debug!(
+                        "Route table confirmed for environment {} deployment {} ({} routes)",
+                        environment_id, deployment_id, update.route_count
+                    );
+                    return Ok(());
+                }
+                Ok(Ok(_)) => {
+                    // Different job or different environment/deployment — keep waiting
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    return Err(format!("Queue receive error: {}", e));
+                }
+                Err(_) => {
+                    return Err("Timed out waiting for route table update".to_string());
+                }
+            }
+        }
+    }
+
+    /// Find the last deployment for the given environment that reached a
+    /// successful state ("completed" or "deployed"), excluding the deployment
+    /// we are currently trying to mark complete. Returns `None` if there is no
+    /// previous successful deployment (e.g. first-ever deploy for this env).
+    async fn find_last_successful_deployment(
+        db: &DbConnection,
+        environment_id: i32,
+        exclude_deployment_id: i32,
+    ) -> Option<i32> {
+        match deployments::Entity::find()
+            .filter(deployments::Column::EnvironmentId.eq(environment_id))
+            .filter(deployments::Column::Id.ne(exclude_deployment_id))
+            .filter(deployments::Column::State.is_in(vec!["completed", "deployed"]))
+            .order_by_desc(deployments::Column::FinishedAt)
+            .one(db)
+            .await
+        {
+            Ok(Some(deployment)) => {
+                debug!(
+                    "Last successful deployment for environment {}: {} (state: {}, finished: {:?})",
+                    environment_id, deployment.id, deployment.state, deployment.finished_at
+                );
+                Some(deployment.id)
+            }
+            Ok(None) => {
+                debug!(
+                    "No previous successful deployment found for environment {}",
+                    environment_id
+                );
+                None
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to query last successful deployment for environment {}: {}",
+                    environment_id,
+                    e
+                );
+                // Fall back to None rather than crashing — this means the
+                // environment will have no current_deployment_id, which is safer
+                // than pointing at a broken deployment.
+                None
+            }
+        }
     }
 
     /// Teardown all running/pending deployments for the same environment
@@ -614,6 +837,7 @@ pub struct MarkDeploymentCompleteJobBuilder {
     log_service: Option<Arc<LogService>>,
     container_deployer: Option<Arc<dyn temps_deployer::ContainerDeployer>>,
     queue: Option<Arc<dyn JobQueue>>,
+    config_service: Option<Arc<temps_config::ConfigService>>,
 }
 
 impl MarkDeploymentCompleteJobBuilder {
@@ -626,6 +850,7 @@ impl MarkDeploymentCompleteJobBuilder {
             log_service: None,
             container_deployer: None,
             queue: None,
+            config_service: None,
         }
     }
 
@@ -667,6 +892,11 @@ impl MarkDeploymentCompleteJobBuilder {
         self
     }
 
+    pub fn config_service(mut self, config_service: Arc<temps_config::ConfigService>) -> Self {
+        self.config_service = Some(config_service);
+        self
+    }
+
     pub fn build(self) -> Result<MarkDeploymentCompleteJob, WorkflowError> {
         let job_id = self
             .job_id
@@ -692,6 +922,9 @@ impl MarkDeploymentCompleteJobBuilder {
         }
         if let Some(log_service) = self.log_service {
             job = job.with_log_service(log_service);
+        }
+        if let Some(config_service) = self.config_service {
+            job = job.with_config_service(config_service);
         }
 
         Ok(job)

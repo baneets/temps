@@ -185,6 +185,20 @@ pub struct StatusCheckCompletedJob {
     pub error_message: Option<String>,
 }
 
+/// Job emitted by route table listeners after successfully reloading routes.
+/// Used by the deployment pipeline to confirm the proxy has picked up the new
+/// routing configuration before marking a deployment as completed and tearing
+/// down previous containers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteTableUpdatedJob {
+    /// The environment whose `current_deployment_id` change triggered this reload
+    pub environment_id: Option<i32>,
+    /// The deployment that the environment now points to
+    pub deployment_id: Option<i32>,
+    /// Total number of routes loaded in this reload
+    pub route_count: usize,
+}
+
 /// Core job enum containing all possible job types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Job {
@@ -218,6 +232,8 @@ pub enum Job {
     VulnerabilityScanCompleted(VulnerabilityScanCompletedJob),
     // Status check events
     StatusCheckCompleted(StatusCheckCompletedJob),
+    // Route table events
+    RouteTableUpdated(RouteTableUpdatedJob),
 }
 
 impl fmt::Display for Job {
@@ -257,6 +273,7 @@ impl fmt::Display for Job {
             Job::DomainProvisioned(job) => write!(f, "DomainProvisioned(id: {}, name: {}, project: {})", job.domain_id, job.domain_name, job.project_id),
             Job::VulnerabilityScanCompleted(job) => write!(f, "VulnerabilityScanCompleted(id: {}, project: {}, env: {:?}, total: {}, critical: {}, high: {})", job.scan_id, job.project_id, job.environment_id, job.total_vulnerabilities, job.critical_count, job.high_count),
             Job::StatusCheckCompleted(job) => write!(f, "StatusCheckCompleted(monitor: {}, status: {})", job.monitor_id, job.status),
+            Job::RouteTableUpdated(job) => write!(f, "RouteTableUpdated(env: {:?}, deployment: {:?}, routes: {})", job.environment_id, job.deployment_id, job.route_count),
         }
     }
 }
