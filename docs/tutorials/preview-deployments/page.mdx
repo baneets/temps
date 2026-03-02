@@ -1,202 +1,214 @@
 export const metadata = {
   title: 'Set Up Preview Deployments',
-  description: 'Tutorial: Configure preview deployments for pull requests and branches.',
+  description: 'Configure automatic preview deployments for every branch and pull request on Temps.',
   alternates: {
-    canonical: '/docs/tutorials/preview-deployments',
+    canonical: '/docs/preview-deployments',
   },
 }
 
 # Set Up Preview Deployments
 
-## Page Goal
-Enable users to set up preview deployments for every PR/branch, allowing them to test changes before merging. Show the power of Temps for team collaboration.
+Preview deployments give every branch its own URL. When a developer pushes to a feature branch, Temps automatically deploys it to a unique subdomain so the team can test changes before merging. {{ className: 'lead' }}
 
-## Target Persona
-**Team Lead Tina** - A developer or manager who:
-- Works with a team
-- Needs to review changes before merging
-- Wants to test features in isolation
-- Dealing with complex features / multiple PRs
-- Values: Team collaboration, safe deployments, testing
-- Pain point: "I want to see it working before we merge"
-- Timeline: Setting up team workflow
+---
 
-## Key Content to Include
+## What you will achieve {{ anchor: true, id: 'what-you-will-achieve' }}
 
-**1. What You'll Achieve**
-- Automatic deployment for every PR
-- Unique URL for each preview
-- Share with team/stakeholders
-- Test before merge
-- Automatic cleanup after merge
-- Time: 10 minutes setup
+- Automatic deployments for every branch
+- A unique URL per branch (e.g. `myproject-feature-login.your-server.com`)
+- Environment variables scoped to previews
+- Automatic cleanup when branches are deleted
 
-**2. Understanding Preview Deployments**
-- What they are
-- How they work
-- Use cases:
-  - Feature testing
-  - Stakeholder review
-  - QA testing
-  - Client previews
-  - Design review
+**Time required:** 5 minutes.
 
-**3. Enabling Preview Deployments**
+**Prerequisites:**
+- A project deployed on Temps with a Git provider connected
+- A production environment already working
 
-**Step 1: Navigate to Settings** (2 min)
-- Go to app settings
-- Preview deployments section
-- Enable toggle
-- Screenshot
+---
 
-**Step 2: Configure Branch Pattern** (2 min)
-- Which branches get previews
-- All branches vs specific pattern
-- PR-only vs all branches
-- Examples:
-  - All PRs (recommended)
-  - `feature/*` branches
-  - `dev` and `staging` branches
+## How preview environments work {{ anchor: true, id: 'how-it-works' }}
 
-**Step 3: Configure Preview Settings** (2 min)
-- Subdomain pattern: `pr-123.app.temps.dev`
-- Environment variables (same as prod or different?)
-- Auto-delete after merge
-- Retention time
+Temps creates a **preview environment** for each branch that receives a push. Each preview environment:
 
-**4. Using Preview Deployments**
+- Has its own deployment — independent from production
+- Gets a unique subdomain: `{project-slug}-{branch-slug}.{your-temps-domain}`
+- Inherits environment variables marked with "Include in preview"
+- Runs its own container (for server deployments) or serves its own static files
 
-**Creating a Preview:**
-1. Create feature branch
-2. Push to GitHub
-3. Open pull request
-4. Temps automatically deploys preview
-5. Preview URL appears in PR comment (if configured)
+When you push to a branch, Temps checks if a preview environment exists for that branch. If not, it creates one. Then it deploys the latest commit.
 
-**Accessing Previews:**
-- From Temps dashboard
-- From GitHub PR
-- Direct URL pattern
-- Sharing with team
+```text
+main branch       → production environment → app.example.com
+feature/login     → preview environment    → myproject-feature-login.temps.example.com
+fix/header-bug    → preview environment    → myproject-fix-header-bug.temps.example.com
+```
 
-**5. PR Integration**
+---
 
-**GitHub Integration:**
-- Status checks on PRs
-- Comment with preview URL
-- Build status
-- Deployment status
+## Step 1: Enable preview deployments {{ anchor: true, id: 'enable' }}
 
-**GitLab Integration:**
-- Similar PR integration
-- Environment URLs
-- Pipeline status
+1. Open your project in the Temps dashboard
+2. Go to **Settings**
+3. Find **Preview Deployments** and enable the toggle
 
-**6. Preview Environment Configuration**
+That is the only configuration needed. Temps now creates preview environments automatically when you push to any branch other than the main production branch.
 
-**Environment Variables:**
-- Use production values?
-- Use different database?
-- Feature flags for previews
-- API keys for testing
+---
 
-**Database Strategy:**
-- Shared staging database
-- Per-preview database (if supported)
-- Seeded test data
+## Step 2: Push to a branch {{ anchor: true, id: 'push-branch' }}
 
-**7. Team Workflow**
+Create a feature branch and push it:
 
-**Developer Workflow:**
-1. Create feature branch
-2. Make changes
-3. Push and open PR
-4. Share preview URL with team
-5. Gather feedback
-6. Make adjustments
-7. Merge when approved
+```bash
+git checkout -b feature/new-dashboard
+# Make your changes
+git add .
+git commit -m "Add new dashboard layout"
+git push origin feature/new-dashboard
+```
 
-**Review Workflow:**
-- Review code on GitHub
-- Test functionality on preview
-- Check responsive design
-- Verify integrations
-- Approve PR
+Temps receives the push webhook from your Git provider, creates a preview environment for the `feature/new-dashboard` branch, copies eligible environment variables, and starts a deployment.
 
-**8. Best Practices**
+---
 
-**✅ DO:**
-- Test on preview before merging
-- Share previews with stakeholders
-- Use meaningful branch names (reflects in URL)
-- Set up auto-cleanup
-- Use preview-specific config when needed
+## Step 3: Access the preview {{ anchor: true, id: 'access-preview' }}
 
-**❌ DON'T:**
-- Merge without testing preview
-- Use production database in previews
-- Leave previews running forever
-- Share sensitive previews publicly
+The preview URL follows this pattern:
 
-**9. Advanced Configuration**
+```text
+{project-slug}-{branch-slug}.{your-temps-domain}
+```
 
-**Custom Preview Domains:**
-- feature-abc.preview.yourapp.com
-- Custom subdomain patterns
+For example, if your project slug is `myapp` and the branch is `feature/new-dashboard`, the preview is accessible at:
 
-**Preview Webhooks:**
-- Notify Slack when preview ready
-- Post to Discord
-- Email stakeholders
+```text
+https://myapp-feature-new-dashboard.temps.example.com
+```
 
-**Preview Authentication:**
-- Basic auth for previews
-- Protect previews from public access
+Find the exact URL in the Temps dashboard under your project's **Environments** tab. Each preview environment is listed with its URL and deployment status.
 
-**10. Troubleshooting**
+---
 
-**Preview not deploying:**
-- Check branch pattern
-- Verify permissions
-- Review build logs
+## Environment variables in previews {{ anchor: true, id: 'preview-variables' }}
 
-**Preview showing old code:**
-- Force rebuild
-- Clear cache
-- Check branch is updated
+When a preview environment is created, Temps copies variables from your project that have **Include in preview** enabled (this is the default for new variables).
 
-**Preview URL not working:**
-- DNS propagation
-- Check deployment status
-- Verify branch exists
+### What to include
 
-**11. Example Scenarios**
+| Variable | Include in preview? | Why |
+|----------|-------------------|-----|
+| `VITE_API_URL` | Yes | Frontend needs API access |
+| `DATABASE_URL` | Depends | Use a staging database, not production |
+| `STRIPE_SECRET_KEY` | No | Never use production payment keys in previews |
+| `LOG_LEVEL` | Yes | Safe to share |
+| `SENTRY_DSN` | Yes | Errors from previews are useful to track |
 
-**Scenario 1: Feature Testing**
-- Developer builds login feature
-- Opens PR
-- Preview deployed automatically
-- Team tests login on preview
-- Finds bug, fixes, pushes update
-- Preview rebuilds
-- Approve and merge
+### Using a different database for previews
 
-**Scenario 2: Design Review**
-- Designer wants to see new UI
-- Developer shares preview URL
-- Designer reviews on real device
-- Provides feedback
-- Changes made and instantly visible
+If your preview environments should use a separate database, create the variable scoped only to preview environments (or create a separate staging database and assign it to preview environments):
 
-**Scenario 3: Client Demo**
-- Client wants to see new feature
-- Share preview URL (with auth)
-- Client tests and approves
-- Merge to production
+1. Set `DATABASE_URL` with `Include in preview` **disabled** for production
+2. Create a separate `DATABASE_URL` scoped to your preview/staging environments pointing to a staging database
 
-## Success Metrics
-- Team uses previews for every PR
-- Fewer bugs reach production
-- Faster feedback loop
-- Stakeholders can review easily
-- Confident merging
+---
+
+## Creating environments manually {{ anchor: true, id: 'manual-environments' }}
+
+You can also create environments manually for long-lived branches like `staging` or `develop`:
+
+1. Go to your project > **Environments**
+2. Click **New Environment**
+3. Enter a name (e.g. `staging`)
+4. Select the branch (e.g. `develop`)
+5. Configure replicas and resource limits (optional)
+
+Manual environments work identically to auto-created preview environments but are not deleted when the branch is removed.
+
+### Per-environment overrides
+
+Each environment can override these project-level settings:
+
+<Properties>
+  <Property name="branch" type="string">
+    The Git branch this environment tracks.
+  </Property>
+  <Property name="replicas" type="integer">
+    Number of container instances. Default: 1.
+  </Property>
+  <Property name="exposed_port" type="integer">
+    Override the container port. Default: auto-detected from EXPOSE directive.
+  </Property>
+  <Property name="automatic_deploy" type="boolean">
+    Whether pushes to the branch trigger automatic deployments. Default: true.
+  </Property>
+  <Property name="cpu_limit" type="string">
+    CPU limit for containers (e.g. `500m`, `1000m`).
+  </Property>
+  <Property name="memory_limit" type="string">
+    Memory limit for containers (e.g. `256Mi`, `512Mi`).
+  </Property>
+</Properties>
+
+---
+
+## Team workflow {{ anchor: true, id: 'team-workflow' }}
+
+A typical workflow with preview deployments:
+
+1. Developer creates a feature branch and pushes changes
+2. Temps deploys the branch to a preview URL
+3. Developer shares the URL in the pull request or team chat
+4. Reviewers test the feature on the preview deployment
+5. If changes are needed, the developer pushes again — Temps redeploys the preview automatically
+6. Once approved, the PR is merged to `main`
+7. Production deploys the merged changes
+8. The preview environment can be cleaned up (manually or when the branch is deleted)
+
+---
+
+## Webhooks for preview events {{ anchor: true, id: 'webhooks' }}
+
+Temps can notify external systems when deployments happen. Set up outbound webhooks to notify Slack, Discord, or any URL when a preview deployment succeeds or fails:
+
+1. Go to **Settings** > **Webhooks**
+2. Add a webhook URL
+3. Select events: `deployment.succeeded`, `deployment.failed`, `deployment.ready`
+
+Webhook payloads include the project name, branch, commit SHA, commit message, and deployment status — enough information to post a meaningful notification.
+
+Available deployment events:
+- `deployment.created` — A deployment was queued
+- `deployment.succeeded` — The deployment completed and is healthy
+- `deployment.failed` — The deployment failed (build error, health check timeout, etc.)
+- `deployment.cancelled` — The deployment was manually cancelled
+- `deployment.ready` — The deployment is live and receiving traffic
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Preview not created after push
+
+- Verify that **Preview Deployments** is enabled in project settings
+- Check that the push is to a branch other than the main production branch
+- Verify the Git webhook is configured correctly — check your Git provider's webhook delivery logs
+
+### Preview URL shows 404
+
+- The deployment may still be in progress — check the Environments tab for deployment status
+- DNS may not be configured for the preview subdomain pattern. If you use a custom domain, ensure a wildcard DNS record (`*.temps.example.com`) points to your Temps server
+
+### Variables missing in preview
+
+- Check that the variable has **Include in preview** enabled
+- Variables are copied when the preview environment is first created. If you add a new variable later, it is not automatically added to existing preview environments — add it manually to the preview environment or recreate it
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/ci-cd-setup">Set up CI/CD</Button>
+<Button href="/docs/environment-variables">Manage environment variables</Button>
+<Button href="/docs/custom-domain">Add a custom domain</Button>
+<Button href="/docs/analytics">Add analytics</Button>

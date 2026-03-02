@@ -1,77 +1,924 @@
 export const metadata = {
   title: 'Deploy Web Applications',
-  description: 'Deploy Node.js, Python, Go, PHP, and other web applications on Temps.',
+  description: 'Deploy Node.js, Python, Go, Ruby, Java, Rust, PHP, and .NET web applications on Temps.',
   alternates: {
-    canonical: '/docs/deploy/web-applications',
+    canonical: '/docs/web-applications',
   },
 }
 
 # Deploy Web Applications
 
-## Page Goal
-Provide framework-agnostic guidance for deploying traditional web applications (APIs, full-stack apps) on Temps. Cover multiple languages and frameworks to show Temps' versatility.
+Temps deploys web applications from a Git repository. Push your code, and Temps detects your language, installs dependencies, builds the project, and starts it in a container. This page covers every supported language and what your application needs to work. {{ className: 'lead' }}
 
-## Target Persona
-**Backend Ben** - A developer who:
-- Building APIs or full-stack applications
-- Uses Node.js, Python, Go, PHP, Ruby, or similar
-- May use frameworks like Express, FastAPI, Django, Laravel
-- Needs database connections (external DB)
-- Values: Framework flexibility, easy configuration
-- Questions: "Will my stack work?", "How do I configure the build?"
-- Timeline: 10-15 minutes to deploy first app
+---
 
-## Key Content to Include
+## How it works {{ anchor: true, id: 'how-it-works' }}
 
-**1. Supported Languages & Frameworks**
-- Node.js (Express, Fastify, NestJS, etc.)
-- Python (FastAPI, Django, Flask)
-- Go (Gin, Echo, Chi)
-- PHP (Laravel, Symfony)
-- Ruby (Rails, Sinatra)
-- And more...
+When you connect a repository to Temps and trigger a deployment, the following happens:
 
-**2. Deployment Requirements**
-- Git repository
-- Framework detection
-- Port configuration (must listen on PORT env var)
-- Start command
+1. **Clone** — Temps pulls your code from GitHub, GitLab, Bitbucket, or Gitea
+2. **Detect** — The build system inspects your files to determine the language and framework
+3. **Build** — Dependencies are installed, the project is compiled, and a container image is created
+4. **Deploy** — The container starts, Temps injects environment variables (including `PORT`), and runs health checks
+5. **Route** — Once healthy, traffic is routed to the new container and the old one is removed
 
-**3. Step-by-Step Deployment**
-- Connect repository
-- Auto-detection vs manual configuration
-- Setting start command
-- Environment variables
-- Deploy
+You do not need to write a Dockerfile. Temps generates one automatically based on your framework. If you prefer full control, you can add your own Dockerfile and it will take priority over auto-detection.
 
-**4. Framework-Specific Guides**
-- Node.js/Express example
-- Python/FastAPI example
-- Go API example
-- PHP/Laravel example
-- Each with example code
+### The one requirement
 
-**5. Configuration**
-- Build commands
-- Start commands
-- Environment variables
-- Port binding
-- Health check endpoints
+Your application must listen on the port provided in the `PORT` environment variable. Temps sets this automatically and routes all traffic to it.
 
-**6. Database Connections**
-- Using external databases
-- Connection string configuration
-- Environment variable patterns
-- Connection pooling
+```javascript {{ title: 'Node.js' }}
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0');
+```
 
-**7. Common Issues**
-- Port binding errors
-- Build failures
-- Runtime errors
-- Performance tuning
+```python {{ title: 'Python' }}
+import os
+port = int(os.environ.get('PORT', 8000))
+```
 
-## Success Metrics
-- User can deploy their web application
-- User understands how to configure their specific framework
-- User can connect to external services
-- Clear examples for popular frameworks
+```go {{ title: 'Go' }}
+port := os.Getenv("PORT")
+if port == "" {
+    port = "8080"
+}
+http.ListenAndServe("0.0.0.0:"+port, router)
+```
+
+<Note>
+  Binding to `0.0.0.0` instead of `localhost` or `127.0.0.1` is required. Containers that bind to localhost only accept connections from inside the container, so Temps cannot route traffic to them.
+</Note>
+
+---
+
+## Framework detection {{ anchor: true, id: 'framework-detection' }}
+
+Temps inspects your repository files and auto-detects the framework. Detection happens in priority order — the first match wins.
+
+| Priority | Framework | Detection signal | Default port |
+|----------|-----------|-----------------|-------------|
+| 1 | **Dockerfile** | `Dockerfile` in repo root | From `EXPOSE` directive |
+| 2 | **Docusaurus** | `docusaurus.config.js` or `.ts` | 3000 |
+| 3 | **Next.js** | `next.config.js`, `.mjs`, or `.ts` | 3000 |
+| 4 | **Vite** | `vite.config.js` or `.ts` | 80 (static, nginx) |
+| 5 | **Create React App** | `react-scripts` in package.json | 3000 |
+| 6 | **Rsbuild** | `rsbuild.config.ts` | 3000 |
+| 7 | **Rust** | `Cargo.toml` | 8080 |
+| 8 | **Go** | `go.mod` | 8080 |
+| 9 | **Python** | `requirements.txt`, `pyproject.toml`, `setup.py`, or `Pipfile` | 8000 |
+| 10 | **Java** | `pom.xml`, `build.gradle`, or `build.gradle.kts` | 8080 |
+| — | **PHP** | `composer.json` (via Nixpacks) | 8080 |
+| — | **Ruby** | `Gemfile` (via Nixpacks) | 3000 |
+| — | **C# / .NET** | `.csproj` (via Nixpacks) | 8080 |
+
+Languages marked with **—** in priority are not in the auto-detection chain. They are supported via [Nixpacks](https://nixpacks.com) and can be selected manually in the project settings, or you can add a custom Dockerfile for full control (see examples below).
+
+If a `Dockerfile` is present alongside framework config files (e.g., both `Dockerfile` and `next.config.ts`), the Dockerfile always takes priority.
+
+For Node.js projects, Temps further detects the specific framework from your `package.json` dependencies: Next.js, NestJS, Nuxt, Remix, Astro, SvelteKit, Vite, Vue, Express, or generic Node.js.
+
+For Python projects, Temps checks your requirements for Django, FastAPI, Flask, or Streamlit.
+
+### Package manager detection
+
+For Node.js projects, Temps detects your package manager from the lock file:
+
+| Lock file | Package manager | Install command |
+|-----------|----------------|-----------------|
+| `pnpm-lock.yaml` | pnpm | `pnpm install --frozen-lockfile` |
+| `package-lock.json` | npm | `npm install` |
+| `yarn.lock` | Yarn | `yarn install --frozen-lockfile` |
+| `bun.lockb` or `bun.lock` | Bun | `bun install` |
+
+If no lock file is found, npm is used as the default.
+
+---
+
+## Node.js {{ anchor: true, id: 'nodejs' }}
+
+Temps supports Express, Fastify, NestJS, Hono, and any Node.js HTTP server.
+
+### Express
+
+```javascript {{ title: 'server.js' }}
+const express = require('express');
+const app = express();
+
+app.get('/', (req, res) => {
+  res.json({ message: 'Hello from Express' });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on port ${port}`);
+});
+```
+
+```json {{ title: 'package.json' }}
+{
+  "name": "my-api",
+  "scripts": {
+    "start": "node server.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}
+```
+
+### Fastify
+
+```javascript {{ title: 'server.js' }}
+const fastify = require('fastify')({ logger: true });
+
+fastify.get('/', async () => {
+  return { message: 'Hello from Fastify' };
+});
+
+fastify.get('/health', async () => {
+  return { status: 'ok' };
+});
+
+const start = async () => {
+  const port = process.env.PORT || 3000;
+  await fastify.listen({ port: Number(port), host: '0.0.0.0' });
+};
+start();
+```
+
+### NestJS
+
+NestJS is auto-detected when `@nestjs/core` is in your dependencies. Ensure your `main.ts` reads the port from the environment:
+
+```typescript {{ title: 'src/main.ts' }}
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  await app.listen(process.env.PORT ?? 3000);
+}
+bootstrap();
+```
+
+### TypeScript projects
+
+If your project uses TypeScript, ensure you have a `build` script in `package.json`:
+
+```json {{ title: 'package.json' }}
+{
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  }
+}
+```
+
+Temps runs `npm run build` (or equivalent for your package manager) during the build phase, then `npm start` to launch the application.
+
+---
+
+## Python {{ anchor: true, id: 'python' }}
+
+Temps supports Flask, FastAPI, Django, and any Python WSGI/ASGI application.
+
+### Flask
+
+```python {{ title: 'main.py' }}
+from flask import Flask, jsonify
+import os
+
+app = Flask(__name__)
+
+@app.route('/')
+def hello():
+    return jsonify({
+        'message': 'Hello from Flask',
+        'status': 'healthy'
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'ok'})
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+```
+
+```text {{ title: 'requirements.txt' }}
+Flask==3.0.0
+gunicorn==22.0.0
+```
+
+Temps detects Flask from your `requirements.txt` and starts the application with Gunicorn in production.
+
+### FastAPI
+
+```python {{ title: 'main.py' }}
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get('/')
+async def root():
+    return {'message': 'Hello from FastAPI'}
+
+@app.get('/health')
+async def health():
+    return {'status': 'ok'}
+```
+
+```text {{ title: 'requirements.txt' }}
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+```
+
+FastAPI apps are started with Uvicorn automatically.
+
+### Django
+
+For Django projects, Temps detects `django` in your requirements and the presence of `manage.py`. The application is started with Gunicorn using your WSGI module:
+
+```text {{ title: 'requirements.txt' }}
+Django==5.1.0
+gunicorn==22.0.0
+psycopg2-binary==2.9.9
+```
+
+Ensure `ALLOWED_HOSTS` reads from the environment:
+
+```python {{ title: 'settings.py' }}
+import os
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+```
+
+---
+
+## Go {{ anchor: true, id: 'go' }}
+
+Temps detects Go projects by the presence of `go.mod`. The project is compiled with `go build` and the resulting binary is executed.
+
+```go {{ title: 'main.go' }}
+package main
+
+import (
+    "net/http"
+    "os"
+
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    r := gin.Default()
+
+    r.GET("/", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{
+            "message": "Hello from Go",
+        })
+    })
+
+    r.GET("/health", func(c *gin.Context) {
+        c.JSON(http.StatusOK, gin.H{"status": "ok"})
+    })
+
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8080"
+    }
+    r.Run("0.0.0.0:" + port)
+}
+```
+
+This works with Gin, Echo, Chi, the standard library `net/http`, or any Go HTTP framework. The key requirement is reading the port from `PORT` and binding to `0.0.0.0`.
+
+---
+
+## Rust {{ anchor: true, id: 'rust' }}
+
+Temps detects Rust projects by `Cargo.toml`. The project is compiled with `cargo build --release` via Nixpacks.
+
+```rust {{ title: 'src/main.rs' }}
+use axum::{routing::get, Json, Router};
+use serde::Serialize;
+use std::net::SocketAddr;
+
+#[derive(Serialize)]
+struct Response {
+    message: String,
+}
+
+#[tokio::main]
+async fn main() {
+    let app = Router::new()
+        .route("/", get(|| async {
+            Json(Response { message: "Hello from Rust".into() })
+        }))
+        .route("/health", get(|| async {
+            Json(serde_json::json!({"status": "ok"}))
+        }));
+
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "3000".into())
+        .parse()
+        .unwrap_or(3000);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+```
+
+```toml {{ title: 'Cargo.toml' }}
+[package]
+name = "my-api"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+```
+
+---
+
+## Java {{ anchor: true, id: 'java' }}
+
+Temps detects Java projects from `pom.xml` (Maven) or `build.gradle` / `build.gradle.kts` (Gradle).
+
+### Spring Boot
+
+```java {{ title: 'src/main/java/com/example/Application.java' }}
+package com.example;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+```
+
+```java {{ title: 'src/main/java/com/example/HelloController.java' }}
+package com.example;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+import java.util.Map;
+
+@RestController
+public class HelloController {
+    @GetMapping("/")
+    public Map<String, String> hello() {
+        return Map.of("message", "Hello from Spring Boot");
+    }
+
+    @GetMapping("/health")
+    public Map<String, String> health() {
+        return Map.of("status", "ok");
+    }
+}
+```
+
+Configure Spring Boot to read the port from the environment:
+
+```properties {{ title: 'src/main/resources/application.properties' }}
+server.port=${PORT:8080}
+```
+
+Temps uses Nixpacks to build Java projects. For full control, add your own Dockerfile:
+
+<CodeGroup>
+
+```dockerfile {{ title: 'Dockerfile (Maven)' }}
+FROM maven:3.9-eclipse-temurin-21-alpine AS build
+WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline
+COPY src ./src
+RUN mvn package -DskipTests
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+
+EXPOSE 8080
+CMD ["java", "-jar", "app.jar"]
+```
+
+```dockerfile {{ title: 'Dockerfile (Gradle)' }}
+FROM gradle:8-jdk21-alpine AS build
+WORKDIR /app
+COPY build.gradle.kts settings.gradle.kts ./
+COPY gradle ./gradle
+RUN gradle dependencies --no-daemon
+COPY src ./src
+RUN gradle bootJar --no-daemon
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=build /app/build/libs/*.jar app.jar
+
+EXPOSE 8080
+CMD ["java", "-jar", "app.jar"]
+```
+
+</CodeGroup>
+
+<Note>
+  The multi-stage build separates dependency resolution from source compilation. This means dependencies are cached and only re-downloaded when `pom.xml` or `build.gradle.kts` changes.
+</Note>
+
+---
+
+## C# / .NET {{ anchor: true, id: 'dotnet' }}
+
+Temps supports .NET applications via Nixpacks. Detection is based on `.csproj` files in the project directory.
+
+### Minimal API
+
+```csharp {{ title: 'Program.cs' }}
+var builder = WebApplication.CreateBuilder(args);
+
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+
+var app = builder.Build();
+
+app.MapGet("/", () => new { message = "Hello from .NET", status = "healthy" });
+app.MapGet("/health", () => new { status = "ok" });
+
+app.Run();
+```
+
+```xml {{ title: 'MyApp.csproj' }}
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+```
+
+### Custom Dockerfile
+
+For production .NET deployments, a custom Dockerfile gives you control over the SDK version and runtime image:
+
+```dockerfile {{ title: 'Dockerfile' }}
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS build
+WORKDIR /app
+COPY *.csproj .
+RUN dotnet restore
+COPY . .
+RUN dotnet publish -c Release -o /out
+
+FROM mcr.microsoft.com/dotnet/aspnet:9.0-alpine
+WORKDIR /app
+COPY --from=build /out .
+
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "MyApp.dll"]
+```
+
+<Note>
+  The `aspnet` runtime image is much smaller than the `sdk` image. The multi-stage build uses the SDK for compilation and the runtime for execution.
+</Note>
+
+---
+
+## Ruby {{ anchor: true, id: 'ruby' }}
+
+Temps detects Ruby projects from a `Gemfile`. Rails and Sinatra are both supported via Nixpacks.
+
+### Rails
+
+Ensure your `Gemfile` includes `rails` and that `config/puma.rb` binds to the correct port:
+
+```ruby {{ title: 'config/puma.rb' }}
+port ENV.fetch('PORT') { 3000 }
+bind "tcp://0.0.0.0:#{ENV.fetch('PORT') { 3000 }}"
+```
+
+### Sinatra
+
+```ruby {{ title: 'app.rb' }}
+require 'sinatra'
+
+set :port, ENV['PORT'] || 4567
+set :bind, '0.0.0.0'
+
+get '/' do
+  content_type :json
+  { message: 'Hello from Sinatra' }.to_json
+end
+```
+
+### Custom Dockerfile
+
+For Rails applications that need specific system dependencies (image processing, PDF generation, etc.), use a custom Dockerfile:
+
+```dockerfile {{ title: 'Dockerfile (Rails)' }}
+FROM ruby:3.3-slim AS build
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Gemfile Gemfile.lock ./
+RUN bundle config set --local deployment true && \
+    bundle config set --local without 'development test' && \
+    bundle install
+
+COPY . .
+RUN SECRET_KEY_BASE=placeholder bundle exec rake assets:precompile
+
+FROM ruby:3.3-slim
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y libpq5 && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /app /app
+
+ENV RAILS_ENV=production \
+    RAILS_SERVE_STATIC_FILES=true \
+    RAILS_LOG_TO_STDOUT=true
+
+EXPOSE 3000
+CMD ["bundle", "exec", "puma", "-C", "config/puma.rb"]
+```
+
+---
+
+## PHP {{ anchor: true, id: 'php' }}
+
+Temps detects PHP projects from `composer.json`. Laravel is specifically detected when `laravel/framework` is a dependency and an `artisan` file exists. PHP support is provided via Nixpacks.
+
+### Laravel
+
+Set essential environment variables in the Temps dashboard:
+
+```bash
+APP_KEY=base64:your-app-key-here
+APP_URL=https://your-app.yourdomain.com
+DB_CONNECTION=pgsql
+DATABASE_URL=postgres://user:pass@host:5432/dbname
+```
+
+<Note>
+  Never commit `APP_KEY` to your repository. Generate it locally with `php artisan key:generate --show` and add it as an environment variable in Temps.
+</Note>
+
+### Custom Dockerfile (Laravel)
+
+For production Laravel deployments, a custom Dockerfile gives you full control over PHP extensions, web server configuration, and optimization:
+
+```dockerfile {{ title: 'Dockerfile (Laravel)' }}
+FROM php:8.3-fpm-alpine AS base
+
+# Install system dependencies and PHP extensions
+RUN apk add --no-cache \
+    nginx \
+    supervisor \
+    libpng-dev \
+    libjpeg-turbo-dev \
+    libzip-dev \
+    postgresql-dev \
+    icu-dev \
+    && docker-php-ext-configure gd --with-jpeg \
+    && docker-php-ext-install \
+    pdo_pgsql \
+    gd \
+    zip \
+    intl \
+    opcache \
+    bcmath \
+    && rm -rf /var/cache/apk/*
+
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+
+# Install dependencies (cached layer)
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist
+
+# Copy application
+COPY . .
+RUN composer dump-autoload --optimize && \
+    php artisan config:clear
+
+# Set permissions
+RUN chown -R www-data:www-data storage bootstrap/cache
+
+# Nginx configuration
+COPY docker/nginx.conf /etc/nginx/http.d/default.conf
+
+# Supervisor to run nginx + php-fpm
+COPY docker/supervisord.conf /etc/supervisord.conf
+
+# PHP production settings
+RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
+COPY docker/opcache.ini /usr/local/etc/php/conf.d/opcache.ini
+
+EXPOSE 8080
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+```
+
+Supporting configuration files:
+
+```nginx {{ title: 'docker/nginx.conf' }}
+server {
+    listen 8080;
+    server_name _;
+    root /var/www/html/public;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+}
+```
+
+```ini {{ title: 'docker/supervisord.conf' }}
+[supervisord]
+nodaemon=true
+logfile=/dev/stdout
+logfile_maxbytes=0
+
+[program:nginx]
+command=nginx -g "daemon off;"
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+
+[program:php-fpm]
+command=php-fpm --nodaemonize
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+```
+
+```ini {{ title: 'docker/opcache.ini' }}
+opcache.enable=1
+opcache.memory_consumption=128
+opcache.max_accelerated_files=10000
+opcache.validate_timestamps=0
+```
+
+### Generic PHP
+
+For non-Laravel PHP applications, use a simpler Dockerfile:
+
+```dockerfile {{ title: 'Dockerfile (PHP + Apache)' }}
+FROM php:8.3-apache
+
+RUN a2enmod rewrite && \
+    docker-php-ext-install pdo_mysql
+
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /var/www/html
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --prefer-dist
+COPY . .
+
+RUN sed -i 's|80|${PORT}|g' /etc/apache2/sites-available/000-default.conf && \
+    sed -i 's|80|${PORT}|g' /etc/apache2/ports.conf
+
+EXPOSE 8080
+CMD ["apache2-foreground"]
+```
+
+---
+
+## Elixir {{ anchor: true, id: 'elixir' }}
+
+Temps supports Elixir projects via Nixpacks (select the `nixpacks-elixir` preset manually). For Phoenix applications, a custom Dockerfile is recommended:
+
+```dockerfile {{ title: 'Dockerfile (Phoenix)' }}
+FROM elixir:1.17-alpine AS build
+RUN apk add --no-cache build-base git
+
+WORKDIR /app
+ENV MIX_ENV=prod
+
+COPY mix.exs mix.lock ./
+RUN mix deps.get --only prod && mix deps.compile
+
+COPY lib ./lib
+COPY priv ./priv
+COPY config ./config
+RUN mix compile && mix release
+
+FROM alpine:3.20
+RUN apk add --no-cache libstdc++ openssl ncurses-libs
+
+WORKDIR /app
+COPY --from=build /app/_build/prod/rel/my_app ./
+
+ENV PORT=4000
+EXPOSE 4000
+CMD ["bin/my_app", "start"]
+```
+
+Make sure your Phoenix endpoint reads the port from the environment:
+
+```elixir {{ title: 'config/runtime.exs' }}
+config :my_app, MyAppWeb.Endpoint,
+  url: [host: System.get_env("APP_HOST") || "localhost"],
+  http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT") || "4000")]
+```
+
+---
+
+## Health checks {{ anchor: true, id: 'health-checks' }}
+
+After starting your container, Temps sends HTTP GET requests to verify the application is healthy before routing traffic to it.
+
+### Default behavior
+
+- **Path:** `/` (the root of your application)
+- **Success:** 2 consecutive responses with a 2xx or 3xx status code
+- **Timeout:** 300 seconds (5 minutes) for the application to become healthy
+- **Retry interval:** every 5 seconds
+
+If your application returns 4xx or 5xx errors for 60 consecutive seconds, the deployment fails. Connection errors (application still starting up) are retried without penalty.
+
+### Custom health check path
+
+Add a `.temps.yaml` file to your repository root to customize the health check:
+
+```yaml {{ title: '.temps.yaml' }}
+health:
+  path: /health
+  status: 200
+  interval: 30
+  timeout: 5
+  retries: 3
+```
+
+<Note>
+  Adding a dedicated `/health` endpoint that returns a simple 200 response is recommended. This avoids issues where your root path (`/`) requires authentication or returns a redirect.
+</Note>
+
+---
+
+## Configuration {{ anchor: true, id: 'configuration' }}
+
+### Override build and start commands
+
+You can override the auto-detected commands in the Temps dashboard under your project settings, or via `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  install_command: npm ci
+  build_command: npm run build
+  output_dir: dist
+```
+
+### Environment variables
+
+Set environment variables in the Temps dashboard under **Project > Environment Variables**. Variables can be scoped to specific environments (production, staging, etc.).
+
+Common patterns:
+
+```bash
+# Database connection
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+
+# API keys (never commit these to Git)
+STRIPE_SECRET_KEY=sk_live_...
+SENDGRID_API_KEY=SG...
+
+# Application config
+NODE_ENV=production
+LOG_LEVEL=info
+```
+
+### Automatically injected variables
+
+Temps injects these environment variables into every deployment:
+
+| Variable | Value | Description |
+|----------|-------|-------------|
+| `PORT` | Resolved port | The port your app must listen on |
+| `HOST` | `0.0.0.0` | Bind address |
+| `SENTRY_DSN` | Auto-generated | Error tracking endpoint |
+| `TEMPS_API_URL` | Your Temps URL | Platform API endpoint |
+| `TEMPS_API_TOKEN` | Deployment token | Authentication for Temps SDKs |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Your Temps OTLP URL | OpenTelemetry trace collection |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | OTLP protocol |
+| `OTEL_SERVICE_NAME` | Project name | Service identifier for traces |
+
+You do not need to configure these manually. They are available in `process.env` (Node.js), `os.environ` (Python), `os.Getenv` (Go), and equivalent in other languages.
+
+---
+
+## Connecting to databases {{ anchor: true, id: 'databases' }}
+
+Temps can provision managed PostgreSQL, Redis, MongoDB, and S3-compatible storage as services linked to your project. When a service is linked, connection variables are injected automatically:
+
+**PostgreSQL:**
+```
+POSTGRES_URL=postgresql://user:pass@host:5432/dbname
+POSTGRES_HOST=host
+POSTGRES_PORT=5432
+POSTGRES_USER=user
+POSTGRES_PASSWORD=pass
+POSTGRES_DATABASE=dbname
+```
+
+**Redis:**
+```
+REDIS_URL=redis://host:6379
+REDIS_HOST=host
+REDIS_PORT=6379
+```
+
+You can also connect to external databases by setting the connection URL as an environment variable in the dashboard.
+
+For a complete walkthrough, see [Deploy with a Database](/docs/deploy-with-database).
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Application exits immediately
+
+Your application is binding to `localhost` or `127.0.0.1` instead of `0.0.0.0`. Temps runs your application in a container — binding to localhost means it only accepts connections from inside the container.
+
+**Fix:** Bind to `0.0.0.0` or use the `HOST` environment variable.
+
+### Health check timeout
+
+The application takes longer than 300 seconds to start, or the health check path returns an error.
+
+**Fix:**
+- Add a `/health` endpoint that returns a 200 status code
+- Configure `health.path` in `.temps.yaml` to point to your health endpoint
+- If your application needs more startup time (e.g., database migrations), consider running migrations as a separate step
+
+### Build fails with "command not found"
+
+The auto-detected build command does not match your project setup.
+
+**Fix:** Override the build command in the Temps dashboard or in `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  build_command: yarn build
+  install_command: yarn install --frozen-lockfile
+```
+
+### Port mismatch
+
+Your application listens on a different port than what Temps expects.
+
+**Fix:** Always read from the `PORT` environment variable. Do not hardcode ports. If your framework uses a different default (e.g., Flask uses 5000, Go uses 8080), that is fine — Temps sets `PORT` to the correct value and your code should use it.
+
+---
+
+## What to explore next
+
+<div className="not-prose">
+  <Button href="/docs/docker-containers" variant="text" arrow="right">
+    Deploy with a custom Dockerfile
+  </Button>
+  <Button href="/docs/static-sites" variant="text" arrow="right">
+    Deploy static sites and SPAs
+  </Button>
+  <Button href="/docs/your-first-deployment" variant="text" arrow="right">
+    Your first deployment tutorial
+  </Button>
+  <Button href="/docs/deploy-with-database" variant="text" arrow="right">
+    Deploy with a database
+  </Button>
+</div>

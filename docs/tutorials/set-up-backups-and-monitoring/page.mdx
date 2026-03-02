@@ -3,7 +3,7 @@ export const metadata = {
   description:
     'Configure automated backups to S3 storage and uptime monitoring with alerts. Protect your data and know the moment something goes wrong.',
   alternates: {
-    canonical: '/docs/tutorials/set-up-backups-and-monitoring',
+    canonical: '/docs/set-up-backups-and-monitoring',
   },
 }
 
@@ -43,8 +43,8 @@ By the end of this tutorial, you will have:
 
 | Covered | Not covered |
 |---------|-------------|
-| Connecting S3 storage for backups | Setting up managed databases ([tutorial](/docs/tutorials/deploy-with-database)) |
-| Manual and scheduled backups | CI/CD pipeline configuration ([how-to guide](/docs/howto/set-up-ci-cd-pipeline)) |
+| Connecting S3 storage for backups | Setting up managed databases ([tutorial](/docs/deploy-with-database)) |
+| Manual and scheduled backups | CI/CD pipeline configuration ([how-to guide](/docs/set-up-ci-cd-pipeline)) |
 | Email, Slack, and webhook notifications | Disk space monitoring (runs automatically) |
 | Uptime monitors and incidents | Custom status pages |
 | Restoring from a backup | Point-in-time recovery with WAL-G |
@@ -55,7 +55,7 @@ By the end of this tutorial, you will have:
 
 You need:
 
-- A **running Temps instance** with at least one deployed project (complete [Your First Deployment](/docs/tutorials/your-first-deployment) first)
+- A **running Temps instance** with at least one deployed project (complete [Your First Deployment](/docs/your-first-deployment) first)
 - **S3-compatible storage** — any of the following:
   - [AWS S3](https://aws.amazon.com/s3/) bucket
   - [MinIO](https://min.io/) instance (self-hosted)
@@ -535,16 +535,16 @@ Additional protections that Temps runs automatically in the background:
 ## What to explore next
 
 <div className="not-prose">
-  <Button href="/docs/tutorials/deploy-with-database" variant="text" arrow="right">
+  <Button href="/docs/deploy-with-database" variant="text" arrow="right">
     Deploy an application with a managed PostgreSQL database
   </Button>
-  <Button href="/docs/howto/debug-a-failed-deployment" variant="text" arrow="right">
+  <Button href="/docs/debug-a-failed-deployment" variant="text" arrow="right">
     Debug a failed deployment using logs and status codes
   </Button>
-  <Button href="/docs/concepts/deployments" variant="text" arrow="right">
+  <Button href="/docs/deployments" variant="text" arrow="right">
     Understand how the deployment pipeline works under the hood
   </Button>
-  <Button href="/docs/howto/roll-back-a-deployment" variant="text" arrow="right">
+  <Button href="/docs/roll-back-a-deployment" variant="text" arrow="right">
     Roll back to a previous deployment instantly
   </Button>
 </div>

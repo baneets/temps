@@ -1,203 +1,290 @@
 export const metadata = {
-  title: "Manage Environment Variables",
-  description:
-    "Tutorial: Configure environment variables and secrets in Temps. Manage build-time and runtime variables across environments securely.",
+  title: 'Manage Environment Variables',
+  description: 'Configure environment variables and secrets in Temps. Scope variables per environment, handle build-time vs runtime, and keep secrets secure.',
   alternates: {
-    canonical: "/docs/tutorials/environment-variables",
+    canonical: '/docs/environment-variables',
   },
-};
+}
 
 # Manage Environment Variables
 
-## Page Goal
+Environment variables let you configure your application without changing code — database URLs, API keys, feature flags, and secrets. This guide covers how to add, scope, and secure them in Temps. {{ className: 'lead' }}
 
-Teach proper environment variable management and secrets handling. Help users avoid common security mistakes and configuration issues.
+---
 
-## Target Persona
+## How environment variables work {{ anchor: true, id: 'how-it-works' }}
 
-**Secure Sam** - A developer who:
+Variables in Temps are defined at the **project level** and **scoped to specific environments**. When you create a variable, you choose which environments receive it — production, staging, preview, or all of them.
 
-- Needs to manage API keys, secrets
-- Wants production-ready security
-- May have different env per environment
-- Concerned about security best practices
-- Values: Security, proper configuration, peace of mind
-- Questions: "Is this secure?", "How do I structure these?"
-- Timeline: Setting up production deployment
+At deployment time, Temps gathers variables in this order (later entries override earlier ones):
 
-## Key Content to Include
+1. **Default** — `HOST=0.0.0.0` is always set
+2. **User-defined** — Variables you configure in the dashboard, filtered by the target environment
+3. **Linked services** — Connection strings from Temps-managed databases and caches (PostgreSQL, Redis, S3, etc.)
+4. **Auto-injected** — Sentry DSN, OpenTelemetry endpoints, and framework-specific variants
 
-**1. What You'll Learn**
+Variables are injected into the container at runtime as standard environment variables. They are also passed as Docker build arguments, making them available during the build step.
 
-- Add environment variables
-- Manage secrets securely
-- Environment-specific configs
-- Best practices
-- Time: 10 minutes
+---
 
-**2. Understanding Environment Variables**
+## Adding variables {{ anchor: true, id: 'adding-variables' }}
 
-- What they are
-- When to use them
-- What should be environment variables
-- What shouldn't be
+1. Open your project in the Temps dashboard
+2. Go to **Settings** > **Environment Variables**
+3. Click **Add Variable**
+4. Enter the key and value
+5. Select which environments should receive this variable
+6. Click **Save**
 
-**3. Adding Environment Variables**
+After adding or changing a variable, trigger a new deployment for the changes to take effect. Variables are read when the container starts — changes do not affect running containers.
 
-**Step 1: Navigate to Settings** (1 min)
+### Scoping to environments
 
-- Go to your application
-- Environment variables section
-- Screenshots
+Each variable can be assigned to one or more environments. This lets you use different values for production and staging:
 
-**Step 2: Add Variables** (2 min)
+| Key | Production | Staging |
+|-----|-----------|---------|
+| `DATABASE_URL` | `postgres://prod-db:5432/app` | `postgres://staging-db:5432/app` |
+| `LOG_LEVEL` | `warn` | `debug` |
+| `FEATURE_NEW_UI` | `false` | `true` |
 
-- Variable name
-- Variable value
-- Per-environment (dev/staging/prod)
-- Visibility (shown/hidden for secrets)
+If two environments need the same value, assign the variable to both. If they need different values, create separate variables with the same key scoped to each environment.
 
-**Step 3: Trigger Redeploy** (1 min)
+<Note>
+  Variables are checked for key conflicts. You cannot create two variables with the same key in the same environment. Temps rejects the creation and tells you which environment has the conflict.
+</Note>
 
-- Changes require redeploy
-- How to redeploy
-- Verify new variables loaded
+---
 
-**4. Common Environment Variables**
+## Preview environment variables {{ anchor: true, id: 'preview-variables' }}
 
-**For Frontend Apps:**
+When a preview environment is created for a branch, Temps copies variables from the parent environment. Each variable has an **Include in preview** flag that controls whether it is copied:
 
-```bash
-VITE_API_URL=https://api.example.com
-NEXT_PUBLIC_ANALYTICS_ID=UA-12345
-REACT_APP_ENV=production
+- **Enabled** (default) — The variable is copied to preview environments automatically
+- **Disabled** — The variable is not copied. Use this for production secrets that preview environments should not have access to (e.g. payment processing keys, production database URLs)
+
+Set this flag when creating or editing a variable.
+
+---
+
+## Build-time vs runtime {{ anchor: true, id: 'build-vs-runtime' }}
+
+All environment variables are available at both build time and runtime. However, frontend frameworks only embed variables with specific prefixes into the client bundle:
+
+| Framework | Prefix | Embedded in bundle | Requires rebuild on change |
+|-----------|--------|-------------------|---------------------------|
+| Vite | `VITE_` | Yes | Yes |
+| Next.js | `NEXT_PUBLIC_` | Yes | Yes |
+| Create React App | `REACT_APP_` | Yes | Yes |
+| Node.js / Python / Go | (any) | No | No |
+
+### Server-side variables
+
+Variables without the framework prefix are only available on the server. They are injected at runtime and can be changed by redeploying — no rebuild needed.
+
+```javascript
+// Available at runtime on the server
+const dbUrl = process.env.DATABASE_URL;
+const secret = process.env.JWT_SECRET;
 ```
 
-**For Backend APIs:**
+### Client-side variables
 
-```bash
-DATABASE_URL=postgresql://...
-JWT_SECRET=your-secret-key
-API_KEY=your-api-key
-NODE_ENV=production
-PORT=3000 # (usually auto-set by Temps)
+Variables with the framework prefix are embedded in the JavaScript bundle during the build step. If you change them, you must trigger a new deployment.
+
+```typescript
+// Vite — embedded at build time
+const apiUrl = import.meta.env.VITE_API_URL;
+
+// Next.js — embedded at build time
+const analyticsId = process.env.NEXT_PUBLIC_ANALYTICS_ID;
 ```
 
-**For Databases:**
+<Note>
+  Never put secrets in client-side variables. They are visible to anyone who inspects your JavaScript bundle in the browser.
+</Note>
+
+---
+
+## Auto-injected variables {{ anchor: true, id: 'auto-injected' }}
+
+Temps automatically sets these variables. You do not need to add them manually:
+
+<Properties>
+  <Property name="PORT" type="string">
+    The port your application should listen on. Matches the EXPOSE directive or configured port.
+  </Property>
+  <Property name="HOST" type="string">
+    Always `0.0.0.0`.
+  </Property>
+  <Property name="SENTRY_DSN" type="string">
+    Sentry error tracking DSN, if Sentry is configured on the project.
+  </Property>
+  <Property name="NEXT_PUBLIC_SENTRY_DSN" type="string">
+    Same DSN with the Next.js prefix, auto-set for Next.js projects.
+  </Property>
+  <Property name="VITE_PUBLIC_SENTRY_DSN" type="string">
+    Same DSN with the Vite prefix, auto-set for Vite projects.
+  </Property>
+  <Property name="SENTRY_RELEASE" type="string">
+    The deployment commit SHA, used to tag Sentry releases.
+  </Property>
+  <Property name="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
+    OpenTelemetry collector endpoint for traces and metrics.
+  </Property>
+  <Property name="OTEL_EXPORTER_OTLP_PROTOCOL" type="string">
+    Protocol for the OTLP exporter (typically `grpc`).
+  </Property>
+  <Property name="OTEL_EXPORTER_OTLP_HEADERS" type="string">
+    Authentication headers for the OTLP exporter.
+  </Property>
+  <Property name="OTEL_SERVICE_NAME" type="string">
+    Set to your project name. Used by OpenTelemetry SDKs for service identification.
+  </Property>
+  <Property name="OTEL_SERVICE_VERSION" type="string">
+    Set to the deployment commit SHA.
+  </Property>
+  <Property name="TEMPS_API_URL" type="string">
+    The Temps API URL for SDK integrations.
+  </Property>
+  <Property name="TEMPS_API_TOKEN" type="string">
+    API token for Temps SDK integrations.
+  </Property>
+</Properties>
+
+---
+
+## Linked service variables {{ anchor: true, id: 'linked-services' }}
+
+When you link a Temps-managed service (PostgreSQL, Redis, MongoDB, S3) to your project, connection variables are injected automatically at runtime. These come from the service configuration and include connection strings, hostnames, ports, and credentials.
+
+For example, linking a PostgreSQL service adds:
 
 ```bash
-DB_HOST=db.example.com
-DB_PORT=5432
-DB_NAME=myapp
-DB_USER=user
-DB_PASSWORD=secret
+DATABASE_URL=postgres://user:password@postgres-service:5432/mydb
+PGHOST=postgres-service
+PGPORT=5432
+PGUSER=user
+PGPASSWORD=password
+PGDATABASE=mydb
 ```
 
-**5. Security Best Practices**
+Service credentials are encrypted at rest using AES-256-GCM. They are only decrypted when injected into a container at deployment time.
 
-**✅ DO:**
+<Note>
+  If a linked service cannot provide its environment variables (e.g. the service is stopped), the deployment fails. This prevents containers from starting without required connections.
+</Note>
 
-- Use environment variables for secrets
-- Different secrets per environment
-- Rotate secrets regularly
-- Use strong, unique values
-- Limit who can view secrets
+---
 
-**❌ DON'T:**
+## Common patterns {{ anchor: true, id: 'common-patterns' }}
 
-- Commit secrets to Git
-- Use same secrets in dev and prod
-- Share secrets in plain text
-- Reuse secrets across projects
-- Log secret values
-
-**6. Framework-Specific Guidelines**
-
-**Next.js:**
-
-- NEXT*PUBLIC*\* for client-side
-- No prefix for server-side
-- When each is available
-
-**Vite:**
-
-- VITE\_\* for client-side exposure
-- Security implications
-
-**Node.js:**
-
-- process.env.VARIABLE_NAME
-- dotenv for local development
-
-**7. Environment-Specific Configuration**
-
-- Dev environment variables
-- Staging environment variables
-- Production environment variables
-- When to use same vs different values
-
-**8. Managing .env Files**
-
-- .env.example for documentation
-- Never commit .env
-- Local development setup
-- Template example
-
-**9. Variable Precedence**
-
-- Project-level variables
-- Environment-level variables
-- Which takes precedence
-
-**10. Troubleshooting**
-
-**Variables not available:**
-
-- Redeploy required after changes
-- Check variable names
-- Framework-specific prefixes
-
-**Secrets exposed:**
-
-- Client-side vs server-side
-- Browser devtools check
-- Fixing leaked secrets
-
-**Build-time vs Runtime:**
-
-- When variables are read
-- Static site considerations
-- Dynamic APIs
-
-**11. Real-World Examples**
-
-**Example 1: Next.js with Database**
+### Full-stack Next.js app
 
 ```bash
-DATABASE_URL=postgres://... # server-only
-NEXT_PUBLIC_APP_NAME=MyApp # client-side
+# Server-only
+DATABASE_URL=postgres://user:pass@db:5432/myapp
+JWT_SECRET=your-secret-key-here
+SMTP_HOST=smtp.mailgun.org
+SMTP_PASSWORD=your-smtp-password
+
+# Client-side (embedded in bundle)
+NEXT_PUBLIC_API_URL=https://api.myapp.com
+NEXT_PUBLIC_APP_NAME=My App
+NEXT_PUBLIC_STRIPE_PUBLIC_KEY=pk_live_abc123
 ```
 
-**Example 2: React + API**
+### Vite + separate API
 
 ```bash
+# Frontend project
 VITE_API_URL=https://api.myapp.com
-VITE_SENTRY_DSN=https://...
+VITE_POSTHOG_KEY=phc_abc123
+
+# API project
+DATABASE_URL=postgres://user:pass@db:5432/myapp
+REDIS_URL=redis://cache:6379
+CORS_ORIGIN=https://myapp.com
+JWT_SECRET=your-secret-key
 ```
 
-**Example 3: Node.js API**
+### Node.js API with external services
 
 ```bash
-DATABASE_URL=postgres://...
-REDIS_URL=redis://...
-JWT_SECRET=super-secret-key
-CORS_ORIGIN=https://app.myapp.com
+DATABASE_URL=postgres://user:pass@db:5432/myapp
+REDIS_URL=redis://cache:6379
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=your-secret
+S3_BUCKET=my-uploads
+STRIPE_SECRET_KEY=sk_live_abc123
+SENDGRID_API_KEY=SG.abc123
 ```
 
-## Success Metrics
+---
 
-- User understands how to add variables
-- User knows security best practices
-- User can configure framework-specific variables
-- Zero accidental secret exposure
-- Proper environment separation
+## Local development {{ anchor: true, id: 'local-development' }}
+
+Use a `.env` file for local development. Never commit it to Git.
+
+```bash {{ title: '.env' }}
+DATABASE_URL=postgres://localhost:5432/myapp_dev
+JWT_SECRET=dev-secret-not-for-production
+VITE_API_URL=http://localhost:3001
+```
+
+```text {{ title: '.gitignore' }}
+.env
+.env.local
+.env.*.local
+```
+
+Create a `.env.example` file to document what variables are needed without including actual values:
+
+```bash {{ title: '.env.example' }}
+DATABASE_URL=postgres://user:password@host:5432/dbname
+JWT_SECRET=generate-a-random-string
+VITE_API_URL=http://localhost:3001
+```
+
+---
+
+## Security best practices {{ anchor: true, id: 'security' }}
+
+**Do:**
+- Use different secrets for each environment (production, staging, preview)
+- Rotate secrets periodically — update the variable and redeploy
+- Use the "Include in preview" flag to exclude production secrets from preview environments
+- Store secrets only in the Temps dashboard, never in code or `.env` files committed to Git
+
+**Don't:**
+- Put secrets in `VITE_`, `NEXT_PUBLIC_`, or `REACT_APP_` variables — they are visible in the browser
+- Reuse the same secret across multiple projects
+- Log environment variable values — log the key name only
+- Commit `.env` files to Git — add them to `.gitignore`
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Variable not available in the app
+
+1. Check that the variable is scoped to the correct environment
+2. Trigger a new deployment — variables are read at container start, not live-updated
+3. For frontend frameworks, check that the variable uses the correct prefix (`VITE_`, `NEXT_PUBLIC_`, `REACT_APP_`)
+
+### Variable shows old value
+
+A new deployment is required after changing a variable. Running containers use the values that were set when they started.
+
+### Conflict error when creating
+
+A variable with the same key already exists in one of the selected environments. Either update the existing variable or scope the new one to different environments.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/custom-domain">Set up a custom domain</Button>
+<Button href="/docs/preview-deployments">Configure preview deployments</Button>
+<Button href="/docs/add-observability">Add monitoring and tracing</Button>
+<Button href="/docs/web-applications">Framework detection reference</Button>

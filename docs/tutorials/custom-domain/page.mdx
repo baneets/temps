@@ -1,146 +1,274 @@
 export const metadata = {
-  title: 'Set Up Custom Domain',
-  description: 'Tutorial: Configure custom domains with automatic SSL on Temps.',
+  title: 'Set Up a Custom Domain',
+  description: 'Add a custom domain to your Temps deployment with automatic SSL via Let\'s Encrypt. Step-by-step DNS configuration.',
   alternates: {
-    canonical: '/docs/tutorials/custom-domain',
+    canonical: '/docs/custom-domain',
   },
 }
 
-# Set Up Custom Domain
+# Set Up a Custom Domain
 
-## Page Goal
-Walk users through adding a custom domain with zero anxiety. Make DNS configuration crystal clear with provider-specific examples.
+This tutorial walks you through pointing your own domain at a Temps deployment. Temps provisions a TLS certificate via Let's Encrypt automatically — you just need to add a DNS record. {{ className: 'lead' }}
 
-## Target Persona
-**Domain Diana** - A developer who:
-- Has a custom domain to connect
-- May not be DNS expert
-- Wants working HTTPS immediately
-- Worried about breaking things
-- Needs clear, visual instructions
-- Values: Clarity, confidence, working HTTPS
-- Common question: "Did I do this right?"
-- Timeline: Wants it working within the hour
+---
 
-## Key Content to Include
+## What you will achieve {{ anchor: true, id: 'what-you-will-achieve' }}
 
-**1. What You'll Achieve**
-- yourapp.yourdomain.com pointing to Temps
-- Automatic SSL certificate
-- All HTTP → HTTPS redirects
-- Time: 10-15 minutes (+DNS propagation)
+- Your custom domain (e.g. `app.example.com`) pointing to your Temps deployment
+- Automatic TLS certificate from Let's Encrypt
+- HTTP-to-HTTPS redirect
+- Certificate auto-renewal
 
-**2. Prerequisites**
-- Domain name you own
-- Access to DNS settings
-- Deployed application on Temps
+**Time required:** 10 minutes (plus DNS propagation, typically 5-30 minutes).
 
-**3. Step-by-Step Tutorial**
+**Prerequisites:**
+- A deployed application on Temps
+- A domain you control with access to DNS settings
 
-**Step 1: Add Domain in Temps** (2 min)
-- Navigate to app settings
-- Click "Add Domain"
-- Enter your domain
-- Copy DNS records shown
-- Screenshots with arrows
+---
 
-**Step 2: Configure DNS** (5 min)
-Provider-specific tabs with screenshots:
+## Step 1: Add the domain in Temps {{ anchor: true, id: 'add-domain' }}
 
-**For Cloudflare:**
-- Login to Cloudflare
-- Select your domain
-- Go to DNS settings
-- Add A record / CNAME
-- Proxy status (yellow cloud)
-- Screenshot with annotations
+Domain management in Temps is a two-phase process: first you **create the domain and SSL certificate** at the platform level, then you **assign it to a project**.
 
-**For Namecheap:**
-- Login to Namecheap
-- Domain list → Manage
-- Advanced DNS tab
-- Add records
-- Screenshot
+### Create the domain
 
-**For GoDaddy:**
-- Similar step-by-step
-- Screenshots
+1. Click **Domains** in the main sidebar (the left navigation bar, not inside a project)
+2. Click **Add Domain** in the top-right corner
+3. A three-step wizard opens:
 
-**For Other Providers:**
-- General DNS configuration
-- A record vs CNAME explanation
+**Step 1 — Domain:** Enter your domain name (e.g. `app.example.com`, `example.com`, or `*.example.com` for wildcard).
 
-**Step 3: Verify Configuration** (1 min)
-- Back to Temps dashboard
-- Click "Verify DNS"
-- Status indicator
-- What "Pending" vs "Active" means
+**Step 2 — Challenge:** Choose how Let's Encrypt verifies domain ownership:
 
-**Step 4: Wait for Propagation** (0-48h)
-- What is DNS propagation
-- Typical wait time: 5-30 minutes
-- How to check status
-- Using `dig` or online tools
+<Properties>
+  <Property name="HTTP-01 (Recommended)" type="Standard domains">
+    Validates domain ownership by serving a file over HTTP. Requires port 80 to be accessible on your server. Best for single domains — just point your DNS and Temps handles the rest automatically.
+  </Property>
+  <Property name="DNS-01" type="Wildcards and advanced">
+    Validates domain ownership via DNS TXT records. Required for wildcard certificates (`*.example.com`). Also useful when port 80 is not accessible on your server.
+  </Property>
+</Properties>
 
-**Step 5: SSL Certificate** (automatic)
-- Certificate generated automatically
-- How to verify SSL is working
-- Troubleshooting SSL errors
+**Step 3 — Confirm:** Review your configuration and click **Create Domain & Start Provisioning**.
 
-**4. Common Scenarios**
+### Assign the domain to a project
 
-**Adding www subdomain:**
-- Add both example.com and www.example.com
-- Or redirect one to the other
+After the domain is created, assign it to a project:
 
-**Using subdomain:**
-- api.example.com
-- app.example.com
+1. Open your project in the Temps dashboard
+2. Click **Domains** in the project sidebar
+3. Click **Add Domain**
+4. Select your domain from the dropdown (it lists all domains created at the platform level)
+5. Choose the **environment** (e.g. production, staging)
+6. Optionally configure a **redirect** to another domain
+7. Click **Add**
 
-**Apex domain:**
-- Using A record
-- Provider-specific notes
+---
 
-**5. Troubleshooting**
+## Step 2: Configure DNS {{ anchor: true, id: 'configure-dns' }}
 
-**DNS not propagating:**
-- Check configuration
-- DNS checker tools
-- Typical wait times
+Add the required DNS record at your domain registrar or DNS provider. The exact steps depend on your provider.
 
-**SSL certificate error:**
-- Wait for DNS to propagate first
-- Certificate generation time
-- When to retry
+### For subdomains (e.g. `app.example.com`)
 
-**Domain shows wrong app:**
-- Configuration check
-- Cache clearing
+Add a **CNAME record** or **A record** pointing to your Temps server:
 
-**6. Verification Methods**
-- Browser check
-- `dig` command
-- `nslookup` command
-- Online DNS checkers
-- SSL checker tools
+| Type | Name | Value |
+|------|------|-------|
+| A | `app` | `YOUR_TEMPS_SERVER_IP` |
 
-**7. Advanced Configuration**
-- Multiple domains for one app
-- Domain redirects
-- Setting primary domain
+Or using CNAME (if you have a Temps hostname):
 
-**8. Example Checklist**
-- [ ] Domain added in Temps
-- [ ] DNS records configured
-- [ ] DNS verification passed
-- [ ] SSL certificate active
-- [ ] HTTPS working
-- [ ] Redirects working
+| Type | Name | Value |
+|------|------|-------|
+| CNAME | `app` | `your-server.example.com` |
 
-## Success Metrics
-- User successfully adds custom domain
-- Zero ambiguity in DNS configuration
-- User knows how to verify each step
-- Working HTTPS achieved
-- User feels confident throughout process
-- Provider-specific guidance reduces errors
+### For apex domains (e.g. `example.com`)
+
+Apex domains (no subdomain) require an **A record** — CNAME records are not allowed at the zone root by DNS standards:
+
+| Type | Name | Value |
+|------|------|-------|
+| A | `@` | `YOUR_TEMPS_SERVER_IP` |
+
+### For wildcard domains
+
+Wildcard certificates (`*.example.com`) require DNS-01 verification. Add a TXT record:
+
+| Type | Name | Value |
+|------|------|-------|
+| TXT | `_acme-challenge` | `(value shown in Temps dashboard)` |
+
+<Note>
+  If you use Cloudflare as your DNS provider and have Temps configured with Cloudflare integration, DNS records can be managed automatically. Otherwise, add them manually.
+</Note>
+
+### Provider-specific instructions
+
+<CodeGroup>
+
+```text {{ title: 'Cloudflare' }}
+1. Log in to Cloudflare dashboard
+2. Select your domain
+3. Go to DNS > Records
+4. Click "Add record"
+5. Type: A (or CNAME for subdomains)
+6. Name: your subdomain (e.g. "app") or "@" for apex
+7. Content: your Temps server IP
+8. Proxy status: DNS only (gray cloud) — disable the orange cloud
+   (Temps handles TLS itself; Cloudflare proxy would interfere)
+9. Click Save
+```
+
+```text {{ title: 'Namecheap' }}
+1. Log in to Namecheap
+2. Domain List > Manage your domain
+3. Go to Advanced DNS tab
+4. Click "Add New Record"
+5. Type: A Record
+6. Host: your subdomain (e.g. "app") or "@" for apex
+7. Value: your Temps server IP
+8. TTL: Automatic
+9. Click the checkmark to save
+```
+
+```text {{ title: 'GoDaddy' }}
+1. Log in to GoDaddy
+2. My Products > your domain > DNS
+3. Click "Add" in the Records section
+4. Type: A
+5. Name: your subdomain (e.g. "app") or "@" for apex
+6. Value: your Temps server IP
+7. TTL: 1 Hour
+8. Click Save
+```
+
+```text {{ title: 'Route 53 (AWS)' }}
+1. Open Route 53 in AWS Console
+2. Hosted zones > your domain
+3. Click "Create record"
+4. Record name: your subdomain (e.g. "app")
+5. Record type: A
+6. Value: your Temps server IP
+7. TTL: 300
+8. Click "Create records"
+```
+
+</CodeGroup>
+
+---
+
+## Step 3: Verify DNS {{ anchor: true, id: 'verify-dns' }}
+
+After adding the DNS record, Temps automatically checks DNS propagation across multiple public DNS servers (Google, Cloudflare, Quad9, OpenDNS). You can monitor the domain status on the **Domains** page in the main sidebar — it shows the current state (`challenge_requested`, `active`, etc.) along with certificate renewal and expiration dates.
+
+You can also verify manually:
+
+```bash
+# Check A record
+dig +short app.example.com A
+
+# Check CNAME record
+dig +short app.example.com CNAME
+
+# Check TXT record (for DNS-01)
+dig +short _acme-challenge.example.com TXT
+```
+
+DNS propagation typically takes 5-30 minutes. Some providers propagate within seconds; others may take up to 48 hours in rare cases. You can use [dnschecker.org](https://dnschecker.org) to monitor propagation worldwide.
+
+---
+
+## Step 4: Provision the certificate {{ anchor: true, id: 'provision-certificate' }}
+
+Once DNS verification passes, Temps provisions a TLS certificate from Let's Encrypt automatically:
+
+1. Temps creates an ACME order with Let's Encrypt
+2. Let's Encrypt validates the challenge (HTTP-01 or DNS-01)
+3. Temps receives the certificate and stores it securely (private key encrypted with AES-256-GCM)
+4. The proxy starts serving HTTPS for your domain immediately
+
+The domain status changes from **challenge_requested** to **active** on the Domains page once the certificate is provisioned. You will also see the certificate renewal and expiration dates.
+
+### Certificate renewal
+
+Certificates are valid for 90 days. Temps handles renewal automatically — you do not need to take any action. The renewal process runs before the certificate expires.
+
+---
+
+## Step 5: Verify HTTPS {{ anchor: true, id: 'verify-https' }}
+
+Open your domain in a browser:
+
+```text
+https://app.example.com
+```
+
+You should see:
+- A valid TLS certificate (lock icon in the browser)
+- Your application loading correctly
+- HTTP requests redirected to HTTPS automatically
+
+Test with curl:
+
+```bash
+# Should return your app
+curl -I https://app.example.com
+
+# Should redirect to HTTPS
+curl -I http://app.example.com
+```
+
+---
+
+## Multiple domains {{ anchor: true, id: 'multiple-domains' }}
+
+You can assign multiple domains to the same project. Create each domain on the **Domains** page in the main sidebar, then assign them to your project from the project's **Domains** page. Common patterns:
+
+### www and apex
+
+Add both `example.com` and `www.example.com`. Both get separate TLS certificates and route to the same application. When assigning to a project, you can configure one as a redirect to the other using the **Redirect to** option in the domain assignment dialog.
+
+### Different domains per environment
+
+| Environment | Domain |
+|------------|--------|
+| Production | `app.example.com` |
+| Staging | `staging.example.com` |
+| Preview | `preview-branch.your-server.com` (auto-assigned) |
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### DNS verification fails
+
+- Double-check the DNS record type (A vs CNAME) and value
+- Wait longer — some registrars propagate slowly
+- Verify the record with `dig +short your-domain.com A`
+- If using Cloudflare, ensure the proxy is **disabled** (gray cloud, DNS only)
+
+### Certificate provisioning fails
+
+- DNS must be pointing to the Temps server before provisioning
+- For DNS-01 challenges, the TXT record must match exactly (copy-paste from the dashboard)
+- Check the error message in the domain details — it includes the Let's Encrypt rejection reason
+
+### HTTPS works but shows wrong app
+
+- Verify the domain is assigned to the correct project and environment — check the project's **Domains** page
+- If you recently moved the domain between projects, wait for the route table to update
+
+### Mixed content warnings
+
+Your application loads resources over HTTP while the page is served over HTTPS. Update hardcoded `http://` URLs in your application code or environment variables to use `https://`.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/preview-deployments">Set up preview deployments</Button>
+<Button href="/docs/environment-variables">Manage environment variables</Button>
+<Button href="/docs/ci-cd-setup">Set up CI/CD</Button>
+<Button href="/docs/analytics">Add analytics</Button>

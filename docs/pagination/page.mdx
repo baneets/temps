@@ -1,7 +1,7 @@
 export const metadata = {
   title: 'Pagination',
   description:
-    'In this guide, we will look at how to work with paginated responses when querying the Protocol API',
+    'Learn how to work with paginated responses when querying the Temps API.',
   alternates: {
     canonical: '/docs/pagination',
   },
@@ -9,58 +9,144 @@ export const metadata = {
 
 # Pagination
 
-In this guide, we will look at how to work with paginated responses when querying the Protocol API. By default, all responses limit results to ten. However, you can go as high as 100 by adding a `limit` parameter to your requests. If you are using one of the official Protocol API client libraries, you don't need to worry about pagination, as it's all being taken care of behind the scenes. {{ className: 'lead' }}
+All list endpoints in the Temps API support pagination. By default, results are limited to 20 items per page with a maximum of 100. Use the `page` and `page_size` query parameters to navigate through results. {{ className: 'lead' }}
 
-When an API response returns a list of objects, no matter the amount, pagination is supported. In paginated responses, objects are nested in a `data` attribute and have a `has_more` attribute that indicates whether you have reached the end of the last page. You can use the `starting_after` and `ending_before` query parameters to browse pages.
+---
 
-## Example using cursors
+## Page-Based Pagination
+
+The Temps API uses page-based pagination. Every list endpoint accepts `page` and `page_size` parameters and returns a `total` count so you can calculate the total number of pages.
 
 <Row>
   <Col>
 
-    In this example, we request the page that starts after the conversation with id `s4WycXedwhQrEFuM`. As a result, we get a list of three conversations and can tell by the `has_more` attribute that we have reached the end of the resultset.
+    ### Parameters
 
     <Properties>
-      <Property name="starting_after" type="string">
-        The last ID on the page you're currently on when you want to fetch the next page.
+      <Property name="page" type="integer">
+        The page number to retrieve (1-indexed). Defaults to `1`.
       </Property>
-      <Property name="ending_before" type="string">
-        The first ID on the page you're currently on when you want to fetch the previous page.
+      <Property name="page_size" type="integer">
+        The number of items per page. Defaults to `20`, maximum `100`.
       </Property>
-      <Property name="limit" type="integer">
-        Limit the number of items returned.
+    </Properties>
+
+    ### Response Metadata
+
+    <Properties>
+      <Property name="total" type="integer">
+        The total number of items across all pages.
+      </Property>
+      <Property name="page" type="integer">
+        The current page number.
+      </Property>
+      <Property name="page_size" type="integer">
+        The number of items per page.
+      </Property>
+      <Property name="data" type="array">
+        The array of items for the current page.
       </Property>
     </Properties>
 
   </Col>
   <Col>
 
-    ```bash {{ title: 'Manual pagination using cURL' }}
-    curl -G https://api.protocol.chat/v1/conversations \
-      -H "Authorization: Bearer {token}" \
-      -d starting_after="s4WycXedwhQrEFuM" \
-      -d limit=10
+    ```bash {{ title: 'Paginated request' }}
+    curl -G https://your-temps-instance.com/api/projects \
+      -H "Authorization: Bearer tk_your_api_key" \
+      -d page=2 \
+      -d page_size=10
     ```
 
     ```json {{ title: 'Paginated response' }}
     {
-      "has_more": false,
       "data": [
         {
-          "id": "WAz8eIbvDR60rouK",
-          // ...
+          "id": 11,
+          "name": "my-app",
+          "slug": "my-app"
         },
         {
-          "id": "hSIhXBhNe8X1d8Et"
-          // ...
-        },
-        {
-          "id": "fbwYwpi9C2ybt6Yb"
-          // ...
+          "id": 12,
+          "name": "api-service",
+          "slug": "api-service"
         }
-      ]
+      ],
+      "total": 25,
+      "page": 2,
+      "page_size": 10
     }
     ```
 
   </Col>
 </Row>
+
+---
+
+## Sorting
+
+List endpoints return results sorted by `created_at` in descending order by default (newest first). Some endpoints support additional sorting options via a `sort` parameter.
+
+---
+
+## Cursor-Based Pagination
+
+Some endpoints that return large datasets (such as blob storage listing and log search) use cursor-based pagination for better performance.
+
+<Row>
+  <Col>
+
+    ### Parameters
+
+    <Properties>
+      <Property name="cursor" type="string">
+        An opaque continuation token from the previous response. Omit for the first request.
+      </Property>
+      <Property name="limit" type="integer">
+        Maximum number of items to return (varies by endpoint).
+      </Property>
+    </Properties>
+
+    For cursor-based endpoints, keep requesting with the returned `next_cursor` value until it is `null`.
+
+  </Col>
+  <Col>
+
+    ```json {{ title: 'Cursor-based response' }}
+    {
+      "blobs": [
+        {
+          "pathname": "images/logo.png",
+          "size": 15234,
+          "content_type": "image/png"
+        }
+      ],
+      "next_cursor": "eyJrZXkiOiJpbWFnZXMvbG9nby5wbmcifQ==",
+      "has_more": true
+    }
+    ```
+
+  </Col>
+</Row>
+
+---
+
+## SDK Usage
+
+When using the official SDKs, pagination is handled through the API parameters:
+
+```typescript {{ title: 'Node SDK' }}
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const client = new TempsClient({
+  baseUrl: 'https://your-temps-instance.com',
+  apiKey: 'your-api-key'
+});
+
+// Fetch page 1 of projects
+const result = await client.projects.list({
+  query: { page: 1, page_size: 20 }
+});
+
+console.log(`Showing ${result.data.length} of ${result.total} projects`);
+```

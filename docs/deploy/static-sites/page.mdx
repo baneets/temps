@@ -1,79 +1,262 @@
 export const metadata = {
   title: 'Deploy Static Sites',
-  description: 'Deploy Next.js, React, Vue, Vite, and other static sites on Temps.',
+  description: 'Deploy Vite, React, Astro, Vue, Angular, and other static frontends on Temps.',
   alternates: {
-    canonical: '/docs/deploy/static-sites',
+    canonical: '/docs/static-sites',
   },
 }
 
 # Deploy Static Sites
 
-## Page Goal
-Guide users through deploying static sites and frontend applications. Cover popular frameworks and build configurations. Show that Temps is great for modern frontend deployments.
+Temps builds your frontend, extracts the static files, and serves them directly from the proxy — no running container at runtime. You get automatic SPA routing, gzip compression, cache headers, and ETag support out of the box. {{ className: 'lead' }}
 
-## Target Persona
-**Frontend Fran** - A developer who:
-- Building with React, Next.js, Vue, Svelte, etc.
-- Familiar with npm/yarn/pnpm
-- Needs fast static hosting with CDN
-- May need SSR (for Next.js)
-- Values: Fast builds, modern tooling, preview deployments
-- Questions: "Does it support my framework?", "How fast is it?"
-- Timeline: 5-10 minutes for first deployment
+---
 
-## Key Content to Include
+## How static deployments work {{ anchor: true, id: 'how-it-works' }}
 
-**1. Supported Frameworks**
-- Next.js (static and SSR)
-- React (CRA, Vite)
-- Vue (Nuxt, Vite)
-- Svelte (SvelteKit)
-- Astro
-- Gatsby
-- And more...
+Static deployments follow a different path than server deployments:
 
-**2. Automatic Detection**
-- Framework auto-detection
-- Build command detection
-- Output directory detection
-- How to override defaults
+1. **Build** — Temps generates a multi-stage Dockerfile, installs dependencies, and runs your build command inside a container
+2. **Extract** — The compiled output (`dist/`, `build/`, etc.) is copied from the container to the filesystem
+3. **Serve** — The Temps proxy serves the files directly. No container runs at runtime.
 
-**3. Next.js Deployment**
-- Static export vs SSR
-- Image optimization
-- API routes
-- Environment variables
+This means your static site uses zero memory and zero CPU after the build completes. The proxy handles compression, caching, and routing.
 
-**4. React/Vite Deployment**
-- Build configuration
-- Output directory
-- Environment variables (VITE_*)
-- Client-side routing
+### What counts as static
 
-**5. Vue/Nuxt Deployment**
-- Nuxt SSR support
-- Static generation
-- Build modes
+A deployment is static when Temps can determine that the build output is a set of HTML, CSS, and JavaScript files with no server component. The following frameworks produce static output by default:
 
-**6. Build Configuration**
-- Custom build commands
-- Install commands
-- Node version
-- Build environment variables
+| Framework | Build output | Detection signal |
+|-----------|-------------|-----------------|
+| Vite (React, Vue, Svelte) | `dist/` | `vite` in `package.json` dependencies |
+| Create React App | `build/` | `react-scripts` in `package.json` dependencies |
+| Astro (static mode) | `dist/` | `astro` in `package.json` dependencies |
+| Angular | `dist/` | `@angular/core` in `package.json` dependencies |
+| Docusaurus | `build/` | `@docusaurus/core` in `package.json` dependencies |
+| Rsbuild | `dist/` | `@rsbuild/core` in `package.json` dependencies |
 
-**7. Performance**
-- Build caching
-- Asset optimization
-- CDN integration
-- Compression
+<Note>
+  Next.js, Nuxt, Remix, SvelteKit, and NestJS are always deployed as server containers, even when they support static export. If you want pure static hosting for a Next.js project with `output: 'export'`, use Vite or add your own Dockerfile with nginx.
+</Note>
 
-**8. Preview Deployments**
-- Pull request previews
-- Branch deployments
-- Temporary URLs
+---
 
-## Success Metrics
-- User can deploy frontend application in minutes
-- User understands framework-specific configuration
-- User knows how to optimize builds
-- Preview deployments work automatically
+## Vite {{ anchor: true, id: 'vite' }}
+
+Vite is the most common static framework on Temps. It works for React, Vue, Svelte, and vanilla TypeScript projects.
+
+### Minimal project
+
+```json {{ title: 'package.json' }}
+{
+  "name": "my-app",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0",
+    "@vitejs/plugin-react": "^4.0.0"
+  }
+}
+```
+
+Push this repository to Temps. It detects Vite, runs `npm run build`, and serves the `dist/` directory. No configuration needed.
+
+### Environment variables
+
+Vite only exposes environment variables prefixed with `VITE_` to the client bundle. Set them in the Temps dashboard:
+
+| Variable | Available in browser | Available at build time |
+|----------|---------------------|------------------------|
+| `VITE_API_URL` | Yes | Yes |
+| `VITE_PUBLIC_KEY` | Yes | Yes |
+| `DATABASE_URL` | No | Yes |
+| `SECRET_KEY` | No | Yes |
+
+```typescript {{ title: 'src/config.ts' }}
+const apiUrl = import.meta.env.VITE_API_URL;
+```
+
+<Note>
+  Variables without the `VITE_` prefix are available during the build step (they are passed as Docker build arguments) but are NOT included in the client bundle. This is a Vite security feature, not a Temps limitation.
+</Note>
+
+### Custom build output
+
+If your Vite config uses a non-default output directory, override it in `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  output_dir: out
+```
+
+---
+
+## Create React App {{ anchor: true, id: 'create-react-app' }}
+
+CRA projects are detected by `react-scripts` in `package.json`. Temps runs `npm run build` and serves the `build/` directory.
+
+Environment variables prefixed with `REACT_APP_` are embedded in the client bundle:
+
+```bash
+REACT_APP_API_URL=https://api.example.com
+```
+
+```javascript
+const apiUrl = process.env.REACT_APP_API_URL;
+```
+
+---
+
+## Astro {{ anchor: true, id: 'astro' }}
+
+Astro projects in **static mode** (the default) are detected and deployed as static files. Temps runs `npm run build` and serves the `dist/` directory.
+
+```javascript {{ title: 'astro.config.mjs' }}
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+  // Static mode is the default — no output config needed
+});
+```
+
+<Note>
+  Astro SSR mode (`output: 'server'` or `output: 'hybrid'`) is not auto-detected. If you need SSR, add a custom Dockerfile that runs the Astro server with Node.js. See the [Docker containers guide](/docs/docker-containers) for details.
+</Note>
+
+---
+
+## Angular {{ anchor: true, id: 'angular' }}
+
+Angular projects are detected by `@angular/core` in `package.json`. Temps runs `npm run build` and serves the `dist/` directory.
+
+For Angular projects that use a subfolder output structure (e.g. `dist/my-app/browser/`), override the output directory:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  output_dir: dist/my-app/browser
+```
+
+---
+
+## Docusaurus {{ anchor: true, id: 'docusaurus' }}
+
+Docusaurus v2 and v3 projects are detected by `@docusaurus/core` in `package.json`. Temps runs `npm run build` and serves the `build/` directory.
+
+---
+
+## SPA routing {{ anchor: true, id: 'spa-routing' }}
+
+Single-page applications use client-side routing — paths like `/about` or `/dashboard/settings` do not correspond to files on disk. The Temps proxy handles this automatically.
+
+When a request arrives for a path that:
+- Has no file extension (e.g. `/about`, not `/about.css`)
+- Does not match any file on disk
+
+The proxy serves `index.html` instead. Your client-side router (React Router, Vue Router, etc.) then handles the route.
+
+This works out of the box with no configuration. You do not need to add `_redirects`, `vercel.json`, or nginx rewrite rules.
+
+---
+
+## Compression and caching {{ anchor: true, id: 'compression-caching' }}
+
+The Temps proxy applies performance optimizations to all static file responses:
+
+### Gzip compression
+
+Text-based files larger than 1 KB are gzip-compressed automatically when the browser supports it. Compressed content types include:
+
+- `text/html`, `text/css`
+- `application/javascript`, `application/json`
+- `application/xml`, `image/svg+xml`
+
+### Cache headers
+
+Temps sets `Cache-Control` headers based on the file path:
+
+| Pattern | Cache-Control | Use case |
+|---------|--------------|----------|
+| `/assets/*`, `/static/*`, `/_next/static/*`, `.chunk.*`, `.hash.*` | `public, max-age=31536000, immutable` | Hashed assets that never change |
+| Everything else | `public, max-age=0, must-revalidate` | HTML files and non-hashed resources |
+
+This means your hashed JS and CSS bundles (e.g. `assets/index-a1b2c3.js`) are cached for one year, while `index.html` is always revalidated to pick up new deployments.
+
+### ETag support
+
+Every file gets a weak ETag based on its content hash. On subsequent requests, if the browser sends `If-None-Match` and the content has not changed, the proxy responds with `304 Not Modified` — saving bandwidth and latency.
+
+---
+
+## Custom build commands {{ anchor: true, id: 'custom-build' }}
+
+Override the auto-detected install and build commands in `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  install_command: pnpm install --frozen-lockfile
+  build_command: pnpm run build:production
+  output_dir: dist
+```
+
+<Properties>
+  <Property name="install_command" type="string">
+    Override the dependency install step. Defaults to the detected package manager's install command (`npm ci`, `yarn install --frozen-lockfile`, `pnpm install --frozen-lockfile`, or `bun install`).
+  </Property>
+  <Property name="build_command" type="string">
+    Override the build step. Defaults to `npm run build` (or equivalent for your package manager).
+  </Property>
+  <Property name="output_dir" type="string">
+    Override the output directory. Defaults to the framework's standard output directory (`dist/`, `build/`, etc.).
+  </Property>
+</Properties>
+
+---
+
+## Package manager detection {{ anchor: true, id: 'package-managers' }}
+
+Temps detects your package manager from lockfiles:
+
+| Lockfile | Package manager | Install command |
+|----------|----------------|-----------------|
+| `pnpm-lock.yaml` | pnpm | `pnpm install --frozen-lockfile` |
+| `package-lock.json` | npm | `npm ci` |
+| `yarn.lock` | Yarn | `yarn install --frozen-lockfile` |
+| `bun.lockb` | Bun | `bun install` |
+
+If no lockfile is found, npm is used as the default. The correct lockfile is detected before the build starts and the matching package manager is used in the generated Dockerfile.
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Blank page after deployment
+
+Your SPA routes to `/` but the build output is missing `index.html`. Verify that your build command produces an `index.html` in the output directory. For Vite, check that `vite.config.ts` does not override `build.outDir` to a non-standard path without updating `.temps.yaml`.
+
+### 404 on page refresh
+
+If client-side routes return 404, the SPA fallback may not be matching. This happens when the URL contains a file extension (e.g. `/api/data.json`) — the proxy serves those literally. For API calls, use a separate backend deployment or ensure your API paths are proxied correctly.
+
+### Environment variables not available at runtime
+
+Vite, CRA, and other static frameworks embed environment variables **at build time**. If you change a `VITE_*` variable in the dashboard, you must trigger a new deployment for the change to take effect. The variable is baked into the JavaScript bundle during the build step.
+
+### Wrong output directory
+
+If your build produces files in a non-standard directory, Temps may not find the output. Set `build.output_dir` in `.temps.yaml` to the correct path. Check the build logs to see where files are written.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/web-applications">Deploy server-rendered applications</Button>
+<Button href="/docs/deploy-react">React deployment tutorial</Button>
+<Button href="/docs/custom-domain">Set up a custom domain</Button>
+<Button href="/docs/preview-deployments">Preview deployments</Button>

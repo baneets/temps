@@ -1,0 +1,223 @@
+export const metadata = {
+  title: 'KV Storage',
+  description: 'Serverless key-value storage built into Temps. Redis-compatible API with no external dependencies.',
+  alternates: {
+    canonical: '/docs/kv-storage',
+  },
+}
+
+# KV Storage
+
+Temps includes a built-in key-value store powered by Redis. Use it for caching, session storage, feature flags, rate limiting, and any data that benefits from fast key-value access -- all without provisioning external services. {{ className: 'lead' }}
+
+---
+
+## Overview
+
+<Row>
+  <Col>
+    **Key Features**
+    - Redis-compatible operations (GET, SET, DEL, INCR, EXPIRE, TTL, KEYS)
+    - Per-project key isolation
+    - Optional TTL (time-to-live) on any key
+    - Conditional writes (NX/XX flags)
+    - Atomic increment/decrement
+    - Pattern-based key listing
+    - Enable/disable via dashboard or API
+  </Col>
+  <Col>
+    **Why Use It**
+    - Zero external infrastructure
+    - Managed by Temps (backups, monitoring, upgrades)
+    - Per-project access isolation via deployment tokens
+    - No connection string management
+    - Works with the `@temps-sdk/kv` SDK
+  </Col>
+</Row>
+
+---
+
+## Enabling KV Storage
+
+KV storage must be enabled before use. This provisions a Redis container managed by Temps.
+
+1. Go to **Settings** in the Temps dashboard
+2. Navigate to the **KV Storage** section
+3. Click **Enable**
+4. Optionally configure the Redis version and max memory
+
+Or enable via the API:
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/enable \
+  -H "Authorization: Bearer tk_your_api_key" \
+  -H "Content-Type: application/json" \
+  -d '{"persistence": true}'
+```
+
+---
+
+## Operations
+
+### Get a Value
+
+Retrieve a value by key. Returns `null` if the key does not exist.
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/get \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "user:123:session"}'
+```
+
+### Set a Value
+
+Store a value with optional expiration and conditional flags.
+
+<Properties>
+  <Property name="key" type="string">
+    The key to store. Scoped to your project automatically.
+  </Property>
+  <Property name="value" type="any">
+    The value to store (string, number, JSON object).
+  </Property>
+  <Property name="ex" type="integer">
+    Expiration time in seconds.
+  </Property>
+  <Property name="px" type="integer">
+    Expiration time in milliseconds.
+  </Property>
+  <Property name="nx" type="boolean">
+    Only set the key if it does **not** already exist.
+  </Property>
+  <Property name="xx" type="boolean">
+    Only set the key if it **already** exists.
+  </Property>
+</Properties>
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/set \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "user:123:session", "value": {"role": "admin"}, "ex": 3600}'
+```
+
+### Delete Keys
+
+Delete one or more keys. Returns the count of keys deleted.
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/del \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"keys": ["user:123:session", "user:123:cache"]}'
+```
+
+### Increment
+
+Atomically increment a numeric value. Creates the key with value 0 before incrementing if it does not exist.
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/incr \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "page:views:homepage", "amount": 1}'
+```
+
+### Set Expiration
+
+Set a TTL on an existing key.
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/expire \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "user:123:session", "seconds": 1800}'
+```
+
+### Get TTL
+
+Check the remaining time-to-live for a key. Returns `-1` if the key exists but has no expiration, `-2` if the key does not exist.
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/ttl \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"key": "user:123:session"}'
+```
+
+### List Keys
+
+Find keys matching a glob pattern.
+
+```bash
+curl -X POST https://your-temps-instance.com/api/kv/keys \
+  -H "Authorization: Bearer dt_your_deployment_token" \
+  -H "Content-Type: application/json" \
+  -d '{"pattern": "user:*:session"}'
+```
+
+---
+
+## SDK Usage
+
+<CodeGroup title="KV SDK">
+```typescript {{ title: 'Node.js' }}
+import { createKVClient } from '@temps-sdk/kv';
+
+const kv = createKVClient({
+  baseUrl: 'https://your-temps-instance.com',
+  token: process.env.TEMPS_DEPLOYMENT_TOKEN,
+});
+
+// Set a value with 1 hour TTL
+await kv.set('user:123', { name: 'Alice', role: 'admin' }, { ex: 3600 });
+
+// Get a value
+const user = await kv.get('user:123');
+console.log(user); // { name: 'Alice', role: 'admin' }
+
+// Increment a counter
+const views = await kv.incr('page:views');
+
+// Delete a key
+await kv.del(['user:123']);
+
+// List keys matching a pattern
+const sessions = await kv.keys('session:*');
+```
+</CodeGroup>
+
+---
+
+## Authentication
+
+KV operations support two authentication methods:
+
+<Properties>
+  <Property name="Deployment Token">
+    Tokens prefixed with `dt_`. Automatically scoped to the project the token belongs to -- the `project_id` field in requests is ignored for security.
+  </Property>
+  <Property name="API Key">
+    Tokens prefixed with `tk_`. Requires `project_id` in the request body to specify which project's KV store to access.
+  </Property>
+</Properties>
+
+---
+
+## Management
+
+<Properties>
+  <Property name="GET /api/kv/status">
+    Check if KV is enabled, healthy, and which Redis version is running.
+  </Property>
+  <Property name="POST /api/kv/enable">
+    Enable KV storage (provisions a Redis container). Requires SystemAdmin permission.
+  </Property>
+  <Property name="PATCH /api/kv/update">
+    Update KV configuration (e.g., change Docker image version). Requires SystemAdmin permission.
+  </Property>
+  <Property name="DELETE /api/kv/disable">
+    Disable KV storage (stops the Redis container). Requires SystemAdmin permission.
+  </Property>
+</Properties>

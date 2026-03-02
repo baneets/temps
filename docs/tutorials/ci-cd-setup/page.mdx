@@ -1,52 +1,304 @@
 export const metadata = {
-  title: 'Set Up CI/CD Pipeline',
-  description: 'Tutorial: Configure automated CI/CD workflows with Temps.',
+  title: 'Set Up CI/CD',
+  description: 'Configure CI/CD pipelines with GitHub Actions, GitLab CI, or the Temps CLI to test and deploy automatically.',
   alternates: {
-    canonical: '/docs/tutorials/ci-cd-setup',
+    canonical: '/docs/ci-cd-setup',
   },
 }
 
-# Set Up CI/CD Pipeline
+# Set Up CI/CD
 
-## Page Goal
-Guide users through setting up professional CI/CD workflows with automated testing, linting, and deployments. Show that Temps fits into modern development workflows.
+Temps deploys automatically on every push. For teams that want tests, linting, or approval gates before deployment, you can add CI/CD workflows that run quality checks first and then trigger Temps deployments. {{ className: 'lead' }}
 
-## Target Persona
-**Professional Paul** - A developer who:
-- Wants automated testing before deployment
-- Works in a team environment
-- Needs code quality gates
-- Values: Automation, reliability, team workflows
-- Experience: Comfortable with GitHub Actions / GitLab CI
-- Timeline: Setting up proper workflow
+---
 
-## Key Content to Include
+## How deployment triggers work {{ anchor: true, id: 'how-it-works' }}
 
-**1. What You'll Build**
-- Automated tests on every push
-- Linting and type checking
-- Automated deployment after tests pass
-- Preview deployments for PRs
-- Time: 20-30 minutes
+Temps receives Git webhooks from your provider (GitHub, GitLab, Bitbucket, Gitea). When you push to a branch that matches an environment, Temps starts a deployment automatically.
 
-**2. Prerequisites**
-- Application on Temps
-- GitHub/GitLab repository
-- Test suite in your project
-- (Optional) Temps API key for advanced workflows
+The default flow:
 
-**3. Basic Workflow: Auto-Deploy on Push**
+```text
+Push to main → GitHub sends webhook → Temps builds and deploys
+```
 
-**How it Works:**
-- Push to main → Auto-deploy (default in Temps)
-- Already enabled!
-- Branch configuration
+This means CI/CD is **already built in** for the simple case. You only need external CI when you want to add checks before deployment (tests, linting, type checking) or want programmatic control over when deployments happen.
 
-**4. Advanced Workflow: Test Then Deploy**
+---
 
-**GitHub Actions Example:**
-```yaml
+## Option 1: Auto-deploy with CI checks {{ anchor: true, id: 'auto-deploy-with-ci' }}
+
+Keep Temps auto-deploy enabled and run CI checks in parallel. Your CI pipeline runs tests while Temps builds and deploys. If tests fail, you know there is a problem — but the deployment still happens.
+
+This is the simplest approach for solo developers or small teams who want fast feedback:
+
+<CodeGroup>
+
+```yaml {{ title: 'GitHub Actions' }}
+name: CI
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+```
+
+```yaml {{ title: 'GitLab CI' }}
+stages:
+  - test
+
+test:
+  stage: test
+  image: node:22
+  script:
+    - npm ci
+    - npm run lint
+    - npm run typecheck
+    - npm test
+```
+
+</CodeGroup>
+
+Temps deploys independently — the CI pipeline provides feedback but does not gate the deployment.
+
+---
+
+## Option 2: CI gates before deploy {{ anchor: true, id: 'ci-gates' }}
+
+Disable auto-deploy on the environment and trigger deployments from CI only after checks pass:
+
+### Step 1: Disable auto-deploy
+
+Go to your project > **Environments** > select the environment > **Settings** and set **Automatic Deploy** to off.
+
+### Step 2: Trigger deployment from CI
+
+Use the Temps API or CLI to trigger a deployment after your CI checks pass:
+
+<CodeGroup>
+
+```yaml {{ title: 'GitHub Actions' }}
 name: Test and Deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Temps deployment
+        run: |
+          curl -X POST "$TEMPS_API_URL/projects/$PROJECT_ID/trigger-pipeline" \
+            -H "Authorization: Bearer $TEMPS_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"environment_id\": $ENVIRONMENT_ID, \"branch\": \"main\"}"
+        env:
+          TEMPS_API_URL: ${{ secrets.TEMPS_API_URL }}
+          TEMPS_API_TOKEN: ${{ secrets.TEMPS_API_TOKEN }}
+          PROJECT_ID: ${{ secrets.TEMPS_PROJECT_ID }}
+          ENVIRONMENT_ID: ${{ secrets.TEMPS_ENVIRONMENT_ID }}
+```
+
+```yaml {{ title: 'GitLab CI' }}
+stages:
+  - test
+  - deploy
+
+test:
+  stage: test
+  image: node:22
+  script:
+    - npm ci
+    - npm run lint
+    - npm run typecheck
+    - npm test
+
+deploy:
+  stage: deploy
+  image: curlimages/curl
+  only:
+    - main
+  script:
+    - >
+      curl -X POST "$TEMPS_API_URL/projects/$TEMPS_PROJECT_ID/trigger-pipeline"
+      -H "Authorization: Bearer $TEMPS_API_TOKEN"
+      -H "Content-Type: application/json"
+      -d "{\"environment_id\": $TEMPS_ENVIRONMENT_ID, \"branch\": \"main\"}"
+```
+
+</CodeGroup>
+
+### Step 3: Store secrets in CI
+
+Add these secrets to your CI provider:
+
+| Secret | Value | Where to find it |
+|--------|-------|-----------------|
+| `TEMPS_API_URL` | Your Temps instance URL (e.g. `https://temps.example.com`) | Your server configuration |
+| `TEMPS_API_TOKEN` | API token from the Temps dashboard | **Settings** > **API Tokens** |
+| `TEMPS_PROJECT_ID` | Numeric project ID | Project URL or API |
+| `TEMPS_ENVIRONMENT_ID` | Numeric environment ID | Environment settings |
+
+---
+
+## Using the Temps CLI {{ anchor: true, id: 'temps-cli' }}
+
+The Temps CLI provides more control than raw API calls. Install it in your CI environment:
+
+```bash
+# Install
+npx @temps-sdk/cli --help
+
+# Or with bun
+bunx @temps-sdk/cli --help
+```
+
+### Deploy from Git
+
+Trigger a deployment for a specific branch, tag, or commit:
+
+```bash
+# Deploy the current branch
+temps deploy git --project my-app --environment production
+
+# Deploy a specific commit
+temps deploy git --project my-app --environment production --commit abc123
+
+# Deploy a tag
+temps deploy git --project my-app --environment production --tag v1.2.3
+
+# Wait for deployment to complete (with timeout)
+temps deploy git --project my-app --environment production --wait --timeout 300
+```
+
+### Deploy a pre-built image
+
+If your CI builds a Docker image, deploy it directly without rebuilding on Temps:
+
+```bash
+temps deploy image \
+  --image ghcr.io/your-org/your-app:latest \
+  --project my-app \
+  --environment production \
+  --wait
+```
+
+### Deploy static files
+
+Upload static files from your CI build output:
+
+```bash
+temps deploy static \
+  --path ./dist \
+  --project my-app \
+  --environment production
+```
+
+### Authentication
+
+Set these environment variables for the CLI:
+
+```bash
+export TEMPS_API_URL=https://temps.example.com
+export TEMPS_API_TOKEN=your-api-token
+```
+
+---
+
+## Outbound webhooks {{ anchor: true, id: 'outbound-webhooks' }}
+
+Temps can send deployment event notifications to external systems. Use this to post to Slack, update a status page, or trigger downstream actions.
+
+### Setting up
+
+1. Go to **Settings** > **Webhooks** in your project
+2. Add a webhook URL (e.g. a Slack incoming webhook URL)
+3. Select events to listen for
+4. Optionally set a secret for HMAC signature verification
+
+### Available events
+
+| Event | Description |
+|-------|------------|
+| `deployment.created` | A deployment was queued |
+| `deployment.succeeded` | The deployment completed successfully |
+| `deployment.failed` | The deployment failed |
+| `deployment.cancelled` | The deployment was cancelled |
+| `deployment.ready` | The deployment is live and receiving traffic |
+| `project.created` | A new project was created |
+| `project.deleted` | A project was deleted |
+| `domain.created` | A domain was added |
+| `domain.provisioned` | A TLS certificate was provisioned |
+
+### Webhook payload
+
+Each webhook delivery includes:
+
+- Project name and ID
+- Branch and commit SHA
+- Commit message
+- Deployment status
+- Timestamp
+
+Failed deliveries can be retried from the webhook delivery history in the dashboard.
+
+---
+
+## Rollback {{ anchor: true, id: 'rollback' }}
+
+If a deployment introduces a bug, you can roll back:
+
+### Automatic rollback
+
+Temps rolls back automatically if the new container fails health checks. The old container keeps running and the route table reverts — no manual intervention needed.
+
+### Manual rollback via dashboard
+
+1. Go to your project > **Deployments**
+2. Find the last working deployment
+3. Click **Rollback** to redeploy that version
+
+### Git-based rollback
+
+Revert the commit and push:
+
+```bash
+git revert HEAD
+git push origin main
+```
+
+Temps deploys the reverted commit as a new deployment.
+
+---
+
+## Complete example: Next.js with GitHub Actions {{ anchor: true, id: 'example' }}
+
+```yaml {{ title: '.github/workflows/deploy.yml' }}
+name: Test and Deploy
+
 on:
   push:
     branches: [main]
@@ -56,135 +308,40 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-node@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
       - run: npm ci
-      - run: npm test
       - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm test -- --ci
 
   deploy:
     needs: test
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Temps Deploy
+      - name: Deploy to Temps
         run: |
-          # Auto-deploy happens automatically
-          # Or use Temps API for advanced control
+          curl -X POST "$TEMPS_API_URL/projects/$PROJECT_ID/trigger-pipeline" \
+            -H "Authorization: Bearer $TEMPS_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"environment_id\": $ENVIRONMENT_ID, \"branch\": \"main\", \"commit\": \"${{ github.sha }}\"}"
+        env:
+          TEMPS_API_URL: ${{ secrets.TEMPS_API_URL }}
+          TEMPS_API_TOKEN: ${{ secrets.TEMPS_API_TOKEN }}
+          PROJECT_ID: ${{ secrets.TEMPS_PROJECT_ID }}
+          ENVIRONMENT_ID: ${{ secrets.TEMPS_ENVIRONMENT_ID }}
 ```
 
-**GitLab CI Example:**
-```yaml
-stages:
-  - test
-  - deploy
+---
 
-test:
-  stage: test
-  script:
-    - npm ci
-    - npm test
-    - npm run lint
+## What to explore next {{ anchor: true, id: 'next-steps' }}
 
-deploy:
-  stage: deploy
-  only:
-    - main
-  script:
-    - echo "Temps auto-deploys main branch"
-```
-
-**5. Pull Request Workflow**
-
-**Step 1: Enable Preview Deployments**
-- Configure in Temps dashboard
-- Select which branches get previews
-- PR-based preview URLs
-
-**Step 2: GitHub Action for PR Comments**
-```yaml
-- name: Comment Preview URL
-  uses: actions/github-script@v6
-  with:
-    script: |
-      github.rest.issues.createComment({
-        issue_number: context.issue.number,
-        body: 'Preview: https://pr-${{ github.event.pull_request.number }}.app.temps.dev'
-      })
-```
-
-**6. Quality Gates**
-
-**Linting:**
-- ESLint for JavaScript/TypeScript
-- Prettier for formatting
-- Fail build on errors
-
-**Type Checking:**
-- TypeScript type checking
-- Only deploy if types pass
-
-**Testing:**
-- Unit tests
-- Integration tests
-- E2E tests (optional)
-- Coverage requirements
-
-**7. Environment-Specific Deployments**
-
-**Deploy to Staging First:**
-```yaml
-deploy-staging:
-  if: github.ref == 'refs/heads/develop'
-  # Deploy to staging environment
-
-deploy-production:
-  if: github.ref == 'refs/heads/main'
-  # Deploy to production
-```
-
-**8. Using Temps API**
-- API key generation
-- Triggering deployments
-- Getting deployment status
-- Advanced automation
-
-**9. Notifications**
-
-**Slack Notifications:**
-```yaml
-- name: Notify Slack
-  if: always()
-  uses: 8398a7/action-slack@v3
-  with:
-    status: ${{ job.status }}
-    text: 'Deployment to Temps: ${{ job.status }}'
-```
-
-**Discord/Email:**
-- Similar webhook integrations
-- Deployment status alerts
-
-**10. Rollback Strategy**
-- Automatic rollback on health check failure
-- Manual rollback via Temps dashboard
-- Git-based rollback (revert + push)
-
-**11. Complete Example Workflows**
-- Next.js with tests
-- Node.js API with tests
-- Monorepo with multiple apps
-- Link to example repositories
-
-**12. Troubleshooting**
-- Build fails in CI but works locally
-- Tests timeout
-- Environment variable access in CI
-- Deployment doesn't trigger
-
-## Success Metrics
-- User sets up automated testing
-- Deployments only happen when tests pass
-- Professional workflow established
-- Team confidence in deployments
-- Broken code doesn't reach production
+<Button href="/docs/preview-deployments">Preview deployments</Button>
+<Button href="/docs/environment-variables">Environment variables</Button>
+<Button href="/docs/scaling">Scale your application</Button>
+<Button href="/docs/add-observability">Add monitoring</Button>

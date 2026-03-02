@@ -1,136 +1,334 @@
 export const metadata = {
-  title: 'Deploy Node.js API',
-  description: 'Tutorial: Deploy Node.js REST APIs and backend services on Temps.',
+  title: 'Deploy a Node.js API',
+  description: 'Deploy an Express, Fastify, or NestJS API on Temps with environment variables, health checks, and automatic HTTPS.',
   alternates: {
-    canonical: '/docs/tutorials/deploy-nodejs',
+    canonical: '/docs/deploy-nodejs',
   },
 }
 
-# Deploy Node.js API
+# Deploy a Node.js API
 
-## Page Goal
-Show developers how to deploy backend services and APIs on Temps. Cover Express and other popular frameworks with production best practices.
+This tutorial walks you through deploying a Node.js backend — Express, Fastify, or NestJS — on Temps. By the end, you will have a production API with environment variables, health checks, and automatic HTTPS. {{ className: 'lead' }}
 
-## Target Persona
-**Backend Bob** - A developer who:
-- Building REST APIs or backend services
-- Using Express, Fastify, NestJS, etc.
-- Needs environment variables and secrets
-- May connect to external databases
-- Values: Reliability, security, performance
-- Search intent: "deploy nodejs api", "host express app"
-- Timeline: Production deployment needed
+---
 
-## Key Content to Include
+## What you will build {{ anchor: true, id: 'what-you-will-build' }}
 
-**1. What You'll Deploy**
-- Express.js REST API
-- Fastify API
-- NestJS application
-- Other Node.js backends
-- Time: 10-15 minutes
+- A Node.js API deployed from a Git repository
+- Environment variables for database connections and secrets
+- A health check endpoint for zero-downtime deployments
+- Automatic HTTPS and deployment on every push
 
-**2. Prerequisites**
-- Temps installed
-- Node.js API in Git
-- (Optional) Database connection string
+**Time required:** 10 minutes.
 
-**3. Preparing Your API**
+**Prerequisites:**
+- A running Temps instance ([install guide](/docs/your-first-deployment))
+- A Node.js API in a Git repository
+- (Optional) A database connection string
 
-**Step 1: Port Configuration**
-- Must listen on process.env.PORT
-- Example code for Express/Fastify
-- Common mistake: hardcoded ports
-```javascript
-const PORT = process.env.PORT || 3000
-app.listen(PORT)
+---
+
+## Step 1: Prepare your API {{ anchor: true, id: 'prepare' }}
+
+Your Node.js API needs two things to work on Temps: listen on the `PORT` environment variable and bind to `0.0.0.0`.
+
+<CodeGroup>
+
+```javascript {{ title: 'Express' }}
+import express from 'express';
+
+const app = express();
+app.use(express.json());
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.get('/api/users', async (req, res) => {
+  // Your business logic
+  res.json([]);
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on port ${port}`);
+});
 ```
 
-**Step 2: Package.json Configuration**
-- Start script required
-- Build script (if TypeScript)
-- Dependencies vs devDependencies
-- Example package.json
+```javascript {{ title: 'Fastify' }}
+import Fastify from 'fastify';
 
-**Step 3: Health Check Endpoint**
-- Add /health or /ping
-- Why health checks matter
-- Example implementation
+const fastify = Fastify({ logger: true });
 
-**4. Deployment Steps**
+fastify.get('/health', async () => {
+  return { status: 'ok' };
+});
 
-**Step 1: Connect Repository**
-- Git integration
-- Select branch
-- Monorepo path (if applicable)
+fastify.get('/api/users', async () => {
+  return [];
+});
 
-**Step 2: Configure Build**
-- Build command (if TypeScript): `npm run build`
-- Start command: `npm start`
-- Node version selection
+const port = process.env.PORT || 3000;
+fastify.listen({ port: Number(port), host: '0.0.0.0' });
+```
 
-**Step 3: Environment Variables**
-- Database connection strings
-- API keys and secrets
-- NODE_ENV=production
-- Security best practices
+```typescript {{ title: 'NestJS (main.ts)' }}
+import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
 
-**Step 4: Deploy**
-- Trigger deployment
-- Monitor build logs
-- Verify startup
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  const port = process.env.PORT || 3000;
+  await app.listen(port, '0.0.0.0');
+}
+bootstrap();
+```
 
-**5. Testing Your API**
-- Get deployment URL
-- Test endpoints with curl
-- Verify database connection
-- Load testing considerations
+</CodeGroup>
 
-**6. Production Best Practices**
-- Error handling
-- Logging setup
-- Rate limiting
-- Security headers
-- CORS configuration
+### package.json
 
-**7. Framework-Specific Guides**
+Make sure you have `start` and `build` scripts (build is needed for TypeScript projects):
 
-**Express.js**
-- Example Express app
-- Middleware configuration
-- Static files serving
+```json {{ title: 'package.json' }}
+{
+  "name": "my-api",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "express": "^5.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "tsx": "^4.0.0"
+  }
+}
+```
 
-**Fastify**
-- Fastify-specific config
-- Plugin setup
-- Performance tips
+<Note>
+  Temps detects `express`, `fastify`, or `@nestjs/core` in your dependencies and generates an appropriate Dockerfile. For NestJS, the `dist/` output directory is used automatically. For plain Express or Fastify, Temps runs `npm start`.
+</Note>
 
-**NestJS**
-- NestJS production build
-- Module configuration
-- Microservices
+### Add a health check endpoint
 
-**8. Database Connection**
-- PostgreSQL connection example
-- MongoDB connection example
-- Connection pooling
-- Handling reconnections
+Temps checks `/` by default to verify your app is healthy. Adding a dedicated `/health` endpoint is better practice — it responds quickly and does not trigger business logic:
 
-**9. Troubleshooting**
-- Port binding errors
-- Database connection failures
-- Memory/CPU limits
-- Timeout issues
+```javascript
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+```
 
-**10. Monitoring & Logs**
-- Accessing logs
-- Structured logging
-- Error tracking
-- Performance monitoring
+Configure it in `.temps.yaml`:
 
-## Success Metrics
-- User deploys working API
-- API is production-ready
-- User understands port configuration
-- Database connections work
-- Security best practices followed
+```yaml {{ title: '.temps.yaml' }}
+health:
+  path: /health
+```
+
+---
+
+## Step 2: Create a project {{ anchor: true, id: 'create-project' }}
+
+1. Open the Temps dashboard
+2. Click **New Project**
+3. Select your Git provider and repository
+4. Choose the branch to deploy
+
+Temps detects your Node.js framework automatically. You will see it listed in the project configuration.
+
+---
+
+## Step 3: Configure environment variables {{ anchor: true, id: 'environment-variables' }}
+
+Add environment variables in the project settings. Common ones for APIs:
+
+```bash
+# Database
+DATABASE_URL=postgres://user:password@db-host:5432/mydb
+
+# Secrets
+JWT_SECRET=your-jwt-secret
+API_KEY=your-api-key
+
+# Application
+NODE_ENV=production
+LOG_LEVEL=info
+```
+
+All variables are available at runtime via `process.env`. They are injected when the container starts — not baked into the image.
+
+---
+
+## Step 4: Deploy {{ anchor: true, id: 'deploy' }}
+
+Push a commit or click **Deploy** in the dashboard. Temps:
+
+1. Clones your repository
+2. Detects Node.js and your framework
+3. Installs dependencies (detected from your lockfile)
+4. Runs `npm run build` if a build script exists
+5. Starts the container with `npm start`
+6. Sends health check requests until the API responds
+
+A typical Node.js API builds in under a minute.
+
+---
+
+## Step 5: Test your API {{ anchor: true, id: 'test' }}
+
+Once deployed, test your endpoints:
+
+```bash
+# Health check
+curl https://your-api.your-domain.com/health
+
+# API endpoint
+curl https://your-api.your-domain.com/api/users
+
+# POST request
+curl -X POST https://your-api.your-domain.com/api/users \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice", "email": "alice@example.com"}'
+```
+
+---
+
+## Connecting to a database {{ anchor: true, id: 'database' }}
+
+### Using a Temps-managed database
+
+If you added a PostgreSQL or MySQL service through Temps, the connection details are available as environment variables. Use them in your database client:
+
+```javascript {{ title: 'Database connection' }}
+import pg from 'pg';
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
+});
+```
+
+### Using an external database
+
+Set the connection string as an environment variable in the dashboard. If the database requires SSL, most clients accept an `?sslmode=require` query parameter:
+
+```bash
+DATABASE_URL=postgres://user:pass@external-host:5432/db?sslmode=require
+```
+
+### Connection pooling
+
+Always configure connection pool limits. A single container with 20-50 connections is typical. Set `max` in your pool configuration to avoid exhausting database connections.
+
+---
+
+## TypeScript projects {{ anchor: true, id: 'typescript' }}
+
+For TypeScript APIs, Temps runs `npm run build` during the build step and `npm start` to run the compiled output.
+
+Make sure your `tsconfig.json` outputs to a directory that your `start` script references:
+
+```json {{ title: 'tsconfig.json' }}
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*"]
+}
+```
+
+```json {{ title: 'package.json scripts' }}
+{
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  }
+}
+```
+
+---
+
+## Production best practices {{ anchor: true, id: 'best-practices' }}
+
+### CORS
+
+If your API is called from a different domain (e.g. a frontend on a different subdomain), configure CORS:
+
+```javascript
+import cors from 'cors';
+
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || 'https://your-frontend.com',
+  credentials: true,
+}));
+```
+
+### Error handling
+
+Add a global error handler to prevent unhandled errors from crashing the process:
+
+```javascript
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+```
+
+### Graceful shutdown
+
+Handle `SIGTERM` to close connections cleanly during deployments:
+
+```javascript
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  await pool.end(); // Close database connections
+  server.close(() => {
+    process.exit(0);
+  });
+});
+```
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### "Cannot find module" at startup
+
+Your `start` script points to a file that does not exist. For TypeScript projects, verify that `npm run build` produces output in the expected directory. Check that `outDir` in `tsconfig.json` matches the path in your `start` script.
+
+### Health check times out
+
+Your API is starting but Temps cannot reach it. Common causes:
+- Binding to `localhost` instead of `0.0.0.0`
+- The port in your code does not match what Temps expects — use `process.env.PORT`
+- A database migration or seed step is blocking startup — move these to a build script or separate endpoint
+
+### Database connection refused
+
+The database host is unreachable from the container. For Temps-managed databases, use the service name as the hostname (visible in the dashboard). For external databases, ensure the database allows connections from your server's IP.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/deploy-with-database">Deploy with a database</Button>
+<Button href="/docs/environment-variables">Manage environment variables</Button>
+<Button href="/docs/add-observability">Add monitoring and tracing</Button>
+<Button href="/docs/ci-cd-setup">Set up CI/CD</Button>

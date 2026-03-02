@@ -1,78 +1,300 @@
 export const metadata = {
   title: 'Deploy Monorepos',
-  description: 'Deploy applications from monorepo repositories on Temps.',
+  description: 'Deploy applications from Turborepo, Nx, Lerna, and pnpm workspace monorepos on Temps.',
   alternates: {
-    canonical: '/docs/deploy/monorepos',
+    canonical: '/docs/monorepos',
   },
 }
 
 # Deploy Monorepos
 
-## Page Goal
-Help users deploy applications from monorepo setups (Turborepo, Nx, Lerna, pnpm workspaces). Address the specific challenges of monorepo deployments.
+Temps supports deploying individual applications from monorepo repositories. Point each Temps project at the subdirectory containing your app, and Temps handles framework detection, builds, and deployments independently for each one. {{ className: 'lead' }}
 
-## Target Persona
-**Monorepo Mike** - A developer who:
-- Working with monorepo architecture
-- Uses Turborepo, Nx, or pnpm workspaces
-- Needs to deploy multiple apps from one repo
-- Deals with shared dependencies
-- Values: Efficient builds, proper isolation
-- Pain points: Build optimization, workspace configuration
-- Timeline: 20-30 minutes for complex setup
+---
 
-## Key Content to Include
+## How monorepos work on Temps {{ anchor: true, id: 'how-it-works' }}
 
-**1. Monorepo Support**
-- What is a monorepo
-- Supported monorepo tools
-- Root directory configuration
-- Build context
+A monorepo contains multiple applications and shared packages in a single Git repository. To deploy from a monorepo, you create a separate Temps project for each application and configure the **project directory** to point at the correct subdirectory.
 
-**2. Configuration**
-- Setting the app directory
-- Root vs app package.json
-- Shared dependencies
-- Build command configuration
+```text {{ title: 'Typical monorepo structure' }}
+my-monorepo/
+  apps/
+    web/          <-- Temps project 1 (Next.js)
+    api/          <-- Temps project 2 (Express)
+    admin/        <-- Temps project 3 (Vite)
+  packages/
+    ui/           <-- Shared component library
+    config/       <-- Shared config
+  turbo.json
+  package.json
+  pnpm-lock.yaml
+```
 
-**3. Turborepo**
-- Turborepo detection
-- Build pipeline configuration
-- Caching strategies
-- Remote caching
+Each Temps project builds independently. When you push to the repository, all projects connected to it receive a deployment trigger. Each project builds from its own subdirectory.
 
-**4. Nx Monorepos**
-- Nx workspace deployment
-- Affected app detection
-- Build optimization
-- Project configuration
+### Setting the project directory
 
-**5. pnpm Workspaces**
-- Workspace configuration
-- Dependency hoisting
-- Build commands
-- Filtering
+When creating a project in Temps, set the **Root Directory** field to the subdirectory containing your application:
 
-**6. Multiple Apps**
-- Deploying multiple apps from one repo
-- Separate deployments per app
-- Shared configuration
-- Branch strategies
+- `apps/web` for the frontend
+- `apps/api` for the backend
+- `apps/admin` for the admin panel
 
-**7. Build Optimization**
-- Incremental builds
-- Build caching
-- Dependency pruning
-- Build time optimization
+Temps clones the entire repository but uses your specified directory as the build context. Framework detection, dependency installation, and builds all run relative to this directory.
 
-**8. Common Issues**
-- Dependency resolution
-- Build context problems
-- Path issues
-- Lock file management
+---
 
-## Success Metrics
-- User can deploy from monorepo
-- User understands how to configure their specific monorepo tool
-- Builds are optimized and fast
-- Multiple apps can be deployed independently
+## Monorepo tool detection {{ anchor: true, id: 'tool-detection' }}
+
+Temps detects your monorepo tool from marker files in the repository root:
+
+| Tool | Detection file | Notes |
+|------|---------------|-------|
+| Turborepo | `turbo.json` | Most common with Next.js monorepos |
+| Nx | `nx.json` | Popular for Angular and enterprise projects |
+| Lerna | `lerna.json` | Legacy but still supported |
+
+Detection is priority-ordered: Lerna > Turborepo > Nx. When a monorepo tool is detected, Temps adjusts the install and build commands accordingly.
+
+<Note>
+  pnpm workspaces (`pnpm-workspace.yaml`) are supported through pnpm's package manager detection. Temps detects `pnpm-lock.yaml` and uses `pnpm install --frozen-lockfile` automatically. You do not need Turborepo or Nx on top of pnpm workspaces — though many projects use both.
+</Note>
+
+---
+
+## Turborepo {{ anchor: true, id: 'turborepo' }}
+
+Turborepo is detected when `turbo.json` exists in the repository root. Temps uses `turbo build` scoped to your project directory.
+
+### Project setup
+
+```json {{ title: 'turbo.json' }}
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": [".next/**", "dist/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}
+```
+
+```json {{ title: 'apps/web/package.json' }}
+{
+  "name": "web",
+  "scripts": {
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^16.0.0",
+    "ui": "workspace:*"
+  }
+}
+```
+
+Create a Temps project with **Root Directory** set to `apps/web`. Temps detects Next.js in the subdirectory and Turborepo at the root.
+
+### Generated build commands
+
+When Turborepo is detected, the generated Dockerfile uses:
+
+| Package manager | Install command | Build command |
+|----------------|----------------|---------------|
+| pnpm | `pnpm install --frozen-lockfile` | `pnpm turbo build` |
+| npm | `npm ci` | `npx turbo build` |
+| yarn | `yarn install --frozen-lockfile` | `yarn turbo build` |
+| bun | `bun install` | `bun turbo build` |
+
+Turborepo's `dependsOn: ["^build"]` ensures shared packages build first, then the target app builds. Turbo's built-in caching skips unchanged packages.
+
+---
+
+## Nx {{ anchor: true, id: 'nx' }}
+
+Nx is detected when `nx.json` exists in the repository root. Build commands are scoped to the target project.
+
+### Generated build commands
+
+| Package manager | Install command | Build command (with package) |
+|----------------|----------------|------------------------------|
+| pnpm | `pnpm install --frozen-lockfile` | `pnpm nx build web` |
+| npm | `npm ci` | `npx nx build web` |
+| yarn | `yarn install --frozen-lockfile` | `yarn nx build web` |
+| bun | `bun install` | `bun nx build web` |
+
+Where `web` is the project slug (derived from the directory name or `package.json` name).
+
+For Nx, the build command targets a specific project, so only the affected project and its dependencies are built.
+
+---
+
+## Lerna {{ anchor: true, id: 'lerna' }}
+
+Lerna is detected when `lerna.json` exists in the repository root.
+
+### Generated build commands
+
+| Package manager | Install command | Build command (with scope) |
+|----------------|----------------|----------------------------|
+| npm | `npx lerna bootstrap` | `npx lerna run build --scope=web` |
+| yarn | `yarn lerna bootstrap` | `yarn lerna run build --scope=web` |
+| pnpm | `pnpm lerna bootstrap` | `pnpm lerna run build --scope=web` |
+
+Lerna scopes the build to the target package using `--scope`.
+
+---
+
+## pnpm workspaces {{ anchor: true, id: 'pnpm-workspaces' }}
+
+pnpm workspaces work without an additional monorepo tool. Temps detects `pnpm-lock.yaml` and uses pnpm commands:
+
+```yaml {{ title: 'pnpm-workspace.yaml' }}
+packages:
+  - 'apps/*'
+  - 'packages/*'
+```
+
+Set the **Root Directory** to your app subdirectory (e.g. `apps/web`). Temps installs all workspace dependencies from the root lockfile, then builds the specific application.
+
+To override the build command for pnpm workspaces, use `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml (in apps/web/)' }}
+build:
+  install_command: pnpm install --frozen-lockfile
+  build_command: pnpm --filter web build
+```
+
+---
+
+## Deploying multiple apps {{ anchor: true, id: 'multiple-apps' }}
+
+To deploy multiple applications from the same repository:
+
+1. **Create one Temps project per application** — each pointing to a different Root Directory
+2. **Connect all projects to the same Git repository**
+3. **Push to the repository** — all projects receive a deployment trigger
+
+Each project builds and deploys independently. A failure in `apps/api` does not affect the deployment of `apps/web`.
+
+### Example: three apps from one repo
+
+| Temps project | Root directory | Framework detected | Deployment type |
+|--------------|----------------|-------------------|-----------------|
+| `my-app-web` | `apps/web` | Next.js | Server container |
+| `my-app-api` | `apps/api` | Express | Server container |
+| `my-app-admin` | `apps/admin` | Vite | Static files |
+
+Each project can have its own environment variables, custom domain, and deployment settings.
+
+---
+
+## Custom build configuration {{ anchor: true, id: 'custom-build' }}
+
+Override the auto-detected commands with `.temps.yaml` in the application subdirectory:
+
+```yaml {{ title: 'apps/web/.temps.yaml' }}
+build:
+  install_command: pnpm install --frozen-lockfile
+  build_command: pnpm turbo build --filter=web...
+  output_dir: .next
+```
+
+<Properties>
+  <Property name="install_command" type="string">
+    Override dependency installation. Useful when the auto-detected monorepo command does not match your workflow.
+  </Property>
+  <Property name="build_command" type="string">
+    Override the build step. Use monorepo-aware commands like `turbo build --filter=web...` or `nx build web`.
+  </Property>
+  <Property name="output_dir" type="string">
+    Override the expected build output directory.
+  </Property>
+</Properties>
+
+---
+
+## Using a custom Dockerfile {{ anchor: true, id: 'custom-dockerfile' }}
+
+For complex monorepos where auto-detection is not sufficient, add a Dockerfile to your application subdirectory:
+
+```dockerfile {{ title: 'apps/web/Dockerfile' }}
+FROM node:22-alpine AS base
+RUN corepack enable
+
+# Install dependencies from the workspace root
+FROM base AS deps
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json ./apps/web/
+COPY packages/ui/package.json ./packages/ui/
+COPY packages/config/package.json ./packages/config/
+RUN pnpm install --frozen-lockfile
+
+# Build
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
+COPY . .
+RUN pnpm turbo build --filter=web...
+
+# Production
+FROM base AS runner
+WORKDIR /app/apps/web
+COPY --from=builder /app/apps/web/.next ./.next
+COPY --from=builder /app/apps/web/package.json ./
+COPY --from=builder /app/apps/web/node_modules ./node_modules
+
+EXPOSE 3000
+CMD ["pnpm", "start"]
+```
+
+When using a custom Dockerfile with a monorepo, set the build context to the repository root so that `COPY . .` includes all workspace packages:
+
+```yaml {{ title: 'apps/web/.temps.yaml' }}
+build:
+  dockerfile: apps/web/Dockerfile
+  context: .
+```
+
+<Note>
+  The `context: .` setting is critical for monorepo Dockerfiles. Without it, the build context is the application subdirectory, and `COPY` instructions cannot access shared packages or the root lockfile.
+</Note>
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Build fails with "workspace package not found"
+
+The build context is set to the application subdirectory, but your Dockerfile references files from the repository root or other packages. Set `build.context: .` in `.temps.yaml` to make the full repository available during the build.
+
+### Wrong build command
+
+If Temps uses `npm` commands but your project uses pnpm, check that `pnpm-lock.yaml` exists in the repository root. Temps detects the package manager from lockfiles. If the lockfile is missing from Git (check `.gitignore`), Temps falls back to npm.
+
+### Shared package changes not picked up
+
+Turborepo and Nx both use caching. If a change to a shared package is not reflected in the build output, verify that:
+- The shared package is listed in `dependsOn` (Turborepo) or as a dependency (Nx)
+- The build output directories are included in `outputs` (Turborepo) or `outputs` (Nx)
+- The cache is not stale — Temps builds in a fresh environment each time, so local cache issues do not apply
+
+### Multiple lockfiles
+
+If your repository has lockfiles in both the root and subdirectories, Temps uses the one in the build context. For monorepos, the lockfile should be at the root. Remove subdirectory lockfiles to avoid confusion.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/web-applications">Framework auto-detection reference</Button>
+<Button href="/docs/docker-containers">Custom Dockerfile deployments</Button>
+<Button href="/docs/environment-variables">Configure environment variables</Button>
+<Button href="/docs/preview-deployments">Preview deployments per branch</Button>

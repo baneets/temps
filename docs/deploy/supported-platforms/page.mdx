@@ -1,0 +1,272 @@
+export const metadata = {
+  title: 'Supported Languages, Frameworks & Build Methods',
+  description: 'A complete reference of every language, framework, and build method Temps supports — plus what is not supported.',
+  alternates: {
+    canonical: '/docs/supported-platforms',
+  },
+}
+
+# Supported Languages, Frameworks & Build Methods
+
+Everything Temps can build and deploy, at a glance. Temps supports 20+ languages via Nixpacks, first-class presets for popular frameworks, Dockerfile builds, pre-built Docker images, and static file deployments. {{ className: 'lead' }}
+
+---
+
+## Build methods {{ anchor: true, id: 'build-methods' }}
+
+Temps offers four ways to get your application running:
+
+<Properties>
+  <Property name="Git push (auto-detected)" type="Default">
+    Push code to a connected Git repository. Temps detects your language and framework, generates a Dockerfile, builds a container image, and deploys it. This is the most common flow and requires no configuration.
+  </Property>
+  <Property name="Dockerfile" type="Full control">
+    Add a `Dockerfile` to your repository root. Temps uses it directly instead of auto-detection. Supports multi-stage builds, BuildKit caching (`--mount=type=cache`), custom build arguments, and custom Dockerfile paths for monorepos.
+  </Property>
+  <Property name="Docker image" type="Pre-built">
+    Deploy a pre-built image from Docker Hub, GitHub Container Registry, or any OCI registry. You can also upload an image directly via `docker save`. No build step — Temps pulls the image and starts a container.
+  </Property>
+  <Property name="Static files" type="No runtime">
+    Upload a `.tar.gz` or `.zip` bundle of pre-built static files. Temps serves them directly from the proxy — no container runs at runtime. Zero memory and CPU usage after deployment.
+  </Property>
+</Properties>
+
+For details on each method, see [Docker Containers](/docs/docker-containers), [Web Applications](/docs/web-applications), and [Static Sites](/docs/static-sites).
+
+---
+
+## Framework presets {{ anchor: true, id: 'framework-presets' }}
+
+Presets are framework-specific build configurations. When Temps detects a framework, it selects the appropriate preset to generate an optimized Dockerfile. You can also select a preset manually when creating a project.
+
+### JavaScript / TypeScript
+
+| Framework | Preset | Type | Default Port | Detection |
+|-----------|--------|------|-------------|-----------|
+| Next.js | `nextjs` | Server (SSR) | 3000 | `next.config.js`, `.mjs`, `.ts` |
+| Vite | `vite` | Static | 5173 | `vite.config.js`, `.ts` |
+| Create React App | `react-app` | Static | 3000 | `react-scripts` in `package.json` |
+| Rsbuild | `rsbuild` | Static | 3000 | `rsbuild.config.ts` |
+| Docusaurus | `docusaurus` | Static | 3000 | `docusaurus.config.js`, `.ts` |
+| Astro | `astro` | Static / Server | 4321 | `astro.config.mjs` |
+| Nuxt | `nuxt` | Server (SSR) | 3000 | `nuxt.config.ts` |
+| Remix | `remix` | Server | 3000 | Remix config |
+| SvelteKit | `sveltekit` | Server | 5173 | SvelteKit config |
+| SolidStart | `solidstart` | Server | 3000 | SolidStart config |
+| Angular | `angular` | Static | 4200 | `angular.json` |
+| Vue | `vue` | Static | 8080 | `vue.config.js` |
+| Node.js | `nodejs` | Server | 3000 | `package.json` (generic) |
+
+<Note>
+  Next.js, Vite, Create React App, Rsbuild, and Docusaurus have first-class Dockerfile generators with multi-stage builds and security hardening. The remaining JavaScript frameworks are built via Nixpacks with framework-specific optimizations.
+</Note>
+
+### Python
+
+| Framework | Preset | Default Port | Detection |
+|-----------|--------|-------------|-----------|
+| Python (generic) | `python` | 8000 | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` |
+| FastAPI | `fastapi` | 8000 | FastAPI in dependencies |
+| Flask | `flask` | 5000 | Flask in dependencies |
+| Django | `django` | 8000 | `manage.py` |
+
+### Other languages
+
+| Language | Preset | Default Port | Detection |
+|----------|--------|-------------|-----------|
+| Rust | `rust` | 8080 | `Cargo.toml` |
+| Go | `go` | 8080 | `go.mod` |
+| Java | `java` | 8080 | `pom.xml`, `build.gradle`, `build.gradle.kts` |
+| Ruby on Rails | `rails` | 3000 | `Gemfile` with Rails |
+| Laravel (PHP) | `laravel` | 8000 | `artisan`, `composer.json` |
+
+### Special presets
+
+| Preset | Slug | Description |
+|--------|------|-------------|
+| Dockerfile | `dockerfile` | Uses the `Dockerfile` in your repository as-is |
+| Nixpacks (auto-detect) | `nixpacks` | Delegates entirely to Nixpacks for language detection and build |
+| Static Site | `static` | For pre-built static files (no build step) |
+
+---
+
+## Nixpacks languages {{ anchor: true, id: 'nixpacks' }}
+
+For languages without a first-class preset, Temps uses [Nixpacks](https://nixpacks.com) to detect, build, and package your application. Nixpacks supports 20+ languages:
+
+<Row>
+  <Col>
+    - Node.js
+    - Python
+    - Rust
+    - Go
+    - Java
+    - PHP
+    - Ruby
+    - Deno
+    - Elixir
+    - C# / .NET
+    - F# / .NET
+  </Col>
+  <Col>
+    - Dart
+    - Swift
+    - Zig
+    - Scala
+    - Haskell
+    - Clojure
+    - Crystal
+    - COBOL
+    - Gleam
+    - Static files
+  </Col>
+</Row>
+
+You can select a specific Nixpacks provider (e.g. `nixpacks-python`, `nixpacks-ruby`) when creating a project, or let Nixpacks auto-detect.
+
+Nixpacks reads optional `nixpacks.toml` or `.nixpacks.toml` configuration files from your repository root for custom build configuration.
+
+---
+
+## Package managers {{ anchor: true, id: 'package-managers' }}
+
+Temps detects your Node.js package manager from the lock file and uses the appropriate commands:
+
+| Package Manager | Lock File | Base Image | Install Command |
+|----------------|-----------|------------|-----------------|
+| npm | `package-lock.json` | `node:22-alpine` | `npm install` |
+| Yarn | `yarn.lock` | `node:22-alpine` | `yarn install --frozen-lockfile` |
+| pnpm | `pnpm-lock.yaml` | `node:22-alpine` | `pnpm install --frozen-lockfile` |
+| Bun | `bun.lockb` or `bun.lock` | `oven/bun:1.2` | `bun install` |
+
+---
+
+## Monorepo tools {{ anchor: true, id: 'monorepo-tools' }}
+
+Temps detects and supports these monorepo build tools:
+
+| Tool | Detection | Behavior |
+|------|-----------|----------|
+| Turborepo | `turbo.json` | Runs `npx turbo build` scoped to your project directory |
+| Nx | `nx.json` | Runs `npx nx build {package}` for the target package |
+| Lerna | `lerna.json` | Runs `npx lerna run build --scope={package}` |
+
+All monorepo tools work with all four package managers (npm, Yarn, pnpm, Bun). See [Deploy Monorepos](/docs/monorepos) for full configuration details.
+
+---
+
+## Preset detection priority {{ anchor: true, id: 'detection-priority' }}
+
+When auto-detecting from your project files, Temps checks in this order. The first match wins:
+
+1. `Dockerfile` exists → **Dockerfile** preset
+2. `docusaurus.config.js` / `.ts` → **Docusaurus**
+3. `next.config.js` / `.mjs` / `.ts` → **Next.js**
+4. `vite.config.js` / `.ts` → **Vite**
+5. `react-scripts` in `package.json` → **Create React App**
+6. `rsbuild.config.ts` → **Rsbuild**
+7. `Cargo.toml` → **Rust**
+8. `go.mod` → **Go**
+9. `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` → **Python**
+10. `pom.xml`, `build.gradle`, `build.gradle.kts` → **Java**
+11. `nixpacks.toml` → **Nixpacks** (explicit)
+12. No match → no preset selected (you must choose one manually)
+
+<Note>
+  If a `Dockerfile` exists in your repository root, it always takes priority — even if Temps would otherwise detect a framework like Next.js or Flask. Rename or remove the `Dockerfile` to use auto-detection.
+</Note>
+
+---
+
+## Build configuration {{ anchor: true, id: 'build-configuration' }}
+
+Every preset supports these optional overrides, configurable from the project settings:
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| **Dockerfile path** | Custom Dockerfile location relative to the build context | `docker/Dockerfile.production` |
+| **Build context** | Custom build context path relative to the repository root | `./apps/web` |
+| **Install command** | Override the default install command | `pnpm install --no-frozen-lockfile` |
+| **Build command** | Override the default build command | `npm run build:production` |
+| **Output directory** | Override the output directory for static builds | `out` |
+
+### Dockerfile features
+
+When using a custom Dockerfile or the generated Dockerfile, Temps supports:
+
+- **Multi-stage builds** — all generated Dockerfiles use separate build and production stages
+- **BuildKit** — enabled by default; supports `--mount=type=cache` for dependency caching
+- **Build arguments** — environment variables are injected as `ARG` directives and passed via `--build-arg`
+- **Custom base images** — any base image works in your custom Dockerfile
+- **Platform targeting** — `linux/amd64` and `linux/arm64`
+
+---
+
+## Container runtime {{ anchor: true, id: 'container-runtime' }}
+
+Every deployed container runs with these defaults:
+
+| Setting | Default | Configurable |
+|---------|---------|-------------|
+| CPU | 1 core | Yes |
+| Memory | 512 MB | Yes |
+| Disk | 1024 MB | Yes |
+| Restart policy | On failure | Yes |
+| Log retention | 50 MB x 3 files (150 MB total) | No |
+| Network binding | `127.0.0.1` (localhost only) | No |
+| Init process | Enabled (`--init`) | No |
+
+Security is enforced at the container level:
+
+- All Linux capabilities are dropped
+- `no-new-privileges` is set
+- PID limit of 512 processes
+- Containers bind to localhost — external access goes through the Temps proxy with automatic TLS
+
+---
+
+## What is not supported {{ anchor: true, id: 'not-supported' }}
+
+Temps is a **single-container deployment platform**. It handles one application per project, built and deployed as a single container (or static file bundle). The following are explicitly **not supported**:
+
+<Properties>
+  <Property name="Docker Compose" type="Not supported">
+    Temps does not read `docker-compose.yml` / `compose.yaml` files. Each project deploys one container. If your application needs a database, cache, or message queue, use [Managed Services](/docs/managed-services) — Temps creates and manages those containers separately and injects connection details as environment variables.
+  </Property>
+  <Property name="Multi-container pods" type="Not supported">
+    There is no sidecar pattern or pod grouping. Each deployment runs exactly one container. Separate services (databases, Redis, etc.) are managed independently through the Services feature.
+  </Property>
+  <Property name="Kubernetes / Docker Swarm" type="Not supported">
+    Temps uses Docker directly — there is no orchestrator layer. Deployments run as individual Docker containers managed by the Temps deployer.
+  </Property>
+  <Property name="Lambda-style serverless" type="Not supported">
+    There are no isolated per-request functions. Your framework's API routes (Next.js, Remix, SvelteKit, etc.) run inside the application container. See [Serverless Functions](/docs/serverless) for how Temps handles these patterns.
+  </Property>
+  <Property name="Cloud Native Buildpacks" type="Not supported">
+    Temps uses Nixpacks and Dockerfile builds. Paketo / Heroku buildpacks are not supported.
+  </Property>
+</Properties>
+
+### Alternatives to Docker Compose
+
+If you are migrating from a Docker Compose setup, here is how to map each service:
+
+| Docker Compose service | Temps equivalent |
+|------------------------|-----------------|
+| Your application | A Temps **project** with Git deployment |
+| PostgreSQL / MySQL / MongoDB | A **Managed Service** attached to your project |
+| Redis / Valkey | A **Managed Service** attached to your project |
+| Nginx reverse proxy | Not needed — Temps proxy handles TLS, routing, and load balancing |
+| Worker / background jobs | A separate Temps **project** pointing at the same repository with a different start command |
+
+See [Deploy with a Database](/docs/deploy-with-database) for a step-by-step guide on replacing a Docker Compose setup.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/web-applications">Deploy web applications</Button>
+<Button href="/docs/docker-containers">Deploy with a Dockerfile</Button>
+<Button href="/docs/static-sites">Deploy static sites</Button>
+<Button href="/docs/monorepos">Deploy from monorepos</Button>
+<Button href="/docs/deploy-with-database">Deploy with a database</Button>

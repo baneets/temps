@@ -9,7 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use temps_core::{
-    JobResult, WorkflowCancellationProvider, WorkflowContext, WorkflowError, WorkflowTask,
+    JobResult, TempsConfig, WorkflowCancellationProvider, WorkflowContext, WorkflowError,
+    WorkflowTask,
 };
 use temps_deployer::{BuildRequest, ImageBuilder};
 use temps_logs::{LogLevel, LogService};
@@ -325,6 +326,17 @@ impl BuildImageJob {
         Ok(())
     }
 
+    /// Load and parse .temps.yaml from the build context directory.
+    /// Returns None if the file does not exist or cannot be parsed.
+    fn load_temps_config(&self, build_context_dir: &Path) -> Option<TempsConfig> {
+        let config_path = build_context_dir.join(".temps.yaml");
+        if !config_path.exists() {
+            return None;
+        }
+        let contents = fs::read_to_string(&config_path).ok()?;
+        TempsConfig::from_yaml(&contents).ok()
+    }
+
     async fn ensure_dockerfile(
         &self,
         context: &WorkflowContext,
@@ -434,16 +446,34 @@ impl BuildImageJob {
         // Use repo name as project slug (sanitized: lowercase, hyphens to underscores)
         let project_slug = repo_output.repo_name.replace("-", "_").to_lowercase();
 
-        // Generate Dockerfile content with build args
+        // Load .temps.yaml for build overrides (install_command, build_command, output_dir)
+        let temps_config = self.load_temps_config(build_context_dir);
+        let build_overrides = temps_config.as_ref().and_then(|c| c.build.as_ref());
+
+        let install_cmd_owned = build_overrides.and_then(|b| b.install_command.clone());
+        let build_cmd_owned = build_overrides.and_then(|b| b.build_command.clone());
+        let output_dir_owned = build_overrides.and_then(|b| b.output_dir.clone());
+
+        if build_overrides.is_some() {
+            self.log(
+                context,
+                format!(
+                    "Found .temps.yaml build overrides: install={:?}, build={:?}, output_dir={:?}",
+                    install_cmd_owned, build_cmd_owned, output_dir_owned
+                ),
+            )
+            .await?;
+        }
+
+        // Generate Dockerfile content with build args and .temps.yaml overrides
         // Use build_context_dir as both root and local path so preset detection works correctly
-        // TODO: Get use_buildkit from ImageBuilder configuration
         let dockerfile_with_args = preset
             .dockerfile(temps_presets::DockerfileConfig {
                 root_local_path: build_context_dir,
                 local_path: build_context_dir,
-                install_command: None,         // auto-detect
-                build_command: None,           // auto-detect
-                output_dir: None,              // auto-detect
+                install_command: install_cmd_owned.as_deref(),
+                build_command: build_cmd_owned.as_deref(),
+                output_dir: output_dir_owned.as_deref(),
                 build_vars: Some(&build_vars), // ARG directives for env vars
                 project_slug: &project_slug,
                 use_buildkit: true, // Enable BuildKit for faster builds and caching
@@ -665,6 +695,16 @@ impl WorkflowTask for BuildImageJob {
             "dockerfile_path",
             image_output.dockerfile_path.to_string_lossy().to_string(),
         )?;
+
+        // Read .temps.yaml health config and pass it to downstream jobs
+        // The DeployImageJob will use this to configure its health check path
+        let build_context_dir = &image_output.build_context;
+        if let Some(temps_config) = self.load_temps_config(build_context_dir) {
+            if let Some(health) = &temps_config.health {
+                context.set_output(&self.job_id, "health_check_path", &health.path)?;
+                context.set_output(&self.job_id, "health_check_timeout", health.timeout)?;
+            }
+        }
 
         // Set artifacts
         context.set_artifact(

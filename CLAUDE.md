@@ -895,9 +895,8 @@ if (isLoading) return <Spinner />
 
 ### Testing with Playwright
 
-Local dev credentials:
-- Email: `dviejo@kfs.es`
-- Password: `@vAvQL78%HfL0&vX`
+If you need to run or test deployment-related features locally, ask for the required credentials (such as Docker or Temps platform accounts/env vars) from a maintainer. Credentials are not stored in the repository for security reasons.
+
 
 ---
 

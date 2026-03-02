@@ -1,76 +1,481 @@
 export const metadata = {
   title: 'Deploy Docker Containers',
-  description: 'Deploy custom Docker containers and Dockerized applications on Temps.',
+  description: 'Deploy custom Dockerfiles and pre-built images on Temps with full control over your build and runtime.',
   alternates: {
-    canonical: '/docs/deploy/docker-containers',
+    canonical: '/docs/docker-containers',
   },
 }
 
 # Deploy Docker Containers
 
-## Page Goal
-Empower users to deploy any application using Docker, providing maximum flexibility. Show that Temps supports complex, custom deployments beyond standard frameworks.
+When auto-detection is not enough, bring your own Dockerfile. Temps builds and deploys it as a container with health checks, zero-downtime rollouts, and automatic TLS — no extra configuration required. {{ className: 'lead' }}
 
-## Target Persona
-**Docker Dave** - A developer who:
-- Comfortable with Docker
-- Has complex application requirements
-- Needs custom runtime configurations
-- May have multi-stage builds
-- Values: Control, flexibility, containerization
-- Use cases: Legacy apps, custom stacks, complex dependencies
-- Timeline: 15-20 minutes including Dockerfile writing
+---
 
-## Key Content to Include
+## When to use a Dockerfile {{ anchor: true, id: 'when-to-use' }}
 
-**1. Docker Support**
-- Dockerfile-based deployments
-- Docker Compose (single container)
-- Custom base images
-- Multi-stage builds
+Temps auto-detects most frameworks and generates a Dockerfile for you. You only need a custom Dockerfile when:
 
-**2. Dockerfile Requirements**
-- Must expose a port
-- EXPOSE instruction
-- Proper CMD/ENTRYPOINT
-- Port binding best practices
+- Your stack is not auto-detected (e.g. Elixir, Haskell, custom C++ service)
+- You need system packages that the generated image does not include
+- You want a specific base image (Debian, Ubuntu, distroless)
+- Your build has multiple stages with non-trivial caching
+- You are migrating from another container platform and already have a Dockerfile
 
-**3. Basic Docker Deployment**
-- Repository with Dockerfile
-- Auto-detection
-- Port configuration
-- Deployment
+<Note>
+  If a `Dockerfile` exists in your repository root, Temps always uses it — even if auto-detection would match a framework like Next.js or Flask. Remove or rename the file to fall back to auto-detection.
+</Note>
 
-**4. Dockerfile Best Practices**
-- Multi-stage builds for smaller images
-- Layer caching optimization
-- Security considerations
-- .dockerignore
+---
 
-**5. Advanced Configuration**
-- Build arguments
-- Environment variables in Docker
-- Volume mounts (limitations)
-- Resource limits
+## Quick start {{ anchor: true, id: 'quick-start' }}
 
-**6. Docker Compose**
-- Single-service compose files
-- Environment variable substitution
-- Port mapping
+Create a `Dockerfile` in your repository root:
 
-**7. Registry Integration**
-- Docker Hub images
-- Private registries
-- Pre-built images
+```dockerfile {{ title: 'Dockerfile' }}
+FROM node:22-alpine
 
-**8. Troubleshooting**
-- Build failures
-- Port binding issues
-- Image size problems
-- Runtime errors
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --production
+COPY . .
 
-## Success Metrics
-- User can deploy Dockerized application
-- User understands Dockerfile requirements
-- User can optimize their Docker builds
-- User knows limitations and capabilities
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+Push to your connected repository. Temps detects the Dockerfile, builds the image, runs health checks, and routes traffic to the new container.
+
+### The two requirements
+
+1. **`EXPOSE` a port** — Temps reads the `EXPOSE` directive to know which port your application listens on. If you omit it, Temps falls back to the port configured in the dashboard (default `3000`).
+2. **Listen on `0.0.0.0`** — Containers that bind to `localhost` or `127.0.0.1` only accept connections from inside the container. Temps routes traffic from the host, so your application must bind to all interfaces.
+
+```javascript {{ title: 'server.js' }}
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0');
+```
+
+Temps injects a `PORT` environment variable that matches the `EXPOSE` value. You can use it, but it is not required — as long as the port in your code matches `EXPOSE`, traffic will be routed correctly.
+
+---
+
+## Multi-stage builds {{ anchor: true, id: 'multi-stage-builds' }}
+
+Multi-stage builds produce smaller images by separating the build toolchain from the runtime. Temps supports them natively.
+
+<CodeGroup>
+
+```dockerfile {{ title: 'Node.js' }}
+# Stage 1: Build
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Stage 2: Production
+FROM node:22-alpine
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+```dockerfile {{ title: 'Go' }}
+# Stage 1: Build
+FROM golang:1.24-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o server .
+
+# Stage 2: Production
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY --from=builder /app/server .
+
+EXPOSE 8080
+CMD ["./server"]
+```
+
+```dockerfile {{ title: 'Rust' }}
+# Stage 1: Build
+FROM rust:1.83-slim AS builder
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main(){}" > src/main.rs
+RUN cargo build --release
+RUN rm -rf src
+COPY . .
+RUN cargo build --release
+
+# Stage 2: Production
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /app/target/release/myapp .
+
+EXPOSE 8080
+CMD ["./myapp"]
+```
+
+```dockerfile {{ title: 'Python' }}
+# Stage 1: Build
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+# Stage 2: Production
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /install /usr/local
+COPY . .
+
+EXPOSE 8000
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8000"]
+```
+
+</CodeGroup>
+
+---
+
+## Custom Dockerfile path {{ anchor: true, id: 'custom-path' }}
+
+If your Dockerfile is not in the repository root, specify its location in `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  dockerfile: docker/Dockerfile.production
+  context: .
+```
+
+<Properties>
+  <Property name="dockerfile" type="string">
+    Path to the Dockerfile relative to the repository root. Defaults to `Dockerfile`.
+  </Property>
+  <Property name="context" type="string">
+    Build context directory relative to the repository root. Defaults to the project directory.
+  </Property>
+</Properties>
+
+The build context controls which files are available during `COPY` and `ADD` instructions. Setting `context: .` when your Dockerfile is in a subdirectory ensures the build can access files from the repository root.
+
+---
+
+## Build arguments {{ anchor: true, id: 'build-arguments' }}
+
+Pass build-time variables to your Dockerfile via `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+build:
+  args:
+    NODE_ENV: production
+    API_VERSION: v2
+    ENABLE_FEATURE_X: "true"
+```
+
+Use them in your Dockerfile with `ARG`:
+
+```dockerfile {{ title: 'Dockerfile' }}
+FROM node:22-alpine
+
+ARG NODE_ENV=development
+ARG API_VERSION=v1
+
+ENV NODE_ENV=$NODE_ENV
+
+WORKDIR /app
+COPY . .
+RUN npm ci
+RUN npm run build
+
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+Environment variables configured in the Temps dashboard are also passed as build arguments automatically. User-provided args take precedence over any args generated by presets.
+
+<Note>
+  Build arguments are visible in the image history. Do not use them for secrets. Use environment variables (set in the dashboard) for sensitive values — they are injected at runtime, not baked into the image.
+</Note>
+
+---
+
+## .dockerignore {{ anchor: true, id: 'dockerignore' }}
+
+A `.dockerignore` file reduces build context size and prevents sensitive files from being included in the image:
+
+```text {{ title: '.dockerignore' }}
+node_modules
+.git
+.env
+.env.*
+dist
+build
+*.md
+.DS_Store
+.vscode
+.idea
+```
+
+Smaller build contexts mean faster builds. Always exclude `node_modules`, `.git`, and any build output that gets regenerated during the build.
+
+---
+
+## Environment variables {{ anchor: true, id: 'environment-variables' }}
+
+Temps injects environment variables into your container at runtime. Variables configured in the dashboard are available via `process.env` (Node.js), `os.environ` (Python), `os.Getenv` (Go), etc.
+
+### Auto-injected variables
+
+These variables are always available — you do not need to configure them:
+
+<Properties>
+  <Property name="PORT" type="string">
+    The port Temps expects your application to listen on. Matches the `EXPOSE` directive in your Dockerfile.
+  </Property>
+  <Property name="HOST" type="string">
+    Always `0.0.0.0`.
+  </Property>
+  <Property name="SENTRY_DSN" type="string">
+    Sentry DSN for error tracking, if configured on your project.
+  </Property>
+  <Property name="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
+    OpenTelemetry collector endpoint for traces and metrics.
+  </Property>
+  <Property name="OTEL_SERVICE_NAME" type="string">
+    Set to your project name. Used by OpenTelemetry SDKs automatically.
+  </Property>
+</Properties>
+
+---
+
+## Health checks {{ anchor: true, id: 'health-checks' }}
+
+After starting your container, Temps verifies it is healthy before routing traffic to it.
+
+### Default behavior
+
+1. Temps waits for the container to enter `Running` state (up to 5 minutes)
+2. Sends HTTP `GET` requests to `/` on the container port
+3. Requires **2 consecutive** `2xx` or `3xx` responses to pass
+4. Connection errors during startup are retried every 5 seconds without penalty
+5. If `4xx` or `5xx` responses persist for 60 seconds, the deployment fails
+6. If no healthy response within 5 minutes total, the deployment times out
+
+### Custom health check
+
+Override the defaults in `.temps.yaml`:
+
+```yaml {{ title: '.temps.yaml' }}
+health:
+  path: /health
+  timeout: 10
+  interval: 30
+  retries: 3
+```
+
+<Properties>
+  <Property name="path" type="string">
+    HTTP path to check. Defaults to `/`.
+  </Property>
+  <Property name="timeout" type="integer">
+    Request timeout in seconds. Defaults to `5`.
+  </Property>
+  <Property name="interval" type="integer">
+    Seconds between checks. Defaults to `30`.
+  </Property>
+  <Property name="retries" type="integer">
+    Consecutive failures before marking unhealthy. Defaults to `3`.
+  </Property>
+</Properties>
+
+A minimal health endpoint:
+
+<CodeGroup>
+
+```javascript {{ title: 'Express' }}
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+```
+
+```python {{ title: 'Flask' }}
+@app.route('/health')
+def health():
+    return {'status': 'ok'}, 200
+```
+
+```go {{ title: 'Go' }}
+http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(http.StatusOK)
+    w.Write([]byte(`{"status":"ok"}`))
+})
+```
+
+</CodeGroup>
+
+---
+
+## Pre-built images {{ anchor: true, id: 'pre-built-images' }}
+
+You can deploy images that were built elsewhere — from Docker Hub, GitHub Container Registry, or any private registry.
+
+Configure a project to use an external image instead of building from source. Temps pulls the image, runs health checks, and deploys it identically to a source-built container.
+
+Your Docker daemon credentials (`~/.docker/config.json` on the Temps server) are used for authentication. For private registries, ensure the Temps server has `docker login` configured for your registry.
+
+```text
+# Supported image reference formats
+nginx:latest
+ghcr.io/your-org/your-app:v1.2.3
+registry.example.com:5000/app:latest
+```
+
+<Note>
+  Pre-built image deployments skip the build step entirely. Temps pulls the image, inspects it for `EXPOSE` directives, and deploys it directly.
+</Note>
+
+---
+
+## Resource limits {{ anchor: true, id: 'resource-limits' }}
+
+Every container runs with default resource limits:
+
+| Resource | Default | Description |
+|----------|---------|-------------|
+| CPU | 1 core | Maximum CPU allocation |
+| Memory | 512 MB | Maximum memory allocation |
+| PIDs | 512 | Maximum number of processes |
+
+These limits prevent a single container from consuming all server resources. Configure different limits per environment in the Temps dashboard.
+
+### Security hardening
+
+Temps applies security best practices to every container automatically:
+
+- **All Linux capabilities dropped** — containers run with the minimum privilege set
+- **No privilege escalation** — the `no-new-privileges` security option is enforced
+- **PID limit** — prevents fork bombs with a 512-process cap
+- **Init process** — proper signal handling and zombie process reaping via `--init`
+- **Log rotation** — container logs are capped at 150 MB (3 files x 50 MB) to prevent disk exhaustion
+
+---
+
+## Zero-downtime deployments {{ anchor: true, id: 'zero-downtime' }}
+
+Temps deploys your new container before removing the old one:
+
+1. **Build** — The new image is built from your latest commit
+2. **Start** — The new container starts alongside the existing one
+3. **Health check** — Temps verifies the new container is healthy
+4. **Switch** — The route table is updated to point to the new container
+5. **Confirm** — Temps waits for the proxy to confirm the route change (up to 30 seconds)
+6. **Teardown** — Only after confirmation, the old container is stopped and removed
+
+If the route confirmation times out, Temps reverts the route table to the previous deployment. The old container keeps running. The failed deployment is marked as failed — nothing breaks.
+
+---
+
+## Networking {{ anchor: true, id: 'networking' }}
+
+Containers run on an isolated Docker bridge network (`temps-app-network`). Each container:
+
+- Gets a random host port mapped to its `EXPOSE` port
+- Is accessible from the Temps proxy via `127.0.0.1:{host_port}`
+- Can communicate with other containers on the same network by container name
+- Is **not** directly accessible from the internet — all external traffic goes through the Temps proxy
+
+If your application needs to connect to a database or Redis service managed by Temps, use the service name as the hostname. Temps DNS resolution handles the rest within the Docker network.
+
+---
+
+## Build caching {{ anchor: true, id: 'build-caching' }}
+
+Temps uses Docker BuildKit for all image builds. BuildKit provides automatic layer caching — unchanged layers are reused from the cache, and you will see `[CACHED]` in the build logs for skipped steps.
+
+To maximize cache hits:
+
+```dockerfile {{ title: 'Good: dependencies cached separately' }}
+FROM node:22-alpine
+WORKDIR /app
+
+# Copy dependency files first
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Copy application code (changes more often)
+COPY . .
+RUN npm run build
+
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+```dockerfile {{ title: 'Bad: cache busted on every change' }}
+FROM node:22-alpine
+WORKDIR /app
+
+# Copying everything first means any file change
+# invalidates the npm ci cache
+COPY . .
+RUN npm ci
+RUN npm run build
+
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+The key principle: copy files that change less often (lockfiles, dependency manifests) before files that change frequently (source code).
+
+---
+
+## Troubleshooting {{ anchor: true, id: 'troubleshooting' }}
+
+### Build fails with "no such file or directory"
+
+Your `COPY` or `ADD` instruction references a file outside the build context. Check your `.temps.yaml` `build.context` setting and make sure the file exists relative to the context directory.
+
+### Container exits immediately
+
+Check the deployment logs for the exit code and error output. Common causes:
+
+- Missing environment variable that your application requires at startup
+- Port mismatch — your app listens on a different port than `EXPOSE` declares
+- Missing runtime dependency — the production image is missing a library or binary the app needs
+
+### Health check times out
+
+Your container starts but Temps cannot reach it on the expected port:
+
+- Verify your application binds to `0.0.0.0`, not `localhost`
+- Verify the port in your code matches the `EXPOSE` directive
+- If your application takes a long time to start (loading ML models, running migrations), set a custom health check with a longer timeout in `.temps.yaml`
+- Add a dedicated health endpoint that responds quickly, even while the app is still warming up
+
+### Image too large
+
+Use multi-stage builds to separate build dependencies from the runtime image. A Node.js application that is 1.2 GB in a single stage typically shrinks to 150-200 MB with a multi-stage build.
+
+Other tips:
+- Use Alpine-based images (`node:22-alpine` instead of `node:22`)
+- Add a `.dockerignore` to exclude `node_modules`, `.git`, and test files
+- Clean up package manager caches (`apt-get clean`, `rm -rf /var/cache/apk/*`)
+- Combine `RUN` commands to reduce layers
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/web-applications">Deploy without a Dockerfile</Button>
+<Button href="/docs/environment-variables">Configure environment variables</Button>
+<Button href="/docs/custom-domain">Set up a custom domain</Button>
+<Button href="/docs/error-tracking">Add error tracking</Button>

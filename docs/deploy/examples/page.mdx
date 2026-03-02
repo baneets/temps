@@ -1,0 +1,631 @@
+export const metadata = {
+  title: 'Example Projects',
+  description: 'Ready-to-deploy example projects for every supported language and framework on Temps.',
+  alternates: {
+    canonical: '/docs/examples',
+  },
+}
+
+# Example Projects
+
+Fork an example, connect it to Temps, and deploy. Each project is a minimal, working application that demonstrates the correct setup for its language or framework — no extra configuration needed. {{ className: 'lead' }}
+
+All examples are available in the [gotempsh/temps-demo-apps](https://github.com/gotempsh/temps-demo-apps) repository. Each subdirectory is a standalone project — fork the repo, or just copy the directory you need.
+
+---
+
+## Node.js {{ anchor: true, id: 'nodejs' }}
+
+### Express (npm)
+
+A minimal Express server. Temps detects Node.js via `package.json` and builds with Nixpacks.
+
+```js {{ title: 'server.js' }}
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.json({ message: 'Hello from Express on Temps!' });
+});
+
+app.listen(port, () => {
+  console.log(`Listening on port ${port}`);
+});
+```
+
+```json {{ title: 'package.json' }}
+{
+  "name": "temps-express-example",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
+```
+
+**Key points:**
+- Listen on `process.env.PORT` — Temps injects this automatically
+- Include a `start` script in `package.json`
+- No Dockerfile needed
+
+### Fastify (pnpm)
+
+A Fastify server using pnpm. Temps detects pnpm from `pnpm-lock.yaml`.
+
+```js {{ title: 'server.js' }}
+const fastify = require('fastify')({ logger: true });
+const port = process.env.PORT || 3000;
+
+fastify.get('/', async () => {
+  return { message: 'Hello from Fastify on Temps!' };
+});
+
+fastify.listen({ port, host: '0.0.0.0' });
+```
+
+```json {{ title: 'package.json' }}
+{
+  "name": "temps-fastify-example",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "fastify": "^5.3.3"
+  }
+}
+```
+
+**Key points:**
+- Bind to `0.0.0.0` — required for Fastify to accept connections from the Temps proxy
+- `pnpm-lock.yaml` triggers pnpm instead of npm
+
+---
+
+## Bun {{ anchor: true, id: 'bun' }}
+
+### Bun HTTP server
+
+A native Bun server. Temps detects Bun from `bun.lockb` or `bun.lock` and uses the `oven/bun:1.2` base image.
+
+```ts {{ title: 'index.ts' }}
+const port = process.env.PORT || 3000;
+
+const server = Bun.serve({
+  port,
+  fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === '/') {
+      return Response.json({ message: 'Hello from Bun on Temps!' });
+    }
+    return new Response('Not Found', { status: 404 });
+  },
+});
+
+console.log(`Listening on port ${server.port}`);
+```
+
+```json {{ title: 'package.json' }}
+{
+  "name": "temps-bun-example",
+  "scripts": {
+    "start": "bun run index.ts"
+  }
+}
+```
+
+**Key points:**
+- Bun runs TypeScript natively — no build step required
+- Generate a lock file with `bun install` before pushing
+
+### Elysia (Bun)
+
+[Elysia](https://elysiajs.com/) is a fast web framework for Bun with end-to-end type safety.
+
+```ts {{ title: 'src/index.ts' }}
+import { Elysia } from 'elysia';
+
+const port = process.env.PORT || 3000;
+
+new Elysia()
+  .get('/', () => ({ message: 'Hello from Elysia on Temps!' }))
+  .get('/health', () => ({ status: 'ok' }))
+  .listen(port);
+
+console.log(`Listening on port ${port}`);
+```
+
+```json {{ title: 'package.json' }}
+{
+  "name": "temps-elysia-example",
+  "scripts": {
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "elysia": "^1.3.2"
+  }
+}
+```
+
+---
+
+## Next.js {{ anchor: true, id: 'nextjs' }}
+
+### Next.js App Router
+
+Next.js is auto-detected from `next.config.js` and built with the first-class `nextjs` preset. Temps generates a security-hardened multi-stage Dockerfile.
+
+```tsx {{ title: 'app/page.tsx' }}
+export default function Home() {
+  return (
+    <main>
+      <h1>Hello from Next.js on Temps!</h1>
+    </main>
+  );
+}
+```
+
+```tsx {{ title: 'app/api/health/route.ts' }}
+export function GET() {
+  return Response.json({ status: 'ok' });
+}
+```
+
+```js {{ title: 'next.config.js' }}
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  output: 'standalone',
+};
+
+module.exports = nextConfig;
+```
+
+**Key points:**
+- Set `output: 'standalone'` in `next.config.js` — Temps uses standalone output for smaller container images
+- API routes work out of the box — they run inside the same container
+- No Dockerfile needed — Temps generates an optimized one with Alpine base, non-root user, and cache mounts
+
+---
+
+## Vite {{ anchor: true, id: 'vite' }}
+
+### Vite + React
+
+Vite projects are detected from `vite.config.ts` and deployed as **static sites** — no container runs at runtime.
+
+```tsx {{ title: 'src/App.tsx' }}
+function App() {
+  return <h1>Hello from Vite + React on Temps!</h1>;
+}
+
+export default App;
+```
+
+```ts {{ title: 'vite.config.ts' }}
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+});
+```
+
+**Key points:**
+- Static deployment — Temps builds the `dist/` folder, extracts the files, and serves them from the proxy
+- Zero runtime memory and CPU usage
+- SPA routing, gzip compression, and cache headers are handled by the Temps proxy
+
+---
+
+## Python {{ anchor: true, id: 'python' }}
+
+### FastAPI
+
+A FastAPI application. Temps detects Python from `requirements.txt` and builds with Nixpacks.
+
+```python {{ title: 'main.py' }}
+from fastapi import FastAPI
+import os
+
+app = FastAPI()
+
+@app.get("/")
+def read_root():
+    return {"message": "Hello from FastAPI on Temps!"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+```text {{ title: 'requirements.txt' }}
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.0
+```
+
+```toml {{ title: 'nixpacks.toml' }}
+[start]
+cmd = "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"
+```
+
+**Key points:**
+- Bind to `0.0.0.0` — required for the Temps proxy to reach the container
+- Use `nixpacks.toml` to specify the start command when auto-detection is not enough
+- `PORT` is injected by Temps
+
+### Flask
+
+```python {{ title: 'app.py' }}
+from flask import Flask, jsonify
+import os
+
+app = Flask(__name__)
+
+@app.route("/")
+def hello():
+    return jsonify(message="Hello from Flask on Temps!")
+
+@app.route("/health")
+def health():
+    return jsonify(status="ok")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+```
+
+```text {{ title: 'requirements.txt' }}
+flask>=3.1.0
+gunicorn>=23.0.0
+```
+
+```toml {{ title: 'nixpacks.toml' }}
+[start]
+cmd = "gunicorn app:app --bind 0.0.0.0:${PORT:-5000}"
+```
+
+**Key points:**
+- Use Gunicorn in production — Flask's built-in server is not suitable for production traffic
+- The `nixpacks.toml` start command overrides the default
+
+### Django
+
+```python {{ title: 'mysite/wsgi.py' }}
+import os
+from django.core.wsgi import get_wsgi_application
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'mysite.settings')
+application = get_wsgi_application()
+```
+
+```text {{ title: 'requirements.txt' }}
+django>=5.2
+gunicorn>=23.0.0
+psycopg2-binary>=2.9.0
+whitenoise>=6.9.0
+```
+
+```toml {{ title: 'nixpacks.toml' }}
+[start]
+cmd = "python manage.py migrate && gunicorn mysite.wsgi --bind 0.0.0.0:${PORT:-8000}"
+
+[phases.setup]
+aptPkgs = ["libpq-dev"]
+```
+
+**Key points:**
+- Run migrations on startup with `&&` chaining
+- Use WhiteNoise for static files in production
+- Add `libpq-dev` in `nixpacks.toml` if you need `psycopg2`
+- For the database, add a PostgreSQL **Managed Service** to your project — Temps injects `POSTGRES_URL` automatically
+
+---
+
+## Go {{ anchor: true, id: 'go' }}
+
+### Go net/http
+
+Detected from `go.mod`. Built via Nixpacks, which compiles a static binary.
+
+```go {{ title: 'main.go' }}
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+)
+
+func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Hello from Go on Temps!",
+		})
+	})
+
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	fmt.Printf("Listening on port %s\n", port)
+	http.ListenAndServe(":"+port, nil)
+}
+```
+
+```text {{ title: 'go.mod' }}
+module temps-go-example
+
+go 1.24
+```
+
+**Key points:**
+- Listen on `:PORT`, not `localhost:PORT` — the container must accept connections from the Temps proxy
+- Go compiles to a static binary — the final container is minimal
+
+### Gin
+
+```go {{ title: 'main.go' }}
+package main
+
+import (
+	"net/http"
+	"os"
+
+	"github.com/gin-gonic/gin"
+)
+
+func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	r := gin.Default()
+
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"message": "Hello from Gin on Temps!"})
+	})
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	r.Run(":" + port)
+}
+```
+
+**Key points:**
+- Gin listens on all interfaces by default when using `r.Run(":port")`
+- Set `GIN_MODE=release` as an environment variable in Temps for production
+
+---
+
+## PHP {{ anchor: true, id: 'php' }}
+
+### Laravel
+
+Detected from `artisan` and `composer.json`. Built via Nixpacks.
+
+```php {{ title: 'routes/api.php' }}
+<?php
+
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', function () {
+    return response()->json(['message' => 'Hello from Laravel on Temps!']);
+});
+
+Route::get('/health', function () {
+    return response()->json(['status' => 'ok']);
+});
+```
+
+```json {{ title: 'composer.json (excerpt)' }}
+{
+    "name": "temps/laravel-example",
+    "require": {
+        "php": "^8.3",
+        "laravel/framework": "^12.0"
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ]
+    }
+}
+```
+
+```toml {{ title: 'nixpacks.toml' }}
+[start]
+cmd = "php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=${PORT:-8000}"
+
+[phases.setup]
+aptPkgs = ["libpq-dev", "php8.3-pgsql"]
+```
+
+**Key points:**
+- Run migrations on startup
+- Bind to `0.0.0.0` — required for the Temps proxy
+- Add PHP extensions for your database driver in `nixpacks.toml`
+- Set `APP_KEY`, `APP_ENV=production`, and `APP_URL` as environment variables in Temps
+
+### PHP (vanilla)
+
+A plain PHP application served with the built-in server. No framework needed.
+
+```php {{ title: 'index.php' }}
+<?php
+header('Content-Type: application/json');
+
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+
+if ($path === '/health') {
+    echo json_encode(['status' => 'ok']);
+    exit;
+}
+
+echo json_encode(['message' => 'Hello from PHP on Temps!']);
+```
+
+```toml {{ title: 'nixpacks.toml' }}
+[start]
+cmd = "php -S 0.0.0.0:${PORT:-8000} -t ."
+```
+
+---
+
+## Rust {{ anchor: true, id: 'rust' }}
+
+### Actix Web
+
+Detected from `Cargo.toml`. Built via Nixpacks, which runs `cargo build --release`.
+
+```rust {{ title: 'src/main.rs' }}
+use actix_web::{web, App, HttpServer, HttpResponse};
+use serde_json::json;
+use std::env;
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let port: u16 = env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .expect("PORT must be a number");
+
+    println!("Listening on port {}", port);
+
+    HttpServer::new(|| {
+        App::new()
+            .route("/", web::get().to(|| async {
+                HttpResponse::Ok().json(json!({"message": "Hello from Actix on Temps!"}))
+            }))
+            .route("/health", web::get().to(|| async {
+                HttpResponse::Ok().json(json!({"status": "ok"}))
+            }))
+    })
+    .bind(("0.0.0.0", port))?
+    .run()
+    .await
+}
+```
+
+```toml {{ title: 'Cargo.toml' }}
+[package]
+name = "temps-actix-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4"
+serde_json = "1"
+```
+
+**Key points:**
+- Bind to `0.0.0.0`, not `127.0.0.1`
+- Rust builds take longer than most languages — the first deployment may take several minutes while dependencies compile. Subsequent builds are faster thanks to BuildKit caching.
+
+---
+
+## Dockerfile {{ anchor: true, id: 'dockerfile' }}
+
+### Custom Dockerfile
+
+If your stack is not auto-detected, or you need full control, add a `Dockerfile` to your repository. Temps uses it directly.
+
+```dockerfile {{ title: 'Dockerfile' }}
+FROM node:22-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:22-alpine
+RUN addgroup -g 1001 appgroup && adduser -D -u 1001 -G appgroup appuser
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+USER appuser
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
+```
+
+**Key points:**
+- Multi-stage builds keep the final image small
+- Run as a non-root user for security
+- `EXPOSE` is informational — Temps reads `PORT` from the environment variable, not from `EXPOSE`
+- If a `Dockerfile` exists in the repo root, Temps always uses it regardless of framework detection
+
+---
+
+## Common patterns {{ anchor: true, id: 'common-patterns' }}
+
+### Listening on the right port
+
+Every example above uses `process.env.PORT` (or the equivalent in each language). This is the single most important pattern — Temps injects the `PORT` variable and routes all traffic to it.
+
+```js {{ title: 'Node.js' }}
+const port = process.env.PORT || 3000;
+```
+
+```python {{ title: 'Python' }}
+port = int(os.environ.get("PORT", 8000))
+```
+
+```go {{ title: 'Go' }}
+port := os.Getenv("PORT")
+```
+
+```rust {{ title: 'Rust' }}
+let port: u16 = env::var("PORT").unwrap_or_else(|_| "8080".into()).parse().unwrap();
+```
+
+```php {{ title: 'PHP' }}
+$port = getenv('PORT') ?: 8000;
+```
+
+### Binding to 0.0.0.0
+
+Your application must bind to `0.0.0.0`, not `127.0.0.1` or `localhost`. The Temps proxy routes traffic to your container over the Docker network — binding to localhost makes your app unreachable.
+
+### Health checks
+
+Temps runs HTTP health checks against your container after deployment. A `GET /` that returns a 200 status is sufficient. If your root route redirects or requires authentication, add a dedicated `/health` endpoint.
+
+### Start command
+
+Temps determines the start command in this order:
+
+1. `CMD` in your Dockerfile (if using a custom Dockerfile)
+2. `start` script in `package.json` (for Node.js projects)
+3. `[start]` section in `nixpacks.toml`
+4. Nixpacks auto-detection (e.g. `python main.py`, `go run .`)
+
+If your app does not start correctly, add a `nixpacks.toml` with an explicit `[start]` command.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/supported-platforms">Supported languages and frameworks</Button>
+<Button href="/docs/web-applications">Web application deployment guide</Button>
+<Button href="/docs/docker-containers">Dockerfile deployment guide</Button>
+<Button href="/docs/deploy-with-database">Add a database to your project</Button>
+<Button href="/docs/monorepos">Deploy from monorepos</Button>

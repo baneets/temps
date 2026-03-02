@@ -1,78 +1,313 @@
 export const metadata = {
-  title: 'Deploy Serverless Functions',
-  description: 'Deploy serverless functions and edge functions on Temps.',
+  title: 'Serverless Functions & API Routes',
+  description: 'How Temps handles serverless patterns — framework API routes, cron jobs, and when to use containers instead.',
   alternates: {
-    canonical: '/docs/deploy/serverless',
+    canonical: '/docs/serverless',
   },
 }
 
-# Deploy Serverless Functions
+# Serverless Functions & API Routes
 
-## Page Goal
-Explain serverless/edge function deployment capabilities in Temps. Help users understand when to use serverless vs traditional deployments.
+Temps is a container platform, not a serverless runtime. There are no Lambda-style isolated functions. Instead, your framework's built-in API routes run inside the same container as your application — and Temps adds cron scheduling for background work. {{ className: 'lead' }}
 
-## Target Persona
-**Serverless Sam** - A developer who:
-- Building APIs or webhooks
-- Wants low-cost, auto-scaling solutions
-- Familiar with Lambda, Vercel Functions, etc.
-- Needs event-driven architecture
-- Values: Cost efficiency, auto-scaling, simplicity
-- Questions: "Can I deploy just functions?", "How do cold starts work?"
-- Timeline: 10-15 minutes to deploy first function
+---
 
-## Key Content to Include
+## How Temps differs from serverless platforms {{ anchor: true, id: 'how-it-differs' }}
 
-**1. Serverless in Temps**
-- What serverless functions are
-- Use cases for serverless
-- How Temps handles serverless
-- Pricing model
+On platforms like Vercel or AWS Lambda, each API route or function runs in an isolated ephemeral environment. On Temps, your entire application — frontend and API routes — runs in a single long-lived container.
 
-**2. Supported Runtimes**
-- Node.js functions
-- Python functions
-- Go functions
-- Deno/Bun support
+<Row>
+  <Col>
+    **What Temps provides**
+    - Framework API routes (Next.js, Remix, SvelteKit, Nuxt, Astro)
+    - Scheduled cron jobs via `.temps.yaml`
+    - Persistent containers with in-memory state
+    - No cold starts
+    - No per-invocation billing
+    - Full access to the filesystem
+  </Col>
+  <Col>
+    **What Temps does not provide**
+    - Isolated per-function execution
+    - Auto-scaling to zero
+    - Edge functions (runs from your server, not CDN edge)
+    - Per-function memory/timeout configuration
+    - Separate function deployments
+  </Col>
+</Row>
 
-**3. Function Structure**
-- File-based routing
-- API routes (Next.js style)
-- Function signatures
-- Request/response handling
+For most applications, the container model is simpler and more predictable. You avoid cold starts, function size limits, and the complexity of managing dozens of isolated function deployments.
 
-**4. Deployment**
-- Creating function project
-- Directory structure
-- Configuration
-- Deploy
+---
 
-**5. Configuration**
-- Environment variables
-- Timeouts
-- Memory limits
-- Concurrency
+## Framework API routes {{ anchor: true, id: 'api-routes' }}
 
-**6. API Routes Pattern**
-- Next.js API routes
-- Remix actions
-- SvelteKit endpoints
-- Framework-specific patterns
+If your framework supports API routes or server endpoints, they work on Temps without any special configuration. The framework runs as a server inside the container and handles both page requests and API calls.
 
-**7. Limitations & Considerations**
-- Execution time limits
-- Cold starts
-- Stateless nature
-- When NOT to use serverless
+### Next.js API routes
 
-**8. Advanced Topics**
-- Background jobs
-- Cron functions
-- Webhooks
-- Queue integration
+Next.js App Router route handlers and Pages Router API routes both work:
 
-## Success Metrics
-- User understands serverless vs traditional deployment
-- User can deploy and test functions
-- User knows limitations
-- User can choose appropriate deployment type
+<CodeGroup>
+
+```typescript {{ title: 'app/api/users/route.ts (App Router)' }}
+import { NextResponse } from 'next/server';
+
+export async function GET() {
+  const users = await db.query('SELECT * FROM users');
+  return NextResponse.json(users);
+}
+
+export async function POST(request: Request) {
+  const body = await request.json();
+  const user = await db.insert('users', body);
+  return NextResponse.json(user, { status: 201 });
+}
+```
+
+```typescript {{ title: 'pages/api/users.ts (Pages Router)' }}
+import type { NextApiRequest, NextApiResponse } from 'next';
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
+  if (req.method === 'GET') {
+    const users = await db.query('SELECT * FROM users');
+    return res.json(users);
+  }
+}
+```
+
+</CodeGroup>
+
+### Remix loaders and actions
+
+```typescript {{ title: 'app/routes/users.tsx' }}
+import { json } from '@remix-run/node';
+import type { LoaderFunction, ActionFunction } from '@remix-run/node';
+
+export const loader: LoaderFunction = async () => {
+  const users = await db.query('SELECT * FROM users');
+  return json(users);
+};
+
+export const action: ActionFunction = async ({ request }) => {
+  const form = await request.formData();
+  const user = await db.insert('users', Object.fromEntries(form));
+  return json(user, { status: 201 });
+};
+```
+
+### SvelteKit endpoints
+
+```typescript {{ title: 'src/routes/api/users/+server.ts' }}
+import { json } from '@sveltejs/kit';
+
+export async function GET() {
+  const users = await db.query('SELECT * FROM users');
+  return json(users);
+}
+```
+
+### Nuxt server routes
+
+```typescript {{ title: 'server/api/users.ts' }}
+export default defineEventHandler(async (event) => {
+  const users = await db.query('SELECT * FROM users');
+  return users;
+});
+```
+
+All of these work identically on Temps as they do in local development. The framework handles routing, and Temps routes HTTP traffic to the container.
+
+---
+
+## Cron jobs {{ anchor: true, id: 'cron-jobs' }}
+
+Temps supports scheduled HTTP calls to your application via the `cron` section in `.temps.yaml`. This is the closest equivalent to scheduled serverless functions.
+
+```yaml {{ title: '.temps.yaml' }}
+cron:
+  - path: /api/cron/cleanup
+    schedule: "0 0 * * *"
+    name: "Daily Cleanup"
+
+  - path: /api/cron/send-digests
+    schedule: "0 9 * * 1"
+    name: "Weekly Digest"
+
+  - path: /api/cron/sync-inventory
+    schedule: "*/15 * * * *"
+    name: "Inventory Sync"
+```
+
+<Properties>
+  <Property name="path" type="string" required>
+    The HTTP path to call. Temps sends a `GET` request to this path on schedule.
+  </Property>
+  <Property name="schedule" type="string" required>
+    A cron expression. Standard five-field format: `minute hour day-of-month month day-of-week`.
+  </Property>
+  <Property name="name" type="string">
+    Human-readable name displayed in the Temps dashboard.
+  </Property>
+</Properties>
+
+### Implementing a cron endpoint
+
+Your cron endpoint is a regular HTTP route. Keep it fast — the cron system sends a request and expects a response.
+
+```typescript {{ title: 'app/api/cron/cleanup/route.ts' }}
+export async function GET() {
+  // Delete expired sessions
+  const deleted = await db.query(
+    'DELETE FROM sessions WHERE expires_at < NOW()'
+  );
+
+  return Response.json({
+    deleted: deleted.rowCount,
+    timestamp: new Date().toISOString(),
+  });
+}
+```
+
+<Note>
+  Cron endpoints run inside your existing container — there is no separate function environment. Long-running cron tasks share resources with your web traffic. For heavy background processing, consider a dedicated worker container deployed as a separate Temps project.
+</Note>
+
+### Common cron schedules
+
+| Schedule | Expression | Description |
+|----------|-----------|-------------|
+| Every minute | `* * * * *` | High-frequency polling |
+| Every 15 minutes | `*/15 * * * *` | Regular sync jobs |
+| Hourly | `0 * * * *` | Hourly reports |
+| Daily at midnight | `0 0 * * *` | Nightly cleanup |
+| Weekdays at 9am | `0 9 * * 1-5` | Business hours tasks |
+| Weekly on Monday | `0 9 * * 1` | Weekly digests |
+| Monthly on the 1st | `0 0 1 * *` | Monthly reports |
+
+---
+
+## Standalone API servers {{ anchor: true, id: 'standalone-apis' }}
+
+If you are building a pure API (no frontend), deploy it as a regular web application. Temps auto-detects backend frameworks:
+
+<CodeGroup>
+
+```typescript {{ title: 'Express' }}
+import express from 'express';
+
+const app = express();
+app.use(express.json());
+
+app.get('/api/users', async (req, res) => {
+  const users = await db.query('SELECT * FROM users');
+  res.json(users);
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, '0.0.0.0');
+```
+
+```python {{ title: 'FastAPI' }}
+from fastapi import FastAPI
+import os
+
+app = FastAPI()
+
+@app.get("/api/users")
+async def get_users():
+    users = await db.fetch("SELECT * FROM users")
+    return users
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+```go {{ title: 'Gin' }}
+package main
+
+import (
+    "os"
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    r := gin.Default()
+    r.GET("/api/users", getUsers)
+
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8080"
+    }
+    r.Run("0.0.0.0:" + port)
+}
+```
+
+</CodeGroup>
+
+See the [web applications guide](/docs/web-applications) for full framework support and auto-detection details.
+
+---
+
+## When to use what {{ anchor: true, id: 'when-to-use' }}
+
+| Pattern | Best for | Temps approach |
+|---------|---------|----------------|
+| API routes within a framework | Full-stack apps with both pages and API endpoints | Deploy the framework — routes are included automatically |
+| Standalone API server | Backend services, microservices | Deploy as a [web application](/docs/web-applications) |
+| Scheduled tasks | Cleanup, reports, sync jobs | Use [cron jobs](#cron-jobs) in `.temps.yaml` |
+| Background processing | Heavy computation, queue processing | Deploy a separate worker container |
+| Webhooks | Third-party integrations | Add an endpoint to your existing app |
+
+---
+
+## Migrating from serverless platforms {{ anchor: true, id: 'migrating' }}
+
+If you are moving from Vercel, Netlify, or AWS Lambda:
+
+### From Vercel serverless functions
+
+Vercel functions in `api/` or `app/api/` are typically Next.js API routes. These work on Temps without changes — Next.js handles the routing regardless of where it runs.
+
+If you used Vercel's `@vercel/og` or `@vercel/blob`, replace them with:
+- Image generation: Run your own image service or use a library like `sharp`
+- Blob storage: Use the [Temps Blob SDK](/docs/sdks) or S3-compatible storage
+
+### From AWS Lambda
+
+Lambda handlers need to be wrapped in an HTTP server. Replace the Lambda handler signature with an Express/Fastify route:
+
+```typescript {{ title: 'Before (Lambda)' }}
+export async function handler(event) {
+  const users = await getUsers();
+  return { statusCode: 200, body: JSON.stringify(users) };
+}
+```
+
+```typescript {{ title: 'After (Express)' }}
+import express from 'express';
+
+const app = express();
+app.get('/api/users', async (req, res) => {
+  const users = await getUsers();
+  res.json(users);
+});
+
+app.listen(process.env.PORT || 3000, '0.0.0.0');
+```
+
+The business logic stays the same — you only change the HTTP interface.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/web-applications">Deploy web applications</Button>
+<Button href="/docs/deploy-nextjs">Next.js deployment tutorial</Button>
+<Button href="/docs/deploy-nodejs">Node.js API deployment tutorial</Button>
+<Button href="/docs/analytics">Add analytics to your API</Button>

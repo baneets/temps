@@ -3,7 +3,7 @@ export const metadata = {
   description:
     'Add analytics, error tracking, session replay, and performance monitoring to your Temps application. Replace Plausible, Sentry, and FullStory with a single self-hosted stack.',
   alternates: {
-    canonical: '/docs/tutorials/add-observability',
+    canonical: '/docs/add-observability',
   },
 }
 
@@ -45,8 +45,8 @@ All data stays on your server. There are no third-party services, no usage limit
 
 You need:
 
-- A **deployed application on Temps** (if you have not deployed yet, complete [Your First Deployment](/docs/tutorials/your-first-deployment) first)
-- A **React or Next.js application** — this tutorial uses the React SDK. If your app uses a different framework, see [Analytics & Observability](/docs/features/analytics) for vanilla JS instructions.
+- A **deployed application on Temps** (if you have not deployed yet, complete [Your First Deployment](/docs/your-first-deployment) first)
+- A **React or Next.js application** — this tutorial uses the React SDK. If your app uses a different framework, see [Analytics & Observability](/docs/analytics) for vanilla JS instructions.
 - **Access to your codebase** — you will add a package and modify a few files
 
 ---
@@ -389,7 +389,7 @@ You will see recorded sessions listed with their duration, page count, and start
 - Device viewport emulation
 
 <Note>
-**Privacy:** Password inputs are always masked. Session recordings are stored on your server and are never sent to third parties. Use `blockClass` and `maskAllInputs` to control what is captured. See [Privacy & Compliance](/docs/features/analytics#privacy) for GDPR configuration.
+**Privacy:** Password inputs are always masked. Session recordings are stored on your server and are never sent to third parties. Use `blockClass` and `maskAllInputs` to control what is captured. See [Privacy & Compliance](/docs/analytics#privacy) for GDPR configuration.
 </Note>
 
 ---
@@ -464,16 +464,16 @@ All of this runs on your own infrastructure with no usage limits and no monthly 
 ## What to explore next
 
 <div className="not-prose">
-  <Button href="/docs/tutorials/set-up-backups-and-monitoring" variant="text" arrow="right">
+  <Button href="/docs/set-up-backups-and-monitoring" variant="text" arrow="right">
     Set up automated backups and uptime monitoring
   </Button>
-  <Button href="/docs/features/analytics#funnel-analysis" variant="text" arrow="right">
+  <Button href="/docs/analytics#funnel-analysis" variant="text" arrow="right">
     Create conversion funnels to track user journeys
   </Button>
-  <Button href="/docs/features/analytics#enrich-visitors" variant="text" arrow="right">
+  <Button href="/docs/analytics#enrich-visitors" variant="text" arrow="right">
     Enrich visitor data from your backend
   </Button>
-  <Button href="/docs/concepts/deployments" variant="text" arrow="right">
+  <Button href="/docs/deployments" variant="text" arrow="right">
     Understand how the deployment pipeline works
   </Button>
 </div>

@@ -3,7 +3,7 @@ export const metadata = {
   description:
     'Complete REST API reference for Temps. Authentication, project management, deployments, analytics, and all available endpoints.',
   alternates: {
-    canonical: '/docs/reference/api',
+    canonical: '/docs/api',
   },
 }
 
@@ -348,4 +348,4 @@ const { data: projects } = await temps.projects.list();
 const { data: deployments } = await temps.deployments.list({ path: { project_id: 1 } });
 ```
 
-See the [Node SDK Reference](/docs/reference/node-sdk) for the full API.
+See the [Node SDK Reference](/docs/node-sdk) for the full API.

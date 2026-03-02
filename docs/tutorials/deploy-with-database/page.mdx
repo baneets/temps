@@ -3,7 +3,7 @@ export const metadata = {
   description:
     'Provision a managed PostgreSQL database, connect it to your application, and deploy — all without leaving Temps.',
   alternates: {
-    canonical: '/docs/tutorials/deploy-with-database',
+    canonical: '/docs/deploy-with-database',
   },
 }
 
@@ -46,7 +46,7 @@ By the end of this tutorial, you will have:
 | Linking services to projects | Database migrations and schema management |
 | Automatic environment variable injection | Connection pooling and performance tuning |
 | Per-environment database isolation | Replication and high availability |
-| Querying data from the dashboard | Backup and restore ([previous tutorial](/docs/tutorials/set-up-backups-and-monitoring)) |
+| Querying data from the dashboard | Backup and restore ([previous tutorial](/docs/set-up-backups-and-monitoring)) |
 
 ---
 
@@ -54,7 +54,7 @@ By the end of this tutorial, you will have:
 
 You need:
 
-- A **running Temps instance** with a deployed project (complete [Your First Deployment](/docs/tutorials/your-first-deployment) first)
+- A **running Temps instance** with a deployed project (complete [Your First Deployment](/docs/your-first-deployment) first)
 - An **application that uses a database** — any framework that reads a database connection string from an environment variable will work. This tutorial shows examples for Next.js, Express, and generic Node.js.
 
 If your current project does not use a database, that is fine. You can still follow along to provision the service and link it — then add database code later.
@@ -93,7 +93,7 @@ Click **Create**. Temps pulls the Docker image (if not cached), creates a contai
 When the status shows **Running**, your database is ready.
 
 <Note>
-**Where does data live?** PostgreSQL data is stored in a Docker volume named `postgres-{service-name}_data`, mounted at `/var/lib/postgresql` inside the container. The volume persists across container restarts and Temps upgrades. Back it up with the [backup system](/docs/tutorials/set-up-backups-and-monitoring) for off-site protection.
+**Where does data live?** PostgreSQL data is stored in a Docker volume named `postgres-{service-name}_data`, mounted at `/var/lib/postgresql` inside the container. The volume persists across container restarts and Temps upgrades. Back it up with the [backup system](/docs/set-up-backups-and-monitoring) for off-site protection.
 </Note>
 
 ---
@@ -278,7 +278,7 @@ export async function GET() {
 }
 ```
 
-This gives your [uptime monitor](/docs/tutorials/set-up-backups-and-monitoring#create-an-uptime-monitor) a way to detect database outages, not just application crashes.
+This gives your [uptime monitor](/docs/set-up-backups-and-monitoring#create-an-uptime-monitor) a way to detect database outages, not just application crashes.
 
 ---
 
@@ -440,16 +440,16 @@ The same workflow applies to all managed services:
 ## What to explore next
 
 <div className="not-prose">
-  <Button href="/docs/tutorials/set-up-backups-and-monitoring" variant="text" arrow="right">
+  <Button href="/docs/set-up-backups-and-monitoring" variant="text" arrow="right">
     Set up automated backups to protect your database
   </Button>
-  <Button href="/docs/howto/manage-environment-variables" variant="text" arrow="right">
+  <Button href="/docs/manage-environment-variables" variant="text" arrow="right">
     Manage environment variables across environments
   </Button>
-  <Button href="/docs/howto/scale-for-traffic" variant="text" arrow="right">
+  <Button href="/docs/scale-for-traffic" variant="text" arrow="right">
     Scale your application and database for more traffic
   </Button>
-  <Button href="/docs/concepts/environments" variant="text" arrow="right">
+  <Button href="/docs/environments" variant="text" arrow="right">
     Understand how environments isolate data and configuration
   </Button>
 </div>

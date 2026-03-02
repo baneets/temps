@@ -448,6 +448,7 @@ impl DeployImageJob {
         &self,
         image_output: &BuildImageOutput,
         context: &WorkflowContext,
+        health_check_override: Option<String>,
     ) -> Result<DeploymentOutput, WorkflowError> {
         self.log(
             context,
@@ -494,7 +495,12 @@ impl DeployImageJob {
             .await?;
 
             match self
-                .deploy_single_replica(image_output, context, replica_index)
+                .deploy_single_replica(
+                    image_output,
+                    context,
+                    replica_index,
+                    health_check_override.as_deref(),
+                )
                 .await
             {
                 Ok((container_id, host_port, container_port)) => {
@@ -565,6 +571,7 @@ impl DeployImageJob {
         image_output: &BuildImageOutput,
         context: &WorkflowContext,
         replica_index: u32,
+        health_check_override: Option<&str>,
     ) -> Result<(String, u16, u16), WorkflowError> {
         // Prepare deployment request using temps-deployer types
         self.log(context, "Deploying container image...".to_string())
@@ -875,7 +882,11 @@ impl DeployImageJob {
         // the container running status from Phase 1 is sufficient (useful for
         // rollbacks where the image was already verified, or services without
         // an HTTP endpoint).
-        if let Some(ref health_path) = self.config.health_check_path {
+        // .temps.yaml health override takes priority over the default config.
+        let effective_health_path = health_check_override
+            .map(String::from)
+            .or_else(|| self.config.health_check_path.clone());
+        if let Some(ref health_path) = effective_health_path {
             self.log(
                 context,
                 "Waiting for application to be ready...".to_string(),
@@ -1131,8 +1142,26 @@ impl WorkflowTask for DeployImageJob {
             BuildImageOutput::from_context(&context, &self.build_job_id)?
         };
 
+        // Apply .temps.yaml health config if the build job found one.
+        // The BuildImageJob reads .temps.yaml and stores health_check_path as an output.
+        // We override the default config before deploying.
+        let health_override: Option<String> = context
+            .get_output::<String>(&self.build_job_id, "health_check_path")
+            .ok()
+            .flatten();
+
+        if let Some(ref health_path) = health_override {
+            self.log(
+                &context,
+                format!("Using health check path from .temps.yaml: {}", health_path),
+            )
+            .await?;
+        }
+
         // Deploy the image (logs written in real-time)
-        let deployment_output = self.deploy_image(&image_output, &context).await?;
+        let deployment_output = self
+            .deploy_image(&image_output, &context, health_override)
+            .await?;
 
         // Set typed job outputs
         context.set_output(&self.job_id, "status", &deployment_output.status)?;
