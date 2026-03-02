@@ -20,20 +20,20 @@ Temps provides real-time metrics for every deployed container, giving you instan
 <Row>
   <Col>
     **Available Metrics:**
+    - **Requests** - Total requests and request rate
+    - **Response Time** - Average response time in ms
     - **CPU Usage** - Percentage of CPU resources used
     - **Memory Usage** - RAM consumption in MB and percentage
-    - **Network Traffic** - Inbound and outbound data transfer
-    - **Container Status** - Running state and health
+    - **Network I/O** - Inbound and outbound data transfer rate
 
-    Metrics update in real-time via Server-Sent Events (SSE), so you always see current performance data.
+    Metrics update in real-time, so you always see current performance data.
 
   </Col>
   <Col>
     **Where to View:**
     1. Navigate to your project in the dashboard
-    2. Select an environment (production, staging, etc.)
-    3. Open the **Metrics** tab for any container
-    4. View real-time charts and current values
+    2. Open the **Monitoring** tab
+    3. View real-time metrics and charts
   </Col>
 </Row>
 
@@ -44,37 +44,39 @@ Temps provides real-time metrics for every deployed container, giving you instan
 ### Via Dashboard
 
 1. Go to **Projects** → Select your project
-2. Choose an **Environment** (production, staging, preview)
-3. Click on a **Container** to view its details
-4. Open the **Metrics** tab to see real-time performance data
+2. Click the **Monitoring** tab
+3. View real-time metrics: requests, response time, CPU, memory, and network I/O
 
-The metrics dashboard shows:
+The monitoring dashboard shows:
 
-- **Live CPU graph** - CPU usage over time
-- **Memory graph** - RAM consumption trends
-- **Network activity** - Data transfer rates
-- **Current values** - Real-time snapshots
+- **Requests** - Total requests over time with request rate
+- **Response Time** - Average response time graph
+- **CPU** - Live CPU usage percentage
+- **Memory** - Live memory usage in MB and percentage
+- **Network I/O** - Real-time inbound/outbound data transfer
 
 ### Via API
 
 Access metrics programmatically using the API:
 
 ```bash
-# Get real-time metrics stream
+# Get real-time metrics for an environment
 curl -H "Authorization: Bearer YOUR_TOKEN" \
-  "https://your-temps-instance.com/api/projects/{project_id}/environments/{environment_id}/containers/{container_id}/metrics/stream"
+  "https://your-temps-instance.com/api/projects/{project_id}/environments/{environment_id}/metrics"
 ```
 
-The metrics stream uses Server-Sent Events (SSE) and provides JSON updates in real-time:
+The API returns:
 
 ```json
 {
-  "cpu_percent": 45.2,
-  "memory_bytes": 536870912,
-  "memory_percent": 62.5,
-  "network_rx_bytes": 1048576,
-  "network_tx_bytes": 524288,
-  "container_name": "my-app-production"
+  "requests_total": 1523,
+  "requests_rate": 12.5,
+  "response_time_avg_ms": 45,
+  "cpu_percent": 23.5,
+  "memory_bytes": 268435456,
+  "memory_percent": 52.0,
+  "network_rx_bytes_per_sec": 1024,
+  "network_tx_bytes_per_sec": 2048
 }
 ```
 
@@ -83,30 +85,38 @@ The metrics stream uses Server-Sent Events (SSE) and provides JSON updates in re
 ## Understanding Metrics
 
 <Properties>
+  <Property name="Requests">
+    **What it shows:** Total number of requests and request rate over time
+    **When to worry:** - Sudden spikes in traffic - Unusually high error rates - Request rate exceeds expected capacity
+    **Action:** Monitor traffic patterns and scale resources if needed
+  </Property>
+
+  <Property name="Response Time">
+    **What it shows:** Average time to process requests in milliseconds
+    **When to worry:** - Consistently above 500ms may indicate performance issues - Sudden spikes in response time
+    **Action:** - Optimize application code - Add caching - Review database queries - Consider scaling
+  </Property>
+
   <Property name="CPU Usage">
     **What it shows:** Percentage of CPU resources your container is using
     **When to worry:** - Consistently above 80% may indicate performance issues
-    - Spikes above 90% during traffic surges are normal - Sustained 100% usage
-    suggests you need more CPU resources **Action:** If CPU is consistently
-    high, consider: - Increasing CPU allocation in project settings - Optimizing
-    application code - Adding horizontal scaling
+    - Spikes above 90% during traffic surges are normal
+    - Sustained 100% usage suggests you need more CPU resources
+    **Action:** If CPU is consistently high, consider: - Increasing CPU allocation in project settings - Optimizing application code
   </Property>
 
   <Property name="Memory Usage">
-    **What it shows:** RAM consumption in bytes and percentage of allocated
-    memory **When to worry:** - Approaching 90% of allocated memory - Memory
-    usage continuously growing (potential memory leak) - Container restarts due
-    to OOM (Out of Memory) errors **Action:** If memory is high: - Increase
-    memory allocation - Investigate memory leaks in your code - Review
-    application dependencies
+    **What it shows:** RAM consumption in bytes and percentage of allocated memory
+    **When to worry:** - Approaching 90% of allocated memory
+    - Memory usage continuously growing (potential memory leak)
+    - Container restarts due to OOM (Out of Memory) errors
+    **Action:** If memory is high: - Increase memory allocation - Investigate memory leaks in your code
   </Property>
 
-  <Property name="Network Traffic">
-    **What it shows:** Data transfer rates (inbound and outbound) **What to
-    monitor:** - Unusual spikes in traffic - Asymmetric patterns (high outbound,
-    low inbound) - Network saturation **Action:** High network usage is usually
-    normal for web applications, but monitor for: - DDoS attacks (sudden massive
-    spikes) - Data exfiltration (unusual outbound patterns)
+  <Property name="Network I/O">
+    **What it shows:** Data transfer rates (inbound and outbound) in bytes per second
+    **What to monitor:** - Unusual spikes in traffic - Asymmetric patterns (high outbound, low inbound) - Network saturation
+    **Action:** High network usage is usually normal for web applications, but monitor for: - DDoS attacks (sudden massive spikes) - Data exfiltration (unusual outbound patterns)
   </Property>
 </Properties>
 
@@ -204,20 +214,16 @@ def health():
     operations
   </Property>
 
-  <Property name="Container Restarts">
-    **Symptoms:** Frequent container restarts visible in metrics **Possible
-    causes:** - Out of memory (OOM) errors - Application crashes - Health check
-    failures **Solutions:** 1. Check container logs for error messages 2. Review
-    memory usage before restarts 3. Verify health check endpoint is working 4.
-    Check application error logs
+<Property name="Container Restarts">
+    **Symptoms:** Frequent container restarts, deployment failures
+    **Possible causes:** - Out of memory (OOM) errors - Application crashes - Health check failures
+    **Solutions:** 1. Check deployment logs for error messages 2. Review memory usage patterns 3. Verify health check endpoint is working 4. Check application error logs
   </Property>
 
-  <Property name="Metrics Not Updating">
-    **Symptoms:** Metrics showing stale data or connection errors **Possible
-    causes:** - Container not running - Network connectivity issues - Metrics
-    service unavailable **Solutions:** 1. Verify container is running 2. Check
-    deployment status 3. Refresh the metrics view 4. Contact support if issue
-    persists
+<Property name="Metrics Not Updating">
+    **Symptoms:** Monitoring dashboard showing stale data or errors
+    **Possible causes:** - No active deployments - Network connectivity issues - Service unavailable
+    **Solutions:** 1. Verify a deployment is running 2. Check deployment status 3. Refresh the monitoring page 4. Contact support if issue persists
   </Property>
 </Properties>
 

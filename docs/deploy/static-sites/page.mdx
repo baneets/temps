@@ -36,7 +36,7 @@ A deployment is static when Temps can determine that the build output is a set o
 | Rsbuild | `dist/` | `@rsbuild/core` in `package.json` dependencies |
 
 <Note>
-  Next.js, Nuxt, Remix, SvelteKit, and NestJS are always deployed as server containers, even when they support static export. If you want pure static hosting for a Next.js project with `output: 'export'`, use Vite or add your own Dockerfile with nginx.
+  Next.js, Nuxt, Remix, SvelteKit, and NestJS are always deployed as server containers, even when they support static export. If you want pure static hosting for a Next.js project with `output: 'export'`, use Vite or deploy as a static site.
 </Note>
 
 ---
@@ -161,7 +161,7 @@ When a request arrives for a path that:
 
 The proxy serves `index.html` instead. Your client-side router (React Router, Vue Router, etc.) then handles the route.
 
-This works out of the box with no configuration. You do not need to add `_redirects`, `vercel.json`, or nginx rewrite rules.
+This works out of the box with no configuration. You do not need to add `_redirects`, `vercel.json`, or any rewrite rules.
 
 ---
 
