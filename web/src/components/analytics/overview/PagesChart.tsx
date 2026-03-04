@@ -11,8 +11,9 @@ import {
 } from '@/components/ui/card'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
-import { FileText } from 'lucide-react'
+import { ExternalLink, FileText } from 'lucide-react'
 import * as React from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 
 interface PagesChartProps {
   project: ProjectResponse
@@ -27,6 +28,28 @@ export function PagesChart({
   endDate,
   environment,
 }: PagesChartProps) {
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+
+  /** Build a query string that preserves the current date filter */
+  function buildDateParams(extra?: Record<string, string>): string {
+    const params = new URLSearchParams()
+    // Forward date filter params from the overview
+    const filter = searchParams.get('filter')
+    const from = searchParams.get('from')
+    const to = searchParams.get('to')
+    if (filter) params.set('filter', filter)
+    if (from) params.set('from', from)
+    if (to) params.set('to', to)
+    if (extra) {
+      for (const [k, v] of Object.entries(extra)) {
+        params.set(k, v)
+      }
+    }
+    const qs = params.toString()
+    return qs ? `?${qs}` : ''
+  }
+
   const { data, isLoading, error } = useQuery({
     ...getPropertyBreakdownOptions({
       path: {
@@ -56,22 +79,51 @@ export function PagesChart({
       }))
   }, [data])
 
+  function handlePageClick(pagePath: string, e: React.MouseEvent) {
+    const url = `/projects/${project.slug}/analytics/pages${buildDateParams({ path: pagePath })}`
+    if (e.metaKey || e.ctrlKey) {
+      window.open(url, '_blank')
+    } else {
+      navigate(url)
+    }
+  }
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Top Pages</CardTitle>
-        <CardDescription>
-          {startDate && endDate
-            ? `${format(startDate, 'LLL dd, y')} - ${format(endDate, 'LLL dd, y')}`
-            : 'Select a date range'}
-        </CardDescription>
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle>Top Pages</CardTitle>
+            <CardDescription>
+              {startDate && endDate
+                ? `${format(startDate, 'LLL dd, y')} - ${format(endDate, 'LLL dd, y')}`
+                : 'Select a date range'}
+            </CardDescription>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-xs"
+            onClick={() =>
+              navigate(
+                `/projects/${project.slug}/analytics/pages${buildDateParams()}`,
+              )
+            }
+          >
+            View all
+            <ExternalLink className="ml-1 h-3 w-3" />
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         {isLoading ? (
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               {[...Array(5)].map((_, i) => (
-                <div key={i} className="flex items-center justify-between">
+                <div
+                  key={`skeleton-page-${i}`}
+                  className="flex items-center justify-between"
+                >
                   <div className="h-4 w-[150px] bg-muted animate-pulse rounded" />
                   <div className="h-4 w-[100px] bg-muted animate-pulse rounded" />
                 </div>
@@ -100,7 +152,12 @@ export function PagesChart({
         ) : (
           <div className="space-y-3" style={{ minHeight: '400px' }}>
             {sortedPages.map((page) => (
-              <div key={page.page} className="space-y-2">
+              <button
+                type="button"
+                key={page.page}
+                className="space-y-2 w-full text-left cursor-pointer hover:bg-muted/50 rounded-lg p-1 -mx-1"
+                onClick={(e) => handlePageClick(page.page, e)}
+              >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <FileText className="h-4 w-4 text-muted-foreground" />
@@ -123,7 +180,7 @@ export function PagesChart({
                     style={{ width: `${page.percentage}%` }}
                   />
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         )}
