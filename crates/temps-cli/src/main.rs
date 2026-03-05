@@ -7,9 +7,9 @@ mod commands;
 
 use clap::{Parser, Subcommand};
 use commands::{
-    ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DoctorCommand, DomainCommand,
-    ProxyCommand, ResetPasswordCommand, ServeCommand, ServicesCommand, SetupCommand,
-    UpgradeCommand,
+    AgentCommand, ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DoctorCommand,
+    DomainCommand, JoinCommand, ProxyCommand, ResetPasswordCommand, ServeCommand, ServicesCommand,
+    SetupCommand, UpgradeCommand,
 };
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
@@ -67,6 +67,10 @@ enum Commands {
     Upgrade(UpgradeCommand),
     /// Diagnose the temps installation and check system health
     Doctor(DoctorCommand),
+    /// Join this machine to a Temps cluster as a worker node
+    Join(JoinCommand),
+    /// Run the worker node agent server
+    Agent(AgentCommand),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -140,6 +144,8 @@ fn main() -> anyhow::Result<()> {
              temps_screenshots={level},\
              temps_static_files={level},\
              temps_vulnerability_scanner={level},\
+             temps_agent={level},\
+             temps_wireguard={level},\
              pingora=warn,\
              sqlx=warn,\
              sea_orm=warn,\
@@ -187,5 +193,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Deploy(deploy_cmd) => deploy_cmd.execute(),
         Commands::Upgrade(upgrade_cmd) => upgrade_cmd.execute(),
         Commands::Doctor(doctor_cmd) => doctor_cmd.execute(),
+        Commands::Join(join_cmd) => join_cmd.execute(),
+        Commands::Agent(agent_cmd) => agent_cmd.execute(),
     }
 }

@@ -83,6 +83,9 @@ pub struct DeploymentOutput {
     pub host_ports: Vec<u16>,
     /// The resolved container port (from image EXPOSE, config, or default)
     pub container_port: u16,
+    /// Node IDs for each replica (None = local node). Parallel to container_ids.
+    #[serde(default)]
+    pub node_ids: Vec<Option<i32>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -133,6 +136,13 @@ pub struct DeploymentJobConfig {
     /// Maximum time to wait for the application to become ready (container
     /// start + health checks). Defaults to 300 seconds (5 minutes).
     pub health_check_timeout_secs: u64,
+    /// Optional list of node IDs to deploy to. When set, replicas are distributed
+    /// only across these specific nodes. When None, all active nodes are eligible.
+    pub target_nodes: Option<Vec<i32>>,
+    /// Environment variables with connection strings rewritten for remote nodes.
+    /// Used instead of `environment_variables` when a replica deploys to a worker node
+    /// (container names are replaced with the control plane's private address + host port).
+    pub remote_environment_variables: Option<HashMap<String, String>>,
 }
 
 impl Default for DeploymentJobConfig {
@@ -148,6 +158,8 @@ impl Default for DeploymentJobConfig {
             ingress_enabled: false,
             ingress_host: None,
             health_check_timeout_secs: 300,
+            target_nodes: None,
+            remote_environment_variables: None,
         }
     }
 }
@@ -168,16 +180,23 @@ pub struct DeployImageJob {
     target: DeploymentTarget,
     config: DeploymentJobConfig,
     container_deployer: Arc<dyn ContainerDeployer>,
+    /// Node scheduler for distributing replicas across the cluster.
+    /// When None, all replicas deploy locally (single-node mode).
+    node_scheduler: Option<Arc<crate::services::NodeScheduler>>,
     log_id: Option<String>,
     log_service: Option<Arc<LogService>>,
     /// Container IDs stored as soon as containers are created for cleanup on failure
     container_ids: Arc<Mutex<Vec<String>>>,
+    /// Per-replica deployers: maps container_id → deployer for cleanup on correct node
+    replica_deployers: Arc<Mutex<HashMap<String, Arc<dyn ContainerDeployer>>>>,
     /// Background task handle for log streaming (aborted on cleanup)
     log_stream_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Optional: directly provided image tag (for external/pre-built images, bypasses BuildImageJob lookup)
     external_image_tag: Option<String>,
     /// Docker log rotation config to prevent unbounded log growth
     log_config: Option<ContainerLogConfig>,
+    /// Encryption service for decrypting node tokens during remote deployments
+    encryption_service: Option<Arc<temps_core::EncryptionService>>,
 }
 
 impl std::fmt::Debug for DeployImageJob {
@@ -188,6 +207,7 @@ impl std::fmt::Debug for DeployImageJob {
             .field("target", &self.target)
             .field("config", &self.config)
             .field("container_deployer", &"<ContainerDeployer>")
+            .field("node_scheduler", &self.node_scheduler.is_some())
             .finish()
     }
 }
@@ -205,12 +225,15 @@ impl DeployImageJob {
             target,
             config: DeploymentJobConfig::default(),
             container_deployer,
+            node_scheduler: None,
             log_id: None,
             log_service: None,
             container_ids: Arc::new(Mutex::new(Vec::new())),
+            replica_deployers: Arc::new(Mutex::new(HashMap::new())),
             log_stream_task: Arc::new(Mutex::new(None)),
             external_image_tag: None,
             log_config: None,
+            encryption_service: None,
         }
     }
 
@@ -254,8 +277,18 @@ impl DeployImageJob {
         self
     }
 
+    pub fn with_node_scheduler(mut self, scheduler: Arc<crate::services::NodeScheduler>) -> Self {
+        self.node_scheduler = Some(scheduler);
+        self
+    }
+
     pub fn with_external_image_tag(mut self, image_tag: String) -> Self {
         self.external_image_tag = Some(image_tag);
+        self
+    }
+
+    pub fn with_encryption_service(mut self, service: Arc<temps_core::EncryptionService>) -> Self {
+        self.encryption_service = Some(service);
         self
     }
 
@@ -421,7 +454,16 @@ impl DeployImageJob {
                 self.log(context, format!("🧹 Removing container: {}", container_id))
                     .await?;
 
-                if let Err(e) = self.container_deployer.remove_container(container_id).await {
+                // Use per-replica deployer if available, otherwise fall back to local
+                let deployer = {
+                    let deployers = self.replica_deployers.lock().unwrap();
+                    deployers
+                        .get(container_id)
+                        .cloned()
+                        .unwrap_or_else(|| self.container_deployer.clone())
+                };
+
+                if let Err(e) = deployer.remove_container(container_id).await {
                     self.log(
                         context,
                         format!(
@@ -477,13 +519,67 @@ impl DeployImageJob {
         .await?;
         self.validate_deployment_config(context).await?;
 
+        // Schedule replicas across nodes (or deploy locally if no scheduler/no nodes)
+        let node_assignments = if let Some(ref scheduler) = self.node_scheduler {
+            let target_ids = self.config.target_nodes.as_deref();
+            match scheduler
+                .schedule_replicas(self.config.replicas, None, target_ids)
+                .await
+            {
+                Ok(assignments) => {
+                    // Log where replicas will be deployed
+                    for (i, assignment) in assignments.iter().enumerate() {
+                        match assignment {
+                            crate::services::NodeAssignment::Local => {
+                                self.log(
+                                    context,
+                                    format!("Replica {} scheduled on local node", i + 1),
+                                )
+                                .await?;
+                            }
+                            crate::services::NodeAssignment::Remote {
+                                node_name, node_id, ..
+                            } => {
+                                self.log(
+                                    context,
+                                    format!(
+                                        "Replica {} scheduled on node '{}' (id={})",
+                                        i + 1,
+                                        node_name,
+                                        node_id
+                                    ),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    assignments
+                }
+                Err(e) => {
+                    self.log(
+                        context,
+                        format!(
+                            "Node scheduling failed ({}), falling back to local deployment",
+                            e
+                        ),
+                    )
+                    .await?;
+                    vec![crate::services::NodeAssignment::Local; self.config.replicas as usize]
+                }
+            }
+        } else {
+            // No scheduler injected — pure single-node mode
+            vec![crate::services::NodeAssignment::Local; self.config.replicas as usize]
+        };
+
         // Deploy multiple replicas
         let mut all_container_ids = Vec::new();
         let mut all_host_ports = Vec::new();
+        let mut all_node_ids: Vec<Option<i32>> = Vec::new();
         let mut resolved_container_port: Option<u16> = None;
         let mut deployment_error: Option<WorkflowError> = None;
 
-        for replica_index in 0..self.config.replicas {
+        for (replica_index, assignment) in node_assignments.iter().enumerate() {
             self.log(
                 context,
                 format!(
@@ -494,18 +590,58 @@ impl DeployImageJob {
             )
             .await?;
 
+            // Select deployer based on node assignment
+            let deployer: Arc<dyn ContainerDeployer> = match assignment {
+                crate::services::NodeAssignment::Local => self.container_deployer.clone(),
+                crate::services::NodeAssignment::Remote {
+                    address, node_name, ..
+                } => {
+                    // Look up the node's token from the node service
+                    let token = self.get_node_token(assignment).await?;
+                    match temps_deployer::remote::RemoteNodeDeployer::new(
+                        address.clone(),
+                        token,
+                        node_name.clone(),
+                    ) {
+                        Ok(remote) => Arc::new(remote),
+                        Err(e) => {
+                            self.log(
+                                context,
+                                format!(
+                                    "❌ Failed to create remote deployer for node '{}': {}",
+                                    node_name, e
+                                ),
+                            )
+                            .await?;
+                            return Err(WorkflowError::JobExecutionFailed(format!(
+                                "Failed to create remote deployer for node '{}': {}",
+                                node_name, e
+                            )));
+                        }
+                    }
+                }
+            };
+
             match self
                 .deploy_single_replica(
                     image_output,
                     context,
-                    replica_index,
+                    replica_index as u32,
                     health_check_override.as_deref(),
+                    &deployer,
+                    assignment,
                 )
                 .await
             {
                 Ok((container_id, host_port, container_port)) => {
+                    // Track the deployer for this container (used for cleanup)
+                    {
+                        let mut deployers = self.replica_deployers.lock().unwrap();
+                        deployers.insert(container_id.clone(), deployer);
+                    }
                     all_container_ids.push(container_id);
                     all_host_ports.push(host_port);
+                    all_node_ids.push(assignment.node_id());
                     // All replicas share the same container port
                     resolved_container_port = Some(container_port);
                 }
@@ -556,13 +692,74 @@ impl DeployImageJob {
         .await?;
 
         Ok(DeploymentOutput {
-            status: DeploymentStatus::Running, // All replicas deployed successfully
+            status: DeploymentStatus::Running,
             replicas: all_container_ids.len() as u32,
             resources: self.config.resources.clone(),
             container_ids: all_container_ids,
             host_ports: all_host_ports,
             container_port: resolved_container_port.unwrap_or(self.config.port as u16),
+            node_ids: all_node_ids,
         })
+    }
+
+    /// Get the token for a remote node by decrypting the stored encrypted token.
+    async fn get_node_token(
+        &self,
+        assignment: &crate::services::NodeAssignment,
+    ) -> Result<String, WorkflowError> {
+        match assignment {
+            crate::services::NodeAssignment::Local => Err(WorkflowError::JobExecutionFailed(
+                "Cannot get token for local node assignment".to_string(),
+            )),
+            crate::services::NodeAssignment::Remote {
+                node_id, node_name, ..
+            } => {
+                let scheduler = self.node_scheduler.as_ref().ok_or_else(|| {
+                    WorkflowError::JobExecutionFailed(
+                        "Node scheduler not available for remote deployment".to_string(),
+                    )
+                })?;
+
+                let node = scheduler
+                    .node_service()
+                    .get_by_id(*node_id)
+                    .await
+                    .map_err(|e| {
+                        WorkflowError::JobExecutionFailed(format!(
+                            "Failed to get node '{}' (id={}): {}",
+                            node_name, node_id, e
+                        ))
+                    })?;
+
+                let encrypted_token = node.token_encrypted.ok_or_else(|| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Node '{}' (id={}) has no encrypted token — re-register the node",
+                        node_name, node_id
+                    ))
+                })?;
+
+                let encryption_service = self.encryption_service.as_ref().ok_or_else(|| {
+                    WorkflowError::JobExecutionFailed(
+                        "Encryption service not available for token decryption".to_string(),
+                    )
+                })?;
+
+                let decrypted_bytes =
+                    encryption_service.decrypt(&encrypted_token).map_err(|e| {
+                        WorkflowError::JobExecutionFailed(format!(
+                            "Failed to decrypt token for node '{}' (id={}): {}",
+                            node_name, node_id, e
+                        ))
+                    })?;
+
+                String::from_utf8(decrypted_bytes).map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Decrypted token for node '{}' (id={}) is not valid UTF-8: {}",
+                        node_name, node_id, e
+                    ))
+                })
+            }
+        }
     }
 
     /// Deploy a single replica of the container
@@ -572,6 +769,8 @@ impl DeployImageJob {
         context: &WorkflowContext,
         replica_index: u32,
         health_check_override: Option<&str>,
+        deployer: &Arc<dyn ContainerDeployer>,
+        assignment: &crate::services::NodeAssignment,
     ) -> Result<(String, u16, u16), WorkflowError> {
         // Prepare deployment request using temps-deployer types
         self.log(context, "Deploying container image...".to_string())
@@ -585,13 +784,28 @@ impl DeployImageJob {
             .resolve_container_port(&image_output.image_tag, context)
             .await;
 
-        // Allocate a random available port on the host
-        let host_port = Self::find_available_port()?;
+        // For local deployments, allocate a port on this host.
+        // For remote deployments, set host_port=0 so Docker on the agent picks an available port.
+        let host_port = if assignment.is_local() {
+            Self::find_available_port()?
+        } else {
+            0
+        };
         self.log(
             context,
             format!(
-                "🔌 Allocated host port: {} → container port: {}",
-                host_port, container_port
+                "🔌 {} host port: {} → container port: {}",
+                if assignment.is_local() {
+                    "Allocated"
+                } else {
+                    "Requesting dynamic"
+                },
+                if host_port == 0 {
+                    "auto".to_string()
+                } else {
+                    host_port.to_string()
+                },
+                container_port
             ),
         )
         .await?;
@@ -618,8 +832,17 @@ impl DeployImageJob {
             disk_limit_mb: None,
         };
 
-        // Use environment variables from config (PORT and HOST already included from workflow planner)
-        let environment_vars = self.config.environment_variables.clone();
+        // Use remote environment variables for remote deployments (connection strings
+        // rewritten with control plane's private address), fall back to local env vars.
+        let environment_vars = if !assignment.is_local() {
+            if let Some(ref remote_vars) = self.config.remote_environment_variables {
+                remote_vars.clone()
+            } else {
+                self.config.environment_variables.clone()
+            }
+        } else {
+            self.config.environment_variables.clone()
+        };
 
         tracing::debug!(
             "🌍 Deploying container with {} environment variables: {}",
@@ -672,8 +895,7 @@ impl DeployImageJob {
             labels,
         };
 
-        let deploy_result = self
-            .container_deployer
+        let deploy_result = deployer
             .deploy_container(deploy_request)
             .await
             .map_err(|e| {
@@ -702,8 +924,7 @@ impl DeployImageJob {
         loop {
             // Try to get container info, but don't fail hard if it can't be found
             // (container might have been removed by Docker or other processes)
-            let container_info = match self
-                .container_deployer
+            let container_info = match deployer
                 .get_container_info(&deploy_result.container_id)
                 .await
             {
@@ -892,12 +1113,22 @@ impl DeployImageJob {
                 "Waiting for application to be ready...".to_string(),
             )
             .await?;
-            let health_check_url = temps_core::DeploymentMode::build_container_url(
-                &deploy_result.container_name,
-                deploy_result.container_port,
-                deploy_result.host_port,
-                Some(health_path),
-            );
+            // For remote nodes, health check via the node's private IP and host port
+            // since the control plane can't reach the container by Docker network name.
+            // For local deployments, use the standard container URL resolution.
+            let health_check_url = if let Some(private_addr) = assignment.private_address() {
+                format!(
+                    "http://{}:{}{}",
+                    private_addr, deploy_result.host_port, health_path
+                )
+            } else {
+                temps_core::DeploymentMode::build_container_url(
+                    &deploy_result.container_name,
+                    deploy_result.container_port,
+                    deploy_result.host_port,
+                    Some(health_path),
+                )
+            };
             self.log(context, format!("Health check URL: {}", health_check_url))
                 .await?;
 
@@ -951,8 +1182,7 @@ impl DeployImageJob {
 
                 // Check if container is still running (it may have crashed)
                 // This prevents waiting the full timeout for a container that already exited
-                if let Ok(container_info) = self
-                    .container_deployer
+                if let Ok(container_info) = deployer
                     .get_container_info(&deploy_result.container_id)
                     .await
                 {
@@ -1053,12 +1283,16 @@ impl DeployImageJob {
             .await?;
         }
 
-        let endpoint_url = temps_core::DeploymentMode::build_container_url(
-            &deploy_result.container_name,
-            deploy_result.container_port,
-            deploy_result.host_port,
-            None,
-        );
+        let endpoint_url = if let Some(private_addr) = assignment.private_address() {
+            format!("http://{}:{}", private_addr, deploy_result.host_port)
+        } else {
+            temps_core::DeploymentMode::build_container_url(
+                &deploy_result.container_name,
+                deploy_result.container_port,
+                deploy_result.host_port,
+                None,
+            )
+        };
         self.log(
             context,
             format!("✅ Replica {} ready at {}", replica_index + 1, endpoint_url),
@@ -1172,6 +1406,7 @@ impl WorkflowTask for DeployImageJob {
             &deployment_output.container_ids,
         )?;
         context.set_output(&self.job_id, "host_ports", &deployment_output.host_ports)?;
+        context.set_output(&self.job_id, "node_ids", &deployment_output.node_ids)?;
 
         // For backward compatibility, also set singular fields using the first container
         if !deployment_output.container_ids.is_empty() {
@@ -1295,10 +1530,12 @@ pub struct DeployImageJobBuilder {
     build_job_id: Option<String>,
     target: Option<DeploymentTarget>,
     config: DeploymentJobConfig,
+    node_scheduler: Option<Arc<crate::services::NodeScheduler>>,
     log_id: Option<String>,
     log_service: Option<Arc<LogService>>,
     external_image_tag: Option<String>,
     log_config: Option<ContainerLogConfig>,
+    encryption_service: Option<Arc<temps_core::EncryptionService>>,
 }
 
 impl DeployImageJobBuilder {
@@ -1308,10 +1545,12 @@ impl DeployImageJobBuilder {
             build_job_id: None,
             target: None,
             config: DeploymentJobConfig::default(),
+            node_scheduler: None,
             log_id: None,
             log_service: None,
             external_image_tag: None,
             log_config: None,
+            encryption_service: None,
         }
     }
 
@@ -1403,6 +1642,33 @@ impl DeployImageJobBuilder {
         self
     }
 
+    /// Set the node scheduler for multi-node deployments
+    pub fn node_scheduler(mut self, scheduler: Arc<crate::services::NodeScheduler>) -> Self {
+        self.node_scheduler = Some(scheduler);
+        self
+    }
+
+    /// Set the target node IDs for this deployment
+    pub fn target_nodes(mut self, node_ids: Vec<i32>) -> Self {
+        self.config.target_nodes = Some(node_ids);
+        self
+    }
+
+    /// Set remote environment variables (connection strings rewritten for worker nodes)
+    pub fn remote_environment_variables(
+        mut self,
+        remote_vars: Option<HashMap<String, String>>,
+    ) -> Self {
+        self.config.remote_environment_variables = remote_vars;
+        self
+    }
+
+    /// Set the encryption service for decrypting node tokens during remote deployments
+    pub fn encryption_service(mut self, service: Arc<temps_core::EncryptionService>) -> Self {
+        self.encryption_service = Some(service);
+        self
+    }
+
     pub fn build(
         self,
         container_deployer: Arc<dyn ContainerDeployer>,
@@ -1418,6 +1684,9 @@ impl DeployImageJobBuilder {
         let mut job = DeployImageJob::new(job_id, build_job_id, target, container_deployer)
             .with_config(self.config);
 
+        if let Some(scheduler) = self.node_scheduler {
+            job = job.with_node_scheduler(scheduler);
+        }
         if let Some(log_id) = self.log_id {
             job = job.with_log_id(log_id);
         }
@@ -1429,6 +1698,9 @@ impl DeployImageJobBuilder {
         }
         if let Some(log_config) = self.log_config {
             job = job.with_log_config(log_config);
+        }
+        if let Some(encryption_service) = self.encryption_service {
+            job = job.with_encryption_service(encryption_service);
         }
 
         Ok(job)
@@ -1692,5 +1964,518 @@ mod tests {
 
         let context = crate::test_utils::create_test_context("test".to_string(), 1, 1, 1);
         assert!(job.validate_deployment_config(&context).await.is_ok());
+    }
+
+    #[test]
+    fn test_deploy_image_job_builder_with_node_scheduler() {
+        use crate::services::{NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<nodes::Model>::new()])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let job = DeployImageJobBuilder::new()
+            .job_id("test_deploy".to_string())
+            .build_job_id("build_image".to_string())
+            .target(DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            })
+            .service_name("myapp".to_string())
+            .namespace("default".to_string())
+            .replicas(2)
+            .node_scheduler(scheduler)
+            .target_nodes(vec![1, 3])
+            .build(container_deployer)
+            .unwrap();
+
+        assert!(job.node_scheduler.is_some(), "Node scheduler should be set");
+        assert_eq!(
+            job.config.target_nodes,
+            Some(vec![1, 3]),
+            "Target nodes should be set"
+        );
+        assert_eq!(job.config.replicas, 2);
+    }
+
+    #[test]
+    fn test_deploy_image_job_builder_without_node_scheduler() {
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let job = DeployImageJobBuilder::new()
+            .job_id("test_deploy".to_string())
+            .build_job_id("build_image".to_string())
+            .target(DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            })
+            .service_name("myapp".to_string())
+            .namespace("default".to_string())
+            .replicas(3)
+            .build(container_deployer)
+            .unwrap();
+
+        assert!(
+            job.node_scheduler.is_none(),
+            "Node scheduler should not be set when not provided"
+        );
+        assert_eq!(
+            job.config.target_nodes, None,
+            "Target nodes should be None by default"
+        );
+    }
+
+    #[test]
+    fn test_deployment_job_config_target_nodes_default() {
+        let config = DeploymentJobConfig::default();
+        assert_eq!(config.target_nodes, None);
+    }
+
+    /// Test that node scheduling produces correct assignments when integrated with DeployImageJob.
+    /// We test the scheduling logic directly (not the full deploy flow which needs real containers).
+    #[tokio::test]
+    async fn test_node_scheduling_no_scheduler_returns_local_assignments() {
+        // Without a node_scheduler, the deploy_image method creates Local assignments
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let job = DeployImageJobBuilder::new()
+            .job_id("test".to_string())
+            .build_job_id("build".to_string())
+            .target(DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            })
+            .service_name("myapp".to_string())
+            .namespace("default".to_string())
+            .replicas(3)
+            .build(container_deployer)
+            .unwrap();
+
+        // Verify no scheduler is set
+        assert!(job.node_scheduler.is_none());
+        // The deploy_image method will create vec![Local; 3] internally
+    }
+
+    /// Test that scheduler with no active nodes produces local assignments
+    #[tokio::test]
+    async fn test_node_scheduling_empty_nodes_returns_local() {
+        use crate::services::{NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<nodes::Model>::new()])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        // Schedule 3 replicas with no active nodes
+        let assignments = scheduler.schedule_replicas(3, None, None).await.unwrap();
+        assert_eq!(assignments.len(), 3);
+        for a in &assignments {
+            assert!(
+                a.is_local(),
+                "All assignments should be Local when no active nodes"
+            );
+        }
+    }
+
+    /// Test that scheduler distributes replicas across active nodes via round-robin
+    #[tokio::test]
+    async fn test_node_scheduling_round_robin_across_nodes() {
+        use crate::services::{NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        fn make_node(id: i32, name: &str) -> nodes::Model {
+            nodes::Model {
+                id,
+                name: name.to_string(),
+                token_hash: format!("hash_{}", id),
+                token_encrypted: None,
+                address: format!("https://10.0.0.{}:3100", id),
+                private_address: format!("10.0.0.{}", id),
+                public_endpoint: None,
+                wg_public_key: None,
+                role: "worker".to_string(),
+                status: "active".to_string(),
+                labels: serde_json::json!({}),
+                capacity: serde_json::json!({}),
+                last_heartbeat: Some(chrono::Utc::now()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![
+                make_node(1, "worker-a"),
+                make_node(2, "worker-b"),
+            ]])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        let assignments = scheduler.schedule_replicas(4, None, None).await.unwrap();
+        assert_eq!(assignments.len(), 4);
+
+        // All should be Remote
+        let node_ids: Vec<i32> = assignments
+            .iter()
+            .map(|a| a.node_id().expect("Should be Remote"))
+            .collect();
+
+        // Round-robin: A(1), B(2), A(1), B(2)
+        assert_eq!(node_ids, vec![1, 2, 1, 2]);
+    }
+
+    /// Test that target_nodes filters to only specified nodes
+    #[tokio::test]
+    async fn test_node_scheduling_with_target_nodes_filter() {
+        use crate::services::{NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        fn make_node(id: i32, name: &str) -> nodes::Model {
+            nodes::Model {
+                id,
+                name: name.to_string(),
+                token_hash: format!("hash_{}", id),
+                token_encrypted: None,
+                address: format!("https://10.0.0.{}:3100", id),
+                private_address: format!("10.0.0.{}", id),
+                public_endpoint: None,
+                wg_public_key: None,
+                role: "worker".to_string(),
+                status: "active".to_string(),
+                labels: serde_json::json!({}),
+                capacity: serde_json::json!({}),
+                last_heartbeat: Some(chrono::Utc::now()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![
+                make_node(1, "worker-a"),
+                make_node(2, "worker-b"),
+                make_node(3, "worker-c"),
+            ]])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        // Target only nodes 1 and 3
+        let target_ids = vec![1, 3];
+        let assignments = scheduler
+            .schedule_replicas(4, None, Some(&target_ids))
+            .await
+            .unwrap();
+        assert_eq!(assignments.len(), 4);
+
+        for a in &assignments {
+            let node_id = a.node_id().expect("Should be Remote");
+            assert!(
+                node_id == 1 || node_id == 3,
+                "Should only schedule on target nodes, got {}",
+                node_id
+            );
+        }
+    }
+
+    /// Test that target_nodes with no matching active nodes falls back to local
+    #[tokio::test]
+    async fn test_node_scheduling_target_nodes_no_match_falls_back_to_local() {
+        use crate::services::{NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        let node = nodes::Model {
+            id: 1,
+            name: "worker-1".to_string(),
+            token_hash: "hash".to_string(),
+            token_encrypted: None,
+            address: "https://10.0.0.1:3100".to_string(),
+            private_address: "10.0.0.1".to_string(),
+            public_endpoint: None,
+            wg_public_key: None,
+            role: "worker".to_string(),
+            status: "active".to_string(),
+            labels: serde_json::json!({}),
+            capacity: serde_json::json!({}),
+            last_heartbeat: Some(chrono::Utc::now()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![node]])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        // Target node 99 doesn't exist
+        let target_ids = vec![99];
+        let assignments = scheduler
+            .schedule_replicas(2, None, Some(&target_ids))
+            .await
+            .unwrap();
+        assert_eq!(assignments.len(), 2);
+        for a in &assignments {
+            assert!(
+                a.is_local(),
+                "Should fall back to local when no target nodes match"
+            );
+        }
+    }
+
+    /// Test that DeployImageJob correctly passes target_nodes to scheduler
+    #[tokio::test]
+    async fn test_deploy_image_job_target_nodes_config_flows_to_scheduler() {
+        use crate::services::{NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<nodes::Model>::new()])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let job = DeployImageJobBuilder::new()
+            .job_id("deploy".to_string())
+            .build_job_id("build".to_string())
+            .target(DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            })
+            .service_name("app".to_string())
+            .namespace("default".to_string())
+            .replicas(2)
+            .node_scheduler(scheduler)
+            .target_nodes(vec![5, 10])
+            .build(container_deployer)
+            .unwrap();
+
+        // Verify the config was set correctly
+        assert_eq!(job.config.target_nodes, Some(vec![5, 10]));
+        assert!(job.node_scheduler.is_some());
+
+        // The target_nodes will be passed to scheduler.schedule_replicas
+        // via self.config.target_nodes.as_deref() in deploy_image()
+    }
+
+    /// Test NodeAssignment accessor methods
+    #[test]
+    fn test_node_assignment_private_address() {
+        use crate::services::NodeAssignment;
+
+        let local = NodeAssignment::Local;
+        assert!(local.private_address().is_none());
+
+        let remote = NodeAssignment::Remote {
+            node_id: 1,
+            node_name: "w1".to_string(),
+            address: "https://10.0.0.1:3100".to_string(),
+            private_address: "10.0.0.1".to_string(),
+        };
+        assert_eq!(remote.private_address(), Some("10.0.0.1"));
+        assert_eq!(remote.node_id(), Some(1));
+        assert!(!remote.is_local());
+    }
+
+    /// Test get_node_token returns error for Local assignment
+    #[tokio::test]
+    async fn test_get_node_token_local_returns_error() {
+        use crate::services::NodeAssignment;
+
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let job = DeployImageJob::new(
+            "test".to_string(),
+            "build".to_string(),
+            DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            },
+            container_deployer,
+        );
+
+        let result = job.get_node_token(&NodeAssignment::Local).await;
+        assert!(result.is_err(), "Should error for local assignment");
+    }
+
+    /// Test get_node_token returns error when no scheduler is set
+    #[tokio::test]
+    async fn test_get_node_token_no_scheduler_returns_error() {
+        use crate::services::NodeAssignment;
+
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let job = DeployImageJob::new(
+            "test".to_string(),
+            "build".to_string(),
+            DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            },
+            container_deployer,
+        );
+
+        let result = job
+            .get_node_token(&NodeAssignment::Remote {
+                node_id: 1,
+                node_name: "worker-1".to_string(),
+                address: "https://10.0.0.1:3100".to_string(),
+                private_address: "10.0.0.1".to_string(),
+            })
+            .await;
+        assert!(result.is_err(), "Should error when no scheduler available");
+    }
+
+    /// Test get_node_token decrypts the encrypted token from node service
+    #[tokio::test]
+    async fn test_get_node_token_success() {
+        use crate::services::{NodeAssignment, NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        let enc_service = Arc::new(
+            temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
+        );
+        let plaintext_token = "my-secret-agent-token";
+        let encrypted = enc_service.encrypt(plaintext_token.as_bytes()).unwrap();
+
+        let node = nodes::Model {
+            id: 1,
+            name: "worker-1".to_string(),
+            token_hash: "hash".to_string(),
+            token_encrypted: Some(encrypted),
+            address: "https://10.0.0.1:3100".to_string(),
+            private_address: "10.0.0.1".to_string(),
+            public_endpoint: None,
+            wg_public_key: None,
+            role: "worker".to_string(),
+            status: "active".to_string(),
+            labels: serde_json::json!({}),
+            capacity: serde_json::json!({}),
+            last_heartbeat: Some(chrono::Utc::now()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![node]])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let mut job = DeployImageJob::new(
+            "test".to_string(),
+            "build".to_string(),
+            DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            },
+            container_deployer,
+        );
+        job.node_scheduler = Some(scheduler);
+        job.encryption_service = Some(enc_service);
+
+        let result = job
+            .get_node_token(&NodeAssignment::Remote {
+                node_id: 1,
+                node_name: "worker-1".to_string(),
+                address: "https://10.0.0.1:3100".to_string(),
+                private_address: "10.0.0.1".to_string(),
+            })
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), plaintext_token);
+    }
+
+    /// Test get_node_token fails when no encrypted token is stored
+    #[tokio::test]
+    async fn test_get_node_token_no_encrypted_token() {
+        use crate::services::{NodeAssignment, NodeScheduler, NodeService};
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use temps_entities::nodes;
+
+        let node = nodes::Model {
+            id: 1,
+            name: "worker-1".to_string(),
+            token_hash: "hash".to_string(),
+            token_encrypted: None,
+            address: "https://10.0.0.1:3100".to_string(),
+            private_address: "10.0.0.1".to_string(),
+            public_endpoint: None,
+            wg_public_key: None,
+            role: "worker".to_string(),
+            status: "active".to_string(),
+            labels: serde_json::json!({}),
+            capacity: serde_json::json!({}),
+            last_heartbeat: Some(chrono::Utc::now()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![node]])
+            .into_connection();
+        let node_service = Arc::new(NodeService::new(Arc::new(db)));
+        let scheduler = Arc::new(NodeScheduler::new(node_service));
+
+        let container_deployer: Arc<dyn ContainerDeployer> =
+            Arc::new(TrackingMockContainerDeployer::new());
+
+        let enc_service = Arc::new(
+            temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
+        );
+
+        let mut job = DeployImageJob::new(
+            "test".to_string(),
+            "build".to_string(),
+            DeploymentTarget::Docker {
+                registry_url: "local".to_string(),
+                network: None,
+            },
+            container_deployer,
+        );
+        job.node_scheduler = Some(scheduler);
+        job.encryption_service = Some(enc_service);
+
+        let result = job
+            .get_node_token(&NodeAssignment::Remote {
+                node_id: 1,
+                node_name: "worker-1".to_string(),
+                address: "https://10.0.0.1:3100".to_string(),
+                private_address: "10.0.0.1".to_string(),
+            })
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no encrypted token"),
+            "Error should mention missing token: {}",
+            err
+        );
     }
 }

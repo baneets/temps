@@ -738,18 +738,28 @@ impl SessionReplayService {
             project_id, environment_id
         );
 
-        // Build filtered base for total count
+        // Build filtered base for total count (exclude 0s duration replays)
         let mut count_select = session_replay_sessions::Entity::find()
-            .filter(session_replay_sessions::Column::ProjectId.eq(project_id));
+            .filter(session_replay_sessions::Column::ProjectId.eq(project_id))
+            .filter(
+                session_replay_sessions::Column::Duration
+                    .is_null()
+                    .or(session_replay_sessions::Column::Duration.gt(0)),
+            );
         if let Some(env_id) = environment_id {
             count_select =
                 count_select.filter(session_replay_sessions::Column::EnvironmentId.eq(env_id));
         }
         let total_count: u64 = count_select.count(self.db.as_ref()).await?;
 
-        // Use SeaORM query builder
+        // Use SeaORM query builder (exclude 0s duration replays)
         let mut query = session_replay_sessions::Entity::find()
             .filter(session_replay_sessions::Column::ProjectId.eq(project_id))
+            .filter(
+                session_replay_sessions::Column::Duration
+                    .is_null()
+                    .or(session_replay_sessions::Column::Duration.gt(0)),
+            )
             .inner_join(visitor::Entity)
             .join(
                 sea_orm::JoinType::LeftJoin,
@@ -943,7 +953,7 @@ impl SessionReplayService {
             FROM session_replay_sessions s
             INNER JOIN visitor v ON s.visitor_id = v.id
             LEFT JOIN ip_geolocations g ON v.ip_address_id = g.id
-            WHERE s.visitor_id = $1
+            WHERE s.visitor_id = $1 AND (s.duration IS NULL OR s.duration > 0)
             ORDER BY s.created_at DESC
             LIMIT {} OFFSET {}
             "#,

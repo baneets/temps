@@ -285,6 +285,7 @@ export type AppSettings = {
     docker_registry?: DockerRegistrySettings;
     external_url?: string | null;
     letsencrypt?: LetsEncryptSettings;
+    multi_node?: MultiNodeSettings;
     preview_domain?: string;
     rate_limiting?: RateLimitSettings;
     screenshots?: ScreenshotSettings;
@@ -809,6 +810,10 @@ export type ContainerInfoResponse = {
     created_at: string;
     image_name: string;
     status: string;
+    /**
+     * Node name where this container is running. Undefined for local (single-node) deployments.
+     */
+    node_name?: string;
 };
 
 export type ContainerListResponse = {
@@ -1689,6 +1694,12 @@ export type DeploymentConfig = {
      * Enable session recording for analytics
      */
     sessionRecordingEnabled?: boolean;
+    /**
+     * Optional list of node IDs to deploy to. When set, replicas are distributed
+     * only across these nodes (round-robin). When None, the scheduler distributes
+     * across all active nodes (or deploys locally if no nodes exist).
+     */
+    targetNodes?: Array<number> | null;
 };
 
 /**
@@ -3609,6 +3620,17 @@ export type GenerateDockerfileResponse = {
 };
 
 /**
+ * Response returned when a join token is generated (plaintext shown once)
+ */
+export type GenerateJoinTokenResponse = {
+    message: string;
+    /**
+     * The plaintext join token — shown only once, save it now
+     */
+    token: string;
+};
+
+/**
  * Response containing geolocation information for an IP address
  */
 export type GeoLocationResponse = {
@@ -3887,6 +3909,18 @@ export type HealthSummary = {
     service_name: string;
     status: HealthStatus;
     uptime_pct: number;
+};
+
+export type HeartbeatApiRequest = {
+    /**
+     * Resource capacity/usage info as JSON (cpu_usage, memory_usage, etc.)
+     */
+    capacity?: unknown;
+};
+
+export type HeartbeatResponse = {
+    message: string;
+    status: string;
 };
 
 /**
@@ -4349,6 +4383,16 @@ export type IpAccessControlResponse = {
     ip_address: string;
     reason?: string | null;
     updated_at: string;
+};
+
+/**
+ * Response for join token status check
+ */
+export type JoinTokenStatusResponse = {
+    /**
+     * Whether a join token has been configured
+     */
+    has_token: boolean;
 };
 
 /**
@@ -5096,6 +5140,16 @@ export type MonitorStatus = {
 };
 
 /**
+ * Multi-node cluster settings
+ */
+export type MultiNodeSettings = {
+    /**
+     * SHA-256 hash of the join token (never store plaintext)
+     */
+    join_token_hash?: string | null;
+};
+
+/**
  * MX (Mail Exchange) validation result
  */
 export type MxResult = {
@@ -5176,6 +5230,23 @@ export type NetworkMode = 'bridge' | 'host' | 'none' | {
  */
 export type NixpacksPresetConfig = {
     [key: string]: unknown;
+};
+
+export type NodeInfoResponse = {
+    address: string;
+    created_at: string;
+    id: number;
+    labels: unknown;
+    last_heartbeat?: string | null;
+    name: string;
+    private_address: string;
+    role: string;
+    status: string;
+};
+
+export type NodeListResponse = {
+    nodes: Array<NodeInfoResponse>;
+    total: number;
 };
 
 export type NotificationPreferencesResponse = {
@@ -5944,6 +6015,20 @@ export type PluginManifest = {
      */
     display_name?: string | null;
     /**
+     * Platform event types the plugin subscribes to.
+     *
+     * When specified, Temps will POST matching events to the plugin's
+     * `/_events` endpoint. Uses dot-notation event names matching the
+     * webhook event types (e.g., "deployment.succeeded", "project.created").
+     *
+     * Available events:
+     * - `deployment.created`, `deployment.succeeded`, `deployment.failed`,
+     * `deployment.cancelled`, `deployment.ready`
+     * - `project.created`, `project.deleted`
+     * - `domain.created`, `domain.provisioned`
+     */
+    events?: Array<string>;
+    /**
      * Health check endpoint path (relative to plugin root)
      */
     health_path?: string;
@@ -6192,7 +6277,7 @@ export type ProjectResponse = {
     /**
      * Preset-specific configuration (Dockerfile path, build context, etc.)
      */
-    preset_config?: PresetConfigSchema | null;
+    preset_config?: unknown;
     repo_name?: string | null;
     repo_owner?: string | null;
     slug: string;
@@ -6266,6 +6351,30 @@ export type PropertyBreakdownQuery = {
      * Optional event name filter (e.g., "page_view", "click")
      */
     event_name?: string | null;
+    /**
+     * Filter by browser name (for browser version drill-downs)
+     */
+    filter_browser?: string | null;
+    /**
+     * Filter by channel name (for channel -> referrer drill-downs)
+     */
+    filter_channel?: string | null;
+    /**
+     * Filter by referrer hostname (for referrer -> pages drill-downs)
+     */
+    filter_referrer?: string | null;
+    /**
+     * Filter by country (for region/city drill-downs). Requires geolocation join.
+     */
+    filter_country?: string | null;
+    /**
+     * Filter by operating system name (for OS version drill-downs)
+     */
+    filter_os?: string | null;
+    /**
+     * Filter by region (for city drill-downs). Requires geolocation join.
+     */
+    filter_region?: string | null;
     /**
      * Property column to group by
      */
@@ -6680,6 +6789,52 @@ export type RegisterImageRequest = {
     tag?: string | null;
 };
 
+export type RegisterNodeApiRequest = {
+    /**
+     * Node's reachable address (e.g., "10.100.0.2" or "192.168.1.50")
+     */
+    address: string;
+    /**
+     * Join token to authorize this registration (must match the token generated in Settings)
+     */
+    join_token?: string | null;
+    /**
+     * Labels for scheduling (e.g., {"region": "us-east", "gpu": "true"})
+     */
+    labels?: unknown;
+    /**
+     * Unique name for this node
+     */
+    name: string;
+    /**
+     * Private/WireGuard address for inter-node communication
+     */
+    private_address: string;
+    /**
+     * Public endpoint for WireGuard (e.g., "203.0.113.1:51820")
+     */
+    public_endpoint?: string | null;
+    /**
+     * Node role (default: "worker")
+     */
+    role?: string | null;
+    /**
+     * Registration token (plaintext, will be hashed before storage)
+     */
+    token: string;
+    /**
+     * WireGuard public key
+     */
+    wg_public_key?: string | null;
+};
+
+export type RegisterNodeResponse = {
+    id: number;
+    message: string;
+    name: string;
+    status: string;
+};
+
 export type RegisterRequest = {
     email: string;
     name: string;
@@ -6688,6 +6843,24 @@ export type RegisterRequest = {
 
 export type ReleaseListResponse = {
     releases: Array<string>;
+};
+
+/**
+ * Response from the reload endpoint.
+ */
+export type ReloadResponse = {
+    /**
+     * Number of plugins successfully loaded after reload
+     */
+    loaded: number;
+    /**
+     * Human-readable status message
+     */
+    message: string;
+    /**
+     * Names of loaded plugins
+     */
+    plugins: Array<string>;
 };
 
 export type RepositoryListQuery = {
@@ -8548,10 +8721,7 @@ export type UpdateGitSettingsRequest = {
     git_provider_connection_id?: number | null;
     main_branch: string;
     preset?: string | null;
-    /**
-     * Preset-specific configuration (e.g., Dockerfile path for Docker preset)
-     */
-    preset_config?: PresetConfigSchema | null;
+    preset_config?: null | PresetConfigSchema;
     repo_name: string;
     repo_owner: string;
 };
@@ -8624,10 +8794,7 @@ export type UpdateProjectSettingsRequest = {
     git_provider_connection_id?: number | null;
     main_branch?: string | null;
     preset?: string | null;
-    /**
-     * Preset-specific configuration (e.g., Dockerfile path for Docker preset)
-     */
-    preset_config?: PresetConfigSchema | null;
+    preset_config?: null | PresetConfigSchema;
     repo_name?: string | null;
     repo_owner?: string | null;
     slug?: string | null;
@@ -16534,6 +16701,136 @@ export type GetIncidentUpdatesResponses = {
 
 export type GetIncidentUpdatesResponse = GetIncidentUpdatesResponses[keyof GetIncidentUpdatesResponses];
 
+export type ListNodesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/internal/nodes';
+};
+
+export type ListNodesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListNodesResponses = {
+    /**
+     * List of nodes
+     */
+    200: NodeListResponse;
+};
+
+export type ListNodesResponse = ListNodesResponses[keyof ListNodesResponses];
+
+export type RegisterNodeData = {
+    body: RegisterNodeApiRequest;
+    path?: never;
+    query?: never;
+    url: '/internal/nodes/register';
+};
+
+export type RegisterNodeErrors = {
+    /**
+     * Validation error
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RegisterNodeResponses = {
+    /**
+     * Node reconnected successfully
+     */
+    200: RegisterNodeResponse;
+    /**
+     * Node registered successfully
+     */
+    201: RegisterNodeResponse;
+};
+
+export type RegisterNodeResponse2 = RegisterNodeResponses[keyof RegisterNodeResponses];
+
+export type GetNodeData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}';
+};
+
+export type GetNodeErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Node not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetNodeResponses = {
+    /**
+     * Node details
+     */
+    200: NodeInfoResponse;
+};
+
+export type GetNodeResponse = GetNodeResponses[keyof GetNodeResponses];
+
+export type NodeHeartbeatData = {
+    body: HeartbeatApiRequest;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/heartbeat';
+};
+
+export type NodeHeartbeatErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Node not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type NodeHeartbeatResponses = {
+    /**
+     * Heartbeat received
+     */
+    200: HeartbeatResponse;
+};
+
+export type NodeHeartbeatResponse = NodeHeartbeatResponses[keyof NodeHeartbeatResponses];
+
 export type ListIpAccessControlData = {
     body?: never;
     path?: never;
@@ -22274,9 +22571,13 @@ export type GetPropertyBreakdownData = {
          */
         filter_os?: string;
         /**
-         * Filter by channel (for referrer drill-downs within a channel)
+         * Filter by channel name (for channel drill-downs)
          */
         filter_channel?: string;
+        /**
+         * Filter by referrer hostname (for referrer drill-downs)
+         */
+        filter_referrer?: string;
     };
     url: '/projects/{project_id}/events/properties/breakdown';
 };
@@ -25468,6 +25769,95 @@ export type UpdateSettingsResponses = {
 
 export type UpdateSettingsResponse = UpdateSettingsResponses[keyof UpdateSettingsResponses];
 
+export type RevokeJoinTokenData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/join-token';
+};
+
+export type RevokeJoinTokenErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RevokeJoinTokenResponses = {
+    /**
+     * Join token revoked
+     */
+    200: SettingsUpdateResponse;
+};
+
+export type RevokeJoinTokenResponse = RevokeJoinTokenResponses[keyof RevokeJoinTokenResponses];
+
+export type GenerateJoinTokenData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/join-token/generate';
+};
+
+export type GenerateJoinTokenErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GenerateJoinTokenResponses = {
+    /**
+     * Join token generated
+     */
+    200: GenerateJoinTokenResponse;
+};
+
+export type GenerateJoinTokenResponse2 = GenerateJoinTokenResponses[keyof GenerateJoinTokenResponses];
+
+export type GetJoinTokenStatusData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/join-token/status';
+};
+
+export type GetJoinTokenStatusErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetJoinTokenStatusResponses = {
+    /**
+     * Join token status
+     */
+    200: JoinTokenStatusResponse;
+};
+
+export type GetJoinTokenStatusResponse = GetJoinTokenStatusResponses[keyof GetJoinTokenStatusResponses];
+
 export type ListTemplatesData = {
     body?: never;
     path?: never;
@@ -26399,6 +26789,33 @@ export type ListExternalPluginsResponses = {
 };
 
 export type ListExternalPluginsResponse = ListExternalPluginsResponses[keyof ListExternalPluginsResponses];
+
+export type ReloadPluginsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/x/plugins/reload';
+};
+
+export type ReloadPluginsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+};
+
+export type ReloadPluginsResponses = {
+    /**
+     * Plugins reloaded successfully
+     */
+    200: ReloadResponse;
+};
+
+export type ReloadPluginsResponse = ReloadPluginsResponses[keyof ReloadPluginsResponses];
 
 export type ListAuditLogsData = {
     body?: never;

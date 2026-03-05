@@ -3,10 +3,12 @@ use axum::{
     extract::{Extension, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::sync::Arc;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::error_builder::ErrorBuilder;
@@ -15,7 +17,7 @@ use temps_core::{
     ContainerLogSettings, DiskSpaceAlertSettings, LetsEncryptSettings, RateLimitSettings,
     RequestMetadata, ScreenshotSettings, SecurityHeadersSettings,
 };
-use tracing::error;
+use tracing::{error, info};
 use utoipa::{OpenApi, ToSchema};
 
 pub struct SettingsState {
@@ -51,6 +53,21 @@ impl AuditOperation for SettingsUpdatedAudit {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct SettingsUpdateResponse {
     pub message: String,
+}
+
+/// Response returned when a join token is generated (plaintext shown once)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct GenerateJoinTokenResponse {
+    /// The plaintext join token — shown only once, save it now
+    pub token: String,
+    pub message: String,
+}
+
+/// Response for join token status check
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct JoinTokenStatusResponse {
+    /// Whether a join token has been configured
+    pub has_token: bool,
 }
 
 /// Safe response for application settings that masks sensitive fields
@@ -138,14 +155,22 @@ impl From<AppSettings> for AppSettingsResponse {
 
 #[derive(OpenApi)]
 #[openapi(
-    paths(get_settings, update_settings),
+    paths(
+        get_settings,
+        update_settings,
+        generate_join_token,
+        revoke_join_token,
+        get_join_token_status,
+    ),
     components(schemas(
         AppSettings,
         AppSettingsResponse,
         ContainerLogSettings,
         DnsProviderSettingsMasked,
         DockerRegistrySettingsMasked,
-        SettingsUpdateResponse
+        SettingsUpdateResponse,
+        GenerateJoinTokenResponse,
+        JoinTokenStatusResponse,
     )),
     info(
         title = "Settings API",
@@ -160,6 +185,9 @@ pub fn configure_routes() -> Router<Arc<SettingsState>> {
     Router::new()
         .route("/settings", get(get_settings))
         .route("/settings", put(update_settings))
+        .route("/settings/join-token/generate", post(generate_join_token))
+        .route("/settings/join-token", delete(revoke_join_token))
+        .route("/settings/join-token/status", get(get_join_token_status))
 }
 
 /// Get application settings
@@ -289,4 +317,209 @@ async fn update_settings(
                 .build())
         }
     }
+}
+
+/// SHA-256 hash a token string
+fn sha256_hash(token: &str) -> String {
+    let digest = sha2::Sha256::digest(token.as_bytes());
+    format!("{:x}", digest)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct JoinTokenGeneratedAudit {
+    context: AuditContext,
+}
+
+impl AuditOperation for JoinTokenGeneratedAudit {
+    fn operation_type(&self) -> String {
+        "JOIN_TOKEN_GENERATED".to_string()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct JoinTokenRevokedAudit {
+    context: AuditContext,
+}
+
+impl AuditOperation for JoinTokenRevokedAudit {
+    fn operation_type(&self) -> String {
+        "JOIN_TOKEN_REVOKED".to_string()
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+/// Generate a new join token for multi-node cluster registration
+///
+/// Creates a random 32-byte hex token, stores the SHA-256 hash in settings,
+/// and returns the plaintext exactly once. If a token already exists, it is replaced.
+#[utoipa::path(
+    tag = "Settings",
+    post,
+    path = "/settings/join-token/generate",
+    responses(
+        (status = 200, description = "Join token generated", body = GenerateJoinTokenResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn generate_join_token(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<SettingsState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    // Generate a random 32-byte token as hex
+    let plaintext_token = {
+        let mut rng = rand::thread_rng();
+        let bytes: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
+        hex::encode(bytes)
+    };
+    let token_hash = sha256_hash(&plaintext_token);
+
+    // Store the hash in settings
+    app_state
+        .config_service
+        .update_setting_field(|s| {
+            s.multi_node.join_token_hash = Some(token_hash);
+        })
+        .await
+        .map_err(|e| {
+            error!("Failed to store join token hash: {}", e);
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Settings Error")
+                .detail(format!("Failed to generate join token: {}", e))
+                .build()
+        })?;
+
+    info!(user_id = auth.user_id(), "Join token generated");
+
+    let audit = JoinTokenGeneratedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    Ok(Json(GenerateJoinTokenResponse {
+        token: plaintext_token,
+        message: "Join token generated. Save this token — it will not be shown again.".to_string(),
+    }))
+}
+
+/// Revoke the current join token
+///
+/// Removes the stored join token hash, allowing any node to register
+/// (if no other authentication is in place).
+#[utoipa::path(
+    tag = "Settings",
+    delete,
+    path = "/settings/join-token",
+    responses(
+        (status = 200, description = "Join token revoked", body = SettingsUpdateResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn revoke_join_token(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<SettingsState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    app_state
+        .config_service
+        .update_setting_field(|s| {
+            s.multi_node.join_token_hash = None;
+        })
+        .await
+        .map_err(|e| {
+            error!("Failed to revoke join token: {}", e);
+            ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .title("Settings Error")
+                .detail(format!("Failed to revoke join token: {}", e))
+                .build()
+        })?;
+
+    info!(user_id = auth.user_id(), "Join token revoked");
+
+    let audit = JoinTokenRevokedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    Ok(Json(SettingsUpdateResponse {
+        message: "Join token revoked successfully".to_string(),
+    }))
+}
+
+/// Check whether a join token is currently configured
+#[utoipa::path(
+    tag = "Settings",
+    get,
+    path = "/settings/join-token/status",
+    responses(
+        (status = 200, description = "Join token status", body = JoinTokenStatusResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn get_join_token_status(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<SettingsState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let settings = app_state.config_service.get_settings().await.map_err(|e| {
+        error!("Failed to read settings for join token status: {}", e);
+        ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .title("Settings Error")
+            .detail(format!("Failed to check join token status: {}", e))
+            .build()
+    })?;
+
+    Ok(Json(JoinTokenStatusResponse {
+        has_token: settings.multi_node.join_token_hash.is_some(),
+    }))
 }

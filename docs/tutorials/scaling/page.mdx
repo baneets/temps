@@ -31,6 +31,8 @@ Temps runs your application in Docker containers on your own server. Scaling mea
   </Col>
 </Row>
 
+**Multi-node scaling** — if you need more capacity than a single server provides, you can [add worker nodes](/docs/multi-node) to distribute containers across multiple machines. The control plane schedules replicas across all active nodes using round-robin.
+
 Before scaling, check whether optimization can solve the problem for free. A slow database query or missing index can make an application feel overloaded when the server has plenty of capacity.
 
 ---
@@ -262,6 +264,7 @@ Build time is separate from runtime performance. If builds are slow:
 
 ## What to explore next {{ anchor: true, id: 'next-steps' }}
 
+<Button href="/docs/multi-node">Multi-node deployment</Button>
 <Button href="/docs/add-observability">Add monitoring and tracing</Button>
 <Button href="/docs/ci-cd-setup">Set up CI/CD</Button>
 <Button href="/docs/analytics">Analytics</Button>

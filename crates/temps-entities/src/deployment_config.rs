@@ -263,6 +263,12 @@ pub struct DeploymentConfig {
     /// These settings inherit and override from parent level (Environment > Project > Global)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security: Option<SecurityConfig>,
+
+    /// Optional list of node IDs to deploy to. When set, replicas are distributed
+    /// only across these nodes (round-robin). When None, the scheduler distributes
+    /// across all active nodes (or deploys locally if no nodes exist).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_nodes: Option<Vec<i32>>,
 }
 
 /// Deployment configuration snapshot for deployments
@@ -330,6 +336,7 @@ impl Default for DeploymentConfig {
             session_recording_enabled: false,
             replicas: 1,
             security: None,
+            target_nodes: None,
         }
     }
 }
@@ -386,6 +393,11 @@ impl DeploymentConfig {
                 (None, Some(override_security)) => Some(override_security.clone()),
                 (None, None) => None,
             },
+            // Environment-level target_nodes overrides project-level
+            target_nodes: other
+                .target_nodes
+                .clone()
+                .or_else(|| self.target_nodes.clone()),
         }
     }
 
@@ -490,6 +502,7 @@ mod tests {
             session_recording_enabled: false,
             replicas: 2,
             security: None,
+            target_nodes: None,
         };
 
         let env_config = DeploymentConfig {
@@ -503,6 +516,7 @@ mod tests {
             session_recording_enabled: true, // Override
             replicas: 5,                     // Override
             security: None,
+            target_nodes: None,
         };
 
         let merged = project_config.merge(&env_config);
@@ -516,6 +530,53 @@ mod tests {
         assert!(merged.performance_metrics_enabled); // true || false = true
         assert!(merged.session_recording_enabled);
         assert_eq!(merged.replicas, 5);
+        assert_eq!(merged.target_nodes, None);
+    }
+
+    #[test]
+    fn test_merge_target_nodes() {
+        // Environment target_nodes overrides project-level
+        let project_config = DeploymentConfig {
+            target_nodes: Some(vec![1, 2]),
+            ..Default::default()
+        };
+        let env_config = DeploymentConfig {
+            target_nodes: Some(vec![3]),
+            ..Default::default()
+        };
+        let merged = project_config.merge(&env_config);
+        assert_eq!(merged.target_nodes, Some(vec![3]));
+
+        // Falls back to project-level when env has None
+        let env_no_nodes = DeploymentConfig {
+            target_nodes: None,
+            ..Default::default()
+        };
+        let merged2 = project_config.merge(&env_no_nodes);
+        assert_eq!(merged2.target_nodes, Some(vec![1, 2]));
+
+        // Both None → None
+        let both_none = DeploymentConfig::default().merge(&DeploymentConfig::default());
+        assert_eq!(both_none.target_nodes, None);
+    }
+
+    #[test]
+    fn test_target_nodes_serialization() {
+        let config = DeploymentConfig {
+            target_nodes: Some(vec![1, 3, 5]),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        let deserialized: DeploymentConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.target_nodes, Some(vec![1, 3, 5]));
+
+        // target_nodes: None should be omitted from JSON
+        let config_no_nodes = DeploymentConfig {
+            target_nodes: None,
+            ..Default::default()
+        };
+        let json2 = serde_json::to_value(&config_no_nodes).unwrap();
+        assert!(!json2.as_object().unwrap().contains_key("target_nodes"));
     }
 
     #[test]
@@ -567,6 +628,7 @@ mod tests {
             session_recording_enabled: false,
             replicas: 3,
             security: None,
+            target_nodes: None,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -588,6 +650,7 @@ mod tests {
             session_recording_enabled: false,
             replicas: 2,
             security: None,
+            target_nodes: None,
         };
 
         let mut env_vars = HashMap::new();

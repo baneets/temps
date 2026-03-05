@@ -58,6 +58,11 @@ use temps_vulnerability_scanner::VulnerabilityScannerPlugin;
 use temps_webhooks::WebhooksPlugin;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
+
+// Multi-node support
+use temps_deployments::handlers::nodes::NodeAppState;
+use temps_deployments::jobs::node_health_check::check_node_health;
+use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
 
 // Embed the dist directory at compile time
@@ -372,9 +377,15 @@ fn prompt_for_admin_email() -> anyhow::Result<Option<String>> {
 }
 
 fn create_openapi(plugin_manager: &PluginManager) -> anyhow::Result<utoipa::openapi::OpenApi> {
-    plugin_manager
+    let mut api_doc = plugin_manager
         .get_unified_openapi()
-        .map_err(|e| anyhow::anyhow!("Failed to build unified OpenAPI schema: {}", e))
+        .map_err(|e| anyhow::anyhow!("Failed to build unified OpenAPI schema: {}", e))?;
+
+    // Merge node registration endpoints (not part of the plugin system)
+    let nodes_doc = <temps_deployments::handlers::nodes::NodesApiDoc as utoipa::OpenApi>::openapi();
+    api_doc.merge(nodes_doc);
+
+    Ok(api_doc)
 }
 
 fn create_swagger_router(plugin_manager: &PluginManager) -> anyhow::Result<Router> {
@@ -1007,12 +1018,47 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         debug!("OTel plugin registered successfully; background tasks pending project discovery integration");
     }
 
+    // Multi-node: create NodeService, register node routes, and start health check
+    let config_service_for_nodes = service_context
+        .get_service::<temps_config::ConfigService>()
+        .expect("ConfigService must be available for node registration");
+    let node_service = Arc::new(NodeService::new(db.clone()));
+    let encryption_service_for_nodes = service_context
+        .get_service::<temps_core::EncryptionService>()
+        .expect("EncryptionService must be available for node registration");
+    let node_app_state = Arc::new(NodeAppState {
+        node_service: node_service.clone(),
+        db: db.clone(),
+        config_service: config_service_for_nodes,
+        encryption_service: encryption_service_for_nodes,
+    });
+    let node_routes =
+        temps_deployments::handlers::nodes::configure_routes().with_state(node_app_state);
+
+    // Start periodic node health check (every 60s, marks stale nodes offline)
+    {
+        let health_node_service = node_service.clone();
+        let health_db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let marked = check_node_health(&health_node_service, health_db.as_ref()).await;
+                if marked > 0 {
+                    tracing::info!("Node health check: marked {} node(s) as offline", marked);
+                }
+            }
+        });
+        debug!("Node health check scheduler started (every 60s)");
+    }
+
     // Build the application with all plugin routes and OpenAPI schemas
     debug!("Building application with plugin routes");
     let app = plugin_manager
         .build_application()
         .map_err(|e| anyhow::anyhow!("Failed to build application: {}", e))?
-        .merge(create_swagger_router(&plugin_manager)?);
+        .merge(create_swagger_router(&plugin_manager)?)
+        .nest("/api", node_routes);
 
     let app = app.fallback(serve_static_file);
 

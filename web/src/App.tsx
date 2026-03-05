@@ -170,6 +170,11 @@ const PluginsPage = lazy(() =>
     default: m.PluginsPage,
   }))
 )
+const NodesPage = lazy(() =>
+  import('./pages/settings/NodesPage').then((m) => ({
+    default: m.NodesPage,
+  }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -311,6 +316,7 @@ const FullAppRoutes = () => {
                   <Route path="security" element={<SecurityPage />} />
                   <Route path="rate-limiting" element={<RateLimitingPage />} />
                   <Route path="disk-monitoring" element={<DiskMonitoringPage />} />
+                  <Route path="nodes" element={<NodesPage />} />
                   <Route path="plugins" element={<PluginsPage />} />
                 </Route>
                 {/* Projects */}

@@ -1,0 +1,138 @@
+//! `temps agent` subcommand — runs the worker agent HTTP server.
+//!
+//! Loads configuration from `~/.temps/agent.json` (saved by `temps join`).
+//! CLI flags and environment variables override the saved config.
+
+use clap::Args;
+use std::sync::Arc;
+
+/// Run the worker node agent server
+#[derive(Args)]
+pub struct AgentCommand {
+    /// Listen address for the agent API
+    #[arg(long, env = "TEMPS_AGENT_ADDRESS")]
+    pub listen_address: Option<String>,
+
+    /// Bearer token for authenticating control plane requests (env var only to avoid process list exposure)
+    #[arg(long, env = "TEMPS_AGENT_TOKEN", hide = true)]
+    pub token: Option<String>,
+
+    /// Node name (must match what was registered with the control plane)
+    #[arg(long, env = "TEMPS_NODE_NAME")]
+    pub node_name: Option<String>,
+
+    /// Control plane URL for registration and heartbeats
+    #[arg(long, env = "TEMPS_CONTROL_PLANE_URL")]
+    pub control_plane_url: Option<String>,
+
+    /// Node ID assigned by the control plane
+    #[arg(long, env = "TEMPS_NODE_ID")]
+    pub node_id: Option<i32>,
+}
+
+impl AgentCommand {
+    pub fn execute(self) -> anyhow::Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        rt.block_on(async move {
+            let config = self.resolve_config()?;
+
+            let docker = bollard::Docker::connect_with_defaults()
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Docker: {}", e))?;
+
+            let network_name = temps_core::NETWORK_NAME.clone();
+            let docker_runtime = Arc::new(
+                temps_deployer::docker::DockerRuntime::new(Arc::new(docker), true, network_name)
+                    .with_host_bind_address("0.0.0.0".to_string()),
+            );
+
+            let deployer: Arc<dyn temps_deployer::ContainerDeployer> = docker_runtime.clone();
+            let builder: Arc<dyn temps_deployer::ImageBuilder> = docker_runtime;
+
+            tracing::info!("Starting temps agent (node_id={})...", config.node_id);
+
+            temps_agent::server::start_agent_server(deployer, builder, config)
+                .await
+                .map_err(|e| anyhow::anyhow!("Agent server error: {}", e))?;
+
+            Ok(())
+        })
+    }
+
+    /// Load config from `~/.temps/agent.json`, then overlay any CLI flags on top.
+    fn resolve_config(&self) -> anyhow::Result<temps_agent::AgentConfig> {
+        let saved = self.load_saved_config();
+
+        let listen_address = self
+            .listen_address
+            .clone()
+            .or_else(|| saved.as_ref().map(|c| c.listen_address.clone()))
+            .unwrap_or_else(|| "127.0.0.1:3100".to_string());
+
+        let token = self
+            .token
+            .clone()
+            .or_else(|| saved.as_ref().map(|c| c.token.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing --token. Run 'temps join' first, or provide --token, --node-name, --control-plane-url, --node-id"
+                )
+            })?;
+
+        let node_name = self
+            .node_name
+            .clone()
+            .or_else(|| saved.as_ref().map(|c| c.node_name.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing --node-name. Run 'temps join' first, or provide --token, --node-name, --control-plane-url, --node-id"
+                )
+            })?;
+
+        let control_plane_url = self
+            .control_plane_url
+            .clone()
+            .or_else(|| saved.as_ref().map(|c| c.control_plane_url.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing --control-plane-url. Run 'temps join' first, or provide --token, --node-name, --control-plane-url, --node-id"
+                )
+            })?;
+
+        let node_id = self
+            .node_id
+            .or_else(|| saved.as_ref().map(|c| c.node_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing --node-id. Run 'temps join' first, or provide --token, --node-name, --control-plane-url, --node-id"
+                )
+            })?;
+
+        Ok(temps_agent::AgentConfig {
+            listen_address,
+            token,
+            node_name,
+            control_plane_url,
+            node_id,
+        })
+    }
+
+    /// Try to load `~/.temps/agent.json`. Returns None if not found or unparsable.
+    fn load_saved_config(&self) -> Option<temps_agent::AgentConfig> {
+        let home = dirs::home_dir()?;
+        let config_path = home.join(".temps").join("agent.json");
+        let data = std::fs::read_to_string(&config_path).ok()?;
+        match serde_json::from_str::<temps_agent::AgentConfig>(&data) {
+            Ok(config) => {
+                tracing::info!("Loaded agent config from {}", config_path.display());
+                Some(config)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse {}: {}", config_path.display(), e);
+                None
+            }
+        }
+    }
+}

@@ -152,8 +152,8 @@ export function ReferrersChart({
     enabled: !!startDate && !!endDate,
   })
 
-  // When a referrer is selected, show channel breakdown for context
-  const { data: channelData } = useQuery({
+  // When a referrer is selected, show top pages filtered by that referrer
+  const { data: pagesData } = useQuery({
     ...getPropertyBreakdownOptions({
       path: {
         project_id: project.id,
@@ -164,6 +164,7 @@ export function ReferrersChart({
         group_by: 'pathname',
         environment_id: environment,
         aggregation_level: 'visitors',
+        filter_referrer: selectedReferrer ?? undefined,
         limit: 5,
       },
     }),
@@ -235,13 +236,13 @@ export function ReferrersChart({
                 </Badge>
               </div>
             )}
-            {channelData && channelData.items.length > 0 && (
+            {pagesData && pagesData.items.length > 0 && (
               <div>
                 <p className="text-sm font-medium mb-2 text-muted-foreground">
-                  Top Pages (all traffic)
+                  Top Pages
                 </p>
                 <div className="space-y-2">
-                  {channelData.items.slice(0, 5).map((page) => (
+                  {pagesData.items.slice(0, 5).map((page) => (
                     <div
                       key={page.value}
                       className="flex items-center justify-between text-sm"

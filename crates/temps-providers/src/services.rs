@@ -1233,6 +1233,144 @@ impl ExternalServiceManager {
             })
     }
 
+    /// Get the effective address components for a service.
+    ///
+    /// Returns `(container_name, internal_port, host_port)` where:
+    /// - `container_name` is the Docker container name used in connection strings
+    /// - `internal_port` is the port inside the container (e.g., 5432 for Postgres)
+    /// - `host_port` is the mapped port on the host machine
+    ///
+    /// Used by the workflow planner to build remote environment variables by replacing
+    /// `container_name:internal_port` with `private_address:host_port`.
+    pub async fn get_service_effective_address(
+        &self,
+        service_id: i32,
+    ) -> Result<(String, String, String), ExternalServiceError> {
+        let service = self.get_service(service_id).await?;
+        let service_type = ServiceType::from_str(&service.service_type).map_err(|_| {
+            ExternalServiceError::InvalidServiceType {
+                id: service_id,
+                service_type: service.service_type.clone(),
+            }
+        })?;
+
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
+        let parameters = self.get_service_parameters(service_id).await?;
+        let service_config = ServiceConfig {
+            name: service.name.clone(),
+            service_type,
+            version: service.version,
+            parameters: serde_json::to_value(parameters).map_err(|e| {
+                ExternalServiceError::InternalError {
+                    reason: format!("Failed to serialize parameters: {}", e),
+                }
+            })?,
+        };
+
+        service_instance
+            .init(service_config.clone())
+            .await
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to initialize service: {}", e),
+            })?;
+
+        // get_effective_address returns (container_name, internal_port) in Docker mode
+        let (container_name, internal_port) = service_instance
+            .get_effective_address(service_config.clone())
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to get effective address: {}", e),
+            })?;
+
+        // get_local_address returns "localhost:{host_port}"
+        let local_address = service_instance
+            .get_local_address(service_config)
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to get local address: {}", e),
+            })?;
+        let host_port = local_address
+            .rsplit(':')
+            .next()
+            .unwrap_or(&internal_port)
+            .to_string();
+
+        Ok((container_name, internal_port, host_port))
+    }
+
+    /// Get runtime environment variables with cross-node address resolution.
+    ///
+    /// When the consuming container runs on a different node than the service,
+    /// connection strings are rewritten to use the service node's private/WireGuard IP
+    /// and host port instead of container names or localhost.
+    ///
+    /// If `target_node_id` is None or matches the service's node, returns
+    /// standard env vars (same as `get_runtime_env_vars`).
+    pub async fn get_cross_node_runtime_env_vars(
+        &self,
+        service_id_val: i32,
+        project_id: i32,
+        environment_id: i32,
+        target_node_id: Option<i32>,
+    ) -> Result<HashMap<String, String>, ExternalServiceError> {
+        // Get the base env vars (standard same-node behavior)
+        let mut env_vars = self
+            .get_runtime_env_vars(service_id_val, project_id, environment_id)
+            .await?;
+
+        // If no target node specified, return as-is (single-node mode)
+        let target_node_id = match target_node_id {
+            Some(id) => id,
+            None => return Ok(env_vars),
+        };
+
+        // Check if the service is on a different node
+        let service = self.get_service(service_id_val).await?;
+        let service_node_id = service.node_id;
+
+        // Same node or both local: no rewriting needed
+        if service_node_id == Some(target_node_id) || service_node_id.is_none() {
+            return Ok(env_vars);
+        }
+
+        // Cross-node: resolve the service node's private address and host port
+        let service_node_id = match service_node_id {
+            Some(id) => id,
+            None => return Ok(env_vars), // Service is local, target is remote — use local address
+        };
+
+        use temps_entities::nodes;
+        let service_node = nodes::Entity::find_by_id(service_node_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| ExternalServiceError::InternalError {
+                reason: format!("Service node {} not found", service_node_id),
+            })?;
+
+        let private_addr = &service_node.private_address;
+
+        // Get the service's host port from its container
+        use temps_entities::deployment_containers;
+        let service_container = deployment_containers::Entity::find()
+            .filter(deployment_containers::Column::DeletedAt.is_null())
+            .filter(deployment_containers::Column::ContainerName.contains(&service.name))
+            .one(self.db.as_ref())
+            .await?;
+
+        let host_port = service_container
+            .as_ref()
+            .map(|c| c.host_port.unwrap_or(c.container_port));
+        let internal_port = service_container.as_ref().map(|c| c.container_port);
+
+        rewrite_env_vars_for_cross_node(
+            &mut env_vars,
+            &service.name,
+            private_addr,
+            host_port,
+            internal_port,
+        );
+
+        Ok(env_vars)
+    }
+
     pub async fn get_service_docker_environment_variables(
         &self,
         service_id_val: i32,
@@ -2153,6 +2291,39 @@ impl ExternalServiceManager {
             created_at: external_service.created_at.to_rfc3339(),
             updated_at: external_service.updated_at.to_rfc3339(),
         })
+    }
+}
+
+/// Rewrites env var values for cross-node deployments.
+///
+/// Replaces container names and localhost references with the service node's
+/// private (WireGuard) address and host port.
+fn rewrite_env_vars_for_cross_node(
+    env_vars: &mut HashMap<String, String>,
+    service_name: &str,
+    private_addr: &str,
+    host_port: Option<i32>,
+    internal_port: Option<i32>,
+) {
+    let container_name = format!("{}-service", service_name);
+    for value in env_vars.values_mut() {
+        // Replace container_name:internal_port with private_addr:host_port
+        if value.contains(&container_name) {
+            if let (Some(hp), Some(ip)) = (host_port, internal_port) {
+                *value = value
+                    .replace(
+                        &format!("{}:{}", container_name, ip),
+                        &format!("{}:{}", private_addr, hp),
+                    )
+                    .replace(&container_name, private_addr);
+            }
+        }
+        // Also replace localhost references for baremetal mode
+        if value.contains("localhost") || value.contains("127.0.0.1") {
+            *value = value
+                .replace("localhost", private_addr)
+                .replace("127.0.0.1", private_addr);
+        }
     }
 }
 
@@ -3713,5 +3884,144 @@ mod tests {
         println!("   2. Import it as a Temps service");
         println!("   3. Upgrade the container to v18");
         println!("   4. Verify service connectivity with both versions");
+    }
+
+    // --- Cross-node env var rewriting tests ---
+
+    #[test]
+    fn test_rewrite_env_vars_docker_mode_container_name() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "DATABASE_URL".to_string(),
+            "postgresql://user:pass@my-postgres-service:5432/db".to_string(),
+        );
+        env_vars.insert(
+            "REDIS_URL".to_string(),
+            "redis://my-redis-service:6379/0".to_string(),
+        );
+
+        rewrite_env_vars_for_cross_node(
+            &mut env_vars,
+            "my-postgres",
+            "10.100.0.3",
+            Some(5433),
+            Some(5432),
+        );
+
+        // DATABASE_URL should be rewritten with private addr and host port
+        assert_eq!(
+            env_vars["DATABASE_URL"],
+            "postgresql://user:pass@10.100.0.3:5433/db"
+        );
+        // REDIS_URL is for a different service, should be unchanged
+        assert_eq!(env_vars["REDIS_URL"], "redis://my-redis-service:6379/0");
+    }
+
+    #[test]
+    fn test_rewrite_env_vars_baremetal_mode_localhost() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "DATABASE_URL".to_string(),
+            "postgresql://user:pass@localhost:5433/db".to_string(),
+        );
+
+        rewrite_env_vars_for_cross_node(
+            &mut env_vars,
+            "my-postgres",
+            "10.100.0.3",
+            Some(5433),
+            Some(5432),
+        );
+
+        assert_eq!(
+            env_vars["DATABASE_URL"],
+            "postgresql://user:pass@10.100.0.3:5433/db"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_vars_baremetal_mode_127001() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "DATABASE_URL".to_string(),
+            "postgresql://user:pass@127.0.0.1:5433/db".to_string(),
+        );
+
+        rewrite_env_vars_for_cross_node(
+            &mut env_vars,
+            "my-postgres",
+            "10.100.0.3",
+            Some(5433),
+            Some(5432),
+        );
+
+        assert_eq!(
+            env_vars["DATABASE_URL"],
+            "postgresql://user:pass@10.100.0.3:5433/db"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_vars_no_matching_patterns_unchanged() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("APP_NAME".to_string(), "my-cool-app".to_string());
+        env_vars.insert("LOG_LEVEL".to_string(), "debug".to_string());
+
+        rewrite_env_vars_for_cross_node(
+            &mut env_vars,
+            "my-postgres",
+            "10.100.0.3",
+            Some(5433),
+            Some(5432),
+        );
+
+        assert_eq!(env_vars["APP_NAME"], "my-cool-app");
+        assert_eq!(env_vars["LOG_LEVEL"], "debug");
+    }
+
+    #[test]
+    fn test_rewrite_env_vars_no_ports_skips_container_name_rewrite() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "DATABASE_URL".to_string(),
+            "postgresql://user:pass@my-postgres-service:5432/db".to_string(),
+        );
+
+        // When host_port/internal_port are None, container name replacement is skipped
+        rewrite_env_vars_for_cross_node(&mut env_vars, "my-postgres", "10.100.0.3", None, None);
+
+        // Container name not rewritten (no port info available)
+        assert_eq!(
+            env_vars["DATABASE_URL"],
+            "postgresql://user:pass@my-postgres-service:5432/db"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_vars_multiple_values_rewritten() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "DATABASE_URL".to_string(),
+            "postgresql://user:pass@my-pg-service:5432/db".to_string(),
+        );
+        env_vars.insert("DATABASE_HOST".to_string(), "my-pg-service".to_string());
+        env_vars.insert("DATABASE_PORT".to_string(), "5432".to_string());
+
+        rewrite_env_vars_for_cross_node(
+            &mut env_vars,
+            "my-pg",
+            "10.100.0.5",
+            Some(5433),
+            Some(5432),
+        );
+
+        assert_eq!(
+            env_vars["DATABASE_URL"],
+            "postgresql://user:pass@10.100.0.5:5433/db"
+        );
+        // Bare container name without port gets replaced with private_addr
+        assert_eq!(env_vars["DATABASE_HOST"], "10.100.0.5");
+        // Plain port string doesn't match any pattern, stays as-is
+        assert_eq!(env_vars["DATABASE_PORT"], "5432");
     }
 }

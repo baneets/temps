@@ -1,0 +1,272 @@
+export const metadata = {
+  title: 'Multi-Node Deployment',
+  description:
+    'Distribute containers across multiple servers with worker nodes, round-robin scheduling, and optional WireGuard networking.',
+  alternates: {
+    canonical: '/docs/multi-node',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Architecture', id: 'architecture' },
+  { title: 'Prerequisites', id: 'prerequisites' },
+  { title: 'Adding a worker node (direct mode)', id: 'direct-mode' },
+  { title: 'Adding a worker node (WireGuard mode)', id: 'wireguard-mode' },
+  { title: 'Running the agent directly', id: 'agent-command' },
+  { title: 'Verifying nodes', id: 'verifying-nodes' },
+  { title: 'How scheduling works', id: 'scheduling' },
+  { title: 'Current limitations', id: 'limitations' },
+]
+
+# Multi-Node Deployment
+
+By default Temps runs everything on a single server. Multi-node mode lets you add **worker nodes** — additional servers that receive container deployments from the control plane — so you can distribute workloads across multiple machines. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Multi-node is useful when you:
+
+- **Outgrow a single server** — you need more CPU, memory, or disk than one machine provides
+- **Want geographic distribution** — deploy containers closer to your users by placing workers in different regions
+- **Need workload isolation** — run production and staging on separate physical machines
+
+When no worker nodes are registered, Temps behaves exactly as before — all containers run locally on the control plane server.
+
+---
+
+## Architecture {{ anchor: true, id: 'architecture' }}
+
+<Row>
+  <Col>
+    **Control plane (your Temps server)**
+    - Runs the API, dashboard, proxy, and database
+    - Accepts `temps join` registrations from workers
+    - Schedules container deployments across nodes
+    - Routes traffic to containers via private addresses
+  </Col>
+  <Col>
+    **Worker nodes**
+    - Run the `temps agent` HTTP server on port 3100
+    - Accept container lifecycle commands from the control plane
+    - Send heartbeats every 30 seconds with capacity metrics
+    - Have Docker installed for running containers
+  </Col>
+</Row>
+
+Traffic from the internet still enters through the control plane's reverse proxy (Pingora). The proxy routes requests to the correct container — whether it runs locally or on a remote worker — using the node's private address.
+
+---
+
+## Prerequisites {{ anchor: true, id: 'prerequisites' }}
+
+**On each worker node:**
+
+- Docker installed and running
+- The `temps` binary available (same version as the control plane)
+- Network connectivity to the control plane (see direct vs WireGuard modes below)
+- Port 3100 accessible from the control plane (or a WireGuard tunnel)
+
+**On the control plane:**
+
+- Temps server running with `temps serve`
+- The `/api/internal/nodes/register` endpoint reachable from workers
+- A **join token** generated from **Settings > Worker Nodes** (required for secure node registration)
+
+---
+
+## Adding a worker node (direct mode) {{ anchor: true, id: 'direct-mode' }}
+
+Direct mode is the simplest option when nodes can reach each other over a private network (e.g., same VPC, same data center, or a VPN).
+
+**1. Generate a join token:**
+
+Go to **Settings > Worker Nodes** in the Temps dashboard and click **Generate Join Token**. The token is shown once — copy and save it securely. The control plane only stores a SHA-256 hash.
+
+**2. Install Temps on the worker machine:**
+
+```bash
+curl -fsSL https://temps.sh/install.sh | bash
+```
+
+**3. Join the cluster:**
+
+```bash
+temps join <control-plane-url> <join-token> --private-address <worker-ip>
+```
+
+<Properties>
+  <Property name="control-plane-url" type="string">
+    The URL of your Temps control plane, e.g. `https://temps.example.com`.
+  </Property>
+  <Property name="join-token" type="string">
+    The join token generated in step 1. Required when the control plane has a token configured. The token is hashed (SHA-256) before storage — the plaintext is never persisted on the control plane.
+  </Property>
+  <Property name="--private-address" type="string">
+    The IP address the control plane should use to reach this worker's containers. Typically a private/internal IP like `10.0.0.5` or `192.168.1.50`.
+  </Property>
+</Properties>
+
+The `--private-address` flag enables **direct mode** — no WireGuard tunnel is created. The control plane routes traffic directly to the worker's private address.
+
+**Optional flags:**
+
+```bash
+temps join <url> <token> --private-address 10.0.0.5 \
+  --name worker-eu-1 \
+  --labels region=eu-west,gpu=true \
+  --agent-address 0.0.0.0:3100
+```
+
+- `--name` — A friendly name for this node (defaults to the hostname)
+- `--labels` — Key-value pairs for scheduling hints (e.g., `region=us-east,tier=production`)
+- `--agent-address` — The address the agent server listens on (default: `0.0.0.0:3100`)
+
+After joining, the node is registered and the agent config is saved to `~/.temps/agent.json`. Start the agent separately:
+
+```bash
+temps agent
+```
+
+The agent reads its config from `~/.temps/agent.json` and begins sending heartbeats to the control plane every 30 seconds.
+
+---
+
+## Adding a worker node (WireGuard mode) {{ anchor: true, id: 'wireguard-mode' }}
+
+WireGuard mode creates an encrypted tunnel between the worker and the control plane. Use this when nodes are on different networks without direct connectivity.
+
+```bash
+temps join <control-plane-url> <join-token>
+```
+
+Without `--private-address`, the join command:
+
+1. Generates a WireGuard keypair
+2. Contacts the relay at `api.temps.sh` for key exchange
+3. Sets up a WireGuard tunnel (`wg0` interface) with a `10.100.0.x` address
+4. Registers with the control plane using the WireGuard address
+5. Saves the agent config to `~/.temps/agent.json`
+
+Then start the agent:
+
+```bash
+temps agent
+```
+
+<Note>
+WireGuard mode requires the `wireguard-tools` package installed on both the control plane and the worker. On Ubuntu/Debian: `apt install wireguard-tools`. On macOS: `brew install wireguard-tools`.
+</Note>
+
+---
+
+## Running the agent {{ anchor: true, id: 'agent-command' }}
+
+After `temps join` completes, run the agent server:
+
+```bash
+temps agent
+```
+
+The agent loads its configuration from `~/.temps/agent.json` (saved by `temps join`). CLI flags and environment variables override the saved config:
+
+| Variable / Flag | Default | Description |
+|----------|---------|-------------|
+| `TEMPS_AGENT_ADDRESS` / `--listen-address` | `0.0.0.0:3100` | Address the agent listens on |
+| `TEMPS_AGENT_TOKEN` / `--token` | — | Bearer token for authenticating control plane requests |
+| `TEMPS_NODE_NAME` / `--node-name` | — | Name for this node |
+| `TEMPS_CONTROL_PLANE_URL` / `--control-plane-url` | — | URL of the control plane |
+| `TEMPS_NODE_ID` / `--node-id` | — | Node ID assigned during registration |
+
+If no `~/.temps/agent.json` exists and required fields are missing, the agent exits with an error suggesting you run `temps join` first.
+
+The agent sends a **heartbeat** to the control plane every 30 seconds. If heartbeats stop (e.g., the agent is stopped or the machine goes down), the control plane marks the node as **offline** after 90 seconds and excludes it from scheduling.
+
+The agent exposes these endpoints (all authenticated with the bearer token):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/agent/containers/deploy` | POST | Deploy a container |
+| `/agent/containers/{id}/stop` | POST | Stop a container |
+| `/agent/containers/{id}` | DELETE | Remove a container |
+| `/agent/containers/{id}/logs` | GET | Stream container logs |
+| `/agent/containers/{id}/info` | GET | Get container info |
+| `/agent/images/{name}/exists` | GET | Check if an image exists |
+| `/agent/health` | GET | Health check with system metrics |
+
+---
+
+## Verifying nodes {{ anchor: true, id: 'verifying-nodes' }}
+
+**From the dashboard:**
+
+Go to **Settings > Worker Nodes** to see all registered nodes, their status, and last heartbeat time.
+
+**From the API:**
+
+```bash {{ title: 'List all nodes' }}
+curl https://your-temps-instance/api/internal/nodes
+```
+
+```json {{ title: 'Response' }}
+{
+  "nodes": [
+    {
+      "id": 1,
+      "name": "worker-eu-1",
+      "address": "https://10.0.0.5:3100",
+      "private_address": "10.0.0.5",
+      "role": "worker",
+      "status": "active",
+      "labels": { "region": "eu-west" },
+      "last_heartbeat": "2026-03-04T12:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+```bash {{ title: 'Get a specific node' }}
+curl https://your-temps-instance/api/internal/nodes/1
+```
+
+A node is considered **active** if it has sent a heartbeat within the last 90 seconds. Nodes that miss heartbeats are automatically marked **offline** and excluded from scheduling.
+
+---
+
+## How scheduling works {{ anchor: true, id: 'scheduling' }}
+
+When you deploy an application with multiple replicas, the **node scheduler** distributes containers across available nodes using **round-robin** scheduling:
+
+1. The scheduler queries all nodes with `status = "active"` and a heartbeat within the last 90 seconds
+2. If no active worker nodes exist, all replicas run locally on the control plane
+3. If active workers exist, replicas are distributed evenly across all nodes (including local) in round-robin order
+4. Each container records which node it was assigned to in the database
+
+The deployment job creates a `RemoteNodeDeployer` for each remote assignment, which communicates with the worker's agent API to deploy, stop, and manage containers.
+
+<Note>
+The scheduler currently uses simple round-robin. Label-based scheduling (e.g., "only deploy to nodes with `gpu=true`") is planned but not yet implemented — labels are stored but not used for filtering.
+</Note>
+
+---
+
+## Current limitations {{ anchor: true, id: 'limitations' }}
+
+Multi-node is functional but still evolving. Known limitations:
+
+- **No label-based scheduling** — labels are stored on nodes but the scheduler does not filter by them yet. All active nodes receive deployments equally.
+- **No remote image transfer** — the worker node must be able to pull the Docker image independently. If you are using a local registry on the control plane, the worker needs network access to it.
+- **No log streaming from remote nodes** — deployment logs from containers on worker nodes are not yet streamed back to the control plane dashboard in real-time.
+- **No remote node removal from UI** — nodes can be removed via the API (`DELETE` is not yet exposed) or by stopping the agent and waiting for the heartbeat to expire.
+- **Round-robin only** — no resource-aware scheduling, no affinity/anti-affinity rules, no bin-packing.
+
+---
+
+## What to explore next {{ anchor: true, id: 'next-steps' }}
+
+<Button href="/docs/scaling">Scaling strategies</Button>
+<Button href="/docs/resources">Resource allocation</Button>
+<Button href="/docs/docker-containers">Docker container management</Button>

@@ -20,6 +20,8 @@ pub struct Model {
     pub deployed_at: DBDateTime,
     pub ready_at: Option<DBDateTime>,
     pub deleted_at: Option<DBDateTime>,
+    /// Node this container runs on. NULL = local node (single-node mode).
+    pub node_id: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -30,11 +32,23 @@ pub enum Relation {
         to = "super::deployments::Column::Id"
     )]
     Deployment,
+    #[sea_orm(
+        belongs_to = "super::nodes::Entity",
+        from = "Column::NodeId",
+        to = "super::nodes::Column::Id"
+    )]
+    Node,
 }
 
 impl Related<super::deployments::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Deployment.def()
+    }
+}
+
+impl Related<super::nodes::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Node.def()
     }
 }
 

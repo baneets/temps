@@ -39,6 +39,8 @@ pub struct WorkflowExecutionService {
     screenshot_service: Arc<ScreenshotService>,
     docker: Arc<bollard::Docker>,
     source_map_service: OnceCell<Arc<SourceMapService>>,
+    node_scheduler: OnceCell<Arc<crate::services::NodeScheduler>>,
+    encryption_service: OnceCell<Arc<temps_core::EncryptionService>>,
 }
 
 impl WorkflowExecutionService {
@@ -69,7 +71,19 @@ impl WorkflowExecutionService {
             screenshot_service,
             docker,
             source_map_service: OnceCell::new(),
+            node_scheduler: OnceCell::new(),
+            encryption_service: OnceCell::new(),
         }
+    }
+
+    /// Set the node scheduler for multi-node deployments
+    pub fn set_node_scheduler(&self, scheduler: Arc<crate::services::NodeScheduler>) {
+        let _ = self.node_scheduler.set(scheduler);
+    }
+
+    /// Set the encryption service for decrypting node tokens during remote deployments
+    pub fn set_encryption_service(&self, service: Arc<temps_core::EncryptionService>) {
+        let _ = self.encryption_service.set(service);
     }
 
     /// Set the source map service for automatic source map capture during deployments
@@ -550,6 +564,11 @@ impl WorkflowExecutionService {
                     .get("environment_variables")
                     .and_then(|v| serde_json::from_value::<HashMap<String, String>>(v.clone()).ok())
                     .unwrap_or_default();
+
+                // Get remote environment variables (connection strings rewritten for worker nodes)
+                let remote_env_variables: Option<HashMap<String, String>> = config
+                    .get("remote_environment_variables")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
                 debug!(
                     "🌍 Using {} environment variables for deployment (from job config): {}",
                     env_variables.len(),
@@ -591,6 +610,18 @@ impl WorkflowExecutionService {
                     None
                 };
 
+                // Resolve target_nodes from environment or project config
+                let target_nodes = environment
+                    .deployment_config
+                    .as_ref()
+                    .and_then(|c| c.target_nodes.clone())
+                    .or_else(|| {
+                        project
+                            .deployment_config
+                            .as_ref()
+                            .and_then(|c| c.target_nodes.clone())
+                    });
+
                 let mut builder = DeployImageJobBuilder::new()
                     .job_id(db_job.job_id.clone())
                     .build_job_id(build_job_id)
@@ -603,8 +634,24 @@ impl WorkflowExecutionService {
                     .port(port as u32)
                     .replicas(replicas)
                     .environment_variables(env_variables)
+                    .remote_environment_variables(remote_env_variables)
                     .log_id(db_job.log_id.clone())
                     .log_service(self.log_service.clone());
+
+                // Inject node scheduler for multi-node support
+                if let Some(scheduler) = self.node_scheduler.get() {
+                    builder = builder.node_scheduler(scheduler.clone());
+                }
+
+                // Inject encryption service for decrypting node tokens
+                if let Some(enc_service) = self.encryption_service.get() {
+                    builder = builder.encryption_service(enc_service.clone());
+                }
+
+                // Set target nodes if configured
+                if let Some(nodes) = target_nodes {
+                    builder = builder.target_nodes(nodes);
+                }
 
                 // If using external image, set the image tag directly (bypasses build job lookup)
                 if let Some(image_tag) = external_image_tag {

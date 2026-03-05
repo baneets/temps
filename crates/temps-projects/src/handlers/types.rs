@@ -341,6 +341,10 @@ impl ProjectResponse {
                     .map(|c| c.replicas)
                     .unwrap_or(1), // Default
                 security: project.deployment_config.clone().and_then(|c| c.security),
+                target_nodes: project
+                    .deployment_config
+                    .clone()
+                    .and_then(|c| c.target_nodes),
             },
         }
     }

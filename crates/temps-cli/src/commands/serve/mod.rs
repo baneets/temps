@@ -55,6 +55,11 @@ pub struct ServeCommand {
     /// Disable HTTP-to-HTTPS redirect (useful for local development without TLS)
     #[arg(long, env = "TEMPS_DISABLE_HTTPS_REDIRECT")]
     pub disable_https_redirect: bool,
+
+    /// Private/WireGuard IP address of this control plane node.
+    /// Worker nodes use this address to reach services (databases, etc.) on the control plane.
+    #[arg(long, env = "TEMPS_PRIVATE_ADDRESS")]
+    pub private_address: Option<String>,
 }
 
 impl ServeCommand {
@@ -107,6 +112,26 @@ impl ServeCommand {
             } else {
                 info!("Demo mode using default domain: demo.<preview_domain>");
             }
+        }
+
+        // Update private address setting from CLI flag
+        if let Some(ref private_address) = self.private_address {
+            info!("Private address set to: {}", private_address);
+            let db_for_settings = db.clone();
+            let private_addr = private_address.clone();
+            let serve_config_for_addr = serve_config.clone();
+            rt.block_on(async move {
+                let config_service =
+                    temps_config::ConfigService::new(serve_config_for_addr, db_for_settings);
+                if let Err(e) = config_service
+                    .update_setting_field(|settings| {
+                        settings.multi_node.private_address = Some(private_addr);
+                    })
+                    .await
+                {
+                    tracing::error!("Failed to update private address setting: {}", e);
+                }
+            });
         }
 
         info!(

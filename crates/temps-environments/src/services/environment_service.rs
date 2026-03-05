@@ -201,6 +201,7 @@ impl EnvironmentService {
                 session_recording_enabled: false,
                 replicas: 1,
                 security: None,
+                target_nodes: None,
             })),
             branch: Set(Some(branch)),
             ..Default::default()

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::services::database_cron_service::DatabaseCronConfigService;
+use crate::services::node_service::NodeService;
 use crate::services::remote_deployment_service::RemoteDeploymentService;
 use crate::services::workflow_planner::WorkflowPlanner;
 use crate::services::ExternalDeploymentManager;
@@ -28,6 +29,8 @@ pub struct AppState {
     pub image_builder: Arc<dyn temps_deployer::ImageBuilder>,
     /// Audit logging service
     pub audit_service: Arc<dyn AuditLogger>,
+    /// Node service for listing/getting worker nodes (UI-facing)
+    pub node_service: Arc<NodeService>,
 }
 
 use crate::services::types::Deployment;
@@ -572,17 +575,27 @@ pub struct ContainerInfoResponse {
     pub status: String,
     #[schema(example = "2025-10-12T12:15:47.609192Z")]
     pub created_at: String,
+    /// Node name where this container is running. None for local (single-node) deployments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
 }
 
-impl From<temps_deployer::ContainerInfo> for ContainerInfoResponse {
-    fn from(info: temps_deployer::ContainerInfo) -> Self {
+impl ContainerInfoResponse {
+    pub fn from_info(info: temps_deployer::ContainerInfo, node_name: Option<String>) -> Self {
         Self {
             container_id: info.container_id,
             container_name: info.container_name,
             image_name: info.image_name,
             status: info.status.to_string(),
             created_at: info.created_at.to_rfc3339(),
+            node_name,
         }
+    }
+}
+
+impl From<temps_deployer::ContainerInfo> for ContainerInfoResponse {
+    fn from(info: temps_deployer::ContainerInfo) -> Self {
+        Self::from_info(info, None)
     }
 }
 

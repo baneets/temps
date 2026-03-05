@@ -173,9 +173,15 @@ function FunnelView({
                           </div>
                           <div className="text-sm opacity-90">
                             <Clock className="inline h-3 w-3 mr-1" />
-                            {step.average_time_to_complete_seconds >= 60
-                              ? `${Math.round(step.average_time_to_complete_seconds / 60)}m`
-                              : `${Math.round(step.average_time_to_complete_seconds)}s`}
+                            {step.average_time_to_complete_seconds >= 3600
+                              ? `${Math.round(step.average_time_to_complete_seconds / 3600)}h`
+                              : step.average_time_to_complete_seconds >= 60
+                                ? `${Math.round(step.average_time_to_complete_seconds / 60)}m`
+                                : step.average_time_to_complete_seconds >= 1
+                                  ? `${Math.round(step.average_time_to_complete_seconds)}s`
+                                  : step.average_time_to_complete_seconds > 0
+                                    ? `${(step.average_time_to_complete_seconds * 1000).toFixed(0)}ms`
+                                    : '0s'}
                           </div>
                         </div>
                       </div>
@@ -242,12 +248,16 @@ function FunnelView({
               Average Step Conversion
             </div>
             <div className="text-xl font-bold">
-              {(
-                cumulativeData.reduce(
-                  (acc, step) => acc + step.conversionFromPrevious,
-                  0
-                ) / cumulativeData.length
-              ).toFixed(1)}
+              {(() => {
+                const nonEntrySteps = cumulativeData.slice(1)
+                if (nonEntrySteps.length === 0) return '0.0'
+                return (
+                  nonEntrySteps.reduce(
+                    (acc, step) => acc + step.conversionFromPrevious,
+                    0
+                  ) / nonEntrySteps.length
+                ).toFixed(1)
+              })()}
               %
             </div>
           </div>
@@ -258,7 +268,9 @@ function FunnelView({
             <div className="text-xl font-bold">
               {averageCompletionTime >= 3600
                 ? `${Math.round(averageCompletionTime / 3600)}h`
-                : `${Math.round(averageCompletionTime / 60)}m`}
+                : averageCompletionTime >= 60
+                  ? `${Math.round(averageCompletionTime / 60)}m`
+                  : `${Math.round(averageCompletionTime)}s`}
             </div>
           </div>
         </div>

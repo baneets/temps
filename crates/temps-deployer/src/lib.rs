@@ -20,6 +20,7 @@ pub type LogCallback =
 
 pub mod docker;
 pub mod plugin;
+pub mod remote;
 pub mod static_deployer;
 
 #[derive(Error, Debug)]
@@ -122,7 +123,7 @@ pub struct ImageInfo {
     pub working_dir: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DeployRequest {
     pub image_name: String,
     pub container_name: String,
@@ -131,6 +132,7 @@ pub struct DeployRequest {
     pub network_name: Option<String>,
     pub resource_limits: ResourceLimits,
     pub restart_policy: RestartPolicy,
+    #[schema(value_type = String)]
     pub log_path: PathBuf,
     pub command: Option<Vec<String>>,
     /// Docker log rotation config (max-size, max-file). If None, uses Docker daemon defaults.
@@ -144,7 +146,7 @@ pub struct DeployRequest {
 
 /// Docker container log rotation configuration
 /// Applied via Docker's `--log-opt` to prevent unbounded log growth
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContainerLogConfig {
     /// Maximum size of each log file (e.g., "50m", "100m", "1g")
     pub max_size: String,
@@ -187,27 +189,27 @@ impl ContainerLogConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PortMapping {
     pub host_port: u16,
     pub container_port: u16,
     pub protocol: Protocol,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum Protocol {
     Tcp,
     Udp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ResourceLimits {
     pub cpu_limit: Option<f64>, // CPU cores
     pub memory_limit_mb: Option<u64>,
     pub disk_limit_mb: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, utoipa::ToSchema)]
 pub enum RestartPolicy {
     Never,
     Always,
@@ -216,7 +218,7 @@ pub enum RestartPolicy {
     UnlessStopped,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DeployResult {
     pub container_id: String,
     pub container_name: String,
@@ -225,7 +227,7 @@ pub struct DeployResult {
     pub status: ContainerStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum ContainerStatus {
     Created,
     Running,
@@ -235,12 +237,13 @@ pub enum ContainerStatus {
     Dead,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContainerInfo {
     pub container_id: String,
     pub container_name: String,
     pub image_name: String,
     pub status: ContainerStatus,
+    #[schema(value_type = String, example = "2025-10-12T12:15:47.609192Z")]
     pub created_at: UtcDateTime,
     pub ports: Vec<PortMapping>,
     pub environment_vars: HashMap<String, String>,

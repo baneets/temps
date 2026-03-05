@@ -18,6 +18,7 @@ use axum::{
 };
 use futures::stream::{self, StreamExt};
 use futures::SinkExt;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use temps_auth::permission_guard;
 use temps_auth::RequireAuth;
 use temps_core::{AuditContext, RequestMetadata};
@@ -686,8 +687,33 @@ pub async fn list_containers(
         .list_environment_containers(project_id, environment_id)
         .await?;
 
-    let container_responses: Vec<ContainerInfoResponse> =
-        containers.into_iter().map(Into::into).collect();
+    // Collect unique node_ids to resolve names in a single batch
+    let node_ids: Vec<i32> = containers
+        .iter()
+        .filter_map(|(_, node_id)| *node_id)
+        .collect::<std::collections::HashSet<i32>>()
+        .into_iter()
+        .collect();
+
+    let mut node_names: std::collections::HashMap<i32, String> = std::collections::HashMap::new();
+    if !node_ids.is_empty() {
+        let nodes = temps_entities::nodes::Entity::find()
+            .filter(temps_entities::nodes::Column::Id.is_in(node_ids))
+            .all(state.db.as_ref())
+            .await
+            .unwrap_or_default();
+        for node in nodes {
+            node_names.insert(node.id, node.name);
+        }
+    }
+
+    let container_responses: Vec<ContainerInfoResponse> = containers
+        .into_iter()
+        .map(|(info, node_id)| {
+            let node_name = node_id.and_then(|id| node_names.get(&id).cloned());
+            ContainerInfoResponse::from_info(info, node_name)
+        })
+        .collect();
 
     let total = container_responses.len();
     let response = ContainerListResponse {
@@ -2661,6 +2687,7 @@ mod tests {
             data_dir: temp_dir,
             image_builder: Arc::new(MockImageBuilder) as Arc<dyn temps_deployer::ImageBuilder>,
             audit_service: Arc::new(MockAuditLogger) as Arc<dyn temps_core::AuditLogger>,
+            node_service: Arc::new(crate::services::NodeService::new(db.clone())),
         })
     }
 

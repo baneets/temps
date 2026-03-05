@@ -154,6 +154,18 @@ impl TempsPlugin for DeploymentsPlugin {
                 tracing::debug!("Source map service wired into workflow execution service");
             }
 
+            // Wire NodeScheduler for multi-node deployments
+            let node_service = Arc::new(crate::services::NodeService::new(db.clone()));
+            let node_scheduler = Arc::new(crate::services::NodeScheduler::new(node_service));
+            workflow_execution_service.set_node_scheduler(node_scheduler);
+
+            // Wire encryption service for decrypting node tokens during remote deployments
+            if let Some(encryption_service) = context.get_service::<temps_core::EncryptionService>()
+            {
+                workflow_execution_service.set_encryption_service(encryption_service);
+            }
+            tracing::debug!("Node scheduler wired into workflow execution service");
+
             // Get ExternalServiceManager for accessing external service env vars
             let external_service_manager =
                 context.require_service::<temps_providers::ExternalServiceManager>();
@@ -282,6 +294,9 @@ impl TempsPlugin for DeploymentsPlugin {
         // Get data directory for local file storage
         let data_dir = config_service.data_dir();
 
+        // Create NodeService for admin node routes (list/get with session auth)
+        let node_service = Arc::new(crate::services::NodeService::new(db.clone()));
+
         let app_state = Arc::new(handlers::types::AppState {
             deployment_service,
             log_service,
@@ -296,17 +311,20 @@ impl TempsPlugin for DeploymentsPlugin {
             data_dir,
             image_builder,
             audit_service,
+            node_service,
         });
 
         let deployments_routes = handlers::deployments::configure_routes();
         let cron_routes = handlers::crons::configure_routes();
         let external_images_routes = handlers::external_images::configure_routes();
         let remote_deployments_routes = handlers::remote_deployments::configure_routes();
+        let admin_node_routes = handlers::nodes::configure_admin_routes();
 
         let routes = deployments_routes
             .merge(cron_routes)
             .merge(external_images_routes)
             .merge(remote_deployments_routes)
+            .merge(admin_node_routes)
             .with_state(app_state);
 
         Some(PluginRoutes { router: routes })
@@ -320,6 +338,7 @@ impl TempsPlugin for DeploymentsPlugin {
             <handlers::external_images::ExternalImagesApiDoc as UtoimaOpenApi>::openapi();
         let remote_deployments_schema =
             <handlers::remote_deployments::RemoteDeploymentsApiDoc as UtoimaOpenApi>::openapi();
+        let nodes_schema = <handlers::nodes::NodesApiDoc as UtoimaOpenApi>::openapi();
 
         Some(temps_core::openapi::merge_openapi_schemas(
             deployments_schema,
@@ -327,6 +346,7 @@ impl TempsPlugin for DeploymentsPlugin {
                 cron_schema,
                 external_images_schema,
                 remote_deployments_schema,
+                nodes_schema,
             ],
         ))
     }

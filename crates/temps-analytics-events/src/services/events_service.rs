@@ -577,7 +577,15 @@ impl AnalyticsEventsService {
         }
         if filters.channel.is_some() {
             conditions.push(format!("e.channel = ${}", param_idx));
-            let _ = param_idx;
+            param_idx += 1;
+        }
+        if let Some(ref referrer) = filters.referrer {
+            if referrer == "Direct" {
+                conditions.push("e.referrer_hostname IS NULL".to_string());
+            } else {
+                conditions.push(format!("e.referrer_hostname = ${}", param_idx));
+                let _ = param_idx;
+            }
         }
 
         let sql_query = format!(
@@ -648,6 +656,11 @@ impl AnalyticsEventsService {
         }
         if let Some(channel) = filters.channel {
             params.push(channel.into());
+        }
+        if let Some(referrer) = filters.referrer {
+            if referrer != "Direct" {
+                params.push(referrer.into());
+            }
         }
 
         let results = BreakdownResult::find_by_statement(Statement::from_sql_and_values(

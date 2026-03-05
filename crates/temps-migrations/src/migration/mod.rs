@@ -31,6 +31,8 @@ mod m20260225_000001_add_proxy_logs_retention;
 mod m20260225_000001_create_log_aggregator_tables;
 mod m20260225_000001_create_otel_tables;
 mod m20260226_000001_add_deployment_id_to_deployment_tokens;
+mod m20260305_000001_create_nodes_table;
+mod m20260305_000002_add_node_id_columns;
 
 pub struct Migrator;
 
@@ -69,6 +71,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260225_000001_create_otel_tables::Migration),
             Box::new(m20260226_000001_add_deployment_id_to_deployment_tokens::Migration),
             Box::new(m20260225_000001_create_log_aggregator_tables::Migration),
+            Box::new(m20260305_000001_create_nodes_table::Migration),
+            Box::new(m20260305_000002_add_node_id_columns::Migration),
         ]
     }
 }

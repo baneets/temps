@@ -27,6 +27,8 @@ pub struct DockerRuntime {
     docker: Arc<Docker>,
     use_buildkit: bool,
     network_name: String,
+    /// Address to bind host ports to (e.g. "127.0.0.1" for local, "0.0.0.0" for remote agents)
+    host_bind_address: String,
 }
 
 impl DockerRuntime {
@@ -35,7 +37,15 @@ impl DockerRuntime {
             docker,
             use_buildkit,
             network_name,
+            host_bind_address: "127.0.0.1".to_string(),
         }
+    }
+
+    /// Set the host bind address for container port mappings.
+    /// Use "0.0.0.0" on agent nodes so containers are reachable from the private network.
+    pub fn with_host_bind_address(mut self, address: String) -> Self {
+        self.host_bind_address = address;
+        self
     }
 
     pub async fn ensure_network_exists(&self) -> Result<(), DeployerError> {
@@ -880,8 +890,13 @@ impl ContainerDeployer for DockerRuntime {
             let container_port_key =
                 format!("{}/{}", port_mapping.container_port, port_mapping.protocol);
             let host_port_binding = bollard::models::PortBinding {
-                host_ip: Some("127.0.0.1".to_string()),
-                host_port: Some(port_mapping.host_port.to_string()),
+                host_ip: Some(self.host_bind_address.clone()),
+                // When host_port is 0, let Docker pick an available port
+                host_port: if port_mapping.host_port == 0 {
+                    None
+                } else {
+                    Some(port_mapping.host_port.to_string())
+                },
             };
 
             port_bindings.insert(container_port_key.clone(), Some(vec![host_port_binding]));
@@ -970,11 +985,43 @@ impl ContainerDeployer for DockerRuntime {
             })?;
 
         // Get the first port mapping for the result
-        let (container_port, host_port) = request
+        let (container_port, requested_host_port) = request
             .port_mappings
             .first()
             .map(|pm| (pm.container_port, pm.host_port))
             .unwrap_or((0, 0));
+
+        // When host_port was 0 (Docker picks), inspect the container to get the actual port
+        let host_port = if requested_host_port == 0 && container_port > 0 {
+            let inspect = self
+                .docker
+                .inspect_container(&container.id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| {
+                    DeployerError::DeploymentFailed(format!(
+                        "Failed to inspect container {} for port mapping: {}",
+                        container.id, e
+                    ))
+                })?;
+
+            let port_key = format!("{}/tcp", container_port);
+            inspect
+                .network_settings
+                .and_then(|ns| ns.ports)
+                .and_then(|ports| ports.get(&port_key).cloned())
+                .flatten()
+                .and_then(|bindings| bindings.first().cloned())
+                .and_then(|binding| binding.host_port)
+                .and_then(|p| p.parse::<u16>().ok())
+                .ok_or_else(|| {
+                    DeployerError::DeploymentFailed(format!(
+                        "Container {} has no host port binding for {}",
+                        container.id, port_key
+                    ))
+                })?
+        } else {
+            requested_host_port
+        };
 
         Ok(DeployResult {
             container_id: container.id,

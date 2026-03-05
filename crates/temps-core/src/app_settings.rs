@@ -37,6 +37,9 @@ pub struct AppSettings {
 
     // Docker container log settings
     pub container_logs: ContainerLogSettings,
+
+    // Multi-node settings
+    pub multi_node: MultiNodeSettings,
 }
 
 /// Docker container log rotation settings
@@ -146,6 +149,19 @@ pub struct DemoModeSettings {
     pub domain: Option<String>,
 }
 
+/// Multi-node cluster settings
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+#[derive(Default)]
+pub struct MultiNodeSettings {
+    /// SHA-256 hash of the join token (never store plaintext)
+    pub join_token_hash: Option<String>,
+    /// Private/WireGuard IP address of the control plane node.
+    /// Used by remote worker nodes to reach services (databases, etc.) running on the control plane.
+    /// Set via `--private-address` or `TEMPS_PRIVATE_ADDRESS`.
+    pub private_address: Option<String>,
+}
+
 const DEFAULT_LOCAL_DOMAIN: &str = "localho.st";
 impl Default for AppSettings {
     fn default() -> Self {
@@ -162,6 +178,7 @@ impl Default for AppSettings {
             docker_registry: DockerRegistrySettings::default(),
             disk_space_alert: DiskSpaceAlertSettings::default(),
             container_logs: ContainerLogSettings::default(),
+            multi_node: MultiNodeSettings::default(),
         }
     }
 }

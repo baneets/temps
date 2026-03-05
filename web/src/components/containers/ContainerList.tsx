@@ -5,6 +5,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { useState, useEffect } from 'react'
+import { ServerIcon } from 'lucide-react'
 
 interface ContainerListProps {
   containers: ContainerInfoResponse[]
@@ -144,6 +145,12 @@ function ContainerCard({
             </div>
           </div>
         </div>
+        {container.node_name && (
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <ServerIcon className="w-3 h-3 shrink-0" />
+            <span className="truncate">{container.node_name}</span>
+          </div>
+        )}
         <div className="flex items-center justify-between gap-2">
           <Badge
             variant={container.status === 'running' ? 'default' : 'secondary'}

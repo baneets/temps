@@ -1,9 +1,11 @@
+pub mod agent;
 pub mod api_key;
 pub mod backup;
 pub mod build;
 pub mod deploy;
 pub mod doctor;
 pub mod domain;
+pub mod join;
 pub mod proxy;
 pub mod reset_password;
 pub mod serve;
@@ -11,12 +13,14 @@ pub mod services;
 pub mod setup;
 pub mod upgrade;
 
+pub use agent::AgentCommand;
 pub use api_key::ApiKeyCommand;
 pub use backup::BackupCommand;
 pub use build::BuildCommand;
 pub use deploy::DeployCommand;
 pub use doctor::DoctorCommand;
 pub use domain::DomainCommand;
+pub use join::JoinCommand;
 pub use proxy::ProxyCommand;
 pub use reset_password::ResetPasswordCommand;
 pub use serve::ServeCommand;

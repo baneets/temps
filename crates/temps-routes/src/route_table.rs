@@ -20,31 +20,68 @@
 
 use crate::wildcard_matcher::WildcardMatcher;
 use parking_lot::RwLock;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use sqlx::postgres::{PgListener, PgPool};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use temps_core::DeploymentMode;
 use temps_entities::custom_routes::RouteType;
-use temps_entities::{deployments, environments, projects};
+use temps_entities::{deployments, environments, nodes, projects};
 use tracing::{debug, error, info, warn};
 
-/// Build a backend address for a container based on deployment mode
+/// Look up the private address for a container's node, caching results.
+/// Returns None for local containers (node_id is None).
+async fn resolve_node_private_address(
+    node_id: Option<i32>,
+    nodes_cache: &mut HashMap<i32, String>,
+    db: &sea_orm::DatabaseConnection,
+) -> Option<String> {
+    let node_id = node_id?;
+    if let Some(addr) = nodes_cache.get(&node_id) {
+        return Some(addr.clone());
+    }
+    // Fetch node from DB and cache
+    if let Ok(Some(node)) = nodes::Entity::find_by_id(node_id).one(db).await {
+        let addr = node.private_address.clone();
+        nodes_cache.insert(node_id, addr.clone());
+        Some(addr)
+    } else {
+        warn!(
+            node_id,
+            "Node not found for container routing, treating as local"
+        );
+        None
+    }
+}
+
+/// Build a backend address for a container based on deployment mode and node location
 ///
-/// In Docker mode: Returns container_name:container_port for container-to-container communication
-/// In Baremetal mode: Returns 127.0.0.1:host_port for host-based access
+/// For local containers (node_private_address is None):
+///   Docker mode: Returns container_name:container_port for container-to-container communication
+///   Baremetal mode: Returns 127.0.0.1:host_port for host-based access
+///
+/// For remote containers (node_private_address is Some):
+///   Always returns node_private_address:host_port (reachable via WireGuard or private network)
 fn build_container_backend_addr(
     container_name: &str,
     container_port: i32,
     host_port: Option<i32>,
+    node_private_address: Option<&str>,
 ) -> String {
-    let (host, port) = DeploymentMode::get_effective_host_port(
-        container_name,
-        container_port as u16,
-        host_port.unwrap_or(container_port) as u16,
-    );
-    format!("{}:{}", host, port)
+    if let Some(private_addr) = node_private_address {
+        // Remote node: use the node's private/WireGuard IP with host_port
+        let port = host_port.unwrap_or(container_port);
+        format!("{}:{}", private_addr, port)
+    } else {
+        // Local node: use existing logic
+        let (host, port) = DeploymentMode::get_effective_host_port(
+            container_name,
+            container_port as u16,
+            host_port.unwrap_or(container_port) as u16,
+        );
+        format!("{}:{}", host, port)
+    }
 }
 
 /// Backend type for a route
@@ -234,6 +271,8 @@ impl CachedPeerTable {
         let mut projects_cache: HashMap<i32, Arc<projects::Model>> = HashMap::new();
         let mut environments_cache: HashMap<i32, Arc<environments::Model>> = HashMap::new();
         let mut deployments_cache: HashMap<i32, Arc<deployments::Model>> = HashMap::new();
+        // Node cache: maps node_id -> private_address for multi-node routing
+        let mut nodes_cache: HashMap<i32, String> = HashMap::new();
 
         // Fetch preview_domain from settings
         let preview_domain = settings::Entity::find()
@@ -316,16 +355,21 @@ impl CachedPeerTable {
                             }
                         } else if !containers.is_empty() {
                             // Container deployment - proxy to containers
-                            let backend_addrs: Vec<String> = containers
-                                .iter()
-                                .map(|c| {
-                                    build_container_backend_addr(
-                                        &c.container_name,
-                                        c.container_port,
-                                        c.host_port,
-                                    )
-                                })
-                                .collect();
+                            let mut backend_addrs = Vec::with_capacity(containers.len());
+                            for c in &containers {
+                                let node_addr = resolve_node_private_address(
+                                    c.node_id,
+                                    &mut nodes_cache,
+                                    self.db.as_ref(),
+                                )
+                                .await;
+                                backend_addrs.push(build_container_backend_addr(
+                                    &c.container_name,
+                                    c.container_port,
+                                    c.host_port,
+                                    node_addr.as_deref(),
+                                ));
+                            }
                             BackendType::Upstream {
                                 addresses: backend_addrs,
                                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
@@ -508,16 +552,21 @@ impl CachedPeerTable {
                             }
                         } else if !containers.is_empty() {
                             // Container deployment - proxy to containers
-                            let backend_addrs: Vec<String> = containers
-                                .iter()
-                                .map(|c| {
-                                    build_container_backend_addr(
-                                        &c.container_name,
-                                        c.container_port,
-                                        c.host_port,
-                                    )
-                                })
-                                .collect();
+                            let mut backend_addrs = Vec::with_capacity(containers.len());
+                            for c in &containers {
+                                let node_addr = resolve_node_private_address(
+                                    c.node_id,
+                                    &mut nodes_cache,
+                                    self.db.as_ref(),
+                                )
+                                .await;
+                                backend_addrs.push(build_container_backend_addr(
+                                    &c.container_name,
+                                    c.container_port,
+                                    c.host_port,
+                                    node_addr.as_deref(),
+                                ));
+                            }
                             BackendType::Upstream {
                                 addresses: backend_addrs,
                                 round_robin_counter: Arc::new(AtomicUsize::new(0)),
@@ -631,16 +680,21 @@ impl CachedPeerTable {
                         }
                     } else if !containers.is_empty() {
                         // Container deployment - proxy to containers
-                        let backend_addrs: Vec<String> = containers
-                            .iter()
-                            .map(|c| {
-                                build_container_backend_addr(
-                                    &c.container_name,
-                                    c.container_port,
-                                    c.host_port,
-                                )
-                            })
-                            .collect();
+                        let mut backend_addrs = Vec::with_capacity(containers.len());
+                        for c in &containers {
+                            let node_addr = resolve_node_private_address(
+                                c.node_id,
+                                &mut nodes_cache,
+                                self.db.as_ref(),
+                            )
+                            .await;
+                            backend_addrs.push(build_container_backend_addr(
+                                &c.container_name,
+                                c.container_port,
+                                c.host_port,
+                                node_addr.as_deref(),
+                            ));
+                        }
                         BackendType::Upstream {
                             addresses: backend_addrs,
                             round_robin_counter: Arc::new(AtomicUsize::new(0)),
@@ -782,16 +836,21 @@ impl CachedPeerTable {
                         }
                     } else if !containers.is_empty() {
                         // Container deployment - proxy to containers
-                        let backend_addrs: Vec<String> = containers
-                            .iter()
-                            .map(|c| {
-                                build_container_backend_addr(
-                                    &c.container_name,
-                                    c.container_port,
-                                    c.host_port,
-                                )
-                            })
-                            .collect();
+                        let mut backend_addrs = Vec::with_capacity(containers.len());
+                        for c in &containers {
+                            let node_addr = resolve_node_private_address(
+                                c.node_id,
+                                &mut nodes_cache,
+                                self.db.as_ref(),
+                            )
+                            .await;
+                            backend_addrs.push(build_container_backend_addr(
+                                &c.container_name,
+                                c.container_port,
+                                c.host_port,
+                                node_addr.as_deref(),
+                            ));
+                        }
                         BackendType::Upstream {
                             addresses: backend_addrs,
                             round_robin_counter: Arc::new(AtomicUsize::new(0)),
@@ -1009,6 +1068,10 @@ impl Drop for RouteTableListener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mutex to serialize tests that mutate the DEPLOYMENT_MODE env var.
+    /// Env vars are process-global, so parallel tests would race.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Create a no-op queue for tests that don't need queue functionality
     fn test_queue() -> Arc<dyn temps_core::JobQueue> {
@@ -1286,5 +1349,55 @@ mod tests {
 
         // Dropping without starting should not panic
         drop(listener);
+    }
+
+    #[test]
+    fn test_build_container_backend_addr_local_docker() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // In Docker mode, local containers use container_name:container_port
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "docker") };
+        let addr = build_container_backend_addr("my-app", 3000, Some(8080), None);
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
+        assert_eq!(addr, "my-app:3000");
+    }
+
+    #[test]
+    fn test_build_container_backend_addr_local_baremetal() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // In baremetal mode (default), local containers use 127.0.0.1:host_port
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "baremetal") };
+        let addr = build_container_backend_addr("my-app", 3000, Some(8080), None);
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
+        assert_eq!(addr, "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_build_container_backend_addr_remote_with_host_port() {
+        // Remote containers always use private_address:host_port
+        let addr = build_container_backend_addr("my-app", 3000, Some(8080), Some("10.100.0.5"));
+        assert_eq!(addr, "10.100.0.5:8080");
+    }
+
+    #[test]
+    fn test_build_container_backend_addr_remote_without_host_port() {
+        // When host_port is None, remote falls back to container_port
+        let addr = build_container_backend_addr("my-app", 3000, None, Some("10.100.0.5"));
+        assert_eq!(addr, "10.100.0.5:3000");
+    }
+
+    #[test]
+    fn test_build_container_backend_addr_remote_ignores_deployment_mode() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Remote address should be the same regardless of deployment mode
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "docker") };
+        let addr_docker =
+            build_container_backend_addr("my-app", 3000, Some(8080), Some("10.100.0.5"));
+        unsafe { std::env::set_var("DEPLOYMENT_MODE", "baremetal") };
+        let addr_baremetal =
+            build_container_backend_addr("my-app", 3000, Some(8080), Some("10.100.0.5"));
+        unsafe { std::env::remove_var("DEPLOYMENT_MODE") };
+
+        assert_eq!(addr_docker, addr_baremetal);
+        assert_eq!(addr_docker, "10.100.0.5:8080");
     }
 }

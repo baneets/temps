@@ -266,6 +266,8 @@ pub struct PropertyBreakdownQuery {
     pub filter_os: Option<String>,
     /// Filter by channel name (for channel -> referrer drill-downs)
     pub filter_channel: Option<String>,
+    /// Filter by referrer hostname (for referrer -> pages drill-downs)
+    pub filter_referrer: Option<String>,
 }
 
 /// Optional filters for property breakdown drill-downs.
@@ -282,6 +284,8 @@ pub struct PropertyBreakdownFilters {
     pub operating_system: Option<String>,
     /// Filter by channel name (for channel -> referrer drill-downs)
     pub channel: Option<String>,
+    /// Filter by referrer hostname (for referrer -> pages drill-downs)
+    pub referrer: Option<String>,
 }
 
 /// Query parameters for property timeline (group by column over time)

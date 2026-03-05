@@ -98,6 +98,7 @@ Replicas are the number of container instances running for a given environment. 
 
 - **Higher throughput** — More containers handle more concurrent requests
 - **Fault tolerance** — If one replica crashes, others continue serving traffic while it restarts
+- **Multi-node distribution** — When [worker nodes](/docs/multi-node) are configured, replicas are distributed across available nodes using round-robin scheduling
 
 ### What replicas require
 
@@ -184,5 +185,5 @@ If both vertical and horizontal scaling within the current server are insufficie
 - Use the Temps backup system to migrate: back up on the old server, restore on the new one
 
 <Note>
-Temps does not currently support auto-scaling. Resource allocation and replica count are manual settings. Monitor your metrics and adjust proactively as traffic patterns change.
+Temps does not currently support auto-scaling. Resource allocation and replica count are manual settings. Monitor your metrics and adjust proactively as traffic patterns change. For distributing containers across multiple servers, see [multi-node deployment](/docs/multi-node).
 </Note>

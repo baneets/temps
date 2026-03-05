@@ -324,6 +324,16 @@ impl MarkDeploymentCompleteJob {
                     .as_ref()
                     .and_then(|ports| ports.get(index).map(|&p| p as i32));
 
+                // Get node_id for this replica (from multi-node scheduler, if set)
+                let node_ids = context
+                    .get_output::<Vec<Option<i32>>>("deploy_container", "node_ids")
+                    .ok()
+                    .flatten();
+                let node_id = node_ids
+                    .as_ref()
+                    .and_then(|ids| ids.get(index).cloned())
+                    .flatten();
+
                 // Create deployment_container record
                 let deployment_container = deployment_containers::ActiveModel {
                     deployment_id: Set(self.deployment_id),
@@ -341,6 +351,7 @@ impl MarkDeploymentCompleteJob {
                     deployed_at: Set(now),
                     ready_at: Set(Some(now)),
                     deleted_at: Set(None),
+                    node_id: Set(node_id),
                     ..Default::default()
                 };
 

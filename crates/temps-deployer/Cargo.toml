@@ -31,6 +31,8 @@ temps-core = { path = "../temps-core" }
 temps-config = { path = "../temps-config" }
 utoipa = { workspace = true }
 flate2 = { workspace = true }
+reqwest = { workspace = true }
+urlencoding = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

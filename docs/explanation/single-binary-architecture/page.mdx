@@ -157,9 +157,8 @@ The single-binary approach has deliberate trade-offs:
 - No vendor lock-in — you own the server and the data
 
 **Disadvantages:**
-- Runs on one server (not distributed across a fleet by default)
+- Starts as a single server by default, though [multi-node mode](/docs/multi-node) allows distributing containers across worker nodes
 - All features share server resources (a CPU-heavy build affects analytics ingestion)
-- Scaling requires a bigger server rather than adding more nodes
 - Feature set is fixed to what Temps implements (you cannot swap in a different analytics engine)
 
-For the target audience — solo developers and small teams running 1-10 applications on a single VPS — these trade-offs strongly favor simplicity. If you outgrow a single server, the database (PostgreSQL with TimescaleDB) can be moved to a managed instance, and the binary can run on a larger machine.
+For the target audience — solo developers and small teams running 1-10 applications on a single VPS — these trade-offs strongly favor simplicity. If you outgrow a single server, you can [add worker nodes](/docs/multi-node) to distribute containers, move the database to a managed instance, or run the binary on a larger machine.

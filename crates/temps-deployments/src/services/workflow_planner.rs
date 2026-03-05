@@ -368,6 +368,101 @@ impl WorkflowPlanner {
         Ok(env_vars_map)
     }
 
+    /// Build remote environment variables by rewriting connection strings for cross-node access.
+    ///
+    /// When `private_address` is set in multi-node settings, this method:
+    /// 1. Copies the local environment variables
+    /// 2. For each linked external service, replaces Docker container names and internal ports
+    ///    with the control plane's private address and host port
+    /// 3. Rewrites TEMPS_API_URL if it references localhost/127.0.0.1
+    ///
+    /// Returns `None` if `private_address` is not configured (single-node mode).
+    async fn build_remote_environment_variables(
+        &self,
+        project: &projects::Model,
+        local_env_vars: &std::collections::HashMap<String, String>,
+    ) -> Option<std::collections::HashMap<String, String>> {
+        use temps_entities::project_services;
+
+        // Check if private_address is configured
+        let private_address = match self.config_service.get_settings().await {
+            Ok(settings) => settings.multi_node.private_address?,
+            Err(_) => return None,
+        };
+
+        let mut remote_vars = local_env_vars.clone();
+
+        // Get all services linked to this project
+        let project_services_list = match project_services::Entity::find()
+            .filter(project_services::Column::ProjectId.eq(project.id))
+            .all(self.db.as_ref())
+            .await
+        {
+            Ok(services) => services,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to query project services for remote env var rewriting: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        // For each service, get its address mapping and do replacements
+        for project_service in &project_services_list {
+            match self
+                .external_service_manager
+                .get_service_effective_address(project_service.service_id)
+                .await
+            {
+                Ok((container_name, internal_port, host_port)) => {
+                    for value in remote_vars.values_mut() {
+                        // Replace container_name:internal_port → private_address:host_port
+                        if value.contains(&container_name) {
+                            *value = value
+                                .replace(
+                                    &format!("{}:{}", container_name, internal_port),
+                                    &format!("{}:{}", private_address, host_port),
+                                )
+                                .replace(&container_name, &private_address);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to get effective address for service {} (skipping rewrite): {}",
+                        project_service.service_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Rewrite TEMPS_API_URL if it references localhost/127.0.0.1
+        if let Some(api_url) = remote_vars.get("TEMPS_API_URL").cloned() {
+            if api_url.contains("localhost") || api_url.contains("127.0.0.1") {
+                let rewritten = api_url
+                    .replace("localhost", &private_address)
+                    .replace("127.0.0.1", &private_address);
+                remote_vars.insert("TEMPS_API_URL".to_string(), rewritten.clone());
+
+                // Also rewrite OTEL endpoint which is derived from TEMPS_API_URL
+                if let Some(otel_url) = remote_vars.get("OTEL_EXPORTER_OTLP_ENDPOINT").cloned() {
+                    let rewritten_otel = otel_url
+                        .replace("localhost", &private_address)
+                        .replace("127.0.0.1", &private_address);
+                    remote_vars.insert("OTEL_EXPORTER_OTLP_ENDPOINT".to_string(), rewritten_otel);
+                }
+            }
+        }
+
+        debug!(
+            "Built remote environment variables with private_address={}",
+            private_address
+        );
+        Some(remote_vars)
+    }
+
     /// Create all jobs for a deployment based on project configuration
     pub async fn create_deployment_jobs(
         &self,
@@ -610,19 +705,39 @@ impl WorkflowPlanner {
             env_vars.len()
         );
 
+        // Build remote environment variables (connection strings rewritten for worker nodes)
+        let remote_env_vars = self
+            .build_remote_environment_variables(project, &env_vars)
+            .await;
+        if remote_env_vars.is_some() {
+            debug!("📦 Built remote environment variables for cross-node deployments");
+        }
+
         // Route to appropriate job planning based on effective source type
         match effective_source_type {
             SourceType::DockerImage => {
-                self.plan_docker_image_deployment(project, environment, deployment, env_vars)
-                    .await
+                self.plan_docker_image_deployment(
+                    project,
+                    environment,
+                    deployment,
+                    env_vars,
+                    remote_env_vars,
+                )
+                .await
             }
             SourceType::StaticFiles => {
                 self.plan_static_bundle_deployment(project, environment, deployment, env_vars)
                     .await
             }
             SourceType::Git => {
-                self.plan_git_deployment(project, environment, deployment, env_vars)
-                    .await
+                self.plan_git_deployment(
+                    project,
+                    environment,
+                    deployment,
+                    env_vars,
+                    remote_env_vars,
+                )
+                .await
             }
             SourceType::Manual => {
                 // Manual projects without explicit deployment method
@@ -652,6 +767,7 @@ impl WorkflowPlanner {
         environment: &environments::Model,
         deployment: &deployments::Model,
         mut env_vars: std::collections::HashMap<String, String>,
+        remote_env_vars: Option<std::collections::HashMap<String, String>>,
     ) -> anyhow::Result<Vec<JobDefinition>> {
         let mut jobs = Vec::new();
 
@@ -838,6 +954,12 @@ impl WorkflowPlanner {
             let mut deploy_env_vars = env_vars.clone();
             deploy_env_vars.insert("PORT".to_string(), exposed_port.to_string());
 
+            let remote_deploy_env_vars = remote_env_vars.as_ref().map(|rv| {
+                let mut remote = rv.clone();
+                remote.insert("PORT".to_string(), exposed_port.to_string());
+                remote
+            });
+
             let replicas = environment
                 .deployment_config
                 .as_ref()
@@ -847,18 +969,24 @@ impl WorkflowPlanner {
 
             debug!("🔢 Planning deployment with {} replicas", replicas);
 
+            let mut job_config = serde_json::json!({
+                "port": exposed_port,
+                "replicas": replicas,
+                "environment_variables": deploy_env_vars,
+                "image_name": image_name
+            });
+            if let Some(remote_vars) = remote_deploy_env_vars {
+                job_config["remote_environment_variables"] =
+                    serde_json::to_value(remote_vars).unwrap_or_default();
+            }
+
             jobs.push(JobDefinition {
                 job_id: "deploy_container".to_string(),
                 job_type: "DeployImageJob".to_string(),
                 name: "Deploy Container".to_string(),
                 description: Some("Deploy the built container image".to_string()),
                 dependencies: vec!["build_image".to_string()],
-                job_config: Some(serde_json::json!({
-                    "port": exposed_port,
-                    "replicas": replicas,
-                    "environment_variables": deploy_env_vars,
-                    "image_name": image_name
-                })),
+                job_config: Some(job_config),
                 required_for_completion: true,
             });
 
@@ -1033,6 +1161,7 @@ impl WorkflowPlanner {
         environment: &environments::Model,
         deployment: &deployments::Model,
         env_vars: std::collections::HashMap<String, String>,
+        remote_env_vars: Option<std::collections::HashMap<String, String>>,
     ) -> anyhow::Result<Vec<JobDefinition>> {
         let mut jobs = Vec::new();
 
@@ -1119,6 +1248,12 @@ impl WorkflowPlanner {
         let mut deploy_env_vars = env_vars.clone();
         deploy_env_vars.insert("PORT".to_string(), exposed_port.to_string());
 
+        let remote_deploy_env_vars = remote_env_vars.as_ref().map(|rv| {
+            let mut remote = rv.clone();
+            remote.insert("PORT".to_string(), exposed_port.to_string());
+            remote
+        });
+
         let replicas = environment
             .deployment_config
             .as_ref()
@@ -1126,19 +1261,25 @@ impl WorkflowPlanner {
             .or_else(|| project.deployment_config.as_ref().map(|c| c.replicas))
             .unwrap_or(1);
 
+        let mut job_config = serde_json::json!({
+            "port": exposed_port,
+            "replicas": replicas,
+            "environment_variables": deploy_env_vars,
+            "image_name": external_image_ref,
+            "use_external_image": true,
+        });
+        if let Some(remote_vars) = remote_deploy_env_vars {
+            job_config["remote_environment_variables"] =
+                serde_json::to_value(remote_vars).unwrap_or_default();
+        }
+
         jobs.push(JobDefinition {
             job_id: "deploy_container".to_string(),
             job_type: "DeployImageJob".to_string(),
             name: "Deploy Container".to_string(),
             description: Some("Deploy the external Docker image".to_string()),
             dependencies: vec![image_job_dependency],
-            job_config: Some(serde_json::json!({
-                "port": exposed_port,
-                "replicas": replicas,
-                "environment_variables": deploy_env_vars,
-                "image_name": external_image_ref,
-                "use_external_image": true,  // Flag to use image directly without build
-            })),
+            job_config: Some(job_config),
             required_for_completion: true,
         });
 

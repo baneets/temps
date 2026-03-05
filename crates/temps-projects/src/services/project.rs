@@ -176,6 +176,7 @@ impl ProjectService {
             session_recording_enabled: false,
             replicas: 1, // Default replicas
             security: None,
+            target_nodes: None,
         });
 
         let project = projects::ActiveModel {

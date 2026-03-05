@@ -318,6 +318,7 @@ pub fn create_mock_external_service(
         updated_at: chrono::Utc::now(),
         slug: None,
         config: Some(serde_json::json!({}).to_string()),
+        node_id: None,
     }
 }
 

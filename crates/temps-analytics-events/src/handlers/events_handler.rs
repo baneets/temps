@@ -391,7 +391,8 @@ pub async fn get_hourly_visits(
         ("filter_region" = Option<String>, Query, description = "Filter by region (for city drill-downs)"),
         ("filter_browser" = Option<String>, Query, description = "Filter by browser name (for version drill-downs)"),
         ("filter_os" = Option<String>, Query, description = "Filter by OS name (for version drill-downs)"),
-        ("filter_channel" = Option<String>, Query, description = "Filter by channel name (for channel drill-downs)")
+        ("filter_channel" = Option<String>, Query, description = "Filter by channel name (for channel drill-downs)"),
+        ("filter_referrer" = Option<String>, Query, description = "Filter by referrer hostname (for referrer drill-downs)")
     ),
     responses(
         (status = 200, description = "Successfully retrieved property breakdown", body = PropertyBreakdownResponse),
@@ -420,6 +421,7 @@ pub async fn get_property_breakdown(
         browser: query.filter_browser,
         operating_system: query.filter_os,
         channel: query.filter_channel,
+        referrer: query.filter_referrer,
     };
 
     let breakdown = state

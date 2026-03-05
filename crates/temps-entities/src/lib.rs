@@ -33,6 +33,7 @@ pub mod git_provider_connections;
 pub mod git_providers;
 pub mod ip_access_control;
 pub mod ip_geolocations;
+pub mod nodes;
 pub mod notification_preferences;
 pub mod notification_providers;
 pub mod notifications;
