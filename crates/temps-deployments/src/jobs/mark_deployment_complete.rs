@@ -707,6 +707,40 @@ impl MarkDeploymentCompleteJob {
         let mut next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
 
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("Timed out waiting for route table update".to_string());
+            }
+
+            // Check DB on every poll interval, regardless of queue activity.
+            // This prevents a busy queue from starving the fallback poll —
+            // without this, a stream of unrelated queue events would cause
+            // `continue` on every iteration, never reaching the poll branch.
+            if tokio::time::Instant::now() >= next_poll {
+                next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
+                debug!(
+                    "Polling DB for route confirmation (environment={}, deployment={})",
+                    environment_id, deployment_id
+                );
+                match Self::verify_environment_deployment(db, environment_id, deployment_id).await {
+                    Ok(true) => {
+                        info!(
+                            "Route confirmed via DB poll for environment {} deployment {}",
+                            environment_id, deployment_id
+                        );
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        debug!(
+                            "DB poll: environment {} does not yet point to deployment {}",
+                            environment_id, deployment_id
+                        );
+                    }
+                    Err(e) => {
+                        warn!("DB poll failed: {} — continuing to wait for event", e);
+                    }
+                }
+            }
+
             let wait_until = deadline.min(next_poll);
 
             match tokio::time::timeout_at(wait_until, receiver.recv()).await {
@@ -752,37 +786,8 @@ impl MarkDeploymentCompleteJob {
                 Ok(Err(e)) => {
                     return Err(format!("Queue receive error: {}", e));
                 }
-                Err(_) if tokio::time::Instant::now() >= deadline => {
-                    return Err("Timed out waiting for route table update".to_string());
-                }
                 Err(_) => {
-                    // Poll interval expired — check DB directly as fallback
-                    next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
-                    debug!(
-                        "Polling DB for route confirmation (environment={}, deployment={})",
-                        environment_id, deployment_id
-                    );
-                    match Self::verify_environment_deployment(db, environment_id, deployment_id)
-                        .await
-                    {
-                        Ok(true) => {
-                            info!(
-                                "Route confirmed via DB poll for environment {} deployment {}",
-                                environment_id, deployment_id
-                            );
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            // Not yet confirmed or overwritten — keep waiting
-                            debug!(
-                                "DB poll: environment {} does not yet point to deployment {}",
-                                environment_id, deployment_id
-                            );
-                        }
-                        Err(e) => {
-                            warn!("DB poll failed: {} — continuing to wait for event", e);
-                        }
-                    }
+                    // timeout_at expired — loop back to check deadline and poll
                 }
             }
         }
