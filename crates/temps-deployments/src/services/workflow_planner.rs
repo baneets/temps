@@ -390,6 +390,19 @@ impl WorkflowPlanner {
             Err(_) => return None,
         };
 
+        // Only build remote env vars if there are active worker nodes
+        use temps_entities::nodes;
+        let has_active_nodes = matches!(
+            nodes::Entity::find()
+                .filter(nodes::Column::Status.eq("active"))
+                .one(self.db.as_ref())
+                .await,
+            Ok(Some(_))
+        );
+        if !has_active_nodes {
+            return None;
+        }
+
         let mut remote_vars = local_env_vars.clone();
 
         // Get all services linked to this project
