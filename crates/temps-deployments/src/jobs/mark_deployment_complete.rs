@@ -141,20 +141,49 @@ impl MarkDeploymentCompleteJob {
     ) -> Result<(), WorkflowError> {
         // Use a two-key advisory lock: namespace 0x54454D50 ("TEMP") + environment_id
         // This ensures we don't collide with any other advisory lock usage.
+        //
+        // Uses pg_try_advisory_lock with a retry loop instead of the blocking
+        // pg_advisory_lock to avoid hanging indefinitely when a previous
+        // mark_complete is slow (e.g., tearing down many old containers).
         const LOCK_NAMESPACE: i32 = 0x5445_4D50_u32 as i32; // "TEMP"
-        db.execute(Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Postgres,
-            "SELECT pg_advisory_lock($1, $2)",
-            vec![LOCK_NAMESPACE.into(), environment_id.into()],
-        ))
-        .await
-        .map_err(|e| {
-            WorkflowError::JobExecutionFailed(format!(
-                "Failed to acquire advisory lock for environment {}: {}",
-                environment_id, e
-            ))
-        })?;
-        Ok(())
+        const MAX_WAIT_SECS: u64 = 120;
+        const RETRY_INTERVAL_MS: u64 = 500;
+
+        let deadline =
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(MAX_WAIT_SECS);
+
+        loop {
+            let result = db
+                .query_one(Statement::from_sql_and_values(
+                    sea_orm::DatabaseBackend::Postgres,
+                    "SELECT pg_try_advisory_lock($1, $2)",
+                    vec![LOCK_NAMESPACE.into(), environment_id.into()],
+                ))
+                .await
+                .map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Failed to try advisory lock for environment {}: {}",
+                        environment_id, e
+                    ))
+                })?;
+
+            // pg_try_advisory_lock returns a single boolean column
+            if let Some(row) = result {
+                let acquired: bool = row.try_get_by_index(0).unwrap_or(false);
+                if acquired {
+                    return Ok(());
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(WorkflowError::JobExecutionFailed(format!(
+                    "Timed out after {}s waiting for advisory lock on environment {}",
+                    MAX_WAIT_SECS, environment_id
+                )));
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(RETRY_INTERVAL_MS)).await;
+        }
     }
 
     /// Release the PostgreSQL advisory lock for the given environment.
@@ -223,6 +252,15 @@ impl MarkDeploymentCompleteJob {
             deployment_id = self.deployment_id,
             environment_id, "Released advisory lock for environment"
         );
+
+        // ── Tear down previous deployments (outside the lock) ─────────
+        // This runs after the lock is released so it doesn't block
+        // subsequent deployments. Container teardown can be slow (10s
+        // graceful stop per container) and doesn't need serialization —
+        // the route table already points to the new deployment.
+        if result.is_ok() {
+            self.cancel_previous_deployments(environment_id).await;
+        }
 
         result
     }
@@ -667,11 +705,6 @@ impl MarkDeploymentCompleteJob {
                 self.deployment_id
             );
         }
-
-        // ── Phase 5: Tear down previous deployments ──────────────────────
-        // Safe to do now — the route table is confirmed pointing at the new
-        // deployment, so tearing down old containers won't cause 503s.
-        self.cancel_previous_deployments(environment_id).await;
 
         Ok(MarkCompleteOutput {
             completed_at: now,
