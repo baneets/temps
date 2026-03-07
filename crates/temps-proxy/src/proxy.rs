@@ -2496,6 +2496,14 @@ impl ProxyHttp for LoadBalancer {
             debug!("SSE response detected from upstream");
         }
 
+        // Strip content-length from HEAD responses. The upstream correctly includes it
+        // (per RFC 9110 §9.3.2, HEAD responses SHOULD have the same content-length as GET)
+        // but when proxied over HTTP/2, clients like curl interpret the content-length as
+        // a promise of body bytes and error when none arrive. Cloudflare strips it too.
+        if ctx.method == "HEAD" {
+            upstream_response.remove_header("content-length");
+        }
+
         // Confirm or cancel Markdown conversion now that we know the upstream status and
         // content type.  We only convert successful (2xx) text/html responses; everything
         // else passes through unchanged so the client receives the original response as-is.
