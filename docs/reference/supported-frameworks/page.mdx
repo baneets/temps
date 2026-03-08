@@ -41,20 +41,26 @@ All non-Dockerfile builds use [Nixpacks](https://nixpacks.com/) — a build syst
 
 ---
 
+### Deploy guides
+
+Step-by-step tutorials for each framework: [Next.js](/deploy/nextjs), [React](/deploy/react), [Vue.js](/deploy/vue), [Angular](/deploy/angular), [Astro](/deploy/astro), [SvelteKit](/deploy/svelte), [Remix](/deploy/remix), [Node.js](/deploy/nodejs), [Django](/deploy/django), [FastAPI](/deploy/fastapi), [Laravel](/deploy/laravel), [Ruby on Rails](/deploy/rails), [Go](/deploy/go), [Rust](/deploy/rust).
+
+---
+
 ## JavaScript and TypeScript {{ anchor: true, id: 'javascript-and-typescript' }}
 
 | Framework | Detection signal | Build command | Default port |
 |-----------|-----------------|--------------|-------------|
-| **Next.js** | `next.config.js`, `next.config.ts`, or `next.config.mjs` | `npm run build` | 3000 |
-| **Vite** (React, Vue, Svelte) | `vite.config.ts` or `vite.config.js` | `npm run build` | Static |
-| **Remix** | `remix.config.js` or `remix.config.ts` | `npm run build` | 3000 |
-| **Astro** | `astro.config.mjs` or `astro.config.ts` | `npm run build` | Static or 4321 |
-| **SvelteKit** | `svelte.config.js` | `npm run build` | 3000 |
+| **[Next.js](/deploy/nextjs)** | `next.config.js`, `next.config.ts`, or `next.config.mjs` | `npm run build` | 3000 |
+| **Vite** ([React](/deploy/react), [Vue](/deploy/vue), [Svelte](/deploy/svelte)) | `vite.config.ts` or `vite.config.js` | `npm run build` | Static |
+| **[Remix](/deploy/remix)** | `remix.config.js` or `remix.config.ts` | `npm run build` | 3000 |
+| **[Astro](/deploy/astro)** | `astro.config.mjs` or `astro.config.ts` | `npm run build` | Static or 4321 |
+| **[SvelteKit](/deploy/svelte)** | `svelte.config.js` | `npm run build` | 3000 |
 | **Nuxt** | `nuxt.config.ts` or `nuxt.config.js` | `npm run build` | 3000 |
 | **Express** | `package.json` with `express` dependency | `npm start` | 3000 |
 | **Fastify** | `package.json` with `fastify` dependency | `npm start` | 3000 |
 | **Hono** | `package.json` with `hono` dependency | `npm start` | 3000 |
-| **Node.js (generic)** | `package.json` with `start` script | `npm start` | 3000 |
+| **[Node.js](/deploy/nodejs) (generic)** | `package.json` with `start` script | `npm start` | 3000 |
 | **Create React App** | `package.json` with `react-scripts` | `npm run build` | Static |
 
 ### Package manager detection
@@ -82,9 +88,9 @@ Nixpacks reads the Node.js version from (in order):
 
 | Framework | Detection signal | Start command | Default port |
 |-----------|-----------------|--------------|-------------|
-| **Django** | `manage.py` + `django` in requirements | `gunicorn` | 8000 |
+| **[Django](/deploy/django)** | `manage.py` + `django` in requirements | `gunicorn` | 8000 |
 | **Flask** | `flask` in requirements | `gunicorn` | 5000 |
-| **FastAPI** | `fastapi` in requirements | `uvicorn` | 8000 |
+| **[FastAPI](/deploy/fastapi)** | `fastapi` in requirements | `uvicorn` | 8000 |
 | **Generic Python** | `requirements.txt` or `pyproject.toml` | `python main.py` | 8000 |
 
 ### Python version
@@ -108,9 +114,9 @@ Detected from (in order):
 
 ## Go {{ anchor: true, id: 'go' }}
 
-| Detection signal | Build command | Default port |
-|-----------------|--------------|-------------|
-| `go.mod` | `go build -o app` | 8080 |
+| Detection signal | Build command | Default port | Deploy guide |
+|-----------------|--------------|-------------|-------------|
+| `go.mod` | `go build -o app` | 8080 | [Deploy Go](/deploy/go) |
 
 Go version is read from `go.mod`. Nixpacks compiles to a static binary and runs it.
 
@@ -118,9 +124,9 @@ Go version is read from `go.mod`. Nixpacks compiles to a static binary and runs 
 
 ## Rust {{ anchor: true, id: 'rust' }}
 
-| Detection signal | Build command | Default port |
-|-----------------|--------------|-------------|
-| `Cargo.toml` | `cargo build --release` | 8080 |
+| Detection signal | Build command | Default port | Deploy guide |
+|-----------------|--------------|-------------|-------------|
+| `Cargo.toml` | `cargo build --release` | 8080 | [Deploy Rust](/deploy/rust) |
 
 Rust toolchain version is read from `rust-toolchain.toml` or `rust-toolchain`. Nixpacks uses a multi-stage build to keep the final image small.
 
@@ -130,7 +136,7 @@ Rust toolchain version is read from `rust-toolchain.toml` or `rust-toolchain`. N
 
 | Framework | Detection signal | Default port |
 |-----------|-----------------|-------------|
-| **Laravel** | `artisan` file + `laravel/framework` in `composer.json` | 8000 |
+| **[Laravel](/deploy/laravel)** | `artisan` file + `laravel/framework` in `composer.json` | 8000 |
 | **Generic PHP** | `composer.json` or `index.php` | 8080 |
 
 PHP version is read from `composer.json` `require.php` field.
@@ -141,7 +147,7 @@ PHP version is read from `composer.json` `require.php` field.
 
 | Framework | Detection signal | Default port |
 |-----------|-----------------|-------------|
-| **Rails** | `Gemfile` with `rails` gem | 3000 |
+| **[Rails](/deploy/rails)** | `Gemfile` with `rails` gem | 3000 |
 | **Sinatra** | `Gemfile` with `sinatra` gem | 4567 |
 | **Generic Ruby** | `Gemfile` | 3000 |
 

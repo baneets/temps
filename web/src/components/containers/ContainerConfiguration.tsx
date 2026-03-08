@@ -57,6 +57,16 @@ export function ContainerConfiguration({
               </p>
             </div>
           </div>
+          {container.restart_count != null && container.restart_count > 0 && (
+            <div>
+              <label className="text-sm font-medium text-muted-foreground">
+                Restart Count
+              </label>
+              <div className="mt-1">
+                <Badge variant="destructive">{container.restart_count}</Badge>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 

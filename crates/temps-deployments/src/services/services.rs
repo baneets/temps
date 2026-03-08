@@ -2147,6 +2147,15 @@ impl DeploymentService {
         Ok(env_vars)
     }
 
+    /// Get the restart count for a container from Docker
+    pub async fn get_container_restart_count(&self, container_id: &str) -> Option<i64> {
+        self.deployer
+            .get_container_info(container_id)
+            .await
+            .ok()
+            .and_then(|info| info.restart_count)
+    }
+
     /// Stop all containers in an environment
     pub async fn stop_all_containers(
         &self,
@@ -2736,6 +2745,7 @@ mod tests {
                 ports: vec![],
                 environment_vars: HashMap::new(),
                 status: temps_deployer::ContainerStatus::Running,
+                restart_count: Some(0),
             })
         });
         deployer.expect_list_containers().returning(|| Ok(vec![]));

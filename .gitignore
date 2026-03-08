@@ -36,3 +36,7 @@ target_old
 content/
 
 __pycache__
+
+.claude
+.agents
+skills-lock.json

@@ -1161,6 +1161,7 @@ impl ContainerDeployer for DockerRuntime {
                 .unwrap_or_else(chrono::Utc::now),
             ports: port_mappings,
             environment_vars: env_vars,
+            restart_count: container.restart_count,
         })
     }
 

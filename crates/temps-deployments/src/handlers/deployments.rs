@@ -1263,6 +1263,11 @@ pub async fn get_container_detail(
         }
     }
 
+    let restart_count = state
+        .deployment_service
+        .get_container_restart_count(&container.container_id)
+        .await;
+
     let response = crate::handlers::types::ContainerDetailResponse {
         id: container.id,
         container_id: container.container_id,
@@ -1276,6 +1281,7 @@ pub async fn get_container_detail(
         container_port: container.container_port,
         host_port: container.host_port,
         environment_variables: env_vars,
+        restart_count,
         resource_limits: None, // Could be populated from deployment config if needed
     };
 

@@ -247,6 +247,7 @@ pub struct ContainerInfo {
     pub created_at: UtcDateTime,
     pub ports: Vec<PortMapping>,
     pub environment_vars: HashMap<String, String>,
+    pub restart_count: Option<i64>,
 }
 
 /// Container performance statistics (CPU, memory, network)
@@ -680,6 +681,7 @@ mod tests {
                 protocol: Protocol::Tcp,
             }],
             environment_vars: env_vars,
+            restart_count: Some(0),
         };
 
         assert_eq!(info.container_id, "abc123");

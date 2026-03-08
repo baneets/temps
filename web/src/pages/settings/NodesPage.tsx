@@ -17,7 +17,7 @@ import {
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import {
-  listNodesOptions,
+  adminListNodesOptions,
   getJoinTokenStatusOptions,
   generateJoinTokenMutation,
   revokeJoinTokenMutation,
@@ -419,7 +419,7 @@ function NodeTable({ nodes }: { nodes: NodeInfoResponse[] }) {
 export function NodesPage() {
   const { setBreadcrumbs } = useBreadcrumbs()
   const { data, isLoading, error } = useQuery({
-    ...listNodesOptions(),
+    ...adminListNodesOptions(),
     refetchInterval: 30_000,
   })
   const nodes = data?.nodes ?? []

@@ -132,6 +132,7 @@ impl ContainerDeployer for MockContainerDeployer {
             created_at: chrono::Utc::now(),
             ports: vec![],
             environment_vars: HashMap::new(),
+            restart_count: Some(0),
         })
     }
 

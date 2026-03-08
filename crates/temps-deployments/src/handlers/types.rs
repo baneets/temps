@@ -627,6 +627,9 @@ pub struct ContainerDetailResponse {
     pub host_port: Option<i32>,
     /// Environment variables (sensitive values masked)
     pub environment_variables: Vec<EnvVarResponse>,
+    /// Container restart count from Docker
+    #[schema(nullable = true)]
+    pub restart_count: Option<i64>,
     /// Resource limits
     #[schema(nullable = true)]
     pub resource_limits: Option<ResourceLimitsResponse>,

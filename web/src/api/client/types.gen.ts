@@ -801,6 +801,10 @@ export type ContainerDetailResponse = {
     image_name: string;
     ready_at?: string | null;
     resource_limits?: null | ResourceLimitsResponse;
+    /**
+     * Container restart count from Docker
+     */
+    restart_count?: number | null;
     status: string;
 };
 
@@ -809,11 +813,11 @@ export type ContainerInfoResponse = {
     container_name: string;
     created_at: string;
     image_name: string;
-    status: string;
     /**
-     * Node name where this container is running. Undefined for local (single-node) deployments.
+     * Node name where this container is running. None for local (single-node) deployments.
      */
-    node_name?: string;
+    node_name?: string | null;
+    status: string;
 };
 
 export type ContainerListResponse = {
@@ -5147,6 +5151,12 @@ export type MultiNodeSettings = {
      * SHA-256 hash of the join token (never store plaintext)
      */
     join_token_hash?: string | null;
+    /**
+     * Private/WireGuard IP address of the control plane node.
+     * Used by remote worker nodes to reach services (databases, etc.) running on the control plane.
+     * Set via `--private-address` or `TEMPS_PRIVATE_ADDRESS`.
+     */
+    private_address?: string | null;
 };
 
 /**
@@ -6360,10 +6370,6 @@ export type PropertyBreakdownQuery = {
      */
     filter_channel?: string | null;
     /**
-     * Filter by referrer hostname (for referrer -> pages drill-downs)
-     */
-    filter_referrer?: string | null;
-    /**
      * Filter by country (for region/city drill-downs). Requires geolocation join.
      */
     filter_country?: string | null;
@@ -6371,6 +6377,10 @@ export type PropertyBreakdownQuery = {
      * Filter by operating system name (for OS version drill-downs)
      */
     filter_os?: string | null;
+    /**
+     * Filter by referrer hostname (for referrer -> pages drill-downs)
+     */
+    filter_referrer?: string | null;
     /**
      * Filter by region (for city drill-downs). Requires geolocation join.
      */
@@ -16701,14 +16711,14 @@ export type GetIncidentUpdatesResponses = {
 
 export type GetIncidentUpdatesResponse = GetIncidentUpdatesResponses[keyof GetIncidentUpdatesResponses];
 
-export type ListNodesData = {
+export type AdminListNodesData = {
     body?: never;
     path?: never;
     query?: never;
     url: '/internal/nodes';
 };
 
-export type ListNodesErrors = {
+export type AdminListNodesErrors = {
     /**
      * Unauthorized
      */
@@ -16719,14 +16729,14 @@ export type ListNodesErrors = {
     500: unknown;
 };
 
-export type ListNodesResponses = {
+export type AdminListNodesResponses = {
     /**
      * List of nodes
      */
     200: NodeListResponse;
 };
 
-export type ListNodesResponse = ListNodesResponses[keyof ListNodesResponses];
+export type AdminListNodesResponse = AdminListNodesResponses[keyof AdminListNodesResponses];
 
 export type RegisterNodeData = {
     body: RegisterNodeApiRequest;
@@ -16759,7 +16769,7 @@ export type RegisterNodeResponses = {
 
 export type RegisterNodeResponse2 = RegisterNodeResponses[keyof RegisterNodeResponses];
 
-export type GetNodeData = {
+export type AdminGetNodeData = {
     body?: never;
     path: {
         /**
@@ -16771,7 +16781,7 @@ export type GetNodeData = {
     url: '/internal/nodes/{node_id}';
 };
 
-export type GetNodeErrors = {
+export type AdminGetNodeErrors = {
     /**
      * Unauthorized
      */
@@ -16786,14 +16796,14 @@ export type GetNodeErrors = {
     500: unknown;
 };
 
-export type GetNodeResponses = {
+export type AdminGetNodeResponses = {
     /**
      * Node details
      */
     200: NodeInfoResponse;
 };
 
-export type GetNodeResponse = GetNodeResponses[keyof GetNodeResponses];
+export type AdminGetNodeResponse = AdminGetNodeResponses[keyof AdminGetNodeResponses];
 
 export type NodeHeartbeatData = {
     body: HeartbeatApiRequest;
