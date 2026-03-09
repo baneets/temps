@@ -269,6 +269,30 @@ pub struct DeploymentConfig {
     /// across all active nodes (or deploys locally if no nodes exist).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_nodes: Option<Vec<i32>>,
+
+    /// Label selector for node-based scheduling. Replicas are only deployed to
+    /// nodes whose labels match the selector.
+    ///
+    /// Matching rules:
+    /// - **Same key, array value** → OR: node must match any value
+    /// - **Different keys** → AND: node must satisfy all keys
+    ///
+    /// Example: `{"region": ["us", "asia"], "gpu": "true"}`
+    /// → (region=us OR region=asia) AND gpu=true
+    ///
+    /// Applied after `target_nodes` filtering (they stack).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_labels: Option<serde_json::Value>,
+
+    /// Anti-affinity: spread replicas across different nodes.
+    ///
+    /// When enabled, the scheduler avoids placing two replicas of the same
+    /// environment on the same node. If there are fewer eligible nodes than
+    /// replicas, remaining replicas wrap around (best-effort spreading).
+    ///
+    /// Defaults to `true` — replicas spread by default.
+    #[serde(default = "default_anti_affinity")]
+    pub anti_affinity: bool,
 }
 
 /// Deployment configuration snapshot for deployments
@@ -323,6 +347,10 @@ fn default_replicas() -> i32 {
     1
 }
 
+fn default_anti_affinity() -> bool {
+    true
+}
+
 impl Default for DeploymentConfig {
     fn default() -> Self {
         Self {
@@ -337,6 +365,8 @@ impl Default for DeploymentConfig {
             replicas: 1,
             security: None,
             target_nodes: None,
+            target_labels: None,
+            anti_affinity: true,
         }
     }
 }
@@ -398,6 +428,12 @@ impl DeploymentConfig {
                 .target_nodes
                 .clone()
                 .or_else(|| self.target_nodes.clone()),
+            // Environment-level target_labels overrides project-level
+            target_labels: other
+                .target_labels
+                .clone()
+                .or_else(|| self.target_labels.clone()),
+            anti_affinity: other.anti_affinity,
         }
     }
 
@@ -503,6 +539,8 @@ mod tests {
             replicas: 2,
             security: None,
             target_nodes: None,
+            target_labels: None,
+            anti_affinity: true,
         };
 
         let env_config = DeploymentConfig {
@@ -517,6 +555,8 @@ mod tests {
             replicas: 5,                     // Override
             security: None,
             target_nodes: None,
+            target_labels: None,
+            anti_affinity: true,
         };
 
         let merged = project_config.merge(&env_config);
@@ -629,6 +669,8 @@ mod tests {
             replicas: 3,
             security: None,
             target_nodes: None,
+            target_labels: None,
+            anti_affinity: true,
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -651,6 +693,8 @@ mod tests {
             replicas: 2,
             security: None,
             target_nodes: None,
+            target_labels: None,
+            anti_affinity: true,
         };
 
         let mut env_vars = HashMap::new();

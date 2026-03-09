@@ -13,7 +13,7 @@ use temps_core::{
 };
 use temps_deployer::{
     ContainerDeployer, ContainerLogConfig, ContainerStatus as DeployerContainerStatus,
-    DeployRequest, PortMapping, Protocol, ResourceLimits, RestartPolicy,
+    DeployRequest, ImageBuilder, PortMapping, Protocol, ResourceLimits, RestartPolicy,
 };
 use temps_logs::{LogLevel, LogService};
 use tokio::time::{sleep, Duration};
@@ -139,10 +139,21 @@ pub struct DeploymentJobConfig {
     /// Optional list of node IDs to deploy to. When set, replicas are distributed
     /// only across these specific nodes. When None, all active nodes are eligible.
     pub target_nodes: Option<Vec<i32>>,
+    /// Label selector for node-based scheduling. Nodes whose labels match
+    /// the selector are eligible. Applied after `target_nodes` filtering.
+    pub target_labels: Option<serde_json::Value>,
     /// Environment variables with connection strings rewritten for remote nodes.
     /// Used instead of `environment_variables` when a replica deploys to a worker node
     /// (container names are replaced with the control plane's private address + host port).
     pub remote_environment_variables: Option<HashMap<String, String>>,
+    /// Anti-affinity: avoid placing two replicas on the same node.
+    /// When true, the scheduler spreads replicas across different nodes.
+    pub anti_affinity: bool,
+    /// Node IDs that already host containers for the current environment.
+    /// During rolling updates, the outgoing containers haven't been removed yet.
+    /// When anti-affinity is enabled, these nodes are excluded from scheduling
+    /// to prevent new replicas from landing on the same nodes as old ones.
+    pub exclude_node_ids: Vec<i32>,
 }
 
 impl Default for DeploymentJobConfig {
@@ -159,7 +170,10 @@ impl Default for DeploymentJobConfig {
             ingress_host: None,
             health_check_timeout_secs: 300,
             target_nodes: None,
+            target_labels: None,
             remote_environment_variables: None,
+            anti_affinity: true,
+            exclude_node_ids: Vec::new(),
         }
     }
 }
@@ -197,6 +211,8 @@ pub struct DeployImageJob {
     log_config: Option<ContainerLogConfig>,
     /// Encryption service for decrypting node tokens during remote deployments
     encryption_service: Option<Arc<temps_core::EncryptionService>>,
+    /// Local image builder — used to `save_image()` before transferring to remote nodes
+    image_builder: Option<Arc<dyn temps_deployer::ImageBuilder>>,
 }
 
 impl std::fmt::Debug for DeployImageJob {
@@ -234,6 +250,7 @@ impl DeployImageJob {
             external_image_tag: None,
             log_config: None,
             encryption_service: None,
+            image_builder: None,
         }
     }
 
@@ -292,7 +309,129 @@ impl DeployImageJob {
         self
     }
 
+    pub fn with_image_builder(mut self, builder: Arc<dyn temps_deployer::ImageBuilder>) -> Self {
+        self.image_builder = Some(builder);
+        self
+    }
+
     /// Write log message to job-specific log file
+    /// Ensure the image exists on a remote node, transferring it if needed.
+    ///
+    /// 1. Checks if the image already exists on the remote node (via agent API).
+    /// 2. If not, saves the image as a tar on the control plane (`docker save`).
+    /// 3. Streams the tar to the remote agent (`POST /agent/images/import`).
+    /// 4. Cleans up the local tar file.
+    async fn ensure_image_on_remote(
+        &self,
+        image_tag: &str,
+        remote: &Arc<temps_deployer::remote::RemoteNodeDeployer>,
+        node_name: &str,
+        context: &WorkflowContext,
+    ) -> Result<(), WorkflowError> {
+        // Check if image already exists on the remote node
+        match remote.image_exists(image_tag).await {
+            Ok(true) => {
+                self.log(
+                    context,
+                    format!(
+                        "Image '{}' already exists on node '{}'",
+                        image_tag, node_name
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(false) => {
+                self.log(
+                    context,
+                    format!(
+                        "Image '{}' not found on node '{}', transferring...",
+                        image_tag, node_name
+                    ),
+                )
+                .await?;
+            }
+            Err(e) => {
+                // If we can't check, try transferring anyway
+                tracing::warn!(
+                    image = %image_tag,
+                    node = %node_name,
+                    "Failed to check image existence on remote node, will attempt transfer: {}",
+                    e
+                );
+            }
+        }
+
+        let image_builder = match self.image_builder.as_ref() {
+            Some(b) => b,
+            None => {
+                let msg = format!(
+                    "Cannot transfer image '{}' to node '{}': no image builder configured. \
+                     Multi-node deployments require an image builder for image transfer.",
+                    image_tag, node_name
+                );
+                self.log(context, format!("ERROR: {}", msg)).await?;
+                return Err(WorkflowError::JobExecutionFailed(msg));
+            }
+        };
+
+        // Save image to temp tar file
+        let tar_path =
+            std::env::temp_dir().join(format!("temps-image-transfer-{}.tar", uuid::Uuid::new_v4()));
+
+        self.log(
+            context,
+            format!(
+                "Saving image '{}' to tar for transfer to '{}'...",
+                image_tag, node_name
+            ),
+        )
+        .await?;
+
+        if let Err(e) = image_builder.save_image(image_tag, &tar_path).await {
+            let msg = format!(
+                "Failed to save image '{}' for transfer to node '{}': {}",
+                image_tag, node_name, e
+            );
+            self.log(context, format!("ERROR: {}", msg)).await?;
+            return Err(WorkflowError::JobExecutionFailed(msg));
+        }
+
+        // Transfer to remote node
+        self.log(
+            context,
+            format!("Transferring image to node '{}'...", node_name),
+        )
+        .await?;
+
+        let import_result = remote.import_image(tar_path.clone(), image_tag).await;
+
+        // Clean up local tar file regardless of result
+        if let Err(e) = tokio::fs::remove_file(&tar_path).await {
+            tracing::warn!("Failed to clean up image tar {:?}: {}", tar_path, e);
+        }
+
+        if let Err(e) = import_result {
+            let msg = format!(
+                "Failed to transfer image '{}' to node '{}': {}",
+                image_tag, node_name, e
+            );
+            self.log(context, format!("ERROR: {}", msg)).await?;
+            return Err(WorkflowError::JobExecutionFailed(msg));
+        }
+
+        self.log(
+            context,
+            format!(
+                "Image '{}' transferred to node '{}' successfully",
+                image_tag, node_name
+            ),
+        )
+        .await?;
+
+        Ok(())
+    }
+
     /// Write log message to both job-specific log file and context log writer
     async fn log(&self, context: &WorkflowContext, message: String) -> Result<(), WorkflowError> {
         // Detect log level from message content/emojis
@@ -522,8 +661,15 @@ impl DeployImageJob {
         // Schedule replicas across nodes (or deploy locally if no scheduler/no nodes)
         let node_assignments = if let Some(ref scheduler) = self.node_scheduler {
             let target_ids = self.config.target_nodes.as_deref();
+            let target_labels = self.config.target_labels.as_ref();
             match scheduler
-                .schedule_replicas(self.config.replicas, None, target_ids)
+                .schedule_replicas_excluding(
+                    self.config.replicas,
+                    target_labels,
+                    target_ids,
+                    self.config.anti_affinity,
+                    &self.config.exclude_node_ids,
+                )
                 .await
             {
                 Ok(assignments) => {
@@ -598,7 +744,7 @@ impl DeployImageJob {
                 } => {
                     // Look up the node's token from the node service
                     let token = self.get_node_token(assignment).await?;
-                    match temps_deployer::remote::RemoteNodeDeployer::new(
+                    let remote = match temps_deployer::remote::RemoteNodeDeployer::new(
                         address.clone(),
                         token,
                         node_name.clone(),
@@ -608,7 +754,7 @@ impl DeployImageJob {
                             self.log(
                                 context,
                                 format!(
-                                    "❌ Failed to create remote deployer for node '{}': {}",
+                                    "Failed to create remote deployer for node '{}': {}",
                                     node_name, e
                                 ),
                             )
@@ -618,7 +764,18 @@ impl DeployImageJob {
                                 node_name, e
                             )));
                         }
-                    }
+                    };
+
+                    // Transfer image to remote node if it doesn't already exist there
+                    self.ensure_image_on_remote(
+                        &image_output.image_tag,
+                        &remote,
+                        node_name,
+                        context,
+                    )
+                    .await?;
+
+                    remote
                 }
             };
 
@@ -1548,6 +1705,7 @@ pub struct DeployImageJobBuilder {
     external_image_tag: Option<String>,
     log_config: Option<ContainerLogConfig>,
     encryption_service: Option<Arc<temps_core::EncryptionService>>,
+    image_builder: Option<Arc<dyn temps_deployer::ImageBuilder>>,
 }
 
 impl DeployImageJobBuilder {
@@ -1563,6 +1721,7 @@ impl DeployImageJobBuilder {
             external_image_tag: None,
             log_config: None,
             encryption_service: None,
+            image_builder: None,
         }
     }
 
@@ -1666,6 +1825,25 @@ impl DeployImageJobBuilder {
         self
     }
 
+    /// Set the label selector for node-based scheduling
+    pub fn target_labels(mut self, labels: serde_json::Value) -> Self {
+        self.config.target_labels = Some(labels);
+        self
+    }
+
+    /// Enable or disable anti-affinity (spread replicas across different nodes)
+    pub fn anti_affinity(mut self, enabled: bool) -> Self {
+        self.config.anti_affinity = enabled;
+        self
+    }
+
+    /// Set node IDs to exclude from scheduling (rolling update awareness).
+    /// These are nodes that still host containers from the previous deployment.
+    pub fn exclude_node_ids(mut self, node_ids: Vec<i32>) -> Self {
+        self.config.exclude_node_ids = node_ids;
+        self
+    }
+
     /// Set remote environment variables (connection strings rewritten for worker nodes)
     pub fn remote_environment_variables(
         mut self,
@@ -1678,6 +1856,12 @@ impl DeployImageJobBuilder {
     /// Set the encryption service for decrypting node tokens during remote deployments
     pub fn encryption_service(mut self, service: Arc<temps_core::EncryptionService>) -> Self {
         self.encryption_service = Some(service);
+        self
+    }
+
+    /// Set the local image builder for transferring images to remote nodes
+    pub fn image_builder(mut self, builder: Arc<dyn temps_deployer::ImageBuilder>) -> Self {
+        self.image_builder = Some(builder);
         self
     }
 
@@ -1713,6 +1897,9 @@ impl DeployImageJobBuilder {
         }
         if let Some(encryption_service) = self.encryption_service {
             job = job.with_encryption_service(encryption_service);
+        }
+        if let Some(image_builder) = self.image_builder {
+            job = job.with_image_builder(image_builder);
         }
 
         Ok(job)
@@ -2092,7 +2279,10 @@ mod tests {
         let scheduler = Arc::new(NodeScheduler::new(node_service));
 
         // Schedule 3 replicas with no active nodes
-        let assignments = scheduler.schedule_replicas(3, None, None).await.unwrap();
+        let assignments = scheduler
+            .schedule_replicas(3, None, None, false)
+            .await
+            .unwrap();
         assert_eq!(assignments.len(), 3);
         for a in &assignments {
             assert!(
@@ -2138,17 +2328,28 @@ mod tests {
         let node_service = Arc::new(NodeService::new(Arc::new(db)));
         let scheduler = Arc::new(NodeScheduler::new(node_service));
 
-        let assignments = scheduler.schedule_replicas(4, None, None).await.unwrap();
+        let assignments = scheduler
+            .schedule_replicas(4, None, None, false)
+            .await
+            .unwrap();
         assert_eq!(assignments.len(), 4);
 
-        // All should be Remote
-        let node_ids: Vec<i32> = assignments
-            .iter()
-            .map(|a| a.node_id().expect("Should be Remote"))
-            .collect();
-
-        // Round-robin: A(1), B(2), A(1), B(2)
-        assert_eq!(node_ids, vec![1, 2, 1, 2]);
+        // Pool is [Local, worker-a, worker-b] → round-robin: Local, A(1), B(2), Local
+        assert!(assignments[0].is_local(), "First replica should be Local");
+        assert_eq!(
+            assignments[1].node_id(),
+            Some(1),
+            "Second should be worker-a"
+        );
+        assert_eq!(
+            assignments[2].node_id(),
+            Some(2),
+            "Third should be worker-b"
+        );
+        assert!(
+            assignments[3].is_local(),
+            "Fourth should wrap back to Local"
+        );
     }
 
     /// Test that target_nodes filters to only specified nodes
@@ -2191,18 +2392,25 @@ mod tests {
         // Target only nodes 1 and 3
         let target_ids = vec![1, 3];
         let assignments = scheduler
-            .schedule_replicas(4, None, Some(&target_ids))
+            .schedule_replicas(4, None, Some(&target_ids), false)
             .await
             .unwrap();
         assert_eq!(assignments.len(), 4);
 
+        // Pool is [Local, worker-a(1), worker-c(3)] → round-robin includes Local
         for a in &assignments {
-            let node_id = a.node_id().expect("Should be Remote");
-            assert!(
-                node_id == 1 || node_id == 3,
-                "Should only schedule on target nodes, got {}",
-                node_id
-            );
+            match a {
+                crate::services::NodeAssignment::Remote { node_id, .. } => {
+                    assert!(
+                        *node_id == 1 || *node_id == 3,
+                        "Should only schedule on target nodes, got {}",
+                        node_id
+                    );
+                }
+                crate::services::NodeAssignment::Local => {
+                    // Local (control plane) is always part of the pool
+                }
+            }
         }
     }
 
@@ -2240,7 +2448,7 @@ mod tests {
         // Target node 99 doesn't exist
         let target_ids = vec![99];
         let assignments = scheduler
-            .schedule_replicas(2, None, Some(&target_ids))
+            .schedule_replicas(2, None, Some(&target_ids), false)
             .await
             .unwrap();
         assert_eq!(assignments.len(), 2);

@@ -178,6 +178,8 @@ impl ProjectService {
             replicas: 1, // Default replicas
             security: None,
             target_nodes: None,
+            target_labels: None,
+            anti_affinity: true,
         });
 
         let project = projects::ActiveModel {

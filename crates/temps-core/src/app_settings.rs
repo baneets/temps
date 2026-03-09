@@ -238,7 +238,7 @@ impl Default for DockerRegistrySettings {
 impl Default for SecurityHeadersSettings {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             preset: "moderate".to_string(),
             content_security_policy: Some(
                 "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'".to_string()

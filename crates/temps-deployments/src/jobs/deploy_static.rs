@@ -393,6 +393,14 @@ mod tests {
             })
         }
 
+        async fn save_image(
+            &self,
+            _image_name: &str,
+            _output_path: &std::path::Path,
+        ) -> Result<(), BuilderError> {
+            Ok(())
+        }
+
         fn get_native_platform(&self) -> String {
             "linux/amd64".to_string()
         }

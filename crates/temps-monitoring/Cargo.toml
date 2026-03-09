@@ -11,14 +11,20 @@ homepage.workspace = true
 temps-core = { path = "../temps-core" }
 temps-config = { path = "../temps-config" }
 temps-database = { path = "../temps-database" }
+temps-deployer = { path = "../temps-deployer" }
 temps-entities = { path = "../temps-entities" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sysinfo = "0.33"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+maplit = "1.0"

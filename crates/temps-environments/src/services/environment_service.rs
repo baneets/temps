@@ -202,6 +202,8 @@ impl EnvironmentService {
                 replicas: 1,
                 security: None,
                 target_nodes: None,
+                target_labels: None,
+                anti_affinity: true,
             })),
             branch: Set(Some(branch)),
             ..Default::default()
@@ -575,6 +577,12 @@ impl EnvironmentService {
         }
         if let Some(security) = settings.security {
             deployment_config.security = Some(security);
+        }
+        if settings.target_nodes.is_some() {
+            deployment_config.target_nodes = settings.target_nodes;
+        }
+        if settings.target_labels.is_some() {
+            deployment_config.target_labels = settings.target_labels;
         }
 
         // Validate the deployment config
@@ -995,6 +1003,8 @@ mod tests {
                     performance_metrics_enabled: None,
                     session_recording_enabled: None,
                     security: None,
+                    target_nodes: None,
+                    target_labels: None,
                 },
             )
             .await;
@@ -1071,6 +1081,8 @@ mod tests {
                     performance_metrics_enabled: None,
                     session_recording_enabled: None,
                     security: None,
+                    target_nodes: None,
+                    target_labels: None,
                 },
             )
             .await;

@@ -7,6 +7,7 @@ use crate::tls_cert_loader::CertificateLoader;
 use crate::traits::*;
 use anyhow::Result;
 use pingora::server::RunArgs;
+use pingora_core::apps::HttpServerOptions;
 use pingora_core::listeners::tls::TlsSettings;
 use pingora_core::listeners::TlsAccept;
 use pingora_core::protocols::tls::TlsRef;
@@ -14,7 +15,7 @@ use pingora_core::server::configuration::Opt;
 use pingora_openssl::pkey::PKey;
 use pingora_openssl::ssl::NameType;
 use pingora_openssl::x509::X509;
-use pingora_proxy::http_proxy_service;
+use pingora_proxy::ProxyServiceBuilder;
 use std::any::Any;
 use std::sync::Arc;
 use temps_config::ServerConfig;
@@ -27,7 +28,7 @@ use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
 
-/// TLS extension data stored in SslDigest via the new Pingora 0.7.0 SslDigestExtension.
+/// TLS extension data stored in SslDigest via the new Pingora 0.8.0 SslDigestExtension.
 ///
 /// This allows us to capture SNI hostname during the TLS handshake and make it
 /// available to the HTTP proxy layer without recomputation.
@@ -119,7 +120,7 @@ impl TlsAccept for DynamicCertLoader {
 
     /// Store SNI hostname in SslDigestExtension after handshake completes.
     ///
-    /// This is a Pingora 0.7.0 feature that allows attaching custom data to the
+    /// This is a Pingora 0.8.0 feature that allows attaching custom data to the
     /// TLS digest, making it accessible from the HTTP proxy layer via
     /// `session.downstream_session.digest().ssl_digest.extension`.
     async fn handshake_complete_callback(
@@ -287,8 +288,17 @@ pub fn setup_proxy_server(
     let mut server = pingora_core::server::Server::new(Some(opt))?;
     server.bootstrap();
 
-    // Create HTTP proxy service
-    let mut proxy_service = http_proxy_service(&server.configuration, lb);
+    // Create HTTP proxy service using the builder (Pingora 0.8.0)
+    // Limit downstream connection reuse to prevent slow memory leaks from long-lived
+    // keep-alive connections. Equivalent to nginx's keepalive_requests directive.
+    let mut server_options = HttpServerOptions::default();
+    server_options.keepalive_request_limit = Some(1024);
+
+    let mut proxy_service = ProxyServiceBuilder::new(&server.configuration, lb)
+        .name("Temps HTTP Proxy Service")
+        .server_options(server_options)
+        .build();
+
     proxy_service.add_tcp(&proxy_config.address);
     // Add TLS if configured
     if let Some(ref tls_address) = proxy_config.tls_address {
@@ -318,7 +328,7 @@ pub fn setup_proxy_server(
         );
     }
 
-    // Set TCP-level connection filter for early IP blocking (Pingora 0.7.0 feature)
+    // Set TCP-level connection filter for early IP blocking (Pingora 0.8.0 feature)
     // This rejects blocked IPs at the TCP layer before TLS handshake or HTTP processing,
     // saving significant resources compared to HTTP-layer blocking.
     let tcp_filter = Arc::new(TcpConnectionFilter::new(db.clone()));

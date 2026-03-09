@@ -8,29 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Encryption at rest for environment variables: all values are now encrypted with AES-256-GCM (via `EncryptionService`) before being stored in the database; existing unencrypted rows are transparently decrypted at read time via an `is_encrypted` compatibility flag added in migration `m20260305_000003`; the `WorkflowPlanner` decrypts values before injecting them into deployment containers
-
-### Changed
-- `EnvVarService` (in `temps-environments` and `temps-projects`) now requires `Arc<EncryptionService>` in its constructor; plugin registration injects it from the service registry
-
 - Multi-node cluster support: distribute deployments across a control plane and multiple worker nodes connected via WireGuard private networking
 - `temps-agent` crate: worker node agent with Docker runtime, token-based authentication, and deploy/status/stop/logs API endpoints
 - `temps-wireguard` crate: WireGuard tunnel management for secure node-to-node networking
 - `temps agent` CLI command to start a worker node agent
 - `temps join` CLI command to register a worker node with the control plane (direct or relay mode)
+- `temps node` CLI subcommand with `list`, `show`, `drain`, and `remove` operations for managing cluster nodes
 - `--private-address` flag on `temps serve` to set the control plane's private/WireGuard IP for cross-node service connectivity
-- Node scheduler with round-robin replica distribution across control plane and worker nodes, with optional target node filtering
+- Node scheduler with `LeastLoaded` (default) and `RoundRobin` scheduling strategies; resource-aware replica placement preferring nodes with lowest CPU+memory utilization; configurable max load threshold (default 90%) with graceful fallback
 - Remote container deployer via agent HTTP API with health checks and log streaming support
 - Cross-node service connectivity: environment variables are rewritten for remote containers so they reach external services (Postgres, Redis, MongoDB, S3, RustFS) on the control plane via private IP and host port instead of Docker container names
 - Multi-node-aware route table: proxy resolves worker node private addresses for containers deployed on remote nodes, enabling traffic routing across the cluster with round-robin load balancing
 - Node health check job that monitors worker heartbeats and marks stale nodes as offline
-- Nodes management page in the web UI under Settings with status indicators, heartbeat timestamps, and node details
-- Database migrations: `nodes` table, `node_id` columns on `deployment_containers` and `deployment_config`
+- Node drain operation: stops scheduling new containers on a node and migrates existing workloads to other nodes; CLI supports `--wait` with configurable timeout (default 600s)
+- Node labels: persist in database, sent with every heartbeat, configurable via `--labels` CLI flag (comma-separated `key=value` pairs)
+- Agent `/health` endpoint now returns real system metrics (CPU usage, memory used/total, disk used/total, running container count) via `sysinfo`
+- Nodes management page in the web UI under Settings with resource usage visualization, per-node container listing with project/environment context, drain and remove operations with confirmation dialogs
+- Database migrations: `nodes` table, `node_id` columns on `deployment_containers` and `deployment_config`, `alarms` table
+- Alarm and monitoring system: `AlarmService` with support for container restarts, OOM kills, high CPU/memory, outages, and deployment failures; alarm cooldown mechanism to prevent duplicate rapid-fire alerts; integration with notification and job queue systems via `AlarmFiredJob` and `AlarmResolvedJob`
+- `ContainerHealthMonitor`: periodic health checks on all active containers detecting restart count increases, OOM state changes, and resource threshold breaches
+- Encryption at rest for environment variables: all values are now encrypted with AES-256-GCM (via `EncryptionService`) before being stored in the database; existing unencrypted rows are transparently decrypted at read time via an `is_encrypted` compatibility flag added in migration `m20260305_000003`; the `WorkflowPlanner` decrypts values before injecting them into deployment containers
+- Container restart count tracking: container detail API now returns `restart_count` from Docker, surfacing container instability in the UI
+- Downstream connection keepalive limit (Pingora 0.8.0): connections are closed after 1024 requests to prevent slow memory leaks from long-lived keep-alive connections
+- Upstream write pending time diagnostics (Pingora 0.8.0): `X-Upstream-Write-Pending` response header exposes how long the upstream took to accept the request body; captured in proxy context for observability
+- Preview environment flag support in environment variable settings UI
 
 ### Changed
+- `EnvVarService` (in `temps-environments` and `temps-projects`) now requires `Arc<EncryptionService>` in its constructor; plugin registration injects it from the service registry
+- Upgraded Pingora from 0.7.0 to 0.8.0; proxy service now uses `ProxyServiceBuilder` instead of `http_proxy_service()` for explicit `HttpServerOptions` configuration
+- Security headers are now disabled by default for new installations; existing installations with saved settings are unaffected
 - External service containers (Postgres, Redis, MongoDB, S3/MinIO, RustFS) now bind to `0.0.0.0` instead of `127.0.0.1`, making them reachable from worker nodes via the private network; only affects newly created containers
 
 ### Fixed
+- **Duplicate live visitors**: proxy double-decrypted the visitor cookie — `ensure_visitor_session` decrypted the cookie and passed the plaintext UUID to `get_or_create_visitor`, which tried to decrypt it again; the second decryption always failed silently, causing a new visitor record on every returning page load; now passes the raw encrypted cookie directly
+- Static deployment visitor duplication: `ensure_visitor_session` was called for every static file request (JS, CSS, images); concurrent first-visit requests without cookies each created separate visitors; now skips visitor creation for static asset paths
+- Proxy returned incorrect `Content-Length` for HEAD responses over HTTP/2, causing clients to wait for a body that never arrives; the header is now stripped for HEAD responses
+- Upstream connections could silently fail when reusing stale pooled connections (TCP RST); added explicit connection/read/write/idle timeouts and single automatic retry on connection failure
+- Deployment lock contention: replaced PostgreSQL advisory lock with a process-level `tokio::Mutex`, eliminating cross-process lock conflicts and moving container teardown outside the lock scope
+- Docker container names are now used instead of Docker network aliases for cross-node environment variable rewriting, fixing service connectivity on remote worker nodes
 - Deployment "marking complete" step could hang for the full 60-second timeout when the job queue was busy: the DB poll fallback (which confirms the route table update via database query) was only checked when the queue receiver timed out, but a steady stream of unrelated queue events prevented the timeout from ever firing; the poll now runs on every loop iteration regardless of queue activity
 - Remote environment variables are no longer built when no active worker nodes exist, avoiding unnecessary work in single-node deployments
 
@@ -123,6 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `avg_response_time` cast to `float8` in proxy log time bucket stats for correct type handling
 
 ### Security
+- Patched critical HTTP Request Smuggling vulnerabilities in `pingora-core` (0.7.0 → 0.8.0)
+- Patched high-severity `aws-lc-sys` vulnerabilities: PKCS7 signature validation bypass, certificate chain validation bypass, and AES-CCM timing side-channel (0.32.3 → 0.38.0)
+- Patched `jsonwebtoken` type confusion authorization bypass in google-indexing-plugin (9 → 10.3.0)
+- Updated Flask in example app to 3.1.3 (session cookie fix)
 - Addressed security audit findings in `temps-cli` skill: removed `curl|sh` pattern, credential path disclosure, and secret-like example tokens
 
 ## [0.1.0] - 2024-10-22

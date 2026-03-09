@@ -656,6 +656,46 @@ impl ImageBuilder for DockerRuntime {
         Ok(id)
     }
 
+    async fn save_image(&self, image_name: &str, output_path: &Path) -> Result<(), BuilderError> {
+        info!("Exporting image '{}' to {:?}", image_name, output_path);
+
+        let stream = self.docker.export_image(image_name);
+
+        let mut file = tokio::fs::File::create(output_path).await.map_err(|e| {
+            BuilderError::IoError(std::io::Error::new(
+                e.kind(),
+                format!("Failed to create tar file {:?}: {}", output_path, e),
+            ))
+        })?;
+
+        let mut stream = std::pin::Pin::new(Box::new(stream));
+
+        while let Some(chunk) = StreamExt::next(&mut stream).await {
+            let bytes = chunk.map_err(|e| {
+                BuilderError::Other(format!("Failed to export image '{}': {}", image_name, e))
+            })?;
+            file.write_all(&bytes).await.map_err(|e| {
+                BuilderError::IoError(std::io::Error::new(
+                    e.kind(),
+                    format!("Failed to write image tar: {}", e),
+                ))
+            })?;
+        }
+
+        file.flush().await.map_err(BuilderError::IoError)?;
+
+        let metadata = tokio::fs::metadata(output_path)
+            .await
+            .map_err(BuilderError::IoError)?;
+        info!(
+            "Exported image '{}' ({:.1} MB)",
+            image_name,
+            metadata.len() as f64 / 1_048_576.0
+        );
+
+        Ok(())
+    }
+
     async fn extract_from_image(
         &self,
         image_name: &str,

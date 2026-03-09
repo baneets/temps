@@ -5,6 +5,7 @@
 //! is identical to deploying locally.
 
 use async_trait::async_trait;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -297,10 +298,73 @@ impl ImageBuilder for RemoteNodeDeployer {
         ))
     }
 
-    async fn import_image(&self, _image_path: PathBuf, _tag: &str) -> Result<String, BuilderError> {
-        // Phase 2: implement tar-based image transfer
+    async fn import_image(&self, image_path: PathBuf, tag: &str) -> Result<String, BuilderError> {
+        tracing::info!(
+            node = %self.node_name,
+            image = %tag,
+            "Transferring image tar to remote node"
+        );
+
+        let file = tokio::fs::File::open(&image_path).await.map_err(|e| {
+            BuilderError::IoError(std::io::Error::new(
+                e.kind(),
+                format!("Failed to open image tar {:?}: {}", image_path, e),
+            ))
+        })?;
+
+        let file_size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+        let stream = tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new());
+        let body = reqwest::Body::wrap_stream(stream.map_ok(|b| b.freeze()));
+
+        let url = format!("{}/agent/images/import", self.agent_url);
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .header("content-type", "application/x-tar")
+            .header("x-image-tag", tag)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| {
+                BuilderError::Other(format!(
+                    "Failed to transfer image to node {} at {}: {}",
+                    self.node_name, url, e
+                ))
+            })?;
+
+        let status = response.status();
+        let resp_body: AgentResponse<String> = response.json().await.map_err(|e| {
+            BuilderError::Other(format!(
+                "Invalid response from node {} during image import: {}",
+                self.node_name, e
+            ))
+        })?;
+
+        if !resp_body.success {
+            return Err(BuilderError::Other(format!(
+                "Image import failed on node {} ({}): {}",
+                self.node_name,
+                status,
+                resp_body.error.unwrap_or_default()
+            )));
+        }
+
+        tracing::info!(
+            node = %self.node_name,
+            image = %tag,
+            size_mb = format!("{:.1}", file_size as f64 / 1_048_576.0),
+            "Image transferred successfully"
+        );
+
+        Ok(resp_body.data.unwrap_or_else(|| tag.to_string()))
+    }
+
+    async fn save_image(&self, _image_name: &str, _output_path: &Path) -> Result<(), BuilderError> {
         Err(BuilderError::Other(
-            "Remote image import not yet implemented (Phase 2)".into(),
+            "Save image not supported on remote nodes — images are saved on the control plane"
+                .into(),
         ))
     }
 
@@ -441,7 +505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_import_image_not_supported() {
+    async fn test_import_image_missing_file_returns_error() {
         let deployer = RemoteNodeDeployer::new(
             "https://10.100.0.2:3100".to_string(),
             "token".to_string(),
@@ -449,7 +513,21 @@ mod tests {
         )
         .unwrap();
         let result = deployer
-            .import_image(PathBuf::from("/tmp/image.tar"), "test:latest")
+            .import_image(PathBuf::from("/tmp/nonexistent-image.tar"), "test:latest")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_save_image_not_supported() {
+        let deployer = RemoteNodeDeployer::new(
+            "https://10.100.0.2:3100".to_string(),
+            "token".to_string(),
+            "worker-1".to_string(),
+        )
+        .unwrap();
+        let result = deployer
+            .save_image("test:latest", Path::new("/tmp/out.tar"))
             .await;
         assert!(result.is_err());
     }

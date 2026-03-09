@@ -62,6 +62,7 @@ fn error_response(status: StatusCode, message: String) -> impl IntoResponse {
         get_container_logs,
         get_container_info,
         image_exists,
+        import_image,
         health_check,
     ),
     components(schemas(
@@ -127,13 +128,37 @@ pub async fn deploy_container(
     State(state): State<Arc<AgentState>>,
     Json(request): Json<DeployRequest>,
 ) -> impl IntoResponse {
+    let container_name = request.container_name.clone();
+    let image_name = request.image_name.clone();
+    tracing::info!(
+        container = %container_name,
+        image = %image_name,
+        ports = ?request.port_mappings.iter().map(|p| format!("{}:{}", p.host_port, p.container_port)).collect::<Vec<_>>(),
+        "Deploying container"
+    );
     match state.container_deployer.deploy_container(request).await {
-        Ok(result) => AgentResponse::ok(result).into_response(),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Deploy failed: {}", e),
-        )
-        .into_response(),
+        Ok(result) => {
+            tracing::info!(
+                container = %container_name,
+                container_id = %result.container_id,
+                image = %image_name,
+                "Container deployed successfully"
+            );
+            AgentResponse::ok(result).into_response()
+        }
+        Err(e) => {
+            tracing::error!(
+                container = %container_name,
+                image = %image_name,
+                "Deploy failed: {}",
+                e
+            );
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Deploy failed: {}", e),
+            )
+            .into_response()
+        }
     }
 }
 
@@ -156,13 +181,20 @@ pub async fn stop_container(
     State(state): State<Arc<AgentState>>,
     Path(container_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(container_id = %container_id, "Stopping container");
     match state.container_deployer.stop_container(&container_id).await {
-        Ok(()) => AgentResponse::ok("stopped".to_string()).into_response(),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Stop failed for container {}: {}", container_id, e),
-        )
-        .into_response(),
+        Ok(()) => {
+            tracing::info!(container_id = %container_id, "Container stopped");
+            AgentResponse::ok("stopped".to_string()).into_response()
+        }
+        Err(e) => {
+            tracing::error!(container_id = %container_id, "Stop failed: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Stop failed for container {}: {}", container_id, e),
+            )
+            .into_response()
+        }
     }
 }
 
@@ -185,17 +217,24 @@ pub async fn remove_container(
     State(state): State<Arc<AgentState>>,
     Path(container_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(container_id = %container_id, "Removing container");
     match state
         .container_deployer
         .remove_container(&container_id)
         .await
     {
-        Ok(()) => AgentResponse::ok("removed".to_string()).into_response(),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Remove failed for container {}: {}", container_id, e),
-        )
-        .into_response(),
+        Ok(()) => {
+            tracing::info!(container_id = %container_id, "Container removed");
+            AgentResponse::ok("removed".to_string()).into_response()
+        }
+        Err(e) => {
+            tracing::error!(container_id = %container_id, "Remove failed: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Remove failed for container {}: {}", container_id, e),
+            )
+            .into_response()
+        }
     }
 }
 
@@ -218,17 +257,21 @@ pub async fn get_container_logs(
     State(state): State<Arc<AgentState>>,
     Path(container_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::debug!(container_id = %container_id, "Fetching container logs");
     match state
         .container_deployer
         .get_container_logs(&container_id)
         .await
     {
         Ok(logs) => AgentResponse::ok(logs).into_response(),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to get logs for container {}: {}", container_id, e),
-        )
-        .into_response(),
+        Err(e) => {
+            tracing::error!(container_id = %container_id, "Failed to get logs: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get logs for container {}: {}", container_id, e),
+            )
+            .into_response()
+        }
     }
 }
 
@@ -251,17 +294,21 @@ pub async fn get_container_info(
     State(state): State<Arc<AgentState>>,
     Path(container_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::debug!(container_id = %container_id, "Fetching container info");
     match state
         .container_deployer
         .get_container_info(&container_id)
         .await
     {
         Ok(info) => AgentResponse::ok(info).into_response(),
-        Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to get info for container {}: {}", container_id, e),
-        )
-        .into_response(),
+        Err(e) => {
+            tracing::error!(container_id = %container_id, "Failed to get info: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get info for container {}: {}", container_id, e),
+            )
+            .into_response()
+        }
     }
 }
 
@@ -284,11 +331,114 @@ pub async fn image_exists(
     State(state): State<Arc<AgentState>>,
     Path(image_name): Path<String>,
 ) -> impl IntoResponse {
+    tracing::debug!(image = %image_name, "Checking if image exists");
     match state.container_deployer.image_exists(&image_name).await {
-        Ok(exists) => AgentResponse::ok(exists).into_response(),
+        Ok(exists) => {
+            tracing::debug!(image = %image_name, exists = exists, "Image existence check complete");
+            AgentResponse::ok(exists).into_response()
+        }
+        Err(e) => {
+            tracing::error!(image = %image_name, "Failed to check image: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to check image {}: {}", image_name, e),
+            )
+            .into_response()
+        }
+    }
+}
+
+/// Import a Docker image from a tar archive streamed in the request body.
+///
+/// The control plane calls this to transfer locally-built images to worker nodes.
+/// The image tag is passed via the `x-image-tag` header.
+#[utoipa::path(
+    tag = "Images",
+    post,
+    path = "/agent/images/import",
+    request_body(content = Vec<u8>, content_type = "application/x-tar"),
+    responses(
+        (status = 200, description = "Image imported successfully", body = AgentResponse<String>),
+        (status = 400, description = "Missing x-image-tag header"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Import failed")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn import_image(
+    State(state): State<Arc<AgentState>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Body,
+) -> impl IntoResponse {
+    let tag = match headers.get("x-image-tag").and_then(|v| v.to_str().ok()) {
+        Some(t) => t.to_string(),
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Missing required x-image-tag header".to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    tracing::info!(image = %tag, "Receiving image tar from control plane");
+
+    // Stream the body to a temp file
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("temps-image-import-{}.tar", uuid::Uuid::new_v4()));
+
+    let write_result = async {
+        use http_body_util::BodyExt;
+
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        let mut total_bytes: u64 = 0;
+
+        let mut body = body;
+        while let Some(frame) = BodyExt::frame(&mut body).await {
+            let frame =
+                frame.map_err(|e| std::io::Error::other(format!("Body read error: {}", e)))?;
+            if let Ok(data) = frame.into_data() {
+                tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
+                total_bytes += data.len() as u64;
+            }
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file).await?;
+
+        tracing::info!(
+            image = %tag,
+            size_mb = format!("{:.1}", total_bytes as f64 / 1_048_576.0),
+            "Image tar received, loading into Docker"
+        );
+        Ok::<_, std::io::Error>(())
+    }
+    .await;
+
+    if let Err(e) = write_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to write image tar: {}", e),
+        )
+        .into_response();
+    }
+
+    // Import the image via the image builder (docker load)
+    let result = state
+        .image_builder
+        .import_image(tmp_path.clone(), &tag)
+        .await;
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(&tmp_path).await;
+
+    match result {
+        Ok(image_id) => {
+            tracing::info!(image = %tag, image_id = %image_id, "Image imported successfully");
+            AgentResponse::ok(image_id).into_response()
+        }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to check image {}: {}", image_name, e),
+            format!("Failed to import image '{}': {}", tag, e),
         )
         .into_response(),
     }
@@ -305,16 +455,45 @@ pub async fn image_exists(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn health_check() -> impl IntoResponse {
-    // Gather basic system metrics
-    let report = NodeHealthReport {
-        cpu_percent: 0.0, // TODO: gather real metrics via sysinfo
-        memory_used_bytes: 0,
-        memory_total_bytes: 0,
-        disk_used_bytes: 0,
-        disk_total_bytes: 0,
-        running_containers: 0,
+pub async fn health_check(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    let report = collect_system_metrics(&state).await;
+    AgentResponse::ok(report)
+}
+
+/// Collect real system metrics using sysinfo.
+async fn collect_system_metrics(state: &AgentState) -> NodeHealthReport {
+    use sysinfo::{CpuExt, DiskExt, SystemExt};
+
+    let mut sys = sysinfo::System::new();
+    sys.refresh_cpu();
+    sys.refresh_memory();
+    sys.refresh_disks_list();
+    sys.refresh_disks();
+
+    let cpu_percent = sys.global_cpu_info().cpu_usage() as f64;
+    let memory_used_bytes = sys.used_memory();
+    let memory_total_bytes = sys.total_memory();
+
+    // Use only the root mount point to avoid double-counting overlapping mounts
+    let (disk_used, disk_total) = sys
+        .disks()
+        .iter()
+        .find(|d| d.mount_point() == std::path::Path::new("/"))
+        .map(|d| (d.total_space() - d.available_space(), d.total_space()))
+        .unwrap_or((0, 0));
+
+    // Count running containers via the deployer
+    let running_containers = match state.container_deployer.list_containers().await {
+        Ok(containers) => containers.len() as u64,
+        Err(_) => 0,
     };
 
-    AgentResponse::ok(report)
+    NodeHealthReport {
+        cpu_percent,
+        memory_used_bytes,
+        memory_total_bytes,
+        disk_used_bytes: disk_used,
+        disk_total_bytes: disk_total,
+        running_containers,
+    }
 }

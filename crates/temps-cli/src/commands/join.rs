@@ -166,6 +166,7 @@ impl JoinCommand {
             node_name: node_name.to_string(),
             control_plane_url: self.target.clone(),
             node_id: register_response.id,
+            labels: labels.clone(),
         };
         self.save_agent_config(&config)?;
 
@@ -312,6 +313,7 @@ impl JoinCommand {
             node_name: node_name.to_string(),
             control_plane_url: relay_response.control_plane_url,
             node_id,
+            labels: labels.clone(),
         };
         self.save_agent_config(&config)?;
 

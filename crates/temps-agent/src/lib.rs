@@ -64,4 +64,8 @@ pub struct AgentConfig {
     pub control_plane_url: String,
     /// Node ID assigned by the control plane (used for heartbeat endpoint)
     pub node_id: i32,
+    /// Node labels for scheduling (e.g., {"region": "us-east", "gpu": "true"}).
+    /// Sent in every heartbeat so the control plane has up-to-date label info.
+    #[serde(default)]
+    pub labels: serde_json::Value,
 }

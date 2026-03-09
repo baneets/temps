@@ -1,13 +1,17 @@
-//! Periodic job that checks node health and marks stale nodes as offline.
+//! Periodic job that checks node health, marks stale nodes as offline,
+//! and triggers failover redeployment for affected environments.
 //!
 //! Runs on the control plane every 60 seconds. Nodes that haven't sent
-//! a heartbeat in >90 seconds are marked offline.
+//! a heartbeat in >90 seconds are marked offline. When a node transitions
+//! to offline, its affected environments are automatically redeployed
+//! to healthy nodes.
 
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use temps_entities::nodes;
 
 use crate::services::node_service::NodeService;
+use crate::DeploymentService;
 
 /// Threshold in seconds — nodes with older heartbeats are marked offline.
 const HEARTBEAT_STALE_THRESHOLD_SECS: i64 = 90;
@@ -16,7 +20,9 @@ const HEARTBEAT_STALE_THRESHOLD_SECS: i64 = 90;
 ///
 /// This is designed to be called by a scheduler (e.g., every 60 seconds).
 /// It does NOT run in a loop itself.
-pub async fn check_node_health(node_service: &NodeService, db: &DatabaseConnection) -> u32 {
+///
+/// Returns the list of node IDs that were marked offline (for failover).
+pub async fn check_node_health(node_service: &NodeService, db: &DatabaseConnection) -> Vec<i32> {
     let cutoff = chrono::Utc::now() - chrono::Duration::seconds(HEARTBEAT_STALE_THRESHOLD_SECS);
 
     // Find nodes that are still marked "active" but have a stale heartbeat
@@ -33,11 +39,11 @@ pub async fn check_node_health(node_service: &NodeService, db: &DatabaseConnecti
         Ok(nodes) => nodes,
         Err(e) => {
             tracing::error!("Failed to query nodes for health check: {}", e);
-            return 0;
+            return vec![];
         }
     };
 
-    let mut marked_offline = 0u32;
+    let mut marked_offline = Vec::new();
 
     for node in &stale_nodes {
         tracing::warn!(
@@ -55,19 +61,98 @@ pub async fn check_node_health(node_service: &NodeService, db: &DatabaseConnecti
                 e
             );
         } else {
-            marked_offline += 1;
+            marked_offline.push(node.id);
         }
     }
 
-    if marked_offline > 0 {
+    if !marked_offline.is_empty() {
         tracing::info!(
-            count = marked_offline,
+            count = marked_offline.len(),
             "Node health check completed: marked {} node(s) offline",
-            marked_offline
+            marked_offline.len()
         );
     }
 
     marked_offline
+}
+
+/// Check all draining nodes for drain completion and transition them
+/// to "drained" status when all containers have been migrated.
+///
+/// This is designed to be called after `check_node_health` in the same
+/// periodic job (every 60 seconds). Returns the node IDs that completed.
+pub async fn check_drain_completion(node_service: &NodeService) -> Vec<i32> {
+    match node_service.check_all_drains().await {
+        Ok(completed) => completed,
+        Err(e) => {
+            tracing::error!("Failed to check drain completion: {}", e);
+            vec![]
+        }
+    }
+}
+
+/// Trigger redeployment for all environments that have containers on the
+/// given offline node IDs. This is the failover mechanism — when a node
+/// goes offline, its workloads are automatically rescheduled.
+pub async fn failover_offline_nodes(
+    offline_node_ids: &[i32],
+    node_service: &NodeService,
+    deployment_service: &DeploymentService,
+) {
+    if offline_node_ids.is_empty() {
+        return;
+    }
+
+    for &node_id in offline_node_ids {
+        let affected = match node_service.affected_environments(node_id).await {
+            Ok(envs) => envs,
+            Err(e) => {
+                tracing::error!(
+                    node_id,
+                    "Failed to query affected environments for failover: {}",
+                    e
+                );
+                continue;
+            }
+        };
+
+        if affected.is_empty() {
+            tracing::debug!(node_id, "No affected environments for offline node");
+            continue;
+        }
+
+        tracing::warn!(
+            node_id,
+            affected_count = affected.len(),
+            "Triggering failover redeployment for {} environment(s)",
+            affected.len()
+        );
+
+        for (project_id, environment_id) in &affected {
+            match deployment_service
+                .trigger_pipeline(*project_id, *environment_id, None, None, None)
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        node_id,
+                        project_id,
+                        environment_id,
+                        "Failover: triggered redeployment"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        node_id,
+                        project_id,
+                        environment_id,
+                        "Failover: failed to trigger redeployment: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,7 +201,7 @@ mod tests {
         ));
 
         let marked = check_node_health(&node_service, &db).await;
-        assert_eq!(marked, 0);
+        assert!(marked.is_empty());
     }
 
     #[tokio::test]
@@ -146,6 +231,29 @@ mod tests {
         let node_service = NodeService::new(std::sync::Arc::new(service_db));
 
         let marked = check_node_health(&node_service, &db).await;
-        assert_eq!(marked, 2);
+        assert_eq!(marked.len(), 2);
+        assert!(marked.contains(&1));
+        assert!(marked.contains(&2));
+    }
+
+    #[tokio::test]
+    async fn test_check_node_health_returns_offline_ids() {
+        let stale_node = make_node(5, "worker-5", "active", 200);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![stale_node]])
+            .into_connection();
+
+        let node_for_service = make_node(5, "worker-5", "active", 200);
+        let node_updated = make_node(5, "worker-5", "offline", 200);
+
+        let service_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![node_for_service]])
+            .append_query_results(vec![vec![node_updated]])
+            .into_connection();
+        let node_service = NodeService::new(std::sync::Arc::new(service_db));
+
+        let marked = check_node_health(&node_service, &db).await;
+        assert_eq!(marked, vec![5]);
     }
 }

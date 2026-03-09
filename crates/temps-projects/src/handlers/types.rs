@@ -345,6 +345,15 @@ impl ProjectResponse {
                     .deployment_config
                     .clone()
                     .and_then(|c| c.target_nodes),
+                target_labels: project
+                    .deployment_config
+                    .clone()
+                    .and_then(|c| c.target_labels),
+                anti_affinity: project
+                    .deployment_config
+                    .clone()
+                    .map(|c| c.anti_affinity)
+                    .unwrap_or(true),
             },
         }
     }

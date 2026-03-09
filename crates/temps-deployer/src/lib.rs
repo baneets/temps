@@ -398,6 +398,10 @@ pub trait ImageBuilder: Send + Sync {
     /// Import an image from a tar archive
     async fn import_image(&self, image_path: PathBuf, tag: &str) -> Result<String, BuilderError>;
 
+    /// Export (save) an image to a tar archive file.
+    /// Equivalent to `docker save <image_name> -o <output_path>`.
+    async fn save_image(&self, image_name: &str, output_path: &Path) -> Result<(), BuilderError>;
+
     /// Extract files from an image to a destination path
     async fn extract_from_image(
         &self,

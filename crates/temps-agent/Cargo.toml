@@ -23,5 +23,8 @@ reqwest = { workspace = true }
 sha2 = { workspace = true }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+sysinfo = { workspace = true }
+uuid = { workspace = true }
+http-body-util = "0.1"
 temps-core = { path = "../temps-core" }
 temps-deployer = { path = "../temps-deployer" }

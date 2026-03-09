@@ -77,6 +77,10 @@ impl ImageBuilder for MockImageBuilder {
         })
     }
 
+    async fn save_image(&self, _image_name: &str, _output_path: &Path) -> Result<(), BuilderError> {
+        Ok(())
+    }
+
     fn get_native_platform(&self) -> String {
         "linux/amd64".to_string()
     }

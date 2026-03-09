@@ -70,6 +70,8 @@ pub struct RegisterNodeResponse {
 pub struct HeartbeatApiRequest {
     /// Resource capacity/usage info as JSON (cpu_usage, memory_usage, etc.)
     pub capacity: Option<serde_json::Value>,
+    /// Updated node labels for scheduling (allows runtime label changes).
+    pub labels: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -87,6 +89,8 @@ pub struct NodeInfoResponse {
     pub role: String,
     pub status: String,
     pub labels: serde_json::Value,
+    /// Resource capacity/usage metrics from the latest heartbeat
+    pub capacity: serde_json::Value,
     pub last_heartbeat: Option<String>,
     pub created_at: String,
 }
@@ -97,9 +101,69 @@ pub struct NodeListResponse {
     pub total: usize,
 }
 
+/// A container running on a specific node, enriched with project/environment context.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct NodeContainerResponse {
+    pub container_id: String,
+    pub container_name: String,
+    pub image_name: String,
+    pub status: String,
+    pub created_at: String,
+    pub deployment_id: i32,
+    pub project_id: i32,
+    pub project_name: String,
+    pub environment_id: i32,
+    pub environment_name: String,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct NodeContainerListResponse {
+    pub containers: Vec<NodeContainerResponse>,
+    pub total: usize,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct DrainNodeResponse {
+    pub id: i32,
+    pub name: String,
+    pub status: String,
+    pub affected_environments: usize,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct RemoveNodeResponse {
+    pub id: i32,
+    pub message: String,
+}
+
+/// Progress of a node drain operation.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct DrainStatusResponse {
+    pub node_id: i32,
+    pub node_name: String,
+    pub status: String,
+    /// Number of containers still on this node
+    pub remaining_containers: usize,
+    /// Whether the drain is complete (all containers migrated)
+    pub drain_complete: bool,
+    /// Can the node be safely removed?
+    pub can_remove: bool,
+    pub message: String,
+}
+
 #[derive(OpenApi)]
 #[openapi(
-    paths(register_node, node_heartbeat, admin_list_nodes, admin_get_node,),
+    paths(
+        register_node,
+        node_heartbeat,
+        admin_list_nodes,
+        admin_get_node,
+        admin_list_node_containers,
+        admin_drain_node,
+        admin_remove_node,
+        admin_drain_status,
+    ),
     components(schemas(
         RegisterNodeApiRequest,
         RegisterNodeResponse,
@@ -107,6 +171,11 @@ pub struct NodeListResponse {
         HeartbeatResponse,
         NodeInfoResponse,
         NodeListResponse,
+        NodeContainerResponse,
+        NodeContainerListResponse,
+        DrainNodeResponse,
+        RemoveNodeResponse,
+        DrainStatusResponse,
     )),
     info(
         title = "Node Registration API",
@@ -129,7 +198,18 @@ pub fn configure_routes() -> Router<Arc<NodeAppState>> {
 pub fn configure_admin_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/internal/nodes", get(admin_list_nodes))
-        .route("/internal/nodes/{node_id}", get(admin_get_node))
+        .route(
+            "/internal/nodes/{node_id}",
+            get(admin_get_node).delete(admin_remove_node),
+        )
+        .route(
+            "/internal/nodes/{node_id}/containers",
+            get(admin_list_node_containers),
+        )
+        .route(
+            "/internal/nodes/{node_id}/drain",
+            get(admin_drain_status).post(admin_drain_node),
+        )
 }
 
 /// SHA-256 hash a token string
@@ -306,6 +386,7 @@ async fn node_heartbeat(
 
     let heartbeat = HeartbeatRequest {
         capacity: request.capacity.unwrap_or(serde_json::json!({})),
+        labels: request.labels,
     };
 
     app_state
@@ -353,6 +434,7 @@ async fn admin_list_nodes(
             role: n.role,
             status: n.status,
             labels: n.labels,
+            capacity: n.capacity,
             last_heartbeat: n.last_heartbeat.map(|t| t.to_rfc3339()),
             created_at: n.created_at.to_rfc3339(),
         })
@@ -399,8 +481,346 @@ async fn admin_get_node(
         role: node.role,
         status: node.status,
         labels: node.labels,
+        capacity: node.capacity,
         last_heartbeat: node.last_heartbeat.map(|t| t.to_rfc3339()),
         created_at: node.created_at.to_rfc3339(),
+    }))
+}
+
+/// List all containers running on a specific node
+#[utoipa::path(
+    tag = "Nodes",
+    get,
+    path = "/internal/nodes/{node_id}/containers",
+    params(
+        ("node_id" = i32, Path, description = "Node ID")
+    ),
+    responses(
+        (status = 200, description = "Containers on this node", body = NodeContainerListResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Node not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn admin_list_node_containers(
+    RequireAuth(_auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(node_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    // Verify the node exists
+    let _node = app_state
+        .node_service
+        .get_by_id(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    // Query containers for this node, joining with deployments, projects, and environments
+    let rows: Vec<(
+        temps_entities::deployment_containers::Model,
+        Option<temps_entities::deployments::Model>,
+    )> = temps_entities::deployment_containers::Entity::find()
+        .filter(temps_entities::deployment_containers::Column::NodeId.eq(node_id))
+        .filter(temps_entities::deployment_containers::Column::DeletedAt.is_null())
+        .find_also_related(temps_entities::deployments::Entity)
+        .all(app_state.db.as_ref())
+        .await
+        .map_err(|e| {
+            error!("Failed to query containers for node {}: {}", node_id, e);
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Internal Server Error")
+                .with_detail("Failed to query node containers")
+        })?;
+
+    // Collect unique project and environment IDs
+    let mut project_ids = std::collections::HashSet::new();
+    let mut environment_ids = std::collections::HashSet::new();
+    for (_, deployment) in &rows {
+        if let Some(d) = deployment {
+            project_ids.insert(d.project_id);
+            environment_ids.insert(d.environment_id);
+        }
+    }
+
+    // Batch-fetch project names
+    let projects: std::collections::HashMap<i32, String> = temps_entities::projects::Entity::find()
+        .filter(temps_entities::projects::Column::Id.is_in(project_ids))
+        .all(app_state.db.as_ref())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+
+    // Batch-fetch environment names
+    let environments: std::collections::HashMap<i32, String> =
+        temps_entities::environments::Entity::find()
+            .filter(temps_entities::environments::Column::Id.is_in(environment_ids))
+            .all(app_state.db.as_ref())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.id, e.name))
+            .collect();
+
+    let containers: Vec<NodeContainerResponse> = rows
+        .into_iter()
+        .filter_map(|(container, deployment)| {
+            let d = deployment?;
+            Some(NodeContainerResponse {
+                container_id: container.container_id,
+                container_name: container.container_name,
+                image_name: container.image_name.unwrap_or_default(),
+                status: container.status.unwrap_or_else(|| "unknown".to_string()),
+                created_at: container.created_at.to_rfc3339(),
+                deployment_id: d.id,
+                project_id: d.project_id,
+                project_name: projects
+                    .get(&d.project_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("project-{}", d.project_id)),
+                environment_id: d.environment_id,
+                environment_name: environments
+                    .get(&d.environment_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("env-{}", d.environment_id)),
+            })
+        })
+        .collect();
+
+    let total = containers.len();
+    Ok(Json(NodeContainerListResponse { containers, total }))
+}
+
+/// Drain a node: mark it as "draining" so no new replicas are scheduled on it,
+/// and trigger redeployment of all affected environments so their containers
+/// are rescheduled to healthy nodes.
+#[utoipa::path(
+    tag = "Nodes",
+    post,
+    path = "/internal/nodes/{node_id}/drain",
+    params(
+        ("node_id" = i32, Path, description = "Node ID")
+    ),
+    responses(
+        (status = 200, description = "Node drain initiated", body = DrainNodeResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Node not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn admin_drain_node(
+    RequireAuth(_auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(node_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    let node = app_state
+        .node_service
+        .get_by_id(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    if node.status == "draining" {
+        return Err(problemdetails::new(StatusCode::CONFLICT)
+            .with_title("Node Already Draining")
+            .with_detail(format!("Node '{}' is already in draining state", node.name)));
+    }
+
+    // Find affected environments before draining
+    let affected = app_state
+        .node_service
+        .affected_environments(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let affected_count = affected.len();
+
+    // Mark the node as draining — scheduler will exclude it from new assignments
+    app_state
+        .node_service
+        .mark_draining(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    info!(
+        node_id,
+        node_name = %node.name,
+        affected_environments = affected_count,
+        "Node drain initiated, triggering redeployment for affected environments"
+    );
+
+    // Trigger redeployment for each affected environment so containers
+    // move off the draining node onto healthy nodes
+    for (project_id, environment_id) in &affected {
+        match app_state
+            .deployment_service
+            .trigger_pipeline(*project_id, *environment_id, None, None, None)
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    project_id,
+                    environment_id, "Triggered redeployment for drain"
+                );
+            }
+            Err(e) => {
+                error!(
+                    project_id,
+                    environment_id, "Failed to trigger redeployment during drain: {}", e
+                );
+            }
+        }
+    }
+
+    Ok(Json(DrainNodeResponse {
+        id: node_id,
+        name: node.name,
+        status: "draining".to_string(),
+        affected_environments: affected_count,
+        message: format!(
+            "Node drain initiated. {} environment(s) will be redeployed to healthy nodes.",
+            affected_count
+        ),
+    }))
+}
+
+/// Remove a node from the cluster entirely. The node should be drained first
+/// to ensure containers have been rescheduled. If the node still has active
+/// containers, it will be drained automatically before removal.
+#[utoipa::path(
+    tag = "Nodes",
+    delete,
+    path = "/internal/nodes/{node_id}",
+    params(
+        ("node_id" = i32, Path, description = "Node ID")
+    ),
+    responses(
+        (status = 200, description = "Node removed", body = RemoveNodeResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Node not found"),
+        (status = 409, description = "Node still has active containers"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn admin_remove_node(
+    RequireAuth(_auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(node_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    let node = app_state
+        .node_service
+        .get_by_id(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    // Check if node still has active containers
+    let containers = app_state
+        .node_service
+        .list_containers_for_node(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    if !containers.is_empty() {
+        return Err(problemdetails::new(StatusCode::CONFLICT)
+            .with_title("Node Has Active Containers")
+            .with_detail(format!(
+                "Node '{}' still has {} active container(s). Drain the node first with POST /internal/nodes/{}/drain",
+                node.name, containers.len(), node_id
+            )));
+    }
+
+    let node_name = node.name.clone();
+
+    app_state
+        .node_service
+        .remove(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    info!(node_id, node_name = %node_name, "Node removed from cluster");
+
+    Ok(Json(RemoveNodeResponse {
+        id: node_id,
+        message: format!("Node '{}' removed from cluster", node_name),
+    }))
+}
+
+/// Get the drain status for a node, including migration progress.
+///
+/// Returns container counts and whether the drain is complete.
+/// Can be polled to track drain progress.
+#[utoipa::path(
+    tag = "Nodes",
+    get,
+    path = "/internal/nodes/{node_id}/drain",
+    params(
+        ("node_id" = i32, Path, description = "Node ID")
+    ),
+    responses(
+        (status = 200, description = "Drain status", body = DrainStatusResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Node not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn admin_drain_status(
+    RequireAuth(_auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(node_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    // Check drain completion first — this may transition the node to "drained"
+    let _ = app_state
+        .node_service
+        .check_drain_complete(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    // Re-fetch the node to get the potentially updated status
+    let node = app_state
+        .node_service
+        .get_by_id(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let containers = app_state
+        .node_service
+        .list_containers_for_node(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let remaining = containers.len();
+    let is_draining = node.status == "draining";
+    let is_drained = node.status == "drained";
+    let drain_complete = is_drained || (is_draining && remaining == 0);
+    let can_remove = drain_complete || (node.status == "offline" && remaining == 0);
+
+    let message = if is_drained || (is_draining && remaining == 0) {
+        format!(
+            "Drain complete. Node '{}' has no remaining containers and can be safely removed.",
+            node.name
+        )
+    } else if is_draining {
+        format!(
+            "Draining: {} container(s) still on node '{}'. Workloads are being migrated.",
+            remaining, node.name
+        )
+    } else {
+        format!("Node '{}' is {} (not draining)", node.name, node.status)
+    };
+
+    Ok(Json(DrainStatusResponse {
+        node_id,
+        node_name: node.name,
+        status: node.status,
+        remaining_containers: remaining,
+        drain_complete,
+        can_remove,
+        message,
     }))
 }
 

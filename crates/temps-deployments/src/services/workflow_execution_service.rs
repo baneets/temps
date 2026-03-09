@@ -622,6 +622,18 @@ impl WorkflowExecutionService {
                             .and_then(|c| c.target_nodes.clone())
                     });
 
+                // Resolve target_labels from environment or project config
+                let target_labels = environment
+                    .deployment_config
+                    .as_ref()
+                    .and_then(|c| c.target_labels.clone())
+                    .or_else(|| {
+                        project
+                            .deployment_config
+                            .as_ref()
+                            .and_then(|c| c.target_labels.clone())
+                    });
+
                 let mut builder = DeployImageJobBuilder::new()
                     .job_id(db_job.job_id.clone())
                     .build_job_id(build_job_id)
@@ -648,9 +660,75 @@ impl WorkflowExecutionService {
                     builder = builder.encryption_service(enc_service.clone());
                 }
 
+                // Inject image builder for transferring images to remote nodes
+                builder = builder.image_builder(self.image_builder.clone());
+
                 // Set target nodes if configured
                 if let Some(nodes) = target_nodes {
                     builder = builder.target_nodes(nodes);
+                }
+
+                // Set target labels for label-based node scheduling
+                if let Some(labels) = target_labels {
+                    builder = builder.target_labels(labels);
+                }
+
+                // Resolve anti-affinity from environment or project config
+                let anti_affinity = environment
+                    .deployment_config
+                    .as_ref()
+                    .map(|c| c.anti_affinity)
+                    .unwrap_or_else(|| {
+                        project
+                            .deployment_config
+                            .as_ref()
+                            .map(|c| c.anti_affinity)
+                            .unwrap_or(true)
+                    });
+                builder = builder.anti_affinity(anti_affinity);
+
+                // Rolling update awareness: query existing containers for this
+                // environment so the scheduler can avoid placing new replicas on
+                // nodes that still host outgoing containers.
+                if anti_affinity {
+                    use temps_entities::deployment_containers;
+
+                    // Find the most recent previous deployment for this environment
+                    let prev_deployment = deployments::Entity::find()
+                        .filter(deployments::Column::EnvironmentId.eq(deployment.environment_id))
+                        .filter(deployments::Column::ProjectId.eq(deployment.project_id))
+                        .filter(deployments::Column::Id.ne(deployment.id))
+                        .filter(deployments::Column::State.eq("deployed"))
+                        .order_by_desc(deployments::Column::CreatedAt)
+                        .one(self.db.as_ref())
+                        .await
+                        .ok()
+                        .flatten();
+
+                    if let Some(prev) = prev_deployment {
+                        let existing_containers = deployment_containers::Entity::find()
+                            .filter(deployment_containers::Column::DeploymentId.eq(prev.id))
+                            .filter(deployment_containers::Column::DeletedAt.is_null())
+                            .all(self.db.as_ref())
+                            .await
+                            .unwrap_or_default();
+
+                        let exclude_ids: Vec<i32> = existing_containers
+                            .iter()
+                            .filter_map(|c| c.node_id)
+                            .collect::<std::collections::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+
+                        if !exclude_ids.is_empty() {
+                            debug!(
+                                "Anti-affinity: excluding {} node(s) with existing containers: {:?}",
+                                exclude_ids.len(),
+                                exclude_ids
+                            );
+                            builder = builder.exclude_node_ids(exclude_ids);
+                        }
+                    }
                 }
 
                 // If using external image, set the image tag directly (bypasses build job lookup)
@@ -1721,6 +1799,14 @@ mod tests {
                 created: None,
                 working_dir: None,
             })
+        }
+
+        async fn save_image(
+            &self,
+            _image_name: &str,
+            _output_path: &std::path::Path,
+        ) -> Result<(), temps_deployer::BuilderError> {
+            Ok(())
         }
 
         fn get_native_platform(&self) -> String {

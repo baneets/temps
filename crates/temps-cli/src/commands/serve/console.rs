@@ -44,7 +44,10 @@ use temps_infra::InfraPlugin;
 use temps_kv::KvPlugin;
 use temps_log_aggregator::{LogAggregatorPlugin, StorageConfig};
 use temps_logs::LogsPlugin;
-use temps_monitoring::{DiskSpaceMonitor, OutageDetectionService};
+use temps_monitoring::{
+    AlarmService, ContainerHealthConfig, ContainerHealthMonitor, DiskSpaceMonitor,
+    OutageDetectionService,
+};
 use temps_notifications::NotificationsPlugin;
 use temps_otel::plugin::OtelPlugin;
 use temps_projects::ProjectsPlugin;
@@ -61,7 +64,7 @@ use tracing::{debug, info};
 
 // Multi-node support
 use temps_deployments::handlers::nodes::NodeAppState;
-use temps_deployments::jobs::node_health_check::check_node_health;
+use temps_deployments::jobs::node_health_check::{check_node_health, failover_offline_nodes};
 use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -986,14 +989,23 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         );
     }
 
-    // Start event-driven outage detection service (listens to StatusCheckCompleted jobs)
+    // Start alarm service, outage detection, and container health monitoring
     if let (Some(notification_service), Some(queue_service)) = (
         service_context.get_service::<dyn temps_core::notifications::NotificationService>(),
         service_context.get_service::<dyn temps_core::JobQueue>(),
     ) {
+        // Create the alarm service (shared across outage detection and container health)
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            queue_service.clone(),
+        ));
+
+        // Start event-driven outage detection (listens to StatusCheckCompleted jobs)
         let outage_service = Arc::new(OutageDetectionService::new(
             db.clone(),
             notification_service,
+            alarm_service.clone(),
         ));
 
         let job_receiver = queue_service.subscribe();
@@ -1002,9 +1014,29 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         });
 
         debug!("Event-driven outage detection service started (listening to StatusCheckCompleted jobs)");
+
+        // Start container health monitoring (restart count, resource usage)
+        if let Some(container_deployer) =
+            service_context.get_service::<dyn temps_deployer::ContainerDeployer>()
+        {
+            let health_monitor = Arc::new(ContainerHealthMonitor::new(
+                db.clone(),
+                container_deployer,
+                alarm_service,
+                ContainerHealthConfig::default(),
+            ));
+
+            tokio::spawn(async move {
+                health_monitor.start().await;
+            });
+
+            debug!("Container health monitor started (poll interval: 30s)");
+        } else {
+            debug!("ContainerDeployer not available - container health monitoring disabled");
+        }
     } else {
         tracing::warn!(
-            "NotificationService or JobQueue not available - outage detection disabled."
+            "NotificationService or JobQueue not available - outage detection and alarm service disabled."
         );
     }
 
@@ -1035,21 +1067,35 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let node_routes =
         temps_deployments::handlers::nodes::configure_routes().with_state(node_app_state);
 
-    // Start periodic node health check (every 60s, marks stale nodes offline)
+    // Start periodic node health check with failover (every 60s)
     {
         let health_node_service = node_service.clone();
         let health_db = db.clone();
+        let deployment_service_for_failover =
+            service_context.get_service::<temps_deployments::DeploymentService>();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                let marked = check_node_health(&health_node_service, health_db.as_ref()).await;
-                if marked > 0 {
-                    tracing::info!("Node health check: marked {} node(s) as offline", marked);
+                let offline_ids = check_node_health(&health_node_service, health_db.as_ref()).await;
+                if !offline_ids.is_empty() {
+                    tracing::info!(
+                        "Node health check: marked {} node(s) as offline",
+                        offline_ids.len()
+                    );
+                    // Trigger failover redeployment for affected environments
+                    if let Some(ref deployment_service) = deployment_service_for_failover {
+                        failover_offline_nodes(
+                            &offline_ids,
+                            &health_node_service,
+                            deployment_service,
+                        )
+                        .await;
+                    }
                 }
             }
         });
-        debug!("Node health check scheduler started (every 60s)");
+        debug!("Node health check scheduler with failover started (every 60s)");
     }
 
     // Build the application with all plugin routes and OpenAPI schemas

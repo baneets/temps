@@ -1699,6 +1699,20 @@ export type DeploymentConfig = {
      */
     sessionRecordingEnabled?: boolean;
     /**
+     * Label selector for node-based scheduling. Replicas are only deployed to
+     * nodes whose labels match the selector.
+     *
+     * Matching rules:
+     * - **Same key, array value** → OR: node must match any value
+     * - **Different keys** → AND: node must satisfy all keys
+     *
+     * Example: `{"region": ["us", "asia"], "gpu": "true"}`
+     * → (region=us OR region=asia) AND gpu=true
+     *
+     * Applied after `target_nodes` filtering (they stack).
+     */
+    targetLabels?: unknown;
+    /**
      * Optional list of node IDs to deploy to. When set, replicas are distributed
      * only across these nodes (round-robin). When None, the scheduler distributes
      * across all active nodes (or deploys locally if no nodes exist).
@@ -3920,6 +3934,10 @@ export type HeartbeatApiRequest = {
      * Resource capacity/usage info as JSON (cpu_usage, memory_usage, etc.)
      */
     capacity?: unknown;
+    /**
+     * Updated node labels for scheduling (allows runtime label changes).
+     */
+    labels?: unknown;
 };
 
 export type HeartbeatResponse = {
@@ -5244,6 +5262,10 @@ export type NixpacksPresetConfig = {
 
 export type NodeInfoResponse = {
     address: string;
+    /**
+     * Resource capacity/usage metrics from the latest heartbeat
+     */
+    capacity: unknown;
     created_at: string;
     id: number;
     labels: unknown;
@@ -8708,6 +8730,16 @@ export type UpdateEnvironmentSettingsRequest = {
      * Enable/disable session recording
      */
     session_recording_enabled?: boolean | null;
+    /**
+     * Label selector for node-based scheduling (overrides project-level setting).
+     * Same key with array value -> OR, different keys -> AND.
+     * Example: `{"region": ["us", "asia"], "gpu": "true"}`
+     */
+    target_labels?: unknown;
+    /**
+     * Optional list of node IDs to deploy to (overrides project-level setting)
+     */
+    target_nodes?: Array<number> | null;
 };
 
 export type UpdateErrorGroupRequest = {
@@ -16804,6 +16836,45 @@ export type AdminGetNodeResponses = {
 };
 
 export type AdminGetNodeResponse = AdminGetNodeResponses[keyof AdminGetNodeResponses];
+
+export type NodeContainerResponse = {
+    container_id: string;
+    container_name: string;
+    image_name: string;
+    status: string;
+    created_at: string;
+    deployment_id: number;
+    project_id: number;
+    project_name: string;
+    environment_id: number;
+    environment_name: string;
+};
+
+export type NodeContainerListResponse = {
+    containers: Array<NodeContainerResponse>;
+    total: number;
+};
+
+export type AdminListNodeContainersData = {
+    body?: never;
+    path: {
+        node_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/containers';
+};
+
+export type AdminListNodeContainersErrors = {
+    401: unknown;
+    404: unknown;
+    500: unknown;
+};
+
+export type AdminListNodeContainersResponses = {
+    200: NodeContainerListResponse;
+};
+
+export type AdminListNodeContainersResponse = AdminListNodeContainersResponses[keyof AdminListNodeContainersResponses];
 
 export type NodeHeartbeatData = {
     body: HeartbeatApiRequest;

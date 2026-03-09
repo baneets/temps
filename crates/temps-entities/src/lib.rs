@@ -1,5 +1,6 @@
 pub mod acme_accounts;
 pub mod acme_orders;
+pub mod alarms;
 pub mod api_keys;
 pub mod audit_logs;
 pub mod backup_schedules;

@@ -185,6 +185,29 @@ pub struct StatusCheckCompletedJob {
     pub error_message: Option<String>,
 }
 
+/// Job for when an alarm is fired (container restart, outage, high resource usage, etc.)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlarmFiredJob {
+    pub alarm_id: i32,
+    pub project_id: i32,
+    pub environment_id: i32,
+    pub deployment_id: i32,
+    pub alarm_type: String,
+    pub severity: String,
+    pub title: String,
+}
+
+/// Job for when an alarm is resolved
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlarmResolvedJob {
+    pub alarm_id: i32,
+    pub project_id: i32,
+    pub environment_id: i32,
+    pub deployment_id: i32,
+    pub alarm_type: String,
+    pub title: String,
+}
+
 /// Job emitted by route table listeners after successfully reloading routes.
 /// Used by the deployment pipeline to confirm the proxy has picked up the new
 /// routing configuration before marking a deployment as completed and tearing
@@ -234,6 +257,9 @@ pub enum Job {
     StatusCheckCompleted(StatusCheckCompletedJob),
     // Route table events
     RouteTableUpdated(RouteTableUpdatedJob),
+    // Alarm events
+    AlarmFired(AlarmFiredJob),
+    AlarmResolved(AlarmResolvedJob),
 }
 
 impl fmt::Display for Job {
@@ -274,6 +300,8 @@ impl fmt::Display for Job {
             Job::VulnerabilityScanCompleted(job) => write!(f, "VulnerabilityScanCompleted(id: {}, project: {}, env: {:?}, total: {}, critical: {}, high: {})", job.scan_id, job.project_id, job.environment_id, job.total_vulnerabilities, job.critical_count, job.high_count),
             Job::StatusCheckCompleted(job) => write!(f, "StatusCheckCompleted(monitor: {}, status: {})", job.monitor_id, job.status),
             Job::RouteTableUpdated(job) => write!(f, "RouteTableUpdated(env: {:?}, deployment: {:?}, routes: {})", job.environment_id, job.deployment_id, job.route_count),
+            Job::AlarmFired(job) => write!(f, "AlarmFired(id: {}, project: {}, type: {}, severity: {})", job.alarm_id, job.project_id, job.alarm_type, job.severity),
+            Job::AlarmResolved(job) => write!(f, "AlarmResolved(id: {}, project: {}, type: {})", job.alarm_id, job.project_id, job.alarm_type),
         }
     }
 }

@@ -28,6 +28,11 @@ pub struct AgentCommand {
     /// Node ID assigned by the control plane
     #[arg(long, env = "TEMPS_NODE_ID")]
     pub node_id: Option<i32>,
+
+    /// Node labels for scheduling (comma-separated key=value pairs, e.g., "region=us-east,gpu=true").
+    /// Overrides labels from saved config. Sent in every heartbeat.
+    #[arg(long, env = "TEMPS_NODE_LABELS", value_delimiter = ',')]
+    pub labels: Vec<String>,
 }
 
 impl AgentCommand {
@@ -110,12 +115,32 @@ impl AgentCommand {
                 )
             })?;
 
+        // Parse labels from CLI (key=value pairs) or fall back to saved config
+        let labels = if !self.labels.is_empty() {
+            let mut map = serde_json::Map::new();
+            for label in &self.labels {
+                if let Some((key, value)) = label.split_once('=') {
+                    map.insert(
+                        key.trim().to_string(),
+                        serde_json::Value::String(value.trim().to_string()),
+                    );
+                }
+            }
+            serde_json::Value::Object(map)
+        } else {
+            saved
+                .as_ref()
+                .map(|c| c.labels.clone())
+                .unwrap_or(serde_json::json!({}))
+        };
+
         Ok(temps_agent::AgentConfig {
             listen_address,
             token,
             node_name,
             control_plane_url,
             node_id,
+            labels,
         })
     }
 

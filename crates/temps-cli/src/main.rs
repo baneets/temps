@@ -8,8 +8,8 @@ mod commands;
 use clap::{Parser, Subcommand};
 use commands::{
     AgentCommand, ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DoctorCommand,
-    DomainCommand, JoinCommand, ProxyCommand, ResetPasswordCommand, ServeCommand, ServicesCommand,
-    SetupCommand, UpgradeCommand,
+    DomainCommand, JoinCommand, NodeCommand, ProxyCommand, ResetPasswordCommand, ServeCommand,
+    ServicesCommand, SetupCommand, UpgradeCommand,
 };
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
@@ -71,6 +71,8 @@ enum Commands {
     Join(JoinCommand),
     /// Run the worker node agent server
     Agent(AgentCommand),
+    /// Manage cluster worker nodes (list, show, drain, remove)
+    Node(NodeCommand),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -195,5 +197,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Doctor(doctor_cmd) => doctor_cmd.execute(),
         Commands::Join(join_cmd) => join_cmd.execute(),
         Commands::Agent(agent_cmd) => agent_cmd.execute(),
+        Commands::Node(node_cmd) => node_cmd.execute(),
     }
 }

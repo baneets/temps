@@ -344,7 +344,7 @@ pub struct ProxyContext {
     pub tls_cipher: Option<String>,
     /// SNI hostname from TLS handshake (for SNI-based routing)
     pub sni_hostname: Option<String>,
-    /// Upstream response body bytes received (tracked by Pingora 0.7.0)
+    /// Upstream response body bytes received (tracked by Pingora 0.8.0)
     pub upstream_body_bytes_received: usize,
     /// Whether the client requested a Markdown response via `Accept: text/markdown`
     pub wants_markdown: bool,
@@ -352,6 +352,8 @@ pub struct ProxyContext {
     pub markdown_buffer: Vec<u8>,
     /// Number of upstream connection attempts (for retry logic)
     pub upstream_connect_tries: usize,
+    /// Time upstream took to accept the request body (upload diagnostics, Pingora 0.8.0)
+    pub upstream_write_pending_time_ms: Option<i32>,
 }
 
 impl ProxyContext {
@@ -506,11 +508,11 @@ impl LoadBalancer {
                 }
 
                 // Extract TLS version and cipher for logging
-                // version/cipher are Cow<'static, str> in Pingora 0.7.0
+                // version/cipher are Cow<'static, str> in Pingora 0.8.0
                 ctx.tls_version = Some(ssl_digest.version.to_string());
                 ctx.tls_cipher = Some(ssl_digest.cipher.to_string());
 
-                // Extract SNI hostname from SslDigestExtension (Pingora 0.7.0)
+                // Extract SNI hostname from SslDigestExtension (Pingora 0.8.0)
                 // The SNI is captured during the TLS handshake via handshake_complete_callback
                 // in server.rs and stored as TlsExtensionData in the SslDigest extension.
                 if let Some(ext_data) = ssl_digest
@@ -581,17 +583,6 @@ impl LoadBalancer {
             return Ok(());
         }
 
-        // Decrypt visitor cookie if present
-        let visitor_id = ctx.request_visitor_cookie.as_ref().and_then(|encrypted| {
-            match self.crypto.decrypt(encrypted) {
-                Ok(decrypted) => Some(decrypted),
-                Err(e) => {
-                    debug!("Failed to decrypt visitor_id cookie: {}", e);
-                    None
-                }
-            }
-        });
-
         // Project context is already resolved in request_filter, use it here
         let project_context = if let (Some(project), Some(environment), Some(deployment)) =
             (&ctx.project, &ctx.environment, &ctx.deployment)
@@ -640,11 +631,15 @@ impl LoadBalancer {
             utm_campaign: utm.utm_campaign.clone(),
         };
 
-        // Create visitor using the trait (only for non-crawlers)
+        // Pass the raw encrypted cookie to get_or_create_visitor — it handles
+        // decryption internally.  Previously the cookie was decrypted here and the
+        // plaintext UUID was forwarded, causing get_or_create_visitor to attempt a
+        // second decryption that always failed, creating a new visitor on every
+        // returning page load.
         let visitor = match self
             .visitor_manager
             .get_or_create_visitor(
-                visitor_id.as_deref(),
+                ctx.request_visitor_cookie.as_deref(),
                 project_context.as_ref(),
                 &ctx.user_agent,
                 ctx.ip_address.as_deref(),
@@ -1182,6 +1177,10 @@ impl LoadBalancer {
         );
         upstream_response
             .insert_header("X-Response-Time", format!("{}ms", duration.as_millis()))?;
+        if let Some(pending_ms) = ctx.upstream_write_pending_time_ms {
+            upstream_response
+                .insert_header("X-Upstream-Write-Pending", format!("{}ms", pending_ms))?;
+        }
         Ok(())
     }
 
@@ -1723,6 +1722,7 @@ impl ProxyHttp for LoadBalancer {
             wants_markdown: false,
             markdown_buffer: Vec::new(),
             upstream_connect_tries: 0,
+            upstream_write_pending_time_ms: None,
         }
     }
 
@@ -2350,11 +2350,35 @@ impl ProxyHttp for LoadBalancer {
             // IMPORTANT: Skip static file serving for /api/_temps/* paths
             // These must ALWAYS be proxied to the console address (admin API)
             if !ctx.path.starts_with("/api/_temps/") {
-                // Create visitor and session BEFORE serving static file
-                // This ensures tracking cookies are set for HTML pages
-                if let Err(e) = self.ensure_visitor_session(ctx).await {
-                    error!("Failed to ensure visitor session for static file: {:?}", e);
-                    // Continue serving the file even if visitor/session creation fails
+                // Only create visitor/session for HTML page requests, not static assets.
+                // Without this guard, concurrent requests for JS/CSS/images on first visit
+                // (before the browser has received the Set-Cookie response) each create a
+                // separate visitor record, causing duplicate "live visitors".
+                let is_static_asset = ctx.path.contains('.')
+                    && (ctx.path.ends_with(".js")
+                        || ctx.path.ends_with(".css")
+                        || ctx.path.ends_with(".png")
+                        || ctx.path.ends_with(".jpg")
+                        || ctx.path.ends_with(".jpeg")
+                        || ctx.path.ends_with(".gif")
+                        || ctx.path.ends_with(".svg")
+                        || ctx.path.ends_with(".ico")
+                        || ctx.path.ends_with(".woff")
+                        || ctx.path.ends_with(".woff2")
+                        || ctx.path.ends_with(".ttf")
+                        || ctx.path.ends_with(".eot")
+                        || ctx.path.ends_with(".map")
+                        || ctx.path.ends_with(".webp")
+                        || ctx.path.ends_with(".avif")
+                        || ctx.path.ends_with(".json")
+                        || ctx.path.ends_with(".xml")
+                        || ctx.path.ends_with(".txt"));
+
+                if !is_static_asset {
+                    if let Err(e) = self.ensure_visitor_session(ctx).await {
+                        error!("Failed to ensure visitor session for static file: {:?}", e);
+                        // Continue serving the file even if visitor/session creation fails
+                    }
                 }
 
                 // Serve static file
@@ -2618,6 +2642,12 @@ impl ProxyHttp for LoadBalancer {
     where
         Self::CTX: Send + Sync,
     {
+        // Capture upstream write pending time for upload diagnostics (Pingora 0.8.0)
+        let pending_time = session.upstream_write_pending_time();
+        if !pending_time.is_zero() {
+            ctx.upstream_write_pending_time_ms = Some(pending_time.as_millis() as i32);
+        }
+
         // Store content type for later use
         ctx.content_type = Some(
             upstream_response
@@ -3003,6 +3033,7 @@ mod markdown_tests {
             wants_markdown: false,
             markdown_buffer: Vec::new(),
             upstream_connect_tries: 0,
+            upstream_write_pending_time_ms: None,
         }
     }
 
@@ -3541,6 +3572,7 @@ mod markdown_pipeline_tests {
             wants_markdown: false,
             markdown_buffer: Vec::new(),
             upstream_connect_tries: 0,
+            upstream_write_pending_time_ms: None,
         }
     }
 

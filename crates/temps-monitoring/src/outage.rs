@@ -2,6 +2,7 @@
 //!
 //! Monitors status checks for state transitions and sends alerts when outages occur.
 
+use crate::alarm_service::{AlarmService, AlarmSeverity, AlarmType, FireAlarmRequest};
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use sea_orm::{
@@ -15,7 +16,7 @@ use temps_core::notifications::{
     NotificationData, NotificationPriority, NotificationService, NotificationType,
 };
 use temps_core::{Job, JobReceiver};
-use temps_entities::{status_checks, status_incidents, status_monitors};
+use temps_entities::{environments, status_checks, status_incidents, status_monitors};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -129,6 +130,7 @@ impl From<sea_orm::DbErr> for OutageError {
 pub struct OutageDetectionService {
     db: Arc<DatabaseConnection>,
     notification_service: Arc<dyn NotificationService>,
+    alarm_service: Arc<AlarmService>,
     /// Cache of monitor states to detect transitions
     monitor_states: RwLock<HashMap<i32, MonitorState>>,
     /// Number of consecutive failures before triggering alert
@@ -141,10 +143,12 @@ impl OutageDetectionService {
     pub fn new(
         db: Arc<DatabaseConnection>,
         notification_service: Arc<dyn NotificationService>,
+        alarm_service: Arc<AlarmService>,
     ) -> Self {
         Self {
             db,
             notification_service,
+            alarm_service,
             monitor_states: RwLock::new(HashMap::new()),
             failure_threshold: 2, // Alert after 2 consecutive failures
             alert_cooldown: Duration::minutes(5),
@@ -262,12 +266,15 @@ impl OutageDetectionService {
         Ok(event)
     }
 
-    /// Handle an outage event: create/resolve incidents and send notifications
+    /// Handle an outage event: create/resolve incidents, fire/resolve alarms, and send notifications
     async fn handle_outage_event(&self, event: &OutageEvent) -> Result<(), OutageError> {
         if event.current_status.is_outage() {
             // New outage - create incident
             let incident_id = self.create_incident(event).await?;
             self.send_outage_notification(event, incident_id).await?;
+
+            // Fire alarm for the outage
+            self.fire_outage_alarm(event).await;
 
             // Update cached state with incident ID
             let mut states = self.monitor_states.write().await;
@@ -280,9 +287,132 @@ impl OutageDetectionService {
                 self.resolve_incident(incident_id).await?;
             }
             self.send_recovery_notification(event).await?;
+
+            // Resolve outage alarms for this deployment
+            self.resolve_outage_alarm(event).await;
         }
 
         Ok(())
+    }
+
+    /// Fire an alarm when an outage is detected
+    async fn fire_outage_alarm(&self, event: &OutageEvent) {
+        // Look up the environment to get the current deployment_id
+        let environment_id = match event.environment_id {
+            Some(id) => id,
+            None => {
+                debug!(
+                    "No environment_id on outage event for monitor {}, skipping alarm",
+                    event.monitor_id
+                );
+                return;
+            }
+        };
+
+        let environment = match environments::Entity::find_by_id(environment_id)
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(env)) => env,
+            Ok(None) => {
+                debug!("Environment {} not found, skipping alarm", environment_id);
+                return;
+            }
+            Err(e) => {
+                error!(
+                    "Failed to query environment {} for alarm: {}",
+                    environment_id, e
+                );
+                return;
+            }
+        };
+
+        let deployment_id = match environment.current_deployment_id {
+            Some(id) => id,
+            None => {
+                debug!(
+                    "Environment {} has no current deployment, skipping alarm",
+                    environment_id
+                );
+                return;
+            }
+        };
+
+        let severity = match event.current_status {
+            MonitorStatus::Down => AlarmSeverity::Critical,
+            MonitorStatus::Degraded => AlarmSeverity::Warning,
+            MonitorStatus::Operational => return, // shouldn't happen
+        };
+
+        let request = FireAlarmRequest {
+            project_id: event.project_id,
+            environment_id,
+            deployment_id,
+            container_id: None,
+            alarm_type: AlarmType::Outage,
+            severity,
+            title: format!(
+                "{} is {}",
+                event.monitor_name,
+                event.current_status.as_str()
+            ),
+            message: format!(
+                "Monitor '{}' status changed from {} to {}.{}",
+                event.monitor_name,
+                event.previous_status.as_str(),
+                event.current_status.as_str(),
+                event
+                    .error_message
+                    .as_ref()
+                    .map(|m| format!("\n\n{}", m))
+                    .unwrap_or_default()
+            ),
+            metadata: Some(serde_json::json!({
+                "monitor_id": event.monitor_id,
+                "monitor_name": event.monitor_name,
+                "previous_status": event.previous_status.as_str(),
+                "current_status": event.current_status.as_str(),
+            })),
+        };
+
+        if let Err(e) = self.alarm_service.fire_alarm(request).await {
+            error!(
+                "Failed to fire outage alarm for monitor {}: {}",
+                event.monitor_id, e
+            );
+        }
+    }
+
+    /// Resolve outage alarms when the monitor recovers
+    async fn resolve_outage_alarm(&self, event: &OutageEvent) {
+        let environment_id = match event.environment_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let environment = match environments::Entity::find_by_id(environment_id)
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(env)) => env,
+            _ => return,
+        };
+
+        let deployment_id = match environment.current_deployment_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        if let Err(e) = self
+            .alarm_service
+            .resolve_alarms_by_type(event.project_id, deployment_id, AlarmType::Outage)
+            .await
+        {
+            error!(
+                "Failed to resolve outage alarms for monitor {}: {}",
+                event.monitor_id, e
+            );
+        }
     }
 
     /// Create a new incident for an outage
@@ -619,6 +749,50 @@ impl OutageDetectionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alarm_service::AlarmService;
+    use async_trait::async_trait;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use temps_core::jobs::QueueError;
+    use temps_core::notifications::{EmailMessage, NotificationData, NotificationError};
+
+    struct NoopNotificationService;
+
+    #[async_trait]
+    impl NotificationService for NoopNotificationService {
+        async fn send_notification(
+            &self,
+            _notification: NotificationData,
+        ) -> Result<(), NotificationError> {
+            Ok(())
+        }
+        async fn send_email(&self, _message: EmailMessage) -> Result<(), NotificationError> {
+            Ok(())
+        }
+        async fn is_configured(&self) -> Result<bool, NotificationError> {
+            Ok(false)
+        }
+    }
+
+    struct NoopJobQueue;
+
+    #[async_trait]
+    impl temps_core::JobQueue for NoopJobQueue {
+        async fn send(&self, _job: Job) -> Result<(), QueueError> {
+            Ok(())
+        }
+        fn subscribe(&self) -> Box<dyn temps_core::JobReceiver> {
+            unimplemented!("not needed in tests")
+        }
+    }
+
+    fn create_test_alarm_service(db: Arc<DatabaseConnection>) -> Arc<AlarmService> {
+        Arc::new(AlarmService::new(
+            db,
+            Arc::new(NoopNotificationService),
+            Arc::new(NoopJobQueue),
+        ))
+    }
 
     #[test]
     fn test_monitor_status_parsing() {
@@ -675,29 +849,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_clear_monitor_state() {
-        use async_trait::async_trait;
-        use temps_core::notifications::{EmailMessage, NotificationData, NotificationError};
-
-        struct NoopNotificationService;
-
-        #[async_trait]
-        impl NotificationService for NoopNotificationService {
-            async fn send_notification(
-                &self,
-                _notification: NotificationData,
-            ) -> Result<(), NotificationError> {
-                Ok(())
-            }
-            async fn send_email(&self, _message: EmailMessage) -> Result<(), NotificationError> {
-                Ok(())
-            }
-            async fn is_configured(&self) -> Result<bool, NotificationError> {
-                Ok(false)
-            }
-        }
-
         let db = Arc::new(sea_orm::Database::connect("sqlite::memory:").await.unwrap());
-        let service = OutageDetectionService::new(db, Arc::new(NoopNotificationService));
+        let alarm_service = create_test_alarm_service(db.clone());
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
 
         // Manually insert some monitor states
         {
@@ -756,29 +911,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_monitor_statuses() {
-        use async_trait::async_trait;
-        use temps_core::notifications::{EmailMessage, NotificationData, NotificationError};
-
-        struct NoopNotificationService;
-
-        #[async_trait]
-        impl NotificationService for NoopNotificationService {
-            async fn send_notification(
-                &self,
-                _notification: NotificationData,
-            ) -> Result<(), NotificationError> {
-                Ok(())
-            }
-            async fn send_email(&self, _message: EmailMessage) -> Result<(), NotificationError> {
-                Ok(())
-            }
-            async fn is_configured(&self) -> Result<bool, NotificationError> {
-                Ok(false)
-            }
-        }
-
         let db = Arc::new(sea_orm::Database::connect("sqlite::memory:").await.unwrap());
-        let service = OutageDetectionService::new(db, Arc::new(NoopNotificationService));
+        let alarm_service = create_test_alarm_service(db.clone());
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
 
         // Empty initially
         let statuses = service.get_monitor_statuses().await;
@@ -834,5 +970,352 @@ mod tests {
 
         let notif_err = OutageError::Notification("timeout".to_string());
         assert_eq!(notif_err.to_string(), "Notification error: timeout");
+    }
+
+    // ── Alarm bridge tests ────────────────────────────────────────────
+
+    /// Notification service that tracks send count
+    struct TrackingNotificationService {
+        send_count: AtomicU32,
+    }
+
+    impl TrackingNotificationService {
+        fn new() -> Self {
+            Self {
+                send_count: AtomicU32::new(0),
+            }
+        }
+
+        fn send_count(&self) -> u32 {
+            self.send_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl NotificationService for TrackingNotificationService {
+        async fn send_notification(
+            &self,
+            _notification: NotificationData,
+        ) -> Result<(), NotificationError> {
+            self.send_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn send_email(&self, _message: EmailMessage) -> Result<(), NotificationError> {
+            Ok(())
+        }
+        async fn is_configured(&self) -> Result<bool, NotificationError> {
+            Ok(true)
+        }
+    }
+
+    struct TrackingJobQueue {
+        send_count: AtomicU32,
+    }
+
+    impl TrackingJobQueue {
+        fn new() -> Self {
+            Self {
+                send_count: AtomicU32::new(0),
+            }
+        }
+
+        fn send_count(&self) -> u32 {
+            self.send_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl temps_core::JobQueue for TrackingJobQueue {
+        async fn send(&self, _job: Job) -> Result<(), QueueError> {
+            self.send_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn subscribe(&self) -> Box<dyn temps_core::JobReceiver> {
+            unimplemented!("not needed in tests")
+        }
+    }
+
+    fn make_environment_model(id: i32, current_deployment_id: Option<i32>) -> environments::Model {
+        use temps_entities::upstream_config::UpstreamList;
+        environments::Model {
+            id,
+            name: "production".to_string(),
+            slug: "production".to_string(),
+            subdomain: "prod".to_string(),
+            last_deployment: None,
+            host: "example.com".to_string(),
+            upstreams: UpstreamList::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            project_id: 1,
+            current_deployment_id,
+            branch: None,
+            deleted_at: None,
+            deployment_config: None,
+            is_preview: false,
+        }
+    }
+
+    fn make_alarm_model(id: i32, alarm_type: &str, status: &str) -> temps_entities::alarms::Model {
+        temps_entities::alarms::Model {
+            id,
+            project_id: 1,
+            environment_id: 1,
+            deployment_id: 10,
+            container_id: None,
+            alarm_type: alarm_type.to_string(),
+            severity: "critical".to_string(),
+            status: status.to_string(),
+            title: "Outage alarm".to_string(),
+            message: None,
+            metadata: None,
+            fired_at: Utc::now(),
+            acknowledged_at: None,
+            acknowledged_by: None,
+            resolved_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_outage_event(
+        environment_id: Option<i32>,
+        current_status: MonitorStatus,
+        previous_status: MonitorStatus,
+    ) -> OutageEvent {
+        OutageEvent {
+            monitor_id: 1,
+            monitor_name: "API Health".to_string(),
+            project_id: 1,
+            environment_id,
+            previous_status,
+            current_status,
+            error_message: Some("Connection timeout".to_string()),
+            incident_id: Some(42),
+            occurred_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fire_outage_alarm_creates_alarm_for_down_status() {
+        let alarm_model = make_alarm_model(1, "outage", "firing");
+
+        // Mock DB: environment lookup + cooldown check + alarm insert
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Environment lookup
+            .append_query_results(vec![vec![make_environment_model(1, Some(10))]])
+            // Cooldown count query
+            .append_query_results([[maplit::btreemap! {
+                "num_items" => sea_orm::Value::BigInt(Some(0)),
+            }]])
+            // Alarm insert result
+            .append_query_results(vec![vec![alarm_model]])
+            .into_connection();
+
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        let event = make_outage_event(Some(1), MonitorStatus::Down, MonitorStatus::Operational);
+        service.fire_outage_alarm(&event).await;
+
+        // AlarmService should have sent notification + job
+        assert_eq!(notification_service.send_count(), 1);
+        assert_eq!(job_queue.send_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fire_outage_alarm_skips_when_no_environment_id() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        // No environment_id => skip alarm
+        let event = make_outage_event(None, MonitorStatus::Down, MonitorStatus::Operational);
+        service.fire_outage_alarm(&event).await;
+
+        assert_eq!(
+            notification_service.send_count(),
+            0,
+            "No alarm should be fired without environment_id"
+        );
+        assert_eq!(job_queue.send_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fire_outage_alarm_skips_when_no_current_deployment() {
+        // Environment exists but has no current_deployment_id
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![make_environment_model(1, None)]])
+            .into_connection();
+
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        let event = make_outage_event(Some(1), MonitorStatus::Down, MonitorStatus::Operational);
+        service.fire_outage_alarm(&event).await;
+
+        assert_eq!(
+            notification_service.send_count(),
+            0,
+            "No alarm without current deployment"
+        );
+        assert_eq!(job_queue.send_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fire_outage_alarm_skips_operational_status() {
+        // Even if somehow called with Operational status, should return early
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![make_environment_model(1, Some(10))]])
+            .into_connection();
+
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        let event = make_outage_event(Some(1), MonitorStatus::Operational, MonitorStatus::Down);
+        service.fire_outage_alarm(&event).await;
+
+        assert_eq!(
+            notification_service.send_count(),
+            0,
+            "No alarm for operational status"
+        );
+        assert_eq!(job_queue.send_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_outage_alarm_resolves_firing_alarms() {
+        let alarm = make_alarm_model(1, "outage", "firing");
+
+        // Mock DB: environment lookup + find firing alarms + resolve each (find + update)
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Environment lookup for resolve_outage_alarm
+            .append_query_results(vec![vec![make_environment_model(1, Some(10))]])
+            // Find firing outage alarms
+            .append_query_results(vec![vec![alarm.clone()]])
+            // resolve_alarm: find by id
+            .append_query_results(vec![vec![alarm.clone()]])
+            // resolve_alarm: update
+            .append_query_results(vec![vec![alarm.clone()]])
+            .append_exec_results(vec![sea_orm::MockExecResult {
+                last_insert_id: 1,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        let event = make_outage_event(Some(1), MonitorStatus::Operational, MonitorStatus::Down);
+        service.resolve_outage_alarm(&event).await;
+
+        // Should send resolved notification + job
+        assert_eq!(notification_service.send_count(), 1);
+        assert_eq!(job_queue.send_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_outage_alarm_skips_when_no_environment_id() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        let event = make_outage_event(None, MonitorStatus::Operational, MonitorStatus::Down);
+        service.resolve_outage_alarm(&event).await;
+
+        assert_eq!(notification_service.send_count(), 0);
+        assert_eq!(job_queue.send_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_outage_alarm_noop_when_no_firing_alarms() {
+        // Mock DB: environment lookup + find firing alarms (empty)
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![make_environment_model(1, Some(10))]])
+            .append_query_results(vec![Vec::<temps_entities::alarms::Model>::new()])
+            .into_connection();
+
+        let db = Arc::new(db);
+        let notification_service = Arc::new(TrackingNotificationService::new());
+        let job_queue = Arc::new(TrackingJobQueue::new());
+
+        let alarm_service = Arc::new(AlarmService::new(
+            db.clone(),
+            notification_service.clone(),
+            job_queue.clone(),
+        ));
+
+        let service =
+            OutageDetectionService::new(db, Arc::new(NoopNotificationService), alarm_service);
+
+        let event = make_outage_event(Some(1), MonitorStatus::Operational, MonitorStatus::Down);
+        service.resolve_outage_alarm(&event).await;
+
+        assert_eq!(
+            notification_service.send_count(),
+            0,
+            "No notifications when no alarms to resolve"
+        );
+        assert_eq!(job_queue.send_count(), 0);
     }
 }
