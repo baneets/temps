@@ -458,6 +458,53 @@ impl NodeService {
         Ok(result)
     }
 
+    /// Reconcile the control plane's container records against the agent's actual
+    /// Docker state. Marks DB records as deleted if the container no longer exists
+    /// on the worker node (ghost records from crashes / interrupted deploys).
+    ///
+    /// `actual_container_ids` is the list of temps-managed Docker container IDs
+    /// currently running on the node (reported by the agent).
+    ///
+    /// Returns the number of stale DB records that were marked as deleted.
+    pub async fn reconcile_containers(
+        &self,
+        node_id: i32,
+        actual_container_ids: &[String],
+    ) -> Result<usize, NodeError> {
+        let db_containers = self.list_containers_for_node(node_id).await?;
+
+        let mut stale_count = 0;
+        for container in db_containers {
+            if !actual_container_ids.contains(&container.container_id) {
+                // Container exists in DB but not on the node — ghost record
+                tracing::warn!(
+                    node_id,
+                    container_id = %container.container_id,
+                    container_name = %container.container_name,
+                    deployment_id = container.deployment_id,
+                    "Reconciliation: container not found on node, marking as deleted"
+                );
+
+                let mut active: deployment_containers::ActiveModel = container.into();
+                active.deleted_at = Set(Some(chrono::Utc::now()));
+                active.status = Set(Some("removed".to_string()));
+                active.update(self.db.as_ref()).await?;
+                stale_count += 1;
+            }
+        }
+
+        if stale_count > 0 {
+            tracing::info!(
+                node_id,
+                stale_count,
+                "Reconciliation complete: cleaned up {} ghost container record(s)",
+                stale_count
+            );
+        }
+
+        Ok(stale_count)
+    }
+
     /// Soft-delete all active containers on a specific node for a given deployment.
     /// Sets `deleted_at` and `status = "removed"` so the proxy stops routing to them.
     /// Returns the number of containers retired.
@@ -1122,5 +1169,86 @@ mod tests {
 
         let count = service.retire_containers_on_node(5, 10).await.unwrap();
         assert_eq!(count, 0);
+    }
+
+    // ── reconcile_containers tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_reconcile_marks_ghost_containers_as_deleted() {
+        // DB has two containers, but agent only reports one
+        let c1 = sample_container(1, 10, 5); // container_id = "container-1"
+        let c2 = sample_container(2, 11, 5); // container_id = "container-2"
+
+        let mut c2_updated = sample_container(2, 11, 5);
+        c2_updated.status = Some("removed".to_string());
+        c2_updated.deleted_at = Some(chrono::Utc::now());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // list_containers_for_node
+            .append_query_results(vec![vec![c1, c2]])
+            // update c2 (ghost)
+            .append_query_results(vec![vec![c2_updated]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        // Agent reports only container-1 is running
+        let actual = vec!["container-1".to_string()];
+        let stale = service.reconcile_containers(5, &actual).await.unwrap();
+        assert_eq!(stale, 1);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_no_stale_containers() {
+        // DB has two containers, agent reports both
+        let c1 = sample_container(1, 10, 5);
+        let c2 = sample_container(2, 11, 5);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![c1, c2]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let actual = vec!["container-1".to_string(), "container-2".to_string()];
+        let stale = service.reconcile_containers(5, &actual).await.unwrap();
+        assert_eq!(stale, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_empty_node() {
+        // DB has no containers, agent reports none
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<deployment_containers::Model>::new()])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let stale = service.reconcile_containers(5, &[]).await.unwrap();
+        assert_eq!(stale, 0);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_all_containers_gone() {
+        // DB has two containers, agent reports none (all crashed)
+        let c1 = sample_container(1, 10, 5);
+        let c2 = sample_container(2, 11, 5);
+
+        let mut c1_updated = sample_container(1, 10, 5);
+        c1_updated.status = Some("removed".to_string());
+        c1_updated.deleted_at = Some(chrono::Utc::now());
+        let mut c2_updated = sample_container(2, 11, 5);
+        c2_updated.status = Some("removed".to_string());
+        c2_updated.deleted_at = Some(chrono::Utc::now());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // list_containers_for_node
+            .append_query_results(vec![vec![c1, c2]])
+            // update c1
+            .append_query_results(vec![vec![c1_updated]])
+            // update c2
+            .append_query_results(vec![vec![c2_updated]])
+            .into_connection();
+        let service = NodeService::new(Arc::new(db));
+
+        let stale = service.reconcile_containers(5, &[]).await.unwrap();
+        assert_eq!(stale, 2);
     }
 }

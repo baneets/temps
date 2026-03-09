@@ -164,6 +164,11 @@ pub struct UpdateEnvironmentSettingsRequest {
     /// Example: `{"region": ["us", "asia"], "gpu": "true"}`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_labels: Option<serde_json::Value>,
+    /// Anti-affinity: spread replicas across different nodes.
+    /// When enabled, the scheduler avoids placing two replicas of the same
+    /// environment on the same node. Defaults to `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anti_affinity: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

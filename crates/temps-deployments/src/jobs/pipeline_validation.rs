@@ -137,6 +137,7 @@ impl ContainerDeployer for MockContainerDeployer {
             ports: vec![],
             environment_vars: HashMap::new(),
             restart_count: Some(0),
+            labels: HashMap::new(),
         })
     }
 

@@ -248,6 +248,9 @@ pub struct ContainerInfo {
     pub ports: Vec<PortMapping>,
     pub environment_vars: HashMap<String, String>,
     pub restart_count: Option<i64>,
+    /// Docker labels set on the container (e.g., `sh.temps.managed`, `sh.temps.project_id`).
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 /// Container performance statistics (CPU, memory, network)
@@ -686,6 +689,7 @@ mod tests {
             }],
             environment_vars: env_vars,
             restart_count: Some(0),
+            labels: HashMap::new(),
         };
 
         assert_eq!(info.container_id, "abc123");

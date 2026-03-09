@@ -1135,6 +1135,7 @@ impl ContainerDeployer for DockerRuntime {
 
         let state = container.state.unwrap_or_default();
         let config = container.config.unwrap_or_default();
+        let container_labels = config.labels.clone().unwrap_or_default();
 
         // Parse environment variables
         let env_vars = config
@@ -1202,6 +1203,7 @@ impl ContainerDeployer for DockerRuntime {
             ports: port_mappings,
             environment_vars: env_vars,
             restart_count: container.restart_count,
+            labels: container_labels,
         })
     }
 

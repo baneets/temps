@@ -1,6 +1,11 @@
 import { EnvironmentResponse, ProjectResponse } from '@/api/client'
-import { updateEnvironmentSettingsMutation } from '@/api/client/@tanstack/react-query.gen'
+import {
+  updateEnvironmentSettingsMutation,
+  adminListNodesOptions,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { NodeInfoResponse } from '@/api/client/types.gen'
 import { BranchSelector } from '@/components/deployments/BranchSelector'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -9,6 +14,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -19,8 +25,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { useMutation } from '@tanstack/react-query'
-import { GitBranch, Loader2, Shield } from 'lucide-react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { GitBranch, Loader2, Network, Plus, Shield, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
@@ -52,6 +58,12 @@ export function EnvironmentConfigurationCard({
   environment,
   onUpdate,
 }: EnvironmentConfigurationCardProps) {
+  const nodesQuery = useQuery({
+    ...adminListNodesOptions(),
+  })
+  const activeNodes: NodeInfoResponse[] =
+    nodesQuery.data?.nodes?.filter((n) => n.status === 'active') ?? []
+
   const [formData, setFormData] = useState({
     branch: environment.branch ?? '',
     cpu_request: environment.deployment_config?.cpuRequest?.toString() ?? '',
@@ -62,6 +74,9 @@ export function EnvironmentConfigurationCard({
     replicas: environment.deployment_config?.replicas?.toString() ?? '1',
     exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
     attack_mode: environment.attack_mode ?? false,
+    anti_affinity: environment.deployment_config?.antiAffinity ?? true,
+    target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
+    target_labels: (environment.deployment_config?.targetLabels ?? {}) as Record<string, string>,
     security: {
       enabled: environment.deployment_config?.security?.enabled ?? false,
       headers: {
@@ -89,6 +104,10 @@ export function EnvironmentConfigurationCard({
     } as SecurityConfig,
   })
 
+  // Label editing state
+  const [newLabelKey, setNewLabelKey] = useState('')
+  const [newLabelValue, setNewLabelValue] = useState('')
+
   // Sync form data when environment changes
   useEffect(() => {
     setFormData({
@@ -102,6 +121,9 @@ export function EnvironmentConfigurationCard({
       replicas: environment.deployment_config?.replicas?.toString() ?? '1',
       exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
       attack_mode: environment.attack_mode ?? false,
+      anti_affinity: environment.deployment_config?.antiAffinity ?? true,
+      target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
+      target_labels: (environment.deployment_config?.targetLabels ?? {}) as Record<string, string>,
       security: {
         enabled: environment.deployment_config?.security?.enabled ?? false,
         headers: {
@@ -167,7 +189,13 @@ export function EnvironmentConfigurationCard({
         exposed_port: formData.exposed_port
           ? parseInt(formData.exposed_port)
           : null,
-        attack_mode: formData.attack_mode,
+        anti_affinity: formData.anti_affinity,
+        target_nodes:
+          formData.target_nodes.length > 0 ? formData.target_nodes : null,
+        target_labels:
+          Object.keys(formData.target_labels).length > 0
+            ? formData.target_labels
+            : null,
         security: formData.security,
       },
     })
@@ -342,6 +370,184 @@ export function EnvironmentConfigurationCard({
                 </div>
               </div>
             </div>
+
+            {/* Node Scheduling */}
+            {activeNodes.length > 0 && (
+              <div className="border-t pt-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Network className="h-4 w-4" />
+                  <h3 className="text-sm font-medium">Node Scheduling</h3>
+                </div>
+                <div className="space-y-4">
+                  {/* Anti-affinity toggle */}
+                  <div className="flex items-center gap-3 p-3 border rounded-lg">
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium">
+                        Anti-affinity
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        Spread replicas across different nodes. When enabled,
+                        no two replicas of this environment land on the same
+                        node (best-effort if more replicas than nodes).
+                      </p>
+                    </div>
+                    <Switch
+                      checked={formData.anti_affinity}
+                      onCheckedChange={(checked) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          anti_affinity: checked,
+                        }))
+                      }
+                    />
+                  </div>
+
+                  {/* Target Nodes */}
+                  <div>
+                    <Label className="text-sm font-medium">Target Nodes</Label>
+                    <p className="text-xs text-muted-foreground mb-2">
+                      Restrict deployments to specific nodes. Leave empty to use
+                      all active nodes.
+                    </p>
+                    <div className="space-y-2">
+                      {activeNodes.map((node) => {
+                        const isSelected = formData.target_nodes.includes(
+                          node.id
+                        )
+                        return (
+                          <label
+                            key={node.id}
+                            className="flex items-center gap-3 p-2 border rounded-lg cursor-pointer hover:bg-muted/50"
+                          >
+                            <Checkbox
+                              checked={isSelected}
+                              onCheckedChange={(checked) => {
+                                setFormData((prev) => ({
+                                  ...prev,
+                                  target_nodes: checked
+                                    ? [...prev.target_nodes, node.id]
+                                    : prev.target_nodes.filter(
+                                        (id) => id !== node.id
+                                      ),
+                                }))
+                              }}
+                            />
+                            <div className="flex-1 min-w-0">
+                              <span className="text-sm font-medium">
+                                {node.name}
+                              </span>
+                              <span className="text-xs text-muted-foreground ml-2">
+                                {node.private_address}
+                              </span>
+                            </div>
+                            <Badge
+                              variant="secondary"
+                              className="text-[10px] shrink-0"
+                            >
+                              {node.role}
+                            </Badge>
+                          </label>
+                        )
+                      })}
+                    </div>
+                    {formData.target_nodes.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="mt-1 text-xs"
+                        onClick={() =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            target_nodes: [],
+                          }))
+                        }
+                      >
+                        Clear selection
+                      </Button>
+                    )}
+                  </div>
+
+                  {/* Target Labels */}
+                  <div>
+                    <Label className="text-sm font-medium">
+                      Label Selectors
+                    </Label>
+                    <p className="text-xs text-muted-foreground mb-2">
+                      Only deploy to nodes matching these labels. All keys must
+                      match (AND logic).
+                    </p>
+
+                    {/* Existing labels */}
+                    {Object.entries(formData.target_labels).length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {Object.entries(formData.target_labels).map(
+                          ([key, value]) => (
+                            <Badge
+                              key={key}
+                              variant="secondary"
+                              className="gap-1 pr-1"
+                            >
+                              {key}={value}
+                              <button
+                                type="button"
+                                className="ml-1 hover:text-destructive"
+                                onClick={() => {
+                                  setFormData((prev) => {
+                                    const labels = { ...prev.target_labels }
+                                    delete labels[key]
+                                    return { ...prev, target_labels: labels }
+                                  })
+                                }}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </Badge>
+                          )
+                        )}
+                      </div>
+                    )}
+
+                    {/* Add label */}
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="Key (e.g., region)"
+                        value={newLabelKey}
+                        onChange={(e) => setNewLabelKey(e.target.value)}
+                        className="flex-1"
+                      />
+                      <Input
+                        placeholder="Value (e.g., us)"
+                        value={newLabelValue}
+                        onChange={(e) => setNewLabelValue(e.target.value)}
+                        className="flex-1"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        disabled={!newLabelKey.trim() || !newLabelValue.trim()}
+                        onClick={() => {
+                          if (newLabelKey.trim() && newLabelValue.trim()) {
+                            setFormData((prev) => ({
+                              ...prev,
+                              target_labels: {
+                                ...prev.target_labels,
+                                [newLabelKey.trim()]: newLabelValue.trim(),
+                              },
+                            }))
+                            setNewLabelKey('')
+                            setNewLabelValue('')
+                          }
+                        }}
+                      >
+                        <Plus className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Security Configuration */}
             <div className="border-t pt-6">

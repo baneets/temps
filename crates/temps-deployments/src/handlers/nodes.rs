@@ -73,6 +73,18 @@ pub struct HeartbeatApiRequest {
     pub capacity: Option<serde_json::Value>,
     /// Updated node labels for scheduling (allows runtime label changes).
     pub labels: Option<serde_json::Value>,
+    /// Container inventory for reconciliation (sent on first heartbeat after agent startup).
+    /// Each entry has `container_id` and `container_name` of temps-managed containers.
+    pub containers: Option<Vec<ContainerInventoryItem>>,
+}
+
+/// A container reported by the agent during heartbeat reconciliation.
+#[derive(Deserialize, ToSchema)]
+pub struct ContainerInventoryItem {
+    /// Docker container ID
+    pub container_id: String,
+    /// Docker container name
+    pub container_name: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -398,6 +410,9 @@ async fn node_heartbeat(
             .with_detail(format!("Invalid authentication token for node {}", node_id)));
     }
 
+    // Capture previous status before the heartbeat updates it
+    let was_offline = node.status == "offline";
+
     let heartbeat = HeartbeatRequest {
         capacity: request.capacity.unwrap_or(serde_json::json!({})),
         labels: request.labels,
@@ -408,6 +423,40 @@ async fn node_heartbeat(
         .heartbeat(node_id, heartbeat)
         .await
         .map_err(Problem::from)?;
+
+    // Reconcile container state when the agent sends its inventory.
+    // This happens on the first heartbeat after agent startup/reconnect.
+    if let Some(containers) = request.containers {
+        let container_ids: Vec<String> =
+            containers.iter().map(|c| c.container_id.clone()).collect();
+
+        info!(
+            node_id,
+            container_count = container_ids.len(),
+            was_offline,
+            "Received container inventory from agent, reconciling"
+        );
+
+        match app_state
+            .node_service
+            .reconcile_containers(node_id, &container_ids)
+            .await
+        {
+            Ok(stale_count) => {
+                if stale_count > 0 {
+                    info!(
+                        node_id,
+                        stale_count,
+                        "Reconciliation: marked {} stale DB record(s) as deleted",
+                        stale_count
+                    );
+                }
+            }
+            Err(e) => {
+                error!(node_id, "Container reconciliation failed: {}", e);
+            }
+        }
+    }
 
     Ok(Json(HeartbeatResponse {
         status: "ok".to_string(),
@@ -996,7 +1045,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use sea_orm::{DatabaseBackend, MockDatabase};
-    use temps_entities::nodes;
+    use temps_entities::{deployment_containers, nodes};
     use tower::ServiceExt;
 
     fn sample_node() -> nodes::Model {
@@ -1364,4 +1413,190 @@ mod tests {
     // Note: admin_list_nodes and admin_get_node use RequireAuth (session auth)
     // and are tested through the plugin system's auth middleware integration.
     // The agent-facing routes (register, heartbeat) are tested above with bearer tokens.
+
+    // ── Heartbeat with container reconciliation ──────────────────
+
+    #[tokio::test]
+    async fn test_heartbeat_with_container_inventory_triggers_reconciliation() {
+        // Setup: node is "offline", has 2 containers in DB, agent reports only 1
+        let mut node = sample_node();
+        node.status = "offline".to_string();
+        node.token_hash = sha256_hash("test-token");
+
+        let mut reactivated_node = node.clone();
+        reactivated_node.status = "active".to_string();
+
+        // Container tracked in DB: container-1 and container-2
+        let c1 = deployment_containers::Model {
+            id: 1,
+            deployment_id: 10,
+            container_id: "abc123def".to_string(),
+            container_name: "app-1".to_string(),
+            container_port: 8080,
+            host_port: Some(30001),
+            image_name: Some("myapp:latest".to_string()),
+            status: Some("running".to_string()),
+            created_at: chrono::Utc::now(),
+            deployed_at: chrono::Utc::now(),
+            ready_at: Some(chrono::Utc::now()),
+            deleted_at: None,
+            node_id: Some(1),
+        };
+        let c2 = deployment_containers::Model {
+            id: 2,
+            deployment_id: 11,
+            container_id: "ghost456def".to_string(),
+            container_name: "app-2".to_string(),
+            container_port: 8080,
+            host_port: Some(30002),
+            image_name: Some("myapp:latest".to_string()),
+            status: Some("running".to_string()),
+            created_at: chrono::Utc::now(),
+            deployed_at: chrono::Utc::now(),
+            ready_at: Some(chrono::Utc::now()),
+            deleted_at: None,
+            node_id: Some(1),
+        };
+        let mut c2_updated = c2.clone();
+        c2_updated.status = Some("removed".to_string());
+        c2_updated.deleted_at = Some(chrono::Utc::now());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // heartbeat: find_by_id (get node to verify token)
+            .append_query_results(vec![vec![node.clone()]])
+            // heartbeat: find_by_id again (inside heartbeat() method)
+            .append_query_results(vec![vec![node.clone()]])
+            // heartbeat: update (reactivate offline -> active)
+            .append_query_results(vec![vec![reactivated_node]])
+            // reconcile: list_containers_for_node
+            .append_query_results(vec![vec![c1.clone(), c2.clone()]])
+            // reconcile: update ghost container (c2) -> deleted
+            .append_query_results(vec![vec![c2_updated]])
+            .into_connection();
+
+        let app = make_app(db);
+
+        // Agent reports only container abc123def (ghost456def is missing)
+        let body = serde_json::json!({
+            "capacity": { "cpu_percent": 25.0 },
+            "containers": [
+                { "container_id": "abc123def", "container_name": "app-1" }
+            ]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/nodes/1/heartbeat")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_without_containers_skips_reconciliation() {
+        // Normal heartbeat without container inventory — no reconciliation
+        let mut node = sample_node();
+        node.token_hash = sha256_hash("test-token");
+
+        let updated_node = node.clone();
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // heartbeat: find_by_id (verify token)
+            .append_query_results(vec![vec![node.clone()]])
+            // heartbeat: find_by_id (inside heartbeat())
+            .append_query_results(vec![vec![node]])
+            // heartbeat: update
+            .append_query_results(vec![vec![updated_node]])
+            .into_connection();
+
+        let app = make_app(db);
+        let body = serde_json::json!({
+            "capacity": { "cpu_percent": 50.0 }
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/nodes/1/heartbeat")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_with_empty_inventory_marks_all_stale() {
+        // Agent reports zero containers — all DB containers should be marked deleted
+        let mut node = sample_node();
+        node.token_hash = sha256_hash("test-token");
+
+        let updated_node = node.clone();
+
+        let c1 = deployment_containers::Model {
+            id: 1,
+            deployment_id: 10,
+            container_id: "orphan-1".to_string(),
+            container_name: "app-1".to_string(),
+            container_port: 8080,
+            host_port: Some(30001),
+            image_name: Some("myapp:latest".to_string()),
+            status: Some("running".to_string()),
+            created_at: chrono::Utc::now(),
+            deployed_at: chrono::Utc::now(),
+            ready_at: Some(chrono::Utc::now()),
+            deleted_at: None,
+            node_id: Some(1),
+        };
+        let mut c1_updated = c1.clone();
+        c1_updated.status = Some("removed".to_string());
+        c1_updated.deleted_at = Some(chrono::Utc::now());
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // heartbeat: find_by_id (verify token)
+            .append_query_results(vec![vec![node.clone()]])
+            // heartbeat: find_by_id (inside heartbeat())
+            .append_query_results(vec![vec![node]])
+            // heartbeat: update
+            .append_query_results(vec![vec![updated_node]])
+            // reconcile: list_containers_for_node
+            .append_query_results(vec![vec![c1]])
+            // reconcile: update orphan-1 -> deleted
+            .append_query_results(vec![vec![c1_updated]])
+            .into_connection();
+
+        let app = make_app(db);
+        let body = serde_json::json!({
+            "capacity": { "cpu_percent": 10.0 },
+            "containers": []
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/nodes/1/heartbeat")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }

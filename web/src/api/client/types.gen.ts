@@ -8816,6 +8816,12 @@ export type UpdateEnvironmentSettingsRequest = {
      * Optional list of node IDs to deploy to (overrides project-level setting)
      */
     target_nodes?: Array<number> | null;
+    /**
+     * Anti-affinity: spread replicas across different nodes.
+     * When enabled, the scheduler avoids placing two replicas of the same
+     * environment on the same node. Defaults to true.
+     */
+    anti_affinity?: boolean | null;
 };
 
 export type UpdateErrorGroupRequest = {

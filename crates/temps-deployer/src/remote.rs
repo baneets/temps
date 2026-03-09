@@ -253,9 +253,7 @@ impl ContainerDeployer for RemoteNodeDeployer {
     }
 
     async fn list_containers(&self) -> Result<Vec<ContainerInfo>, DeployerError> {
-        Err(DeployerError::Other(
-            "List containers not yet supported on remote nodes".into(),
-        ))
+        self.agent_get("/agent/containers").await
     }
 
     async fn get_container_logs(&self, container_id: &str) -> Result<String, DeployerError> {

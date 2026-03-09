@@ -44,6 +44,7 @@ pub fn build_router(
             "/agent/containers/{id}/info",
             get(handlers::get_container_info),
         )
+        .route("/agent/containers", get(handlers::list_containers))
         .route("/agent/images/import", post(handlers::import_image))
         .route("/agent/images/{name}/exists", get(handlers::image_exists))
         .route("/agent/health", get(handlers::health_check))
@@ -72,7 +73,13 @@ const HEARTBEAT_RETRY_MAX_DELAY: Duration = Duration::from_secs(15);
 /// On transient failures, retries up to `HEARTBEAT_MAX_RETRIES` times with exponential
 /// backoff before giving up for this interval. This prevents a brief network blip from
 /// causing the control plane to mark the node as offline (90s stale threshold).
-fn spawn_heartbeat_loop(config: &AgentConfig) {
+///
+/// The first successful heartbeat includes a full container inventory so the control
+/// plane can reconcile stale DB records against actual Docker state (e.g., after a crash).
+fn spawn_heartbeat_loop(
+    config: &AgentConfig,
+    container_deployer: Arc<dyn temps_deployer::ContainerDeployer>,
+) {
     let control_plane_url = config.control_plane_url.clone();
     let node_id = config.node_id;
     let token = config.token.clone();
@@ -98,12 +105,51 @@ fn spawn_heartbeat_loop(config: &AgentConfig) {
 
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         let mut consecutive_failures: u32 = 0;
+        let mut inventory_sent = false;
 
         loop {
             interval.tick().await;
 
             let capacity = collect_capacity_metrics();
-            let body = serde_json::json!({ "capacity": capacity, "labels": labels });
+            let mut body = serde_json::json!({ "capacity": capacity, "labels": labels });
+
+            // On the first heartbeat (agent startup/reconnect), include a full
+            // container inventory so the control plane can reconcile stale state.
+            if !inventory_sent {
+                match container_deployer.list_containers().await {
+                    Ok(containers) => {
+                        // Only include temps-managed containers
+                        let managed: Vec<_> = containers
+                            .into_iter()
+                            .filter(|c| {
+                                c.labels
+                                    .get("sh.temps.managed")
+                                    .map(|v| v == "true")
+                                    .unwrap_or(false)
+                            })
+                            .map(|c| {
+                                serde_json::json!({
+                                    "container_id": c.container_id,
+                                    "container_name": c.container_name,
+                                })
+                            })
+                            .collect();
+                        body["containers"] = serde_json::json!(managed);
+                        tracing::info!(
+                            node_id = node_id,
+                            count = managed.len(),
+                            "Including container inventory in heartbeat for reconciliation"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            node_id = node_id,
+                            "Failed to list containers for inventory: {}",
+                            e
+                        );
+                    }
+                }
+            }
 
             let mut attempt = 0;
             let mut succeeded = false;
@@ -127,6 +173,7 @@ fn spawn_heartbeat_loop(config: &AgentConfig) {
                         }
                         consecutive_failures = 0;
                         succeeded = true;
+                        inventory_sent = true;
                         tracing::debug!(node_id = node_id, "Heartbeat sent to control plane");
                         break;
                     }
@@ -236,10 +283,10 @@ pub async fn start_agent_server(
     image_builder: Arc<dyn ImageBuilder>,
     config: AgentConfig,
 ) -> Result<(), crate::AgentError> {
-    let router = build_router(container_deployer, image_builder, &config);
+    let router = build_router(container_deployer.clone(), image_builder, &config);
 
-    // Start heartbeat background loop
-    spawn_heartbeat_loop(&config);
+    // Start heartbeat background loop (with deployer for container inventory on first beat)
+    spawn_heartbeat_loop(&config, container_deployer);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_address)
         .await

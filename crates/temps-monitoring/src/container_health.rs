@@ -529,6 +529,7 @@ mod tests {
                     ports: vec![],
                     environment_vars: std::collections::HashMap::new(),
                     restart_count: Some(restart_count),
+                    labels: std::collections::HashMap::new(),
                 }),
                 stats: tokio::sync::Mutex::new(ContainerStats {
                     container_id: "abc123".to_string(),

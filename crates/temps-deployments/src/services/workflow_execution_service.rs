@@ -1950,6 +1950,7 @@ mod tests {
                 environment_vars: HashMap::new(),
                 status: temps_deployer::ContainerStatus::Running,
                 restart_count: Some(0),
+                labels: HashMap::new(),
             })
         }
 

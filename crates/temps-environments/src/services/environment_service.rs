@@ -584,6 +584,9 @@ impl EnvironmentService {
         if settings.target_labels.is_some() {
             deployment_config.target_labels = settings.target_labels;
         }
+        if let Some(anti_affinity) = settings.anti_affinity {
+            deployment_config.anti_affinity = anti_affinity;
+        }
 
         // Validate the deployment config
         deployment_config.validate().map_err(|e| {
@@ -1005,6 +1008,7 @@ mod tests {
                     security: None,
                     target_nodes: None,
                     target_labels: None,
+                    anti_affinity: None,
                 },
             )
             .await;
@@ -1083,6 +1087,7 @@ mod tests {
                     security: None,
                     target_nodes: None,
                     target_labels: None,
+                    anti_affinity: None,
                 },
             )
             .await;

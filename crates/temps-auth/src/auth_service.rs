@@ -1042,7 +1042,7 @@ mod tests {
 
         let request1 = RegisterRequest {
             email: "Test@Example.Com".to_string(),
-            password: "password123".to_string(),
+            password: "Password123!".to_string(),
             name: "Test User".to_string(),
         };
 
@@ -1051,7 +1051,7 @@ mod tests {
 
         let request2 = RegisterRequest {
             email: "TEST@EXAMPLE.COM".to_string(),
-            password: "password456".to_string(),
+            password: "Password456!".to_string(),
             name: "Another User".to_string(),
         };
 

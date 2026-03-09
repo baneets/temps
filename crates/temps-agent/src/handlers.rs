@@ -61,6 +61,7 @@ fn error_response(status: StatusCode, message: String) -> impl IntoResponse {
         remove_container,
         get_container_logs,
         get_container_info,
+        list_containers,
         image_exists,
         import_image,
         health_check,
@@ -306,6 +307,33 @@ pub async fn get_container_info(
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to get info for container {}: {}", container_id, e),
+            )
+            .into_response()
+        }
+    }
+}
+
+/// List all containers on this worker node
+#[utoipa::path(
+    tag = "Containers",
+    get,
+    path = "/agent/containers",
+    responses(
+        (status = 200, description = "List of containers", body = AgentResponse<Vec<temps_deployer::ContainerInfo>>),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Failed to list containers")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_containers(State(state): State<Arc<AgentState>>) -> impl IntoResponse {
+    tracing::debug!("Listing containers");
+    match state.container_deployer.list_containers().await {
+        Ok(containers) => AgentResponse::ok(containers).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list containers: {}", e);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to list containers: {}", e),
             )
             .into_response()
         }

@@ -1032,7 +1032,9 @@ impl DeployImageJob {
 
         // Build Docker labels for the log aggregator to discover this container.
         // The collector inspects these labels to enrich log lines with project/env/service context.
+        // `sh.temps.managed` marks this as a Temps-managed container for reconciliation.
         let mut labels = HashMap::new();
+        labels.insert("sh.temps.managed".to_string(), "true".to_string());
         labels.insert(
             "sh.temps.project_id".to_string(),
             context.project_id.to_string(),
@@ -2006,6 +2008,7 @@ mod tests {
                 ports: vec![],
                 environment_vars: HashMap::new(),
                 restart_count: Some(0),
+                labels: HashMap::new(),
             })
         }
 
