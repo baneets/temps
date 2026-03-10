@@ -1055,7 +1055,7 @@ pub async fn get_deployment_jobs(
 /// Get logs for a specific deployment job
 #[utoipa::path(
     get,
-    path = "/api/projects/{project_id}/deployments/{deployment_id}/jobs/{job_id}/logs",
+    path = "/projects/{project_id}/deployments/{deployment_id}/jobs/{job_id}/logs",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("deployment_id" = i32, Path, description = "Deployment ID"),

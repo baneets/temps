@@ -10017,6 +10017,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "temps-ai-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum 0.8.6",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "http 1.3.1",
+ "http-body-util",
+ "hyper 1.7.0",
+ "reqwest",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "temps-auth",
+ "temps-core",
+ "temps-entities",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tower 0.5.2",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "temps-analytics"
 version = "0.1.0"
 dependencies = [
@@ -10324,6 +10354,7 @@ dependencies = [
  "sha2",
  "tar",
  "temps-agent",
+ "temps-ai-gateway",
  "temps-analytics",
  "temps-analytics-events",
  "temps-analytics-funnels",

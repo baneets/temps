@@ -20,6 +20,7 @@ import {
   BarChart3,
   Bell,
   BellPlus,
+  Bot,
   Boxes,
   Database,
   DatabaseBackup,
@@ -34,6 +35,7 @@ import {
   Mail,
   Monitor,
   Network,
+  Puzzle,
   ScrollText,
   Server,
   Settings,
@@ -138,6 +140,12 @@ const mainNavItems: NavigationItem[] = [
       'digitalocean',
     ],
   },
+  {
+    title: 'AI Gateway',
+    url: '/ai-gateway',
+    icon: Bot,
+    keywords: ['ai', 'llm', 'openai', 'anthropic', 'gateway', 'models', 'providers', 'chat', 'gpt', 'claude'],
+  },
 ]
 
 const settingsNavItems: NavigationItem[] = [
@@ -220,6 +228,18 @@ const settingsNavItems: NavigationItem[] = [
     url: '/settings/disk-monitoring',
     icon: HardDrive,
     keywords: ['disk', 'space', 'storage', 'alerts', 'monitoring'],
+  },
+  {
+    title: 'Worker Nodes',
+    url: '/settings/nodes',
+    icon: Network,
+    keywords: ['worker', 'nodes', 'cluster', 'multinode', 'infrastructure'],
+  },
+  {
+    title: 'Plugins',
+    url: '/settings/plugins',
+    icon: Puzzle,
+    keywords: ['plugins', 'extensions', 'addons', 'modules'],
   },
 ]
 

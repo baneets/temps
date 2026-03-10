@@ -209,6 +209,11 @@ pub enum Permission {
     // OTel / Observability permissions
     OtelRead,
     OtelWrite,
+
+    // AI Gateway permissions
+    AiGatewayRead,
+    AiGatewayWrite,
+    AiGatewayExecute,
 }
 
 impl fmt::Display for Permission {
@@ -342,6 +347,9 @@ impl fmt::Display for Permission {
             Permission::StatusPageDelete => "status_page:delete",
             Permission::OtelRead => "otel:read",
             Permission::OtelWrite => "otel:write",
+            Permission::AiGatewayRead => "ai_gateway:read",
+            Permission::AiGatewayWrite => "ai_gateway:write",
+            Permission::AiGatewayExecute => "ai_gateway:execute",
         };
         write!(f, "{}", name)
     }
@@ -479,6 +487,9 @@ impl Permission {
             "status_page:delete" => Some(Permission::StatusPageDelete),
             "otel:read" => Some(Permission::OtelRead),
             "otel:write" => Some(Permission::OtelWrite),
+            "ai_gateway:read" => Some(Permission::AiGatewayRead),
+            "ai_gateway:write" => Some(Permission::AiGatewayWrite),
+            "ai_gateway:execute" => Some(Permission::AiGatewayExecute),
             _ => None,
         }
     }
@@ -613,6 +624,9 @@ impl Permission {
             Permission::StatusPageDelete,
             Permission::OtelRead,
             Permission::OtelWrite,
+            Permission::AiGatewayRead,
+            Permission::AiGatewayWrite,
+            Permission::AiGatewayExecute,
         ]
     }
 }
@@ -802,6 +816,9 @@ impl Role {
                 Permission::StatusPageDelete,
                 Permission::OtelRead,
                 Permission::OtelWrite,
+                Permission::AiGatewayRead,
+                Permission::AiGatewayWrite,
+                Permission::AiGatewayExecute,
             ],
             Role::User => &[
                 Permission::ProjectsRead,
@@ -898,6 +915,8 @@ impl Role {
                 Permission::StatusPageCreate,
                 Permission::OtelRead,
                 Permission::OtelWrite,
+                Permission::AiGatewayRead,
+                Permission::AiGatewayExecute,
             ],
             Role::Reader => &[
                 Permission::ProjectsRead,
@@ -936,6 +955,7 @@ impl Role {
                 Permission::KvRead,
                 Permission::StatusPageRead,
                 Permission::OtelRead,
+                Permission::AiGatewayRead,
             ],
             Role::Mcp => &[
                 Permission::ProjectsRead,

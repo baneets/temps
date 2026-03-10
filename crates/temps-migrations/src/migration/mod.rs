@@ -35,6 +35,10 @@ mod m20260305_000001_create_nodes_table;
 mod m20260305_000002_add_node_id_columns;
 mod m20260305_000003_add_encrypted_flag_to_env_vars;
 mod m20260308_000001_create_alarms_table;
+mod m20260310_000001_create_ai_provider_keys;
+mod m20260310_000002_create_ai_gateway_config;
+mod m20260310_000003_create_ai_usage_logs;
+mod m20260310_000004_add_is_byok_to_ai_usage_logs;
 
 pub struct Migrator;
 
@@ -77,6 +81,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260305_000002_add_node_id_columns::Migration),
             Box::new(m20260305_000003_add_encrypted_flag_to_env_vars::Migration),
             Box::new(m20260308_000001_create_alarms_table::Migration),
+            Box::new(m20260310_000001_create_ai_provider_keys::Migration),
+            Box::new(m20260310_000002_create_ai_gateway_config::Migration),
+            Box::new(m20260310_000003_create_ai_usage_logs::Migration),
+            Box::new(m20260310_000004_add_is_byok_to_ai_usage_logs::Migration),
         ]
     }
 }

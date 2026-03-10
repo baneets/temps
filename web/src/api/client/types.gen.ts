@@ -649,6 +649,55 @@ export type ChallengeValidationStatus = {
     validated?: string | null;
 };
 
+export type ChatCompletionChoice = {
+    finish_reason?: string | null;
+    index: number;
+    message: ChatMessage;
+};
+
+/**
+ * OpenAI-compatible chat completion request.
+ * Uses `deny_unknown_fields = false` (serde default) so that SDK-specific
+ * fields like `stream_options`, `logprobs`, `top_logprobs`, `logit_bias`,
+ * `parallel_tool_calls`, etc. are silently accepted without breaking.
+ */
+export type ChatCompletionRequest = ({
+    [key: string]: unknown;
+} | null) & {
+    frequency_penalty?: number | null;
+    max_tokens?: number | null;
+    messages: Array<ChatMessage>;
+    model: string;
+    n?: number | null;
+    presence_penalty?: number | null;
+    response_format?: unknown;
+    seed?: number | null;
+    stop?: null | StopSequence;
+    stream?: boolean;
+    temperature?: number | null;
+    tool_choice?: unknown;
+    tools?: Array<unknown> | null;
+    top_p?: number | null;
+    user?: string | null;
+};
+
+export type ChatCompletionResponse = {
+    choices: Array<ChatCompletionChoice>;
+    created: number;
+    id: string;
+    model: string;
+    object: string;
+    usage?: null | UsageInfo;
+};
+
+export type ChatMessage = {
+    content?: null | MessageContent;
+    name?: string | null;
+    role: string;
+    tool_call_id?: string | null;
+    tool_calls?: Array<unknown> | null;
+};
+
 export type CliLoginRequest = {
     password: string;
     username: string;
@@ -820,6 +869,20 @@ export type ContainerInfoResponse = {
     status: string;
 };
 
+/**
+ * A container reported by the agent during heartbeat reconciliation.
+ */
+export type ContainerInventoryItem = {
+    /**
+     * Docker container ID
+     */
+    container_id: string;
+    /**
+     * Docker container name
+     */
+    container_name: string;
+};
+
 export type ContainerListResponse = {
     containers: Array<ContainerInfoResponse>;
     total: number;
@@ -937,6 +1000,12 @@ export type ContainerResponse = {
      * Container name
      */
     name: string;
+};
+
+export type ContentPart = {
+    image_url?: unknown;
+    text?: string | null;
+    type: string;
 };
 
 /**
@@ -1342,6 +1411,13 @@ export type CreateProjectRequest = {
     source_type?: SourceType;
     storage_service_ids: Array<number>;
     use_default_wildcard?: boolean | null;
+};
+
+export type CreateProviderKeyRequest = {
+    api_key: string;
+    base_url?: string | null;
+    display_name: string;
+    provider: string;
 };
 
 export type CreateProviderRequest = {
@@ -2668,6 +2744,33 @@ export type EmailStatusResponse = {
     password_reset_available: boolean;
 };
 
+export type EmbeddingData = {
+    embedding: Array<number>;
+    index: number;
+    object: string;
+};
+
+export type EmbeddingInput = string | Array<string>;
+
+export type EmbeddingRequest = {
+    dimensions?: number | null;
+    encoding_format?: string | null;
+    input: EmbeddingInput;
+    model: string;
+};
+
+export type EmbeddingResponse = {
+    data: Array<EmbeddingData>;
+    model: string;
+    object: string;
+    usage: EmbeddingUsage;
+};
+
+export type EmbeddingUsage = {
+    prompt_tokens: number;
+    total_tokens: number;
+};
+
 /**
  * Request to enable Blob service
  */
@@ -3975,6 +4078,11 @@ export type HeartbeatApiRequest = {
      */
     capacity?: unknown;
     /**
+     * Container inventory for reconciliation (sent on first heartbeat after agent startup).
+     * Each entry has `container_id` and `container_name` of temps-managed containers.
+     */
+    containers?: Array<ContainerInventoryItem> | null;
+    /**
      * Updated node labels for scheduling (allows runtime label changes).
      */
     labels?: unknown;
@@ -4984,6 +5092,8 @@ export type ManualAction = {
  */
 export type ManualActionTiming = 'before-migration' | 'after-migration' | 'within-hours';
 
+export type MessageContent = string | Array<ContentPart>;
+
 /**
  * A time-bucketed metric aggregate for chart display.
  */
@@ -5181,6 +5291,17 @@ export type MiscResult = {
     is_role_account: boolean;
 };
 
+export type ModelInfo = {
+    id: string;
+    object: string;
+    owned_by: string;
+};
+
+export type ModelListResponse = {
+    data: Array<ModelInfo>;
+    object: string;
+};
+
 export type MonitorResponse = {
     check_interval_seconds: number;
     created_at: string;
@@ -5376,6 +5497,16 @@ export type NotificationProviderResponse = {
     name: string;
     provider_type: string;
     updated_at: number;
+};
+
+export type OpenAiError = {
+    code?: string | null;
+    message: string;
+    type: string;
+};
+
+export type OpenAiErrorResponse = {
+    error: OpenAiError;
 };
 
 export type OperatingSystemCount = {
@@ -6549,6 +6680,20 @@ export type ProviderDeletionCheckResponse = {
     can_delete: boolean;
     message: string;
     projects_in_use: Array<ProjectUsageInfoResponse>;
+};
+
+export type ProviderKeyResponse = {
+    /**
+     * Masked API key (only last 4 chars visible)
+     */
+    api_key_masked: string;
+    base_url?: string | null;
+    created_at: string;
+    display_name: string;
+    id: number;
+    is_active: boolean;
+    provider: string;
+    updated_at: string;
 };
 
 export type ProviderMetadata = {
@@ -8288,6 +8433,8 @@ export type StepResult = {
     success: boolean;
 };
 
+export type StopSequence = string | Array<string>;
+
 /**
  * Quota usage information for a project.
  */
@@ -8778,6 +8925,12 @@ export type UpdateEmailProviderRequest = {
 
 export type UpdateEnvironmentSettingsRequest = {
     /**
+     * Anti-affinity: spread replicas across different nodes.
+     * When enabled, the scheduler avoids placing two replicas of the same
+     * environment on the same node. Defaults to `true`.
+     */
+    anti_affinity?: boolean | null;
+    /**
      * Enable/disable automatic deployments for this environment
      */
     automatic_deploy?: boolean | null;
@@ -8816,12 +8969,6 @@ export type UpdateEnvironmentSettingsRequest = {
      * Optional list of node IDs to deploy to (overrides project-level setting)
      */
     target_nodes?: Array<number> | null;
-    /**
-     * Anti-affinity: spread replicas across different nodes.
-     * When enabled, the scheduler avoids placing two replicas of the same
-     * environment on the same node. Defaults to true.
-     */
-    anti_affinity?: boolean | null;
 };
 
 export type UpdateErrorGroupRequest = {
@@ -8922,6 +9069,13 @@ export type UpdateProjectSettingsRequest = {
     repo_name?: string | null;
     repo_owner?: string | null;
     slug?: string | null;
+};
+
+export type UpdateProviderKeyRequest = {
+    api_key?: string | null;
+    base_url?: string | null;
+    display_name?: string | null;
+    is_active?: boolean | null;
 };
 
 export type UpdateProviderRequest = {
@@ -9068,6 +9222,12 @@ export type UptimeDataPoint = {
 export type UptimeHistoryResponse = {
     monitor_id: number;
     uptime_data: Array<UptimeDataPoint>;
+};
+
+export type UsageInfo = {
+    completion_tokens: number;
+    prompt_tokens: number;
+    total_tokens: number;
 };
 
 export type UserResponse = {
@@ -9803,6 +9963,101 @@ export type UpdateSpeedMetricsResponses = {
      */
     200: unknown;
 };
+
+export type ChatCompletionsData = {
+    body: ChatCompletionRequest;
+    path?: never;
+    query?: never;
+    url: '/ai/v1/chat/completions';
+};
+
+export type ChatCompletionsErrors = {
+    /**
+     * Invalid request
+     */
+    400: OpenAiErrorResponse;
+    /**
+     * Unauthorized
+     */
+    401: OpenAiErrorResponse;
+    /**
+     * Model not found
+     */
+    404: OpenAiErrorResponse;
+    /**
+     * Internal error
+     */
+    500: OpenAiErrorResponse;
+};
+
+export type ChatCompletionsError = ChatCompletionsErrors[keyof ChatCompletionsErrors];
+
+export type ChatCompletionsResponses = {
+    /**
+     * Chat completion response
+     */
+    200: ChatCompletionResponse;
+};
+
+export type ChatCompletionsResponse = ChatCompletionsResponses[keyof ChatCompletionsResponses];
+
+export type EmbeddingsData = {
+    body: EmbeddingRequest;
+    path?: never;
+    query?: never;
+    url: '/ai/v1/embeddings';
+};
+
+export type EmbeddingsErrors = {
+    /**
+     * Invalid request
+     */
+    400: OpenAiErrorResponse;
+    /**
+     * Unauthorized
+     */
+    401: OpenAiErrorResponse;
+    /**
+     * Model not found
+     */
+    404: OpenAiErrorResponse;
+};
+
+export type EmbeddingsError = EmbeddingsErrors[keyof EmbeddingsErrors];
+
+export type EmbeddingsResponses = {
+    /**
+     * Embedding response
+     */
+    200: EmbeddingResponse;
+};
+
+export type EmbeddingsResponse = EmbeddingsResponses[keyof EmbeddingsResponses];
+
+export type ListModelsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/ai/v1/models';
+};
+
+export type ListModelsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: OpenAiErrorResponse;
+};
+
+export type ListModelsError = ListModelsErrors[keyof ListModelsErrors];
+
+export type ListModelsResponses = {
+    /**
+     * List of available models
+     */
+    200: ModelListResponse;
+};
+
+export type ListModelsResponse = ListModelsResponses[keyof ListModelsResponses];
 
 export type GetActiveVisitorsData = {
     body?: never;
@@ -11481,6 +11736,142 @@ export type UploadReleaseFileResponses = {
 };
 
 export type UploadReleaseFileResponse = UploadReleaseFileResponses[keyof UploadReleaseFileResponses];
+
+export type ListProviderKeysData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/ai/providers';
+};
+
+export type ListProviderKeysErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+};
+
+export type ListProviderKeysError = ListProviderKeysErrors[keyof ListProviderKeysErrors];
+
+export type ListProviderKeysResponses = {
+    /**
+     * List of provider keys
+     */
+    200: Array<ProviderKeyResponse>;
+};
+
+export type ListProviderKeysResponse = ListProviderKeysResponses[keyof ListProviderKeysResponses];
+
+export type CreateProviderKeyData = {
+    body: CreateProviderKeyRequest;
+    path?: never;
+    query?: never;
+    url: '/api/ai/providers';
+};
+
+export type CreateProviderKeyErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+};
+
+export type CreateProviderKeyError = CreateProviderKeyErrors[keyof CreateProviderKeyErrors];
+
+export type CreateProviderKeyResponses = {
+    /**
+     * Provider key created
+     */
+    201: ProviderKeyResponse;
+};
+
+export type CreateProviderKeyResponse = CreateProviderKeyResponses[keyof CreateProviderKeyResponses];
+
+export type DeleteProviderKeyData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/api/ai/providers/{id}';
+};
+
+export type DeleteProviderKeyErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Not found
+     */
+    404: ProblemDetails;
+};
+
+export type DeleteProviderKeyError = DeleteProviderKeyErrors[keyof DeleteProviderKeyErrors];
+
+export type DeleteProviderKeyResponses = {
+    /**
+     * Provider key deleted
+     */
+    204: void;
+};
+
+export type DeleteProviderKeyResponse = DeleteProviderKeyResponses[keyof DeleteProviderKeyResponses];
+
+export type UpdateProviderKeyData = {
+    body: UpdateProviderKeyRequest;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/api/ai/providers/{id}';
+};
+
+export type UpdateProviderKeyErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Not found
+     */
+    404: ProblemDetails;
+};
+
+export type UpdateProviderKeyError = UpdateProviderKeyErrors[keyof UpdateProviderKeyErrors];
+
+export type UpdateProviderKeyResponses = {
+    /**
+     * Provider key updated
+     */
+    200: ProviderKeyResponse;
+};
+
+export type UpdateProviderKeyResponse = UpdateProviderKeyResponses[keyof UpdateProviderKeyResponses];
 
 export type GetDeploymentJobLogsData = {
     body?: never;
