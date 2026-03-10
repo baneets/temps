@@ -106,12 +106,13 @@ fn test_role_from_str_roundtrip() {
 #[test]
 fn test_role_all() {
     let roles = Role::all();
-    assert_eq!(roles.len(), 6);
+    assert_eq!(roles.len(), 7);
     assert!(roles.contains(&Role::Admin));
     assert!(roles.contains(&Role::User));
     assert!(roles.contains(&Role::Reader));
     assert!(roles.contains(&Role::Mcp));
     assert!(roles.contains(&Role::ApiReader));
+    assert!(roles.contains(&Role::Demo));
     assert!(roles.contains(&Role::Custom));
 }
 
