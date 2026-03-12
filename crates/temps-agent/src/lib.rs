@@ -1,11 +1,13 @@
 //! Temps Agent — lightweight HTTP server wrapping the local Docker runtime.
 //!
 //! Runs on worker nodes. Exposes a small bearer-token–authenticated API that
-//! the control plane (or `RemoteNodeDeployer`) calls to manage containers.
+//! the control plane (or `RemoteNodeDeployer`) calls to manage containers
+//! and external services.
 
 pub mod auth;
 pub mod handlers;
 pub mod server;
+pub mod service_handlers;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,11 +29,20 @@ pub enum AgentError {
     #[error("Agent server error: {0}")]
     ServerError(String),
 
+    #[error("Service operation failed for '{service_name}': {reason}")]
+    ServiceOperation {
+        service_name: String,
+        reason: String,
+    },
+
     #[error("Deployer error: {0}")]
     Deployer(#[from] temps_deployer::DeployerError),
 
     #[error("Builder error: {0}")]
     Builder(#[from] temps_deployer::BuilderError),
+
+    #[error("Docker error: {0}")]
+    Docker(String),
 }
 
 /// Health report sent in heartbeats and returned from GET /agent/health.
@@ -68,4 +79,251 @@ pub struct AgentConfig {
     /// Sent in every heartbeat so the control plane has up-to-date label info.
     #[serde(default)]
     pub labels: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// Service operation request/response types
+// ---------------------------------------------------------------------------
+
+/// Request to create an external service container on this node.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceCreateRequest {
+    /// Service name (used for container naming)
+    pub name: String,
+    /// Service type (postgres, redis, mongodb, s3)
+    pub service_type: String,
+    /// Docker image to use
+    pub image: String,
+    /// Environment variables for the container
+    pub environment: std::collections::HashMap<String, String>,
+    /// Port mappings (host_port -> container_port)
+    pub port_mappings: Vec<ServicePortMapping>,
+    /// Volume mounts (volume_name -> container_path)
+    pub volumes: std::collections::HashMap<String, String>,
+    /// Docker network to attach to
+    #[serde(default)]
+    pub network: Option<String>,
+    /// Optional command override
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+}
+
+/// Port mapping for a service container.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServicePortMapping {
+    pub host_port: u16,
+    pub container_port: u16,
+}
+
+/// Response after creating a service container.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceCreateResponse {
+    pub container_id: String,
+    pub container_name: String,
+    pub host_port: u16,
+}
+
+/// Request to execute a command inside a service container (for backups, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceExecRequest {
+    /// Container name or ID
+    pub container_name: String,
+    /// Command to execute
+    pub command: Vec<String>,
+    /// Environment variables for the exec session
+    #[serde(default)]
+    pub environment: std::collections::HashMap<String, String>,
+    /// Run as this user (e.g., "postgres")
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Detach and run in background
+    #[serde(default)]
+    pub detach: bool,
+}
+
+/// Response from a container exec operation.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceExecResponse {
+    pub exit_code: i64,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Request to back up a service directly to S3.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceBackupRequest {
+    /// Container name of the service to back up
+    pub container_name: String,
+    /// Service type (postgres, redis, mongodb)
+    pub service_type: String,
+    /// S3 credentials for upload (distributed from control plane)
+    pub s3: S3CredentialsPayload,
+    /// S3 key prefix for this backup
+    pub s3_path: String,
+    /// Backup method (e.g., "pg_dump", "walg", "rdb_copy")
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// S3 credentials distributed from the control plane.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct S3CredentialsPayload {
+    pub access_key_id: String,
+    pub secret_key: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub bucket_name: String,
+    pub force_path_style: bool,
+}
+
+/// Response after a backup completes.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceBackupResponse {
+    pub s3_location: String,
+    pub size_bytes: u64,
+    pub compression_type: String,
+    pub checksum: Option<String>,
+}
+
+/// Request to restore a service from S3.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceRestoreRequest {
+    /// Container name of the service to restore into
+    pub container_name: String,
+    /// Service type (postgres, redis, mongodb)
+    pub service_type: String,
+    /// S3 credentials
+    pub s3: S3CredentialsPayload,
+    /// S3 key of the backup to restore
+    pub s3_location: String,
+    /// Compression type of the backup
+    #[serde(default)]
+    pub compression_type: Option<String>,
+}
+
+/// Status of a service on this node.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ServiceStatus {
+    pub container_name: String,
+    pub container_id: Option<String>,
+    pub running: bool,
+    pub health: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_service_create_request_serialization() {
+        let req = ServiceCreateRequest {
+            name: "postgres-main".to_string(),
+            service_type: "postgres".to_string(),
+            image: "timescale/timescaledb-ha:pg18".to_string(),
+            environment: HashMap::from([
+                ("POSTGRES_PASSWORD".to_string(), "secret".to_string()),
+                ("POSTGRES_DB".to_string(), "temps".to_string()),
+            ]),
+            port_mappings: vec![ServicePortMapping {
+                host_port: 30001,
+                container_port: 5432,
+            }],
+            volumes: HashMap::from([(
+                "postgres-main_data".to_string(),
+                "/var/lib/postgresql".to_string(),
+            )]),
+            network: Some("temps".to_string()),
+            command: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ServiceCreateRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "postgres-main");
+        assert_eq!(parsed.service_type, "postgres");
+        assert_eq!(parsed.port_mappings.len(), 1);
+        assert_eq!(parsed.port_mappings[0].host_port, 30001);
+    }
+
+    #[test]
+    fn test_service_exec_request_defaults() {
+        let json = r#"{"container_name":"pg","command":["pg_dump","-Fc"]}"#;
+        let req: ServiceExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.container_name, "pg");
+        assert_eq!(req.command, vec!["pg_dump", "-Fc"]);
+        assert!(req.environment.is_empty());
+        assert!(req.user.is_none());
+        assert!(!req.detach);
+    }
+
+    #[test]
+    fn test_s3_credentials_payload_serialization() {
+        let creds = S3CredentialsPayload {
+            access_key_id: "AKIA...".to_string(),
+            secret_key: "secret".to_string(),
+            region: "us-east-1".to_string(),
+            endpoint: Some("https://s3.example.com".to_string()),
+            bucket_name: "backups".to_string(),
+            force_path_style: true,
+        };
+
+        let json = serde_json::to_string(&creds).unwrap();
+        let parsed: S3CredentialsPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.bucket_name, "backups");
+        assert!(parsed.force_path_style);
+        assert_eq!(parsed.endpoint.unwrap(), "https://s3.example.com");
+    }
+
+    #[test]
+    fn test_service_status_not_running() {
+        let status = ServiceStatus {
+            container_name: "redis-cache".to_string(),
+            container_id: None,
+            running: false,
+            health: None,
+        };
+        assert!(!status.running);
+        assert!(status.container_id.is_none());
+    }
+
+    #[test]
+    fn test_service_backup_request_serialization() {
+        let req = ServiceBackupRequest {
+            container_name: "postgres-main".to_string(),
+            service_type: "postgres".to_string(),
+            s3: S3CredentialsPayload {
+                access_key_id: "key".to_string(),
+                secret_key: "secret".to_string(),
+                region: "eu-central-1".to_string(),
+                endpoint: None,
+                bucket_name: "backups".to_string(),
+                force_path_style: false,
+            },
+            s3_path: "external_services/postgres/main/2026/03/12/".to_string(),
+            method: Some("pg_dump".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ServiceBackupRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.container_name, "postgres-main");
+        assert_eq!(parsed.s3.region, "eu-central-1");
+        assert_eq!(parsed.method.unwrap(), "pg_dump");
+    }
+
+    #[test]
+    fn test_agent_config_serialization_with_defaults() {
+        let config = AgentConfig {
+            listen_address: "0.0.0.0:3100".to_string(),
+            token: "test-token".to_string(),
+            node_name: "worker-1".to_string(),
+            control_plane_url: "https://control:3000".to_string(),
+            node_id: 1,
+            labels: serde_json::json!({}),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: AgentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.node_name, "worker-1");
+        assert_eq!(parsed.node_id, 1);
+    }
 }

@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use temps_auth::RequireAuth;
@@ -174,11 +174,24 @@ pub struct UndrainNodeResponse {
     pub message: String,
 }
 
+/// S3 credentials distributed to agents for backup/restore operations.
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct S3CredentialsResponse {
+    pub access_key_id: String,
+    pub secret_key: String,
+    pub region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub bucket_name: String,
+    pub force_path_style: bool,
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
         register_node,
         node_heartbeat,
+        get_s3_credentials,
         admin_list_nodes,
         admin_get_node,
         admin_list_node_containers,
@@ -192,6 +205,7 @@ pub struct UndrainNodeResponse {
         RegisterNodeResponse,
         HeartbeatApiRequest,
         HeartbeatResponse,
+        S3CredentialsResponse,
         NodeInfoResponse,
         NodeListResponse,
         NodeContainerResponse,
@@ -215,6 +229,10 @@ pub fn configure_routes() -> Router<Arc<NodeAppState>> {
     Router::new()
         .route("/internal/nodes/register", post(register_node))
         .route("/internal/nodes/{node_id}/heartbeat", post(node_heartbeat))
+        .route(
+            "/internal/nodes/{node_id}/s3-credentials/{s3_source_id}",
+            get(get_s3_credentials),
+        )
 }
 
 /// Configure UI-facing admin node routes (session auth via RequireAuth).
@@ -461,6 +479,105 @@ async fn node_heartbeat(
     Ok(Json(HeartbeatResponse {
         status: "ok".to_string(),
         message: "Heartbeat received".to_string(),
+    }))
+}
+
+/// Get decrypted S3 credentials for a backup/restore operation.
+///
+/// Agents call this endpoint to receive the S3 credentials they need to upload
+/// or download backups. The credentials are decrypted from the stored S3 source
+/// and returned over the authenticated TLS/WireGuard channel.
+#[utoipa::path(
+    tag = "Nodes",
+    get,
+    path = "/internal/nodes/{node_id}/s3-credentials/{s3_source_id}",
+    params(
+        ("node_id" = i32, Path, description = "Node ID"),
+        ("s3_source_id" = i32, Path, description = "S3 source ID")
+    ),
+    responses(
+        (status = 200, description = "S3 credentials", body = S3CredentialsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "S3 source not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+async fn get_s3_credentials(
+    State(app_state): State<Arc<NodeAppState>>,
+    headers: HeaderMap,
+    Path((node_id, s3_source_id)): Path<(i32, i32)>,
+) -> Result<impl IntoResponse, Problem> {
+    // Verify the node's token
+    let token = extract_bearer_token(&headers)?;
+    let node = app_state
+        .node_service
+        .get_by_id(node_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let token_hash = sha256_hash(&token);
+    if node.token_hash != token_hash {
+        warn!(node_id, "Invalid token for S3 credentials request");
+        return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
+            .with_title("Invalid Token")
+            .with_detail(format!("Invalid authentication token for node {}", node_id)));
+    }
+
+    // Look up the S3 source
+    let s3_source = temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
+        .one(app_state.db.as_ref())
+        .await
+        .map_err(|e| {
+            error!("Failed to look up S3 source {}: {}", s3_source_id, e);
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail(format!("Failed to look up S3 source: {}", e))
+        })?
+        .ok_or_else(|| {
+            problemdetails::new(StatusCode::NOT_FOUND)
+                .with_title("S3 Source Not Found")
+                .with_detail(format!("S3 source {} not found", s3_source_id))
+        })?;
+
+    // Decrypt credentials
+    let access_key_id = app_state
+        .encryption_service
+        .decrypt_string(&s3_source.access_key_id)
+        .map_err(|e| {
+            error!(
+                "Failed to decrypt access key for S3 source {}: {}",
+                s3_source_id, e
+            );
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Decryption Error")
+                .with_detail("Failed to decrypt S3 credentials")
+        })?;
+
+    let secret_key = app_state
+        .encryption_service
+        .decrypt_string(&s3_source.secret_key)
+        .map_err(|e| {
+            error!(
+                "Failed to decrypt secret key for S3 source {}: {}",
+                s3_source_id, e
+            );
+            problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Decryption Error")
+                .with_detail("Failed to decrypt S3 credentials")
+        })?;
+
+    info!(
+        "Distributed S3 credentials for source {} to node {} ({})",
+        s3_source_id, node_id, node.name
+    );
+
+    Ok(Json(S3CredentialsResponse {
+        access_key_id,
+        secret_key,
+        region: s3_source.region,
+        endpoint: s3_source.endpoint,
+        bucket_name: s3_source.bucket_name,
+        force_path_style: s3_source.force_path_style.unwrap_or(true),
     }))
 }
 

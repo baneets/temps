@@ -12,6 +12,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::auth::{require_agent_auth, AgentAuth};
 use crate::handlers::{self, AgentApiDoc, AgentState};
+use crate::service_handlers;
 use crate::AgentConfig;
 use temps_deployer::{ContainerDeployer, ImageBuilder};
 
@@ -19,17 +20,20 @@ use temps_deployer::{ContainerDeployer, ImageBuilder};
 pub fn build_router(
     container_deployer: Arc<dyn ContainerDeployer>,
     image_builder: Arc<dyn ImageBuilder>,
+    docker: Option<bollard::Docker>,
     config: &AgentConfig,
 ) -> Router {
     let state = Arc::new(AgentState {
         container_deployer,
         image_builder,
+        docker,
     });
 
     let auth = Arc::new(AgentAuth::new(&config.token));
 
     // API routes — all protected by bearer token auth
     let api_routes = Router::new()
+        // Container management routes
         .route("/agent/containers/deploy", post(handlers::deploy_container))
         .route(
             "/agent/containers/{id}/stop",
@@ -48,6 +52,34 @@ pub fn build_router(
         .route("/agent/images/import", post(handlers::import_image))
         .route("/agent/images/{name}/exists", get(handlers::image_exists))
         .route("/agent/health", get(handlers::health_check))
+        // Service management routes
+        .route("/agent/services", post(service_handlers::create_service))
+        .route("/agent/services", get(service_handlers::list_services))
+        .route(
+            "/agent/services/{name}/stop",
+            post(service_handlers::stop_service),
+        )
+        .route(
+            "/agent/services/{name}/start",
+            post(service_handlers::start_service),
+        )
+        .route(
+            "/agent/services/{name}",
+            delete(service_handlers::remove_service),
+        )
+        .route(
+            "/agent/services/{name}/status",
+            get(service_handlers::service_status),
+        )
+        .route("/agent/services/exec", post(service_handlers::service_exec))
+        .route(
+            "/agent/services/backup",
+            post(service_handlers::backup_service),
+        )
+        .route(
+            "/agent/services/restore",
+            post(service_handlers::restore_service),
+        )
         .layer(middleware::from_fn(require_agent_auth))
         .layer(Extension(auth))
         .with_state(state);
@@ -281,9 +313,10 @@ fn collect_capacity_metrics() -> serde_json::Value {
 pub async fn start_agent_server(
     container_deployer: Arc<dyn ContainerDeployer>,
     image_builder: Arc<dyn ImageBuilder>,
+    docker: Option<bollard::Docker>,
     config: AgentConfig,
 ) -> Result<(), crate::AgentError> {
-    let router = build_router(container_deployer.clone(), image_builder, &config);
+    let router = build_router(container_deployer.clone(), image_builder, docker, &config);
 
     // Start heartbeat background loop (with deployer for container inventory on first beat)
     spawn_heartbeat_loop(&config, container_deployer);

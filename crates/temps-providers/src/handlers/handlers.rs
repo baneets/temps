@@ -419,6 +419,7 @@ async fn create_service(
         service_type: request.service_type.into(),
         version: request.version.clone(),
         parameters: request.parameters,
+        node_id: request.node_id,
     };
 
     match app_state

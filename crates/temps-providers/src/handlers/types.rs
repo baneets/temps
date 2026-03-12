@@ -166,6 +166,9 @@ pub struct ExternalServiceInfo {
     pub connection_info: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Node ID where the service runs. Null means control plane (local).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -254,6 +257,9 @@ pub struct CreateExternalServiceRequest {
     pub service_type: ServiceTypeRoute,
     pub version: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
+    /// Target node ID for the service. Omit or null to run on the control plane.
+    #[serde(default)]
+    pub node_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

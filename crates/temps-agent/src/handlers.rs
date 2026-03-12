@@ -20,20 +20,23 @@ use crate::NodeHealthReport;
 pub struct AgentState {
     pub container_deployer: Arc<dyn ContainerDeployer>,
     pub image_builder: Arc<dyn ImageBuilder>,
+    /// Direct Docker client for service operations (create/exec/backup).
+    /// None if Docker is not available (shouldn't happen on a real agent).
+    pub docker: Option<bollard::Docker>,
 }
 
 /// Response wrapper for consistent agent API responses.
 #[derive(Serialize, ToSchema)]
 pub struct AgentResponse<T: Serialize> {
-    success: bool,
+    pub(crate) success: bool,
     #[schema(nullable = true)]
-    data: Option<T>,
+    pub(crate) data: Option<T>,
     #[schema(nullable = true)]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 impl<T: Serialize> AgentResponse<T> {
-    fn ok(data: T) -> Json<Self> {
+    pub(crate) fn ok(data: T) -> Json<Self> {
         Json(Self {
             success: true,
             data: Some(data),
@@ -65,6 +68,15 @@ fn error_response(status: StatusCode, message: String) -> impl IntoResponse {
         image_exists,
         import_image,
         health_check,
+        crate::service_handlers::create_service,
+        crate::service_handlers::stop_service,
+        crate::service_handlers::start_service,
+        crate::service_handlers::remove_service,
+        crate::service_handlers::service_status,
+        crate::service_handlers::service_exec,
+        crate::service_handlers::list_services,
+        crate::service_handlers::backup_service,
+        crate::service_handlers::restore_service,
     ),
     components(schemas(
         AgentResponse<temps_deployer::DeployResult>,
@@ -72,6 +84,11 @@ fn error_response(status: StatusCode, message: String) -> impl IntoResponse {
         AgentResponse<bool>,
         AgentResponse<temps_deployer::ContainerInfo>,
         AgentResponse<NodeHealthReport>,
+        AgentResponse<crate::ServiceCreateResponse>,
+        AgentResponse<crate::ServiceExecResponse>,
+        AgentResponse<crate::ServiceStatus>,
+        AgentResponse<Vec<crate::ServiceStatus>>,
+        AgentResponse<crate::ServiceBackupResponse>,
         NodeHealthReport,
         temps_deployer::DeployRequest,
         temps_deployer::DeployResult,
@@ -82,10 +99,20 @@ fn error_response(status: StatusCode, message: String) -> impl IntoResponse {
         temps_deployer::ResourceLimits,
         temps_deployer::RestartPolicy,
         temps_deployer::ContainerLogConfig,
+        crate::ServiceCreateRequest,
+        crate::ServiceCreateResponse,
+        crate::ServicePortMapping,
+        crate::ServiceExecRequest,
+        crate::ServiceExecResponse,
+        crate::ServiceBackupRequest,
+        crate::ServiceBackupResponse,
+        crate::ServiceRestoreRequest,
+        crate::S3CredentialsPayload,
+        crate::ServiceStatus,
     )),
     info(
         title = "Temps Agent API",
-        description = "Worker node agent API for container management. All endpoints require Bearer token authentication.",
+        description = "Worker node agent API for container and service management. All endpoints require Bearer token authentication.",
         version = "1.0.0"
     ),
     security(

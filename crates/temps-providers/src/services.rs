@@ -3,6 +3,9 @@ use crate::externalsvc::{
     s3::S3Service, AvailableContainer, ExternalService, ServiceConfig, ServiceType,
 };
 use crate::parameter_strategies;
+use crate::remote_service_client::{
+    RemotePortMapping, RemoteServiceClient, RemoteServiceCreateParams,
+};
 use crate::types::EnvironmentVariableInfo;
 use anyhow::Result;
 use bollard::Docker;
@@ -14,7 +17,9 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use temps_entities::{external_service_backups, external_services, project_services, projects};
+use temps_entities::{
+    external_service_backups, external_services, nodes, project_services, projects,
+};
 use thiserror::Error;
 use tracing::{error, info};
 // use crate::routes::types::external_services::EnvironmentVariableInfo;
@@ -133,6 +138,8 @@ pub struct CreateExternalServiceRequest {
     pub service_type: ServiceType,
     pub version: Option<String>,
     pub parameters: HashMap<String, serde_json::Value>,
+    /// Target node ID for the service. None = local (control plane).
+    pub node_id: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +197,8 @@ pub struct ExternalServiceInfo {
     pub connection_info: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Node ID where the service runs. None = control plane (local).
+    pub node_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -305,6 +314,238 @@ impl ExternalServiceManager {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Remote-node helpers
+    // -----------------------------------------------------------------------
+
+    /// Look up a node by ID and return a `RemoteServiceClient` ready to call
+    /// the agent's service endpoints.
+    async fn get_remote_client(
+        &self,
+        node_id: i32,
+    ) -> Result<RemoteServiceClient, ExternalServiceError> {
+        let node = nodes::Entity::find_by_id(node_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ExternalServiceError::InternalError {
+                reason: format!("Node {} not found", node_id),
+            })?;
+
+        let token = node
+            .token_encrypted
+            .as_deref()
+            .ok_or(ExternalServiceError::InternalError {
+                reason: format!(
+                    "Node {} ({}) has no encrypted token — cannot authenticate",
+                    node_id, node.name
+                ),
+            })
+            .and_then(|encrypted| {
+                self.encryption_service
+                    .decrypt_string(encrypted)
+                    .map_err(|e| ExternalServiceError::InternalError {
+                        reason: format!(
+                            "Failed to decrypt token for node {} ({}): {}",
+                            node_id, node.name, e
+                        ),
+                    })
+            })?;
+
+        RemoteServiceClient::new(node.address.clone(), token, node.name.clone())
+    }
+
+    /// Build the `RemoteServiceCreateParams` that the agent needs to create a
+    /// Docker container for a given service type and parameters.
+    fn build_remote_create_params(
+        &self,
+        service_name: &str,
+        service_type: &ServiceType,
+        parameters: &HashMap<String, String>,
+    ) -> Result<RemoteServiceCreateParams, ExternalServiceError> {
+        let (image, container_port, env, volume_path, command) = match service_type {
+            ServiceType::Postgres => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "gotempsh/postgres-walg:18-bookworm".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let database = parameters
+                    .get("database")
+                    .cloned()
+                    .unwrap_or_else(|| "postgres".to_string());
+                let username = parameters
+                    .get("username")
+                    .cloned()
+                    .unwrap_or_else(|| "postgres".to_string());
+                let max_connections = parameters
+                    .get("max_connections")
+                    .cloned()
+                    .unwrap_or_else(|| "100".to_string());
+
+                let env = HashMap::from([
+                    ("POSTGRES_USER".to_string(), username),
+                    ("POSTGRES_PASSWORD".to_string(), password),
+                    ("POSTGRES_DB".to_string(), database),
+                    ("POSTGRES_HOST_AUTH_METHOD".to_string(), "md5".to_string()),
+                ]);
+                let cmd = vec![
+                    "postgres".to_string(),
+                    "-c".to_string(),
+                    format!("max_connections={}", max_connections),
+                    "-c".to_string(),
+                    "wal_level=replica".to_string(),
+                    "-c".to_string(),
+                    "archive_mode=on".to_string(),
+                    "-c".to_string(),
+                    "archive_timeout=60".to_string(),
+                ];
+                (
+                    image,
+                    5432u16,
+                    env,
+                    "/var/lib/postgresql".to_string(),
+                    Some(cmd),
+                )
+            }
+            ServiceType::Redis => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "gotempsh/redis-walg:8-bookworm".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let env = HashMap::new();
+                let cmd = if password.is_empty() {
+                    vec!["redis-server".to_string()]
+                } else {
+                    vec![
+                        "redis-server".to_string(),
+                        "--requirepass".to_string(),
+                        password,
+                    ]
+                };
+                (image, 6379u16, env, "/data".to_string(), Some(cmd))
+            }
+            ServiceType::Mongodb => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "mongo:7".to_string());
+                let username = parameters
+                    .get("username")
+                    .cloned()
+                    .unwrap_or_else(|| "admin".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let database = parameters
+                    .get("database")
+                    .cloned()
+                    .unwrap_or_else(|| "admin".to_string());
+                let env = HashMap::from([
+                    ("MONGO_INITDB_ROOT_USERNAME".to_string(), username),
+                    ("MONGO_INITDB_ROOT_PASSWORD".to_string(), password),
+                    ("MONGO_INITDB_DATABASE".to_string(), database),
+                ]);
+                (image, 27017u16, env, "/data/db".to_string(), None)
+            }
+            ServiceType::S3 | ServiceType::Rustfs | ServiceType::Blob => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "ghcr.io/rustfs/rustfs:latest".to_string());
+                let access_key = parameters
+                    .get("access_key")
+                    .cloned()
+                    .unwrap_or_else(|| "minioadmin".to_string());
+                let secret_key = parameters.get("secret_key").cloned().unwrap_or_default();
+                let env = HashMap::from([
+                    ("RUSTFS_ROOT_USER".to_string(), access_key),
+                    ("RUSTFS_ROOT_PASSWORD".to_string(), secret_key),
+                ]);
+                let cmd = vec![
+                    "rustfs".to_string(),
+                    "server".to_string(),
+                    "/data".to_string(),
+                ];
+                (image, 9000u16, env, "/data".to_string(), Some(cmd))
+            }
+            ServiceType::Kv => {
+                // KV is Redis-backed
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "gotempsh/redis-walg:8-bookworm".to_string());
+                let password = parameters.get("password").cloned().unwrap_or_default();
+                let env = HashMap::new();
+                let cmd = if password.is_empty() {
+                    vec!["redis-server".to_string()]
+                } else {
+                    vec![
+                        "redis-server".to_string(),
+                        "--requirepass".to_string(),
+                        password,
+                    ]
+                };
+                (image, 6379u16, env, "/data".to_string(), Some(cmd))
+            }
+            #[allow(deprecated)]
+            ServiceType::Minio => {
+                let image = parameters
+                    .get("docker_image")
+                    .cloned()
+                    .unwrap_or_else(|| "minio/minio:latest".to_string());
+                let access_key = parameters
+                    .get("access_key")
+                    .cloned()
+                    .unwrap_or_else(|| "minioadmin".to_string());
+                let secret_key = parameters.get("secret_key").cloned().unwrap_or_default();
+                let env = HashMap::from([
+                    ("MINIO_ROOT_USER".to_string(), access_key),
+                    ("MINIO_ROOT_PASSWORD".to_string(), secret_key),
+                ]);
+                let cmd = vec![
+                    "minio".to_string(),
+                    "server".to_string(),
+                    "/data".to_string(),
+                ];
+                (image, 9000u16, env, "/data".to_string(), Some(cmd))
+            }
+        };
+
+        let host_port: u16 = parameters
+            .get("port")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(container_port);
+
+        let container_name = self
+            .create_service_instance(service_name.to_string(), *service_type)
+            .get_name();
+        let container_name_for_volume = format!("{}-{}", service_type, service_name);
+        let volume_name = format!("{}_data", container_name_for_volume);
+
+        Ok(RemoteServiceCreateParams {
+            name: container_name,
+            service_type: service_type.to_string(),
+            image,
+            environment: env,
+            port_mappings: vec![RemotePortMapping {
+                host_port,
+                container_port,
+            }],
+            volumes: HashMap::from([(volume_name, volume_path)]),
+            network: Some(temps_core::NETWORK_NAME.to_string()),
+            command,
+        })
+    }
+
+    /// Get the container name for a service (used for remote operations).
+    fn get_container_name_for_service(
+        &self,
+        service_name: &str,
+        service_type: &ServiceType,
+    ) -> String {
+        self.create_service_instance(service_name.to_string(), *service_type)
+            .get_name()
+    }
+
     pub async fn get_service_by_name(
         &self,
         name_param: &str,
@@ -388,6 +629,7 @@ impl ExternalServiceManager {
                         version: Set(request.version.clone()),
                         status: Set("pending".to_string()),
                         config: Set(Some(encrypted_config)),
+                        node_id: Set(request.node_id),
                         created_at: Set(Utc::now()),
                         updated_at: Set(Utc::now()),
                         ..Default::default()
@@ -689,7 +931,7 @@ impl ExternalServiceManager {
         let service_type_enum = ServiceType::from_str(&service.service_type).map_err(|_| {
             ExternalServiceError::InvalidServiceType {
                 id: service_id,
-                service_type: service.service_type,
+                service_type: service.service_type.clone(),
             }
         })?;
 
@@ -706,26 +948,20 @@ impl ExternalServiceManager {
             });
         }
 
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum);
-
-        // Delete from database
+        // Delete from database first
         self.db
             .transaction::<_, (), ExternalServiceError>(|txn| {
                 Box::pin(async move {
-                    // Delete project links (should be empty due to check above)
                     project_services::Entity::delete_many()
                         .filter(project_services::Column::ServiceId.eq(service_id))
                         .exec(txn)
                         .await?;
 
-                    // Delete service backups
                     external_service_backups::Entity::delete_many()
                         .filter(external_service_backups::Column::ServiceId.eq(service_id))
                         .exec(txn)
                         .await?;
 
-                    // Delete service
                     external_services::Entity::delete_by_id(service_id)
                         .exec(txn)
                         .await?;
@@ -736,15 +972,31 @@ impl ExternalServiceManager {
             .await
             .map_err(ExternalServiceError::from)?;
 
-        // Stop the service
-        info!("Stopping service {} before deletion", service_id);
-        service_instance
-            .remove()
-            .await
-            .map_err(|e| ExternalServiceError::DeletionFailed {
-                id: service_id,
-                reason: e.to_string(),
+        // Remove the container
+        info!("Removing service {} container", service_id);
+        if let Some(node_id) = service.node_id {
+            // Remote node — delegate to agent
+            let client = self.get_remote_client(node_id).await?;
+            let container_name =
+                self.get_container_name_for_service(&service.name, &service_type_enum);
+            client.remove_service(&container_name).await.map_err(|e| {
+                ExternalServiceError::DeletionFailed {
+                    id: service_id,
+                    reason: e.to_string(),
+                }
             })?;
+        } else {
+            // Local node
+            let service_instance =
+                self.create_service_instance(service.name.clone(), service_type_enum);
+            service_instance
+                .remove()
+                .await
+                .map_err(|e| ExternalServiceError::DeletionFailed {
+                    id: service_id,
+                    reason: e.to_string(),
+                })?;
+        }
 
         Ok(())
     }
@@ -786,6 +1038,7 @@ impl ExternalServiceManager {
             connection_info: None,
             created_at: service.created_at.to_rfc3339(),
             updated_at: service.updated_at.to_rfc3339(),
+            node_id: service.node_id,
         })
     }
 
@@ -837,6 +1090,20 @@ impl ExternalServiceManager {
             }
         })?;
 
+        // Remote node — delegate to agent
+        if let Some(node_id) = service.node_id {
+            return self
+                .initialize_service_remote(
+                    service_id,
+                    node_id,
+                    &service,
+                    &parameters,
+                    &service_type_enum,
+                )
+                .await;
+        }
+
+        // Local node — use existing Docker-based service logic
         let service_instance =
             self.create_service_instance(service.name.clone(), service_type_enum);
 
@@ -887,6 +1154,91 @@ impl ExternalServiceManager {
         // Update status to running
         let mut service_update: external_services::ActiveModel = service.clone().into();
         service_update.status = Set("running".to_string());
+        service_update.updated_at = Set(Utc::now());
+        service_update.update(self.db.as_ref()).await?;
+
+        Ok(())
+    }
+
+    /// Initialize a service on a remote node via the agent API.
+    async fn initialize_service_remote(
+        &self,
+        service_id: i32,
+        node_id: i32,
+        service: &external_services::Model,
+        parameters: &HashMap<String, serde_json::Value>,
+        service_type: &ServiceType,
+    ) -> Result<(), ExternalServiceError> {
+        info!(
+            "Initializing service {} on remote node {}",
+            service_id, node_id
+        );
+        let client = self.get_remote_client(node_id).await?;
+
+        // Flatten serde_json::Value parameters to strings for the builder
+        let string_params: HashMap<String, String> = parameters
+            .iter()
+            .map(|(k, v)| {
+                let s = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (k.clone(), s)
+            })
+            .collect();
+
+        let create_params =
+            self.build_remote_create_params(&service.name, service_type, &string_params)?;
+
+        // Try to stop existing container first (ignore errors — may not exist)
+        let container_name = create_params.name.clone();
+        if let Err(e) = client.stop_service(&container_name).await {
+            info!(
+                "Could not stop remote container {} (may not exist): {}",
+                container_name, e
+            );
+        }
+
+        // Create the container on the remote node
+        let response = client.create_service(create_params).await.map_err(|e| {
+            ExternalServiceError::InitializationFailed {
+                id: service_id,
+                reason: format!("Remote agent create_service failed: {}", e),
+            }
+        })?;
+
+        info!(
+            "Service {} created on node {} — container {} (port {})",
+            service_id, node_id, response.container_name, response.host_port
+        );
+
+        // Store the host_port as an inferred parameter so env-var generation works
+        let mut inferred = HashMap::new();
+        inferred.insert("port".to_string(), response.host_port.to_string());
+        inferred.insert("container_id".to_string(), response.container_id.clone());
+
+        // Persist inferred parameters
+        let mut current_params = self.get_service_parameters(service_id).await?;
+        for (key, value) in inferred {
+            if Self::is_inferred_parameter(&key) || !current_params.contains_key(&key) {
+                current_params.insert(key, serde_json::Value::String(value));
+            }
+        }
+        let config_json = serde_json::to_string(&current_params).map_err(|e| {
+            ExternalServiceError::InternalError {
+                reason: format!("Failed to serialize updated params: {}", e),
+            }
+        })?;
+        let encrypted_config = self
+            .encryption_service
+            .encrypt_string(&config_json)
+            .map_err(|e| ExternalServiceError::InternalError {
+                reason: format!("Failed to encrypt updated params: {}", e),
+            })?;
+
+        let mut service_update: external_services::ActiveModel = service.clone().into();
+        service_update.status = Set("running".to_string());
+        service_update.config = Set(Some(encrypted_config));
         service_update.updated_at = Set(Utc::now());
         service_update.update(self.db.as_ref()).await?;
 
@@ -994,30 +1346,54 @@ impl ExternalServiceManager {
             }
         })?;
 
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum);
+        // Remote node — delegate to agent
+        if let Some(node_id) = service.node_id {
+            let client = self.get_remote_client(node_id).await?;
+            let container_name =
+                self.get_container_name_for_service(&service.name, &service_type_enum);
 
-        // Try to start the existing container first
-        match service_instance.start().await {
-            Ok(()) => {}
-            Err(e) => {
-                // If start failed (e.g., container was removed and in-memory config is empty),
-                // fall back to full initialization which loads config from DB and recreates
-                // the container.
-                info!(
-                    "Direct start failed for service {} ({}), falling back to initialize: {}",
-                    service_id, service.name, e
-                );
-                self.initialize_service(service_id)
-                    .await
-                    .map_err(|init_err| ExternalServiceError::StartFailed {
-                        id: service_id,
-                        reason: format!(
-                            "Start failed: {}. Re-initialize also failed: {}",
-                            e, init_err
-                        ),
-                    })?;
-                return self.get_service_info(service_id).await;
+            match client.start_service(&container_name).await {
+                Ok(()) => {}
+                Err(e) => {
+                    info!(
+                        "Remote start failed for service {} ({}), falling back to initialize: {}",
+                        service_id, service.name, e
+                    );
+                    self.initialize_service(service_id)
+                        .await
+                        .map_err(|init_err| ExternalServiceError::StartFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Start failed: {}. Re-initialize also failed: {}",
+                                e, init_err
+                            ),
+                        })?;
+                    return self.get_service_info(service_id).await;
+                }
+            }
+        } else {
+            // Local node
+            let service_instance =
+                self.create_service_instance(service.name.clone(), service_type_enum);
+
+            match service_instance.start().await {
+                Ok(()) => {}
+                Err(e) => {
+                    info!(
+                        "Direct start failed for service {} ({}), falling back to initialize: {}",
+                        service_id, service.name, e
+                    );
+                    self.initialize_service(service_id)
+                        .await
+                        .map_err(|init_err| ExternalServiceError::StartFailed {
+                            id: service_id,
+                            reason: format!(
+                                "Start failed: {}. Re-initialize also failed: {}",
+                                e, init_err
+                            ),
+                        })?;
+                    return self.get_service_info(service_id).await;
+                }
             }
         }
 
@@ -1042,17 +1418,31 @@ impl ExternalServiceManager {
             }
         })?;
 
-        let service_instance =
-            self.create_service_instance(service.name.clone(), service_type_enum);
+        // Remote node — delegate to agent
+        if let Some(node_id) = service.node_id {
+            let client = self.get_remote_client(node_id).await?;
+            let container_name =
+                self.get_container_name_for_service(&service.name, &service_type_enum);
 
-        // Stop the service
-        service_instance
-            .stop()
-            .await
-            .map_err(|e| ExternalServiceError::StopFailed {
-                id: service_id,
-                reason: e.to_string(),
+            client.stop_service(&container_name).await.map_err(|e| {
+                ExternalServiceError::StopFailed {
+                    id: service_id,
+                    reason: e.to_string(),
+                }
             })?;
+        } else {
+            // Local node
+            let service_instance =
+                self.create_service_instance(service.name.clone(), service_type_enum);
+
+            service_instance
+                .stop()
+                .await
+                .map_err(|e| ExternalServiceError::StopFailed {
+                    id: service_id,
+                    reason: e.to_string(),
+                })?;
+        }
 
         // Update status to stopped
         let mut service_update: external_services::ActiveModel = service.into();
@@ -2283,6 +2673,7 @@ impl ExternalServiceManager {
             connection_info: None,
             created_at: external_service.created_at.to_rfc3339(),
             updated_at: external_service.updated_at.to_rfc3339(),
+            node_id: external_service.node_id,
         })
     }
 }
@@ -2396,6 +2787,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("18".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let result = manager.create_service(request).await;
@@ -2430,6 +2822,7 @@ mod tests {
             service_type: ServiceType::Redis,
             version: Some("7".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let result = manager.create_service(request).await;
@@ -2462,6 +2855,7 @@ mod tests {
             service_type: ServiceType::S3,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let result = manager.create_service(request).await;
@@ -2496,6 +2890,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2532,6 +2927,7 @@ mod tests {
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2575,6 +2971,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2626,6 +3023,7 @@ mod tests {
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2657,6 +3055,7 @@ mod tests {
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2692,6 +3091,7 @@ mod tests {
                 service_type: ServiceType::Redis,
                 version: None,
                 parameters: params,
+                node_id: None,
             };
 
             let service = manager.create_service(request).await.unwrap();
@@ -2749,6 +3149,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2812,6 +3213,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -2862,6 +3264,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let result = manager.create_service(request).await;
@@ -2949,6 +3352,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("18".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager
@@ -3029,6 +3433,7 @@ mod tests {
             service_type: ServiceType::Redis,
             version: Some("7".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         // Attempt to create the service - should fail
@@ -3112,6 +3517,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: None,
             parameters: params,
+            node_id: None,
         };
 
         let service = manager.create_service(request).await.unwrap();
@@ -3163,6 +3569,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager
@@ -3238,6 +3645,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager
@@ -3297,6 +3705,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("16".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager
@@ -3361,6 +3770,7 @@ mod tests {
             service_type: ServiceType::Postgres,
             version: Some("18".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager
@@ -3415,6 +3825,7 @@ mod tests {
             service_type: ServiceType::Redis,
             version: Some("7".to_string()),
             parameters: params,
+            node_id: None,
         };
 
         let service = manager
@@ -3764,6 +4175,7 @@ mod tests {
             connection_info: Some("postgresql://localhost:5432/postgres".to_string()),
             created_at: "2025-01-12T10:30:00Z".to_string(),
             updated_at: "2025-01-12T10:30:00Z".to_string(),
+            node_id: None,
         };
 
         assert_eq!(service_info.id, 1);

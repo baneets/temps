@@ -3,6 +3,7 @@
 pub mod externalsvc;
 pub mod parameter_strategies;
 pub mod query_service;
+pub mod remote_service_client;
 pub mod services;
 pub use services::*;
 pub mod plugin;

@@ -322,8 +322,9 @@ impl From<temps_entities::s3_sources::Model> for S3SourceResponse {
             name: source.name,
             bucket_name: source.bucket_name,
             bucket_path: source.bucket_path,
-            access_key_id: source.access_key_id,
-            secret_key: source.secret_key,
+            // Credentials are encrypted at rest — mask them in API responses
+            access_key_id: "***".to_string(),
+            secret_key: "***".to_string(),
             region: source.region,
             endpoint: source.endpoint,
             force_path_style: source.force_path_style,

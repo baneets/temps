@@ -2882,6 +2882,47 @@ impl BackupService {
         Ok(())
     }
 
+    /// Enforce retention for every active backup schedule.
+    /// Deletes backups that are older than each schedule's `retention_period` days.
+    async fn enforce_retention(&self) -> Result<()> {
+        let schedules = temps_entities::backup_schedules::Entity::find()
+            .filter(temps_entities::backup_schedules::Column::Enabled.eq(true))
+            .all(self.db.as_ref())
+            .await?;
+
+        for schedule in &schedules {
+            if schedule.retention_period > 0 {
+                let cutoff = Utc::now() - Duration::days(schedule.retention_period as i64);
+                let old_backups = temps_entities::backups::Entity::find()
+                    .filter(temps_entities::backups::Column::ScheduleId.eq(Some(schedule.id)))
+                    .filter(temps_entities::backups::Column::StartedAt.lt(cutoff))
+                    .all(self.db.as_ref())
+                    .await?;
+
+                if !old_backups.is_empty() {
+                    info!(
+                        "Retention cleanup: deleting {} backup(s) older than {} days for schedule {} ({})",
+                        old_backups.len(),
+                        schedule.retention_period,
+                        schedule.id,
+                        schedule.name
+                    );
+                }
+
+                for backup in old_backups {
+                    if let Err(e) = self.delete_backup(&backup.backup_id).await {
+                        error!(
+                            "Failed to delete expired backup {} for schedule {}: {}",
+                            backup.backup_id, schedule.id, e
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// List all S3 sources
     pub async fn list_s3_sources(
         &self,
@@ -3622,6 +3663,19 @@ impl BackupService {
                 }
                 _ = cancellation_token.cancelled() => {
                     info!("Backup scheduler received cancellation signal");
+                    return Ok(());
+                }
+            }
+
+            // Enforce retention: delete backups older than the schedule's retention period
+            tokio::select! {
+                result = self.enforce_retention() => {
+                    if let Err(e) = result {
+                        error!("Error enforcing backup retention: {}", e);
+                    }
+                }
+                _ = cancellation_token.cancelled() => {
+                    info!("Backup scheduler received cancellation signal during retention cleanup");
                     return Ok(());
                 }
             }

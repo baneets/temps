@@ -49,8 +49,12 @@ impl AgentCommand {
 
             let network_name = temps_core::NETWORK_NAME.clone();
             let docker_runtime = Arc::new(
-                temps_deployer::docker::DockerRuntime::new(Arc::new(docker), true, network_name)
-                    .with_host_bind_address("0.0.0.0".to_string()),
+                temps_deployer::docker::DockerRuntime::new(
+                    Arc::new(docker.clone()),
+                    true,
+                    network_name,
+                )
+                .with_host_bind_address("0.0.0.0".to_string()),
             );
 
             let deployer: Arc<dyn temps_deployer::ContainerDeployer> = docker_runtime.clone();
@@ -58,7 +62,7 @@ impl AgentCommand {
 
             tracing::info!("Starting temps agent (node_id={})...", config.node_id);
 
-            temps_agent::server::start_agent_server(deployer, builder, config)
+            temps_agent::server::start_agent_server(deployer, builder, Some(docker), config)
                 .await
                 .map_err(|e| anyhow::anyhow!("Agent server error: {}", e))?;
 

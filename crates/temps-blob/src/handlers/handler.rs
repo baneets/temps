@@ -586,6 +586,7 @@ pub async fn blob_enable(
             service_type: ServiceType::Blob,
             version,
             parameters,
+            node_id: None,
         };
 
         // Create the service through ExternalServiceManager

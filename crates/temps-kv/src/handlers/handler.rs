@@ -524,6 +524,7 @@ pub async fn kv_enable(
             service_type: ServiceType::Redis,
             version,
             parameters,
+            node_id: None,
         };
 
         // Create the service through ExternalServiceManager

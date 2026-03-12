@@ -26,5 +26,6 @@ utoipa-swagger-ui = { workspace = true }
 sysinfo = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
+bollard = { workspace = true }
 temps-core = { path = "../temps-core" }
 temps-deployer = { path = "../temps-deployer" }
