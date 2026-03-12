@@ -2212,6 +2212,8 @@ impl ProxyHttp for LoadBalancer {
             if let Some(pp) = password_protection {
                 let password_hash = pp.password_hash.clone();
                 let env_id = project_ctx.environment.id;
+                let project_name = &project_ctx.project.name;
+                let environment_name = &project_ctx.environment.name;
 
                 // Check if this is the password verify POST endpoint
                 if ctx.path == "/_temps/password-verify" && ctx.method == "POST" {
@@ -2265,7 +2267,10 @@ impl ProxyHttp for LoadBalancer {
                     } else {
                         // Wrong password — show form again with error
                         let html = crate::handler::password_wall::generate_password_form_html(
-                            redirect, true,
+                            redirect,
+                            true,
+                            project_name,
+                            environment_name,
                         );
                         let html_bytes = Bytes::from(html);
 
@@ -2311,13 +2316,11 @@ impl ProxyHttp for LoadBalancer {
                         ctx.path.clone()
                     };
 
-                    let show_error = ctx
-                        .query_string
-                        .as_deref()
-                        .is_some_and(|q| q.contains("error=1"));
                     let html = crate::handler::password_wall::generate_password_form_html(
                         &current_path,
-                        show_error,
+                        false,
+                        project_name,
+                        environment_name,
                     );
                     let html_bytes = Bytes::from(html);
 

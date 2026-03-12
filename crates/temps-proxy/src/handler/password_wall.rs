@@ -19,13 +19,31 @@ const PASSWORD_FORM_HTML: &str = include_str!("../../password_wall/password_form
 type HmacSha256 = Hmac<Sha256>;
 
 /// Generate the password form HTML for a given redirect path.
-pub fn generate_password_form_html(redirect_path: &str, show_error: bool) -> String {
-    let path = if show_error {
-        format!("{}?error=1", redirect_path)
-    } else {
-        redirect_path.to_string()
-    };
-    PASSWORD_FORM_HTML.replace("{{REDIRECT_PATH}}", &path)
+pub fn generate_password_form_html(
+    redirect_path: &str,
+    show_error: bool,
+    project_name: &str,
+    environment_name: &str,
+) -> String {
+    PASSWORD_FORM_HTML
+        .replace("{{REDIRECT_PATH}}", redirect_path)
+        .replace("{{PROJECT_NAME}}", &html_escape(project_name))
+        .replace("{{ENVIRONMENT_NAME}}", &html_escape(environment_name))
+        .replace(
+            "{{ERROR_DISPLAY}}",
+            if show_error { "flex" } else { "none" },
+        )
+        .replace(
+            "{{ERROR_INPUT_CLASS}}",
+            if show_error { "input-error" } else { "" },
+        )
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Create an HMAC-signed cookie value for a given environment ID.
@@ -137,9 +155,26 @@ mod tests {
 
     #[test]
     fn test_generate_password_form_html() {
-        let html = generate_password_form_html("/some/path", false);
+        let html = generate_password_form_html("/some/path", false, "My Project", "staging");
         assert!(html.contains("/_temps/password-verify"));
         assert!(html.contains("/some/path"));
+        assert!(html.contains("My Project"));
+        assert!(html.contains("staging"));
+        assert!(html.contains("display: none"));
+    }
+
+    #[test]
+    fn test_generate_password_form_html_with_error() {
+        let html = generate_password_form_html("/", true, "App", "production");
+        assert!(html.contains("display: flex"));
+        assert!(html.contains("input-error"));
+    }
+
+    #[test]
+    fn test_generate_password_form_html_escapes_html() {
+        let html = generate_password_form_html("/", false, "<script>xss</script>", "test");
+        assert!(!html.contains("<script>xss</script>"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 
     #[test]

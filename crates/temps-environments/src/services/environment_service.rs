@@ -550,7 +550,14 @@ impl EnvironmentService {
         if let Some(session_recording_enabled) = settings.session_recording_enabled {
             deployment_config.session_recording_enabled = session_recording_enabled;
         }
-        if let Some(security) = settings.security {
+        if let Some(mut security) = settings.security {
+            // Preserve existing password_protection — it's managed separately via the `password` field
+            if security.password_protection.is_none() {
+                security.password_protection = deployment_config
+                    .security
+                    .as_ref()
+                    .and_then(|s| s.password_protection.clone());
+            }
             deployment_config.security = Some(security);
         }
         // Handle password protection: hash plaintext password with argon2
