@@ -343,7 +343,7 @@ async fn test_provider_key_inline(
         Err(e) => TestProviderKeyResponse {
             success: false,
             provider: request.provider,
-            error: Some(e.to_string()),
+            error: Some(friendly_error_message(&e)),
             latency_ms,
         },
     };
@@ -399,10 +399,31 @@ async fn test_provider_key_by_id(
         Err(e) => TestProviderKeyResponse {
             success: false,
             provider: provider_name,
-            error: Some(e.to_string()),
+            error: Some(friendly_error_message(&e)),
             latency_ms,
         },
     };
 
     Ok(Json(response))
+}
+
+/// Extract a human-friendly error message from an AiGatewayError.
+/// For upstream errors the raw body is often a JSON blob; we try to
+/// pull out just the `error.message` field for a cleaner UX.
+fn friendly_error_message(err: &AiGatewayError) -> String {
+    if let AiGatewayError::UpstreamError {
+        status, message, ..
+    } = err
+    {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(message) {
+            if let Some(msg) = parsed
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+            {
+                return format!("{} — {}", status, msg);
+            }
+        }
+    }
+    err.to_string()
 }

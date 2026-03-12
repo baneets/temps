@@ -2895,18 +2895,18 @@ console.log(response.choices[0].message.content);`,
           </div>
           {inlineTestResult && (
             <div
-              className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${
+              className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm max-h-24 overflow-y-auto ${
                 inlineTestResult.success
                   ? 'bg-green-500/10 text-green-500'
                   : 'bg-destructive/10 text-destructive'
               }`}
             >
               {inlineTestResult.success ? (
-                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
               ) : (
-                <XCircle className="h-4 w-4 shrink-0" />
+                <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
               )}
-              <span>
+              <span className="break-all">
                 {inlineTestResult.success
                   ? 'Key is valid'
                   : inlineTestResult.error || 'Key test failed'}

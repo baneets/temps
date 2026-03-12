@@ -170,7 +170,7 @@ impl GatewayService {
     }
 
     /// Send a minimal chat completion to verify a provider API key works.
-    /// Uses the cheapest model for the provider and `max_tokens: 1`.
+    /// Uses the cheapest model for the provider and a small `max_tokens`.
     pub async fn test_provider(
         &self,
         provider_id: &str,
@@ -200,14 +200,14 @@ impl GatewayService {
             model: test_model.to_string(),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
-                content: Some(MessageContent::Text("Hi".to_string())),
+                content: Some(MessageContent::Text("Say ok".to_string())),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
             }],
             stream: false,
             temperature: None,
-            max_tokens: Some(1),
+            max_tokens: Some(20),
             top_p: None,
             stop: None,
             n: None,
