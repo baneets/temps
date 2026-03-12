@@ -187,13 +187,13 @@ impl JoinCommand {
         // Step 1: Check if WireGuard is available
         let wg_manager = temps_wireguard::WireGuardManager::default_config()?;
 
-        if let Err(e) = wg_manager.check_available().await {
-            anyhow::bail!(
+        wg_manager.check_available().await.map_err(|e| {
+            anyhow::anyhow!(
                 "WireGuard not available: {}. \
-                 Install WireGuard or use --private-address for user-managed networking.",
+                 Use --private-address for user-managed networking.",
                 e
-            );
-        }
+            )
+        })?;
 
         // Step 2: Generate WireGuard keypair
         let keypair = wg_manager.generate_keypair().await?;

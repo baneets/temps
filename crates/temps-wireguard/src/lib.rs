@@ -1,20 +1,21 @@
 //! WireGuard mesh networking for Temps multi-node deployments.
 //!
-//! Wraps the `wg` and `ip` CLI commands to manage WireGuard interfaces
-//! and peer connections. WireGuard is in-kernel on Linux 5.6+, so no
-//! additional installation is required on modern Linux systems.
+//! Uses `defguard_wireguard_rs` for embedded userspace WireGuard — no external
+//! `wireguard-tools` package or kernel module required. The WireGuard protocol
+//! runs in-process via boringtun (Cloudflare's Rust implementation).
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum WireGuardError {
-    #[error("WireGuard command failed: {command} — {reason}")]
-    CommandFailed { command: String, reason: String },
+    #[error("WireGuard operation failed: {operation} — {reason}")]
+    OperationFailed { operation: String, reason: String },
 
-    #[error("WireGuard not available on this system: {0}")]
-    NotAvailable(String),
+    #[error("WireGuard interface error: {0}")]
+    InterfaceError(String),
 
     #[error("No available IP addresses in subnet {subnet}")]
     SubnetExhausted { subnet: String },
@@ -22,7 +23,7 @@ pub enum WireGuardError {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
-    #[error("IO error running WireGuard command: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("Interface {interface} already exists")]
@@ -51,6 +52,9 @@ pub struct WireGuardKeypair {
 }
 
 /// Manages a WireGuard interface for the Temps mesh network.
+///
+/// Uses embedded userspace WireGuard via defguard/boringtun — no external
+/// `wg` or `ip` CLI tools required.
 #[derive(Debug)]
 pub struct WireGuardManager {
     /// Interface name, e.g. "wg0"
@@ -108,56 +112,22 @@ impl WireGuardManager {
         Self::new("wg0", &subnet, port)
     }
 
-    /// Check if WireGuard CLI tools are available on this system.
+    /// Check if WireGuard is available.
+    ///
+    /// With embedded userspace WireGuard this always succeeds — no external tools needed.
     pub async fn check_available(&self) -> Result<(), WireGuardError> {
-        let output = tokio::process::Command::new("wg")
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| WireGuardError::NotAvailable(format!("Failed to run 'wg': {}", e)))?;
-
-        if !output.status.success() {
-            return Err(WireGuardError::NotAvailable(
-                "wg command returned non-zero exit code".into(),
-            ));
-        }
-
         Ok(())
     }
 
-    /// Generate a new WireGuard keypair using `wg genkey` and `wg pubkey`.
+    /// Generate a new WireGuard keypair using pure Rust cryptography.
+    ///
+    /// Uses x25519-dalek for Curve25519 key generation — no `wg genkey` needed.
     pub async fn generate_keypair(&self) -> Result<WireGuardKeypair, WireGuardError> {
-        let genkey_output = tokio::process::Command::new("wg")
-            .arg("genkey")
-            .output()
-            .await?;
+        let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let public = x25519_dalek::PublicKey::from(&secret);
 
-        if !genkey_output.status.success() {
-            return Err(WireGuardError::CommandFailed {
-                command: "wg genkey".into(),
-                reason: String::from_utf8_lossy(&genkey_output.stderr).to_string(),
-            });
-        }
-
-        let private_key = String::from_utf8_lossy(&genkey_output.stdout)
-            .trim()
-            .to_string();
-
-        // Pipe private key through wg pubkey
-        let child = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("echo '{}' | wg pubkey", private_key))
-            .output()
-            .await?;
-
-        if !child.status.success() {
-            return Err(WireGuardError::CommandFailed {
-                command: "wg pubkey".into(),
-                reason: String::from_utf8_lossy(&child.stderr).to_string(),
-            });
-        }
-
-        let public_key = String::from_utf8_lossy(&child.stdout).trim().to_string();
+        let private_key = BASE64.encode(secret.as_bytes());
+        let public_key = BASE64.encode(public.as_bytes());
 
         Ok(WireGuardKeypair {
             private_key,
@@ -167,58 +137,61 @@ impl WireGuardManager {
 
     /// Initialize the WireGuard interface with the given IP address and private key.
     ///
-    /// Creates the interface, assigns the IP, sets the private key, and brings it up.
+    /// Creates a userspace WireGuard interface via defguard/boringtun.
+    /// No external `wg` or `ip` CLI tools are needed.
     pub async fn init_interface(
         &self,
         ip: Ipv4Addr,
         private_key: &str,
     ) -> Result<(), WireGuardError> {
-        // Create the WireGuard interface
-        self.run_command(
-            "ip",
-            &["link", "add", "dev", &self.interface, "type", "wireguard"],
-        )
-        .await?;
+        use defguard_wireguard_rs::{
+            InterfaceConfiguration, Userspace, WGApi, WireguardInterfaceApi,
+        };
+        use std::str::FromStr;
 
-        // Assign IP address
-        let addr = format!("{}/{}", ip, self.subnet_mask);
-        self.run_command("ip", &["address", "add", "dev", &self.interface, &addr])
-            .await?;
+        let mut wgapi = WGApi::<Userspace>::new(self.interface.clone()).map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to create WireGuard API for {}: {}",
+                self.interface, e
+            ))
+        })?;
 
-        // Write private key to a temporary file and configure
-        let key_path = format!("/tmp/temps-wg-{}.key", self.interface);
-        tokio::fs::write(&key_path, private_key).await?;
+        // Create the userspace WireGuard interface (TUN device via boringtun)
+        wgapi.create_interface().map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to create interface {}: {}",
+                self.interface, e
+            ))
+        })?;
 
-        // Set permissions
-        self.run_command("chmod", &["600", &key_path]).await?;
+        // Configure the interface with private key, port, and address
+        let addr_str = format!("{}/{}", ip, self.subnet_mask);
+        let address = defguard_wireguard_rs::net::IpAddrMask::from_str(&addr_str).map_err(|e| {
+            WireGuardError::InvalidConfig(format!("Invalid address {}: {}", addr_str, e))
+        })?;
 
-        // Configure WireGuard with private key and listen port
-        let port_str = self.listen_port.to_string();
-        self.run_command(
-            "wg",
-            &[
-                "set",
-                &self.interface,
-                "listen-port",
-                &port_str,
-                "private-key",
-                &key_path,
-            ],
-        )
-        .await?;
+        let config = InterfaceConfiguration {
+            name: self.interface.clone(),
+            prvkey: private_key.to_string(),
+            addresses: vec![address],
+            port: self.listen_port,
+            peers: Vec::new(),
+            mtu: None,
+            fwmark: None,
+        };
 
-        // Clean up key file
-        let _ = tokio::fs::remove_file(&key_path).await;
-
-        // Bring the interface up
-        self.run_command("ip", &["link", "set", "up", "dev", &self.interface])
-            .await?;
+        wgapi.configure_interface(&config).map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to configure interface {}: {}",
+                self.interface, e
+            ))
+        })?;
 
         tracing::info!(
             interface = %self.interface,
             ip = %ip,
             port = %self.listen_port,
-            "WireGuard interface initialized"
+            "WireGuard interface initialized (embedded userspace)"
         );
 
         Ok(())
@@ -226,26 +199,53 @@ impl WireGuardManager {
 
     /// Add a peer to the WireGuard interface.
     pub async fn add_peer(&self, peer: &WireGuardPeer) -> Result<(), WireGuardError> {
-        let mut args = vec![
-            "set",
-            &self.interface,
-            "peer",
-            &peer.public_key,
-            "allowed-ips",
-            &peer.allowed_ips,
-        ];
+        use defguard_wireguard_rs::{Userspace, WGApi, WireguardInterfaceApi};
 
-        // Only set endpoint if provided (peer may be behind NAT)
+        let wgapi = WGApi::<Userspace>::new(self.interface.clone()).map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to create WireGuard API for {}: {}",
+                self.interface, e
+            ))
+        })?;
+
+        // Parse the base64 public key into a Key
+        let key: defguard_wireguard_rs::key::Key =
+            peer.public_key.as_str().try_into().map_err(|e| {
+                WireGuardError::InvalidConfig(format!(
+                    "Invalid peer public key '{}': {:?}",
+                    peer.public_key, e
+                ))
+            })?;
+
+        let mut wg_peer = defguard_wireguard_rs::peer::Peer::new(key);
+
+        // Parse endpoint
         if !peer.endpoint.is_empty() {
-            args.push("endpoint");
-            args.push(&peer.endpoint);
+            wg_peer.set_endpoint(&peer.endpoint).map_err(|e| {
+                WireGuardError::InvalidConfig(format!(
+                    "Invalid peer endpoint '{}': {}",
+                    peer.endpoint, e
+                ))
+            })?;
+        }
+
+        // Parse allowed IPs
+        if let Ok(addr_mask) = peer
+            .allowed_ips
+            .parse::<defguard_wireguard_rs::net::IpAddrMask>()
+        {
+            wg_peer.allowed_ips.push(addr_mask);
         }
 
         // Enable persistent keepalive for NAT traversal
-        args.push("persistent-keepalive");
-        args.push("25");
+        wg_peer.persistent_keepalive_interval = Some(25);
 
-        self.run_command("wg", &args).await?;
+        wgapi
+            .configure_peer(&wg_peer)
+            .map_err(|e| WireGuardError::OperationFailed {
+                operation: format!("add peer {}", peer.public_key),
+                reason: format!("{}", e),
+            })?;
 
         tracing::info!(
             interface = %self.interface,
@@ -260,11 +260,25 @@ impl WireGuardManager {
 
     /// Remove a peer from the WireGuard interface.
     pub async fn remove_peer(&self, public_key: &str) -> Result<(), WireGuardError> {
-        self.run_command(
-            "wg",
-            &["set", &self.interface, "peer", public_key, "remove"],
-        )
-        .await?;
+        use defguard_wireguard_rs::{Userspace, WGApi, WireguardInterfaceApi};
+
+        let wgapi = WGApi::<Userspace>::new(self.interface.clone()).map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to create WireGuard API for {}: {}",
+                self.interface, e
+            ))
+        })?;
+
+        let key: defguard_wireguard_rs::key::Key = public_key.try_into().map_err(|e| {
+            WireGuardError::InvalidConfig(format!("Invalid public key '{}': {:?}", public_key, e))
+        })?;
+
+        wgapi
+            .remove_peer(&key)
+            .map_err(|e| WireGuardError::OperationFailed {
+                operation: format!("remove peer {}", public_key),
+                reason: format!("{}", e),
+            })?;
 
         tracing::info!(
             interface = %self.interface,
@@ -277,8 +291,21 @@ impl WireGuardManager {
 
     /// Tear down the WireGuard interface.
     pub async fn destroy_interface(&self) -> Result<(), WireGuardError> {
-        self.run_command("ip", &["link", "del", "dev", &self.interface])
-            .await?;
+        use defguard_wireguard_rs::{Userspace, WGApi, WireguardInterfaceApi};
+
+        let wgapi = WGApi::<Userspace>::new(self.interface.clone()).map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to create WireGuard API for {}: {}",
+                self.interface, e
+            ))
+        })?;
+
+        wgapi.remove_interface().map_err(|e| {
+            WireGuardError::InterfaceError(format!(
+                "Failed to remove interface {}: {}",
+                self.interface, e
+            ))
+        })?;
 
         tracing::info!(
             interface = %self.interface,
@@ -320,24 +347,6 @@ impl WireGuardManager {
     /// Get the listen port.
     pub fn listen_port(&self) -> u16 {
         self.listen_port
-    }
-
-    /// Run a system command and return an error if it fails.
-    async fn run_command(&self, program: &str, args: &[&str]) -> Result<(), WireGuardError> {
-        let output = tokio::process::Command::new(program)
-            .args(args)
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(WireGuardError::CommandFailed {
-                command: format!("{} {}", program, args.join(" ")),
-                reason: stderr,
-            });
-        }
-
-        Ok(())
     }
 }
 
@@ -403,5 +412,44 @@ mod tests {
         assert_eq!(deserialized.public_key, peer.public_key);
         assert_eq!(deserialized.endpoint, peer.endpoint);
         assert_eq!(deserialized.allowed_ips, peer.allowed_ips);
+    }
+
+    #[tokio::test]
+    async fn test_generate_keypair_produces_valid_keys() {
+        let manager = WireGuardManager::new("wg0", "10.100.0.0/24", 51820).unwrap();
+        let keypair = manager.generate_keypair().await.unwrap();
+
+        // Keys should be valid base64
+        let private_bytes = BASE64.decode(&keypair.private_key).unwrap();
+        let public_bytes = BASE64.decode(&keypair.public_key).unwrap();
+
+        // Keys should be 32 bytes (Curve25519)
+        assert_eq!(private_bytes.len(), 32);
+        assert_eq!(public_bytes.len(), 32);
+
+        // Public key should derive from private key
+        let secret = x25519_dalek::StaticSecret::from(
+            <[u8; 32]>::try_from(private_bytes.as_slice()).unwrap(),
+        );
+        let expected_public = x25519_dalek::PublicKey::from(&secret);
+        assert_eq!(public_bytes, expected_public.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_generate_keypair_unique() {
+        let manager = WireGuardManager::new("wg0", "10.100.0.0/24", 51820).unwrap();
+        let kp1 = manager.generate_keypair().await.unwrap();
+        let kp2 = manager.generate_keypair().await.unwrap();
+
+        // Two keypairs should be different
+        assert_ne!(kp1.private_key, kp2.private_key);
+        assert_ne!(kp1.public_key, kp2.public_key);
+    }
+
+    #[tokio::test]
+    async fn test_check_available_always_succeeds() {
+        let manager = WireGuardManager::new("wg0", "10.100.0.0/24", 51820).unwrap();
+        // Embedded WireGuard is always available
+        assert!(manager.check_available().await.is_ok());
     }
 }
