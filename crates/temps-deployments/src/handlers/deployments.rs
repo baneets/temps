@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use super::audit::{
-    ContainerActionAudit, DeploymentCancelledAudit, DeploymentPausedAudit, DeploymentResumedAudit,
-    DeploymentRollbackAudit, DeploymentTeardownAudit, EnvironmentTeardownAudit,
+    ContainerActionAudit, DeploymentCancelledAudit, DeploymentPausedAudit, DeploymentPromotedAudit,
+    DeploymentResumedAudit, DeploymentRollbackAudit, DeploymentTeardownAudit,
+    EnvironmentTeardownAudit,
 };
 use super::types::AppState;
 use axum::Router;
@@ -30,7 +31,7 @@ use crate::handlers::types::{
     ContainerDetailResponse, ContainerInfoResponse, ContainerListResponse, ContainerLogsQuery,
     ContainerMetricsResponse, DeploymentJobResponse, DeploymentJobsResponse,
     DeploymentListResponse, DeploymentResponse, DeploymentStateResponse, EnvVarResponse,
-    ResourceLimitsResponse,
+    PromoteDeploymentRequest, ResourceLimitsResponse,
 };
 use temps_core::problemdetails;
 use temps_core::problemdetails::Problem;
@@ -45,6 +46,7 @@ use temps_core::problemdetails::Problem;
         get_deployment_job_logs,
         tail_deployment_job_logs,
         rollback_to_deployment,
+        promote_deployment,
         pause_deployment,
         resume_deployment,
         cancel_deployment,
@@ -78,7 +80,8 @@ use temps_core::problemdetails::Problem;
         ContainerActionResponse,
         ActivityGraphQuery,
         ActivityGraphResponse,
-        ActivityDay
+        ActivityDay,
+        PromoteDeploymentRequest
     )),
     info(
         title = "Deployments API",
@@ -115,6 +118,10 @@ pub fn configure_routes() -> Router<Arc<super::types::AppState>> {
         .route(
             "/projects/{project_id}/deployments/{deployment_id}/rollback",
             post(rollback_to_deployment),
+        )
+        .route(
+            "/projects/{project_id}/deployments/{deployment_id}/promote",
+            post(promote_deployment),
         )
         .route(
             "/projects/{project_id}/deployments/{deployment_id}/pause",
@@ -373,6 +380,64 @@ pub async fn rollback_to_deployment(
         },
         project_id,
         deployment_id,
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    Ok(Json(DeploymentResponse::from_service_deployment(
+        deployment,
+    )))
+}
+
+/// Promote a deployment to another environment
+///
+/// Creates a new deployment in the target environment using the source deployment's
+/// Docker image. Useful for promoting a validated preview/staging deployment to production.
+#[utoipa::path(
+    tag = "Deployments",
+    post,
+    path = "/projects/{project_id}/deployments/{deployment_id}/promote",
+    request_body = PromoteDeploymentRequest,
+    responses(
+        (status = 200, description = "Promotion initiated successfully", body = DeploymentResponse),
+        (status = 400, description = "Invalid deployment state for promotion"),
+        (status = 404, description = "Project, deployment, or target environment not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("deployment_id" = i32, Path, description = "Source deployment ID to promote")
+    )
+)]
+pub async fn promote_deployment(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, deployment_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+    Json(request): Json<PromoteDeploymentRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, DeploymentsCreate);
+
+    info!(
+        "Promoting deployment {} to environment {} (project {})",
+        deployment_id, request.target_environment_id, project_id
+    );
+
+    let deployment = state
+        .deployment_service
+        .promote_deployment(project_id, deployment_id, request.target_environment_id)
+        .await?;
+
+    let audit = DeploymentPromotedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        source_deployment_id: deployment_id,
+        target_environment_id: request.target_environment_id,
     };
     if let Err(e) = state.audit_service.create_audit_log(&audit).await {
         error!("Failed to create audit log: {}", e);
@@ -1055,7 +1120,7 @@ pub async fn get_deployment_jobs(
 /// Get logs for a specific deployment job
 #[utoipa::path(
     get,
-    path = "/api/projects/{project_id}/deployments/{deployment_id}/jobs/{job_id}/logs",
+    path = "/projects/{project_id}/deployments/{deployment_id}/jobs/{job_id}/logs",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("deployment_id" = i32, Path, description = "Deployment ID"),

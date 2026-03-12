@@ -518,6 +518,12 @@ pub struct CreateEnvironmentRequest {
     pub branch: String,
 }
 
+#[derive(Deserialize, ToSchema)]
+pub struct PromoteDeploymentRequest {
+    /// Target environment ID to promote the deployment to
+    pub target_environment_id: i32,
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct DeploymentJobResponse {
     pub id: i32,

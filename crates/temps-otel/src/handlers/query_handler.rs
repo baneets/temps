@@ -8,6 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use utoipa::ToSchema;
 
 use crate::types::*;
@@ -41,6 +42,11 @@ pub struct TraceQueryParams {
     pub end_time: Option<String>,
     pub environment_id: Option<i32>,
     pub deployment_id: Option<i32>,
+    /// Filter by span attributes as comma-separated key=value pairs.
+    /// e.g. "gen_ai.system=openai,gen_ai.request.model=gpt-4"
+    pub attributes: Option<String>,
+    /// Filter by span name pattern (ILIKE).
+    pub name_pattern: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
 }
@@ -122,12 +128,57 @@ pub struct PipelineStatsResponse {
     pub stats: PipelineStats,
 }
 
+// ── GenAI-specific DTOs ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct GenAiQueryParams {
+    pub project_id: i32,
+    pub service_name: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    /// Filter by gen_ai.system (e.g. "openai", "anthropic").
+    pub gen_ai_system: Option<String>,
+    /// Filter by gen_ai.request.model (e.g. "gpt-4", "claude-sonnet-4-20250514").
+    pub gen_ai_model: Option<String>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GenAiTraceSummariesResponse {
+    pub data: Vec<GenAiTraceSummary>,
+    pub total: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GenAiTraceDetailResponse {
+    pub trace_id: String,
+    pub spans: Vec<GenAiSpanDetail>,
+    pub span_count: usize,
+    pub events: Vec<GenAiEvent>,
+    pub event_count: usize,
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+fn parse_attributes(s: &str) -> BTreeMap<String, String> {
+    s.split(',')
+        .filter_map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next()?.trim();
+            let value = parts.next()?.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 /// Query metrics with time bucketing.
@@ -253,6 +304,12 @@ pub async fn query_traces(
         end_time: params.end_time.as_deref().and_then(parse_datetime),
         environment_id: params.environment_id,
         deployment_id: params.deployment_id,
+        attributes: params
+            .attributes
+            .as_deref()
+            .map(parse_attributes)
+            .filter(|m| !m.is_empty()),
+        name_pattern: params.name_pattern.clone(),
         limit: params.limit,
         offset: params.offset,
     };
@@ -313,6 +370,12 @@ pub async fn query_trace_summaries(
         end_time: params.end_time.as_deref().and_then(parse_datetime),
         environment_id: params.environment_id,
         deployment_id: params.deployment_id,
+        attributes: params
+            .attributes
+            .as_deref()
+            .map(parse_attributes)
+            .filter(|m| !m.is_empty()),
+        name_pattern: params.name_pattern.clone(),
         limit: params.limit,
         offset: params.offset,
     };
@@ -543,4 +606,171 @@ pub async fn get_pipeline_stats(
 
     let stats = state.otel_service.pipeline_stats();
     Ok(Json(PipelineStatsResponse { stats }))
+}
+
+// ── GenAI Agent Activity Handlers ──────────────────────────────────
+
+/// Query GenAI trace summaries — traces containing spans with `gen_ai.*` attributes.
+#[utoipa::path(
+    tag = "GenAI",
+    get,
+    path = "/otel/genai/traces",
+    params(
+        ("project_id" = i32, Query, description = "Project ID"),
+        ("service_name" = Option<String>, Query, description = "Filter by service name"),
+        ("gen_ai_system" = Option<String>, Query, description = "Filter by AI system (openai, anthropic, etc.)"),
+        ("gen_ai_model" = Option<String>, Query, description = "Filter by model (gpt-4, claude-sonnet-4-20250514, etc.)"),
+        ("start_time" = Option<String>, Query, description = "Start time (RFC 3339)"),
+        ("end_time" = Option<String>, Query, description = "End time (RFC 3339)"),
+        ("limit" = Option<u64>, Query, description = "Max traces to return (default: 50, max: 100)"),
+        ("offset" = Option<u64>, Query, description = "Offset for pagination"),
+    ),
+    responses(
+        (status = 200, description = "GenAI trace summaries", body = GenAiTraceSummariesResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn query_genai_traces(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<OtelAppState>,
+    Query(params): Query<GenAiQueryParams>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, OtelRead);
+
+    // Build attribute filters. For gen_ai_system, we use gen_ai.provider.name (current)
+    // but the SQL also handles the deprecated gen_ai.system via COALESCE.
+    // For direct attribute filtering, we match on gen_ai.provider.name since the
+    // base WHERE clause already matches spans with either attribute.
+    let mut attrs = BTreeMap::new();
+    if let Some(ref system) = params.gen_ai_system {
+        attrs.insert("gen_ai.system".to_string(), system.clone());
+    }
+    if let Some(ref model) = params.gen_ai_model {
+        attrs.insert("gen_ai.request.model".to_string(), model.clone());
+    }
+
+    let query = TraceQuery {
+        project_id: params.project_id,
+        service_name: params.service_name,
+        start_time: params.start_time.as_deref().and_then(parse_datetime),
+        end_time: params.end_time.as_deref().and_then(parse_datetime),
+        attributes: if attrs.is_empty() {
+            None
+        } else {
+            Some(attrs.clone())
+        },
+        limit: params.limit,
+        offset: params.offset,
+        ..Default::default()
+    };
+
+    let count_query = TraceQuery {
+        limit: None,
+        offset: None,
+        ..query.clone()
+    };
+
+    let data = state
+        .otel_service
+        .query_genai_trace_summaries(query)
+        .await?;
+    let total = state.otel_service.count_genai_traces(count_query).await?;
+
+    Ok(Json(GenAiTraceSummariesResponse { data, total }))
+}
+
+/// Get GenAI span details for a specific trace.
+#[utoipa::path(
+    tag = "GenAI",
+    get,
+    path = "/otel/genai/traces/{project_id}/{trace_id}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("trace_id" = String, Path, description = "Trace ID (hex)"),
+    ),
+    responses(
+        (status = 200, description = "GenAI trace span details", body = GenAiTraceDetailResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_genai_trace(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<OtelAppState>,
+    Path((project_id, trace_id)): Path<(i32, String)>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, OtelRead);
+
+    let spans = state
+        .otel_service
+        .get_genai_trace_spans(project_id, &trace_id)
+        .await?;
+    let span_count = spans.len();
+
+    let events = state
+        .otel_service
+        .get_genai_trace_events(project_id, &trace_id)
+        .await?;
+    let event_count = events.len();
+
+    Ok(Json(GenAiTraceDetailResponse {
+        trace_id,
+        spans,
+        span_count,
+        events,
+        event_count,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_attributes_single_pair() {
+        let result = parse_attributes("gen_ai.system=openai");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("gen_ai.system").unwrap(), "openai");
+    }
+
+    #[test]
+    fn test_parse_attributes_multiple_pairs() {
+        let result = parse_attributes("gen_ai.system=openai,gen_ai.request.model=gpt-4");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("gen_ai.system").unwrap(), "openai");
+        assert_eq!(result.get("gen_ai.request.model").unwrap(), "gpt-4");
+    }
+
+    #[test]
+    fn test_parse_attributes_with_whitespace() {
+        let result = parse_attributes(" gen_ai.system = openai , gen_ai.request.model = gpt-4 ");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("gen_ai.system").unwrap(), "openai");
+    }
+
+    #[test]
+    fn test_parse_attributes_empty_string() {
+        let result = parse_attributes("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_attributes_value_with_equals() {
+        let result = parse_attributes("key=value=with=equals");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("key").unwrap(), "value=with=equals");
+    }
+
+    #[test]
+    fn test_parse_attributes_skips_invalid_pairs() {
+        let result = parse_attributes("valid=ok,,novalue,=emptykey,good=yes");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("valid").unwrap(), "ok");
+        assert_eq!(result.get("good").unwrap(), "yes");
+    }
 }

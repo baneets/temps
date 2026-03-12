@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 # All library crates
 temps-agent = { path = "../temps-agent" }
+temps-ai-gateway = { path = "../temps-ai-gateway" }
 temps-analytics = { path = "../temps-analytics" }
 temps-analytics-events = { path = "../temps-analytics-events" }
 temps-blob = { path = "../temps-blob" }

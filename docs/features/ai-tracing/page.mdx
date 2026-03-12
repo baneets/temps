@@ -1,0 +1,560 @@
+export const metadata = {
+  title: 'AI Tracing',
+  description: 'Instrument your AI applications to trace LLM calls, agent workflows, and tool executions with zero custom code.',
+  alternates: {
+    canonical: '/docs/ai-tracing',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'How It Works', id: 'how-it-works' },
+  { title: 'Authentication', id: 'authentication' },
+  { title: 'Python &mdash; Auto-Instrumented', id: 'python-auto' },
+  { title: 'Python &mdash; Anthropic SDK', id: 'python-anthropic' },
+  { title: 'Node.js &mdash; Vercel AI SDK', id: 'nodejs-vercel-ai' },
+  { title: 'Node.js &mdash; Auto-Instrumented', id: 'nodejs-auto' },
+  { title: 'Manual Instrumentation', id: 'manual' },
+  { title: 'Viewing Traces', id: 'viewing-traces' },
+  { title: 'Semantic Conventions', id: 'semantic-conventions' },
+  { title: 'Environment Variables', id: 'environment-variables' },
+]
+
+# AI Tracing
+
+Trace every LLM call, agent step, and tool execution in your AI application. Temps ingests standard OpenTelemetry GenAI spans &mdash; no proprietary SDK required. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Temps provides a built-in **AI Activity** dashboard that visualizes your AI application's behavior: which models you're calling, token usage, latency, error rates, and full conversation replay.
+
+Instead of building a custom tracing library, Temps uses the **OpenTelemetry standard** &mdash; specifically the [`gen_ai.*` semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). This means you can use existing instrumentation libraries from the OTel ecosystem with zero vendor lock-in.
+
+<Row>
+  <Col>
+    **What gets captured**
+    - Model name and provider
+    - Input/output token counts
+    - Request/response latency
+    - Conversation messages (opt-in)
+    - Tool calls and results
+    - Agent workflow traces
+    - Error states and types
+  </Col>
+  <Col>
+    **Supported providers**
+    - OpenAI / Azure OpenAI
+    - Anthropic (Claude)
+    - Google (Gemini)
+    - xAI (Grok)
+    - Any OpenAI-compatible API
+    - Cohere, Mistral, Bedrock
+    - LangChain, LlamaIndex
+  </Col>
+</Row>
+
+---
+
+## How It Works {{ anchor: true, id: 'how-it-works' }}
+
+```
+Your App  →  OTel SDK + Auto-Instrumentation  →  OTLP/HTTP  →  Temps  →  AI Activity Dashboard
+```
+
+1. **Your app** uses an AI SDK (OpenAI, Anthropic, Vercel AI SDK, etc.)
+2. An **auto-instrumentation library** patches the SDK to emit `gen_ai.*` spans automatically
+3. The **OTel exporter** sends spans to Temps via standard OTLP/HTTP protocol
+4. **Temps** stores, indexes, and displays them in the AI Activity tab
+
+No proprietary SDK. No custom span code. Just standard OpenTelemetry.
+
+---
+
+## Authentication {{ anchor: true, id: 'authentication' }}
+
+Temps supports two token types for the OTLP ingest endpoint:
+
+### API Keys (`tk_`)
+
+User-scoped tokens. Requires the `X-Temps-Project-Id` header to identify the target project.
+
+Generate one with the CLI:
+
+```bash
+temps api-key --name "ai-tracing" --role admin
+```
+
+When using an API key, pass both the token and project ID:
+
+```
+Authorization: Bearer tk_your_api_key_here
+X-Temps-Project-Id: 2
+```
+
+### Deployment Tokens (`dt_`)
+
+Project-scoped tokens automatically created for each deployment. The project, environment, and deployment are inferred from the token &mdash; no extra headers needed.
+
+```
+Authorization: Bearer dt_your_deployment_token_here
+```
+
+### OTLP Endpoint
+
+The ingest endpoint accepts standard OTLP/HTTP Protobuf payloads:
+
+```
+POST https://your-temps-instance.com/api/otel/v1/traces
+POST https://your-temps-instance.com/api/otel/v1/metrics
+POST https://your-temps-instance.com/api/otel/v1/logs
+```
+
+Or with IDs in the URL path (useful for deployment tokens):
+
+```
+POST https://your-temps-instance.com/api/otel/v1/{project_id}/{environment_id}/{deployment_id}/traces
+```
+
+---
+
+## Python &mdash; Auto-Instrumented (OpenAI) {{ anchor: true, id: 'python-auto' }}
+
+The easiest way to trace OpenAI SDK calls. The `opentelemetry-instrumentation-openai-v2` library patches the SDK and emits `gen_ai.*` spans automatically.
+
+### Install
+
+```bash
+pip install openai \
+  opentelemetry-sdk \
+  opentelemetry-exporter-otlp-proto-http \
+  opentelemetry-instrumentation-openai-v2
+```
+
+### Setup
+
+```python
+import openai
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
+
+# Configure OTel to export to Temps
+resource = Resource.create({"service.name": "my-ai-app"})
+provider = TracerProvider(resource=resource)
+
+exporter = OTLPSpanExporter(
+    endpoint="https://your-temps-instance.com/api/otel/v1/traces",
+    headers={
+        "Authorization": "Bearer tk_your_api_key",
+        "X-Temps-Project-Id": "2",
+    },
+)
+provider.add_span_processor(BatchSpanProcessor(exporter))
+trace.set_tracer_provider(provider)
+
+# One line to auto-instrument all OpenAI calls
+OpenAIInstrumentor().instrument()
+```
+
+Now use OpenAI as normal &mdash; spans are emitted automatically:
+
+```python
+client = openai.OpenAI()
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+# Traces appear in your Temps AI Activity dashboard
+```
+
+### Enable conversation capture
+
+By default, message content is **not captured** for privacy. To see full conversations in the AI Activity dashboard, set:
+
+```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+<Note>
+  This sends your prompts and responses to your Temps instance. Since Temps is self-hosted, your data never leaves your infrastructure.
+</Note>
+
+### Works with the Temps AI Gateway
+
+If you're using the [Temps AI Gateway](/docs/ai-gateway) (OpenAI-compatible endpoint for multiple providers), the same auto-instrumentation works for all providers &mdash; Anthropic, Google, xAI, etc.:
+
+```python
+client = openai.OpenAI(
+    api_key="tk_your_api_key",
+    base_url="https://your-temps-instance.com/api/ai/v1",
+)
+
+# All of these are auto-traced with gen_ai.* attributes
+client.chat.completions.create(model="claude-haiku-4-5", ...)
+client.chat.completions.create(model="gpt-4o", ...)
+client.chat.completions.create(model="gemini-2.5-flash", ...)
+```
+
+---
+
+## Python &mdash; Anthropic SDK {{ anchor: true, id: 'python-anthropic' }}
+
+Use the community [OpenLLMetry](https://github.com/traceloop/openllmetry) instrumentation for native Anthropic SDK calls.
+
+### Install
+
+```bash
+pip install anthropic \
+  opentelemetry-sdk \
+  opentelemetry-exporter-otlp-proto-http \
+  opentelemetry-instrumentation-anthropic
+```
+
+### Setup
+
+```python
+import anthropic
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.anthropic import AnthropicInstrumentor
+
+# Configure OTel exporter
+resource = Resource.create({"service.name": "my-ai-app"})
+provider = TracerProvider(resource=resource)
+
+exporter = OTLPSpanExporter(
+    endpoint="https://your-temps-instance.com/api/otel/v1/traces",
+    headers={
+        "Authorization": "Bearer tk_your_api_key",
+        "X-Temps-Project-Id": "2",
+    },
+)
+provider.add_span_processor(BatchSpanProcessor(exporter))
+trace.set_tracer_provider(provider)
+
+# Auto-instrument Anthropic SDK
+AnthropicInstrumentor().instrument()
+```
+
+Now use Anthropic as normal:
+
+```python
+client = anthropic.Anthropic()
+message = client.messages.create(
+    model="claude-sonnet-4-20250514",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+# Spans are emitted automatically
+```
+
+### Enable conversation capture
+
+```bash
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+---
+
+## Node.js &mdash; Vercel AI SDK {{ anchor: true, id: 'nodejs-vercel-ai' }}
+
+The Vercel AI SDK has built-in telemetry via the `experimental_telemetry` option. No extra instrumentation library needed.
+
+### Install
+
+```bash
+npm install ai @ai-sdk/openai @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http
+```
+
+### Setup
+
+Create `tracing.ts` and import it before your app starts:
+
+```typescript
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
+
+const sdk = new NodeSDK({
+  traceExporter: new OTLPTraceExporter({
+    url: 'https://your-temps-instance.com/api/otel/v1/traces',
+    headers: {
+      'Authorization': 'Bearer tk_your_api_key',
+      'X-Temps-Project-Id': '2',
+    },
+  }),
+  serviceName: 'my-ai-app',
+})
+
+sdk.start()
+```
+
+### Usage
+
+Pass `experimental_telemetry` to enable tracing on each call:
+
+```typescript
+import { generateText } from 'ai'
+import { openai } from '@ai-sdk/openai'
+
+const result = await generateText({
+  model: openai('gpt-4o'),
+  prompt: 'Explain quantum computing in simple terms.',
+  experimental_telemetry: {
+    isEnabled: true,
+    recordInputs: true,   // capture prompts
+    recordOutputs: true,  // capture responses
+  },
+})
+```
+
+Every `generateText`, `streamText`, `generateObject`, and `streamObject` call emits `gen_ai.*` spans automatically when `experimental_telemetry` is enabled.
+
+### Enable globally with middleware
+
+To avoid passing `experimental_telemetry` to every call:
+
+```typescript
+import { wrapLanguageModel } from 'ai'
+import { openai } from '@ai-sdk/openai'
+
+const model = wrapLanguageModel({
+  model: openai('gpt-4o'),
+  middleware: {
+    experimental_telemetry: {
+      isEnabled: true,
+      recordInputs: true,
+      recordOutputs: true,
+    },
+  },
+})
+
+// All calls through this model are traced
+const result = await generateText({ model, prompt: '...' })
+```
+
+---
+
+## Node.js &mdash; Auto-Instrumented (OpenAI) {{ anchor: true, id: 'nodejs-auto' }}
+
+Use the [OpenLLMetry JS](https://github.com/traceloop/openllmetry-js) library to auto-instrument the OpenAI Node.js SDK.
+
+### Install
+
+```bash
+npm install openai @traceloop/instrumentation-openai @opentelemetry/sdk-node @opentelemetry/exporter-trace-otlp-http
+```
+
+### Setup
+
+Create `tracing.ts` &mdash; must be imported before any other module:
+
+```typescript
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http'
+import { OpenAIInstrumentation } from '@traceloop/instrumentation-openai'
+
+const sdk = new NodeSDK({
+  traceExporter: new OTLPTraceExporter({
+    url: 'https://your-temps-instance.com/api/otel/v1/traces',
+    headers: {
+      'Authorization': 'Bearer tk_your_api_key',
+      'X-Temps-Project-Id': '2',
+    },
+  }),
+  instrumentations: [new OpenAIInstrumentation()],
+  serviceName: 'my-ai-app',
+})
+
+sdk.start()
+```
+
+```typescript
+// app.ts — tracing must be imported first
+import './tracing'
+import OpenAI from 'openai'
+
+const client = new OpenAI()
+const response = await client.chat.completions.create({
+  model: 'gpt-4o',
+  messages: [{ role: 'user', content: 'Hello!' }],
+})
+// Spans are emitted automatically
+```
+
+---
+
+## Manual Instrumentation {{ anchor: true, id: 'manual' }}
+
+If you need full control over span attributes, or you're using a provider without auto-instrumentation support, you can create `gen_ai.*` spans manually.
+
+### Python
+
+```python
+import json
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, StatusCode
+
+tracer = trace.get_tracer("my-ai-app")
+
+with tracer.start_as_current_span(
+    "chat gpt-4o",
+    kind=SpanKind.CLIENT,
+) as span:
+    # Required attributes
+    span.set_attribute("gen_ai.operation.name", "chat")
+    span.set_attribute("gen_ai.system", "openai")
+    span.set_attribute("gen_ai.request.model", "gpt-4o")
+
+    # Make your API call
+    response = call_llm(...)
+
+    # Record response
+    span.set_attribute("gen_ai.response.model", "gpt-4o-2024-08-06")
+    span.set_attribute("gen_ai.usage.input_tokens", 150)
+    span.set_attribute("gen_ai.usage.output_tokens", 320)
+    span.set_attribute("gen_ai.response.finish_reasons", ["stop"])
+
+    # Optional: capture messages (privacy-sensitive)
+    span.set_attribute("gen_ai.input.messages", json.dumps([
+        {"role": "user", "content": "Hello!"}
+    ]))
+    span.set_attribute("gen_ai.output.messages", json.dumps([
+        {"role": "assistant", "content": "Hi there!"}
+    ]))
+
+    span.set_status(StatusCode.OK)
+```
+
+### Node.js / TypeScript
+
+```typescript
+import { trace, SpanKind, SpanStatusCode } from '@opentelemetry/api'
+
+const tracer = trace.getTracer('my-ai-app')
+
+await tracer.startActiveSpan(
+  'chat gpt-4o',
+  { kind: SpanKind.CLIENT },
+  async (span) => {
+    span.setAttribute('gen_ai.operation.name', 'chat')
+    span.setAttribute('gen_ai.system', 'openai')
+    span.setAttribute('gen_ai.request.model', 'gpt-4o')
+
+    const response = await callLLM(...)
+
+    span.setAttribute('gen_ai.response.model', 'gpt-4o-2024-08-06')
+    span.setAttribute('gen_ai.usage.input_tokens', 150)
+    span.setAttribute('gen_ai.usage.output_tokens', 320)
+    span.setAttribute('gen_ai.response.finish_reasons', ['stop'])
+
+    span.setStatus({ code: SpanStatusCode.OK })
+    span.end()
+  }
+)
+```
+
+### Tracing agent workflows
+
+Nest spans to represent agent steps:
+
+```python
+with tracer.start_as_current_span("invoke_agent research-assistant") as agent_span:
+    agent_span.set_attribute("gen_ai.operation.name", "invoke_agent")
+    agent_span.set_attribute("gen_ai.agent.name", "research-assistant")
+
+    # Child span: first LLM call (decides to use tools)
+    with tracer.start_as_current_span("chat gpt-4o", kind=SpanKind.CLIENT):
+        span.set_attribute("gen_ai.operation.name", "chat")
+        span.set_attribute("gen_ai.request.model", "gpt-4o")
+        # ... make LLM call, set response attributes
+
+    # Child span: tool execution
+    with tracer.start_as_current_span("execute_tool search_web"):
+        span.set_attribute("gen_ai.operation.name", "execute_tool")
+        span.set_attribute("gen_ai.tool.name", "search_web")
+        span.set_attribute("gen_ai.tool.call.arguments", '{"query": "..."}')
+        span.set_attribute("gen_ai.tool.call.result", '{"results": [...]}')
+
+    # Child span: final LLM call with tool results
+    with tracer.start_as_current_span("chat gpt-4o", kind=SpanKind.CLIENT):
+        # ... make LLM call with tool results
+```
+
+This produces a trace tree in the AI Activity dashboard:
+
+```
+invoke_agent research-assistant
+  ├── chat gpt-4o (initial request)
+  ├── execute_tool search_web
+  └── chat gpt-4o (final response)
+```
+
+---
+
+## Viewing Traces {{ anchor: true, id: 'viewing-traces' }}
+
+Once instrumented, traces appear in the **AI Activity** tab of your project:
+
+- **Trace list** &mdash; All AI traces with model, provider, token counts, latency, and status
+- **Trace detail** &mdash; Full span tree showing each step of an agent workflow
+- **Conversation view** &mdash; Input/output messages for each LLM call (requires content capture enabled)
+- **Filters** &mdash; Filter by provider (`anthropic`, `openai`, `google`), model, status, or time range
+
+---
+
+## Semantic Conventions {{ anchor: true, id: 'semantic-conventions' }}
+
+Temps follows the [OpenTelemetry GenAI Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). Key attributes:
+
+| Attribute | Description | Example |
+|---|---|---|
+| `gen_ai.operation.name` | Operation type | `chat`, `embeddings`, `execute_tool`, `invoke_agent` |
+| `gen_ai.system` | Provider name | `openai`, `anthropic`, `google` |
+| `gen_ai.request.model` | Requested model | `gpt-4o`, `claude-sonnet-4-20250514` |
+| `gen_ai.response.model` | Actual model used | `gpt-4o-2024-08-06` |
+| `gen_ai.usage.input_tokens` | Input token count | `150` |
+| `gen_ai.usage.output_tokens` | Output token count | `320` |
+| `gen_ai.response.finish_reasons` | Why generation stopped | `["stop"]`, `["tool_calls"]` |
+| `gen_ai.response.id` | Provider response ID | `chatcmpl-abc123` |
+| `gen_ai.request.temperature` | Temperature setting | `0.7` |
+| `gen_ai.request.max_tokens` | Max tokens requested | `1024` |
+| `gen_ai.input.messages` | Input messages (JSON) | Opt-in, contains prompts |
+| `gen_ai.output.messages` | Output messages (JSON) | Opt-in, contains responses |
+| `gen_ai.agent.name` | Agent identifier | `research-assistant` |
+| `gen_ai.tool.name` | Tool being executed | `search_web` |
+| `gen_ai.tool.call.arguments` | Tool call arguments (JSON) | `{"query": "..."}` |
+| `gen_ai.tool.call.result` | Tool call result (JSON) | `{"results": [...]}` |
+
+Temps also supports the deprecated `gen_ai.usage.prompt_tokens` / `gen_ai.usage.completion_tokens` and `gen_ai.provider.name` (alias for `gen_ai.system`) for backward compatibility.
+
+---
+
+## Environment Variables {{ anchor: true, id: 'environment-variables' }}
+
+| Variable | Description | Default |
+|---|---|---|
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | Capture prompt/response content in spans | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP exporter base endpoint | &mdash; |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Headers for OTLP exporter (comma-separated `key=value`) | &mdash; |
+| `OTEL_SERVICE_NAME` | Service name for the OTel resource | &mdash; |
+
+### Minimal env-based configuration
+
+Some OTel SDKs can be configured entirely via environment variables, avoiding any setup code:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://your-temps-instance.com/api
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer tk_your_api_key,X-Temps-Project-Id=2"
+export OTEL_SERVICE_NAME=my-ai-app
+export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+```
+
+With these set, many auto-instrumentation libraries will pick up the configuration automatically without any code changes.

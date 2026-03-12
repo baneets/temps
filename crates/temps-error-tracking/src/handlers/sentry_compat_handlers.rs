@@ -229,7 +229,7 @@ async fn resolve_project_slug(
 #[utoipa::path(
     tag = "sentry-compat",
     post,
-    path = "/api/0/organizations/{org_slug}/releases/",
+    path = "/0/organizations/{org_slug}/releases/",
     params(
         ("org_slug" = String, Path, description = "Organization slug (ignored in single-tenant mode)")
     ),
@@ -286,7 +286,7 @@ async fn create_release(
 #[utoipa::path(
     tag = "sentry-compat",
     post,
-    path = "/api/0/projects/{org_slug}/{project_slug}/releases/{version}/files/",
+    path = "/0/projects/{org_slug}/{project_slug}/releases/{version}/files/",
     params(
         ("org_slug" = String, Path, description = "Organization slug (ignored)"),
         ("project_slug" = String, Path, description = "Project slug or numeric ID"),
@@ -440,7 +440,7 @@ async fn upload_release_file(
 #[utoipa::path(
     tag = "sentry-compat",
     get,
-    path = "/api/0/projects/{org_slug}/{project_slug}/releases/{version}/files/",
+    path = "/0/projects/{org_slug}/{project_slug}/releases/{version}/files/",
     params(
         ("org_slug" = String, Path, description = "Organization slug (ignored)"),
         ("project_slug" = String, Path, description = "Project slug or numeric ID"),
@@ -509,7 +509,7 @@ async fn list_release_files(
 #[utoipa::path(
     tag = "sentry-compat",
     get,
-    path = "/api/0/organizations/{org_slug}/chunk-upload/",
+    path = "/0/organizations/{org_slug}/chunk-upload/",
     params(
         ("org_slug" = String, Path, description = "Organization slug (ignored)")
     ),

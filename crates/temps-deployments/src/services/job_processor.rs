@@ -266,7 +266,10 @@ impl JobProcessorService {
     }
 }
 
-/// Find environment matching the branch, or create/use preview environment
+/// Find the environment to deploy to for a given branch.
+/// When multiple environments track the same branch, the first non-preview
+/// environment is selected. The user can then promote to other environments
+/// manually (Vercel-like model).
 async fn find_or_create_environment_for_branch(
     db: Arc<DbConnection>,
     project: &temps_entities::projects::Model,
@@ -290,10 +293,12 @@ async fn find_or_create_environment_for_branch(
         branch_name, project.id
     );
 
-    // Try to find environment with matching branch
+    // Find the first non-protected environment with matching branch.
+    // Protected environments are skipped — they only receive promoted deployments.
     if let Some(matched_env) = environments::Entity::find()
         .filter(environments::Column::ProjectId.eq(project.id))
         .filter(environments::Column::Branch.eq(branch_name))
+        .filter(environments::Column::Protected.eq(false))
         .filter(environments::Column::DeletedAt.is_null())
         .one(db.as_ref())
         .await
@@ -600,7 +605,9 @@ async fn process_git_push_event(
         }
     };
 
-    // Find environment matching the branch, or fallback to preview environment
+    // Find environment matching the branch, or fallback to preview environment.
+    // Multiple environments can track the same branch, but auto-deploy only
+    // targets the first match. Users promote to other environments via redeploy.
     let environment =
         match find_or_create_environment_for_branch(db.clone(), &project, job.branch.as_deref())
             .await
@@ -742,6 +749,7 @@ async fn process_git_push_event(
         commit_sha: sea_orm::Set(Some(job.commit.clone())),
         commit_message: sea_orm::Set(commit_info.as_ref().map(|c| c.message.clone())),
         commit_author: sea_orm::Set(commit_info.as_ref().map(|c| c.author.clone())),
+        promoted_from_deployment_id: sea_orm::Set(None),
         started_at: sea_orm::Set(None),
         finished_at: sea_orm::Set(None),
         context_vars: sea_orm::Set(Some(serde_json::json!({

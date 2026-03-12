@@ -826,6 +826,11 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let backup_plugin = Box::new(BackupPlugin::new());
     plugin_manager.register_plugin(backup_plugin);
 
+    // AI Gateway Plugin - provides AI provider key management and OpenAI-compatible API
+    debug!("Registering AiGatewayPlugin");
+    let ai_gateway_plugin = Box::new(temps_ai_gateway::AiGatewayPlugin::new());
+    plugin_manager.register_plugin(ai_gateway_plugin);
+
     // 12. ApiKeyPlugin - provides API key management (depends on auth services)
     debug!("Registering ApiKeyPlugin");
     let apikey_plugin = Box::new(ApiKeyPlugin::new());

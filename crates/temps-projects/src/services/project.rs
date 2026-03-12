@@ -173,13 +173,7 @@ impl ProjectService {
             memory_limit: Some(DEFAULT_MEMORY_LIMIT),
             exposed_port: request.exposed_port,
             automatic_deploy: request.automatic_deploy,
-            performance_metrics_enabled: false, // Default to false
-            session_recording_enabled: false,
-            replicas: 1, // Default replicas
-            security: None,
-            target_nodes: None,
-            target_labels: None,
-            anti_affinity: true,
+            ..Default::default()
         });
 
         let project = projects::ActiveModel {

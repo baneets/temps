@@ -440,6 +440,165 @@ impl OtelStorage for MockOtelStorage {
     ) -> StorageResult<f64> {
         Ok(50.0) // 50ms default
     }
+
+    async fn query_genai_trace_summaries(
+        &self,
+        query: TraceQuery,
+    ) -> StorageResult<Vec<GenAiTraceSummary>> {
+        let spans = self.spans.lock().unwrap();
+        let mut trace_map: std::collections::HashMap<String, Vec<&SpanRecord>> =
+            std::collections::HashMap::new();
+
+        for span in spans.iter() {
+            if span.project_id != query.project_id {
+                continue;
+            }
+            if !span.attributes.contains_key("gen_ai.system")
+                && !span.attributes.contains_key("gen_ai.provider.name")
+            {
+                continue;
+            }
+            trace_map
+                .entry(span.trace_id.clone())
+                .or_default()
+                .push(span);
+        }
+
+        let mut summaries: Vec<GenAiTraceSummary> = trace_map
+            .into_iter()
+            .map(|(trace_id, spans_in_trace)| {
+                let root = spans_in_trace
+                    .iter()
+                    .filter(|s| s.parent_span_id.is_none())
+                    .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
+                    .or_else(|| spans_in_trace.first())
+                    .unwrap();
+
+                let sum_i64_attr = |primary: &str, fallback: Option<&str>| -> Option<i64> {
+                    let total: i64 = spans_in_trace
+                        .iter()
+                        .filter_map(|s| {
+                            s.attributes
+                                .get(primary)
+                                .or_else(|| fallback.and_then(|fb| s.attributes.get(fb)))
+                                .and_then(|v| v.parse::<i64>().ok())
+                        })
+                        .sum();
+                    if total > 0 {
+                        Some(total)
+                    } else {
+                        None
+                    }
+                };
+
+                GenAiTraceSummary {
+                    trace_id,
+                    root_span_name: root.name.clone(),
+                    service_name: root.resource.service_name.clone(),
+                    gen_ai_system: root
+                        .attributes
+                        .get("gen_ai.provider.name")
+                        .or_else(|| root.attributes.get("gen_ai.system"))
+                        .cloned(),
+                    gen_ai_model: root.attributes.get("gen_ai.request.model").cloned(),
+                    gen_ai_operation: root.attributes.get("gen_ai.operation.name").cloned(),
+                    start_time: root.start_time,
+                    duration_ms: root.duration_ms,
+                    span_count: spans_in_trace.len() as i64,
+                    error_count: spans_in_trace
+                        .iter()
+                        .filter(|s| s.status_code == SpanStatusCode::Error)
+                        .count() as i64,
+                    total_input_tokens: sum_i64_attr(
+                        "gen_ai.usage.input_tokens",
+                        Some("gen_ai.usage.prompt_tokens"),
+                    ),
+                    total_output_tokens: sum_i64_attr(
+                        "gen_ai.usage.output_tokens",
+                        Some("gen_ai.usage.completion_tokens"),
+                    ),
+                    total_cache_creation_input_tokens: sum_i64_attr(
+                        "gen_ai.usage.cache_creation.input_tokens",
+                        None,
+                    ),
+                    total_cache_read_input_tokens: sum_i64_attr(
+                        "gen_ai.usage.cache_read.input_tokens",
+                        None,
+                    ),
+                }
+            })
+            .collect();
+
+        summaries.sort_by(|a, b| b.start_time.cmp(&a.start_time));
+        Ok(summaries)
+    }
+
+    async fn get_genai_trace_spans(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> StorageResult<Vec<GenAiSpanDetail>> {
+        let spans = self.spans.lock().unwrap();
+        // Return ALL spans in the trace (not just GenAI-attributed ones)
+        // to show the full trace tree including HTTP, DB, and tool spans.
+        let details: Vec<GenAiSpanDetail> = spans
+            .iter()
+            .filter(|s| s.project_id == project_id && s.trace_id == trace_id)
+            .map(|s| {
+                GenAiSpanDetail::from_span_attrs(
+                    s.span_id.clone(),
+                    s.parent_span_id.clone(),
+                    s.name.clone(),
+                    s.kind,
+                    s.start_time,
+                    s.duration_ms,
+                    s.status_code,
+                    s.attributes.clone(),
+                )
+            })
+            .collect();
+        Ok(details)
+    }
+
+    async fn count_genai_traces(&self, query: TraceQuery) -> StorageResult<u64> {
+        let spans = self.spans.lock().unwrap();
+        let trace_ids: std::collections::HashSet<String> = spans
+            .iter()
+            .filter(|s| {
+                s.project_id == query.project_id
+                    && (s.attributes.contains_key("gen_ai.system")
+                        || s.attributes.contains_key("gen_ai.provider.name"))
+            })
+            .map(|s| s.trace_id.clone())
+            .collect();
+        Ok(trace_ids.len() as u64)
+    }
+
+    async fn get_genai_trace_events(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> StorageResult<Vec<GenAiEvent>> {
+        let spans = self.spans.lock().unwrap();
+        let mut events = Vec::new();
+        for span in spans.iter() {
+            if span.project_id != project_id || span.trace_id != trace_id {
+                continue;
+            }
+            for event in &span.events {
+                if event.name.starts_with("gen_ai.") {
+                    events.push(GenAiEvent {
+                        span_id: span.span_id.clone(),
+                        trace_id: trace_id.to_string(),
+                        event_name: event.name.clone(),
+                        timestamp: event.timestamp,
+                        attributes: event.attributes.clone(),
+                    });
+                }
+            }
+        }
+        Ok(events)
+    }
 }
 
 // ── Protobuf trace tree builders ────────────────────────────────────

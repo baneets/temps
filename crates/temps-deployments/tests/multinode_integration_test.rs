@@ -87,6 +87,7 @@ fn make_deployment(id: i32, project_id: i32, environment_id: i32) -> deployments
         screenshot_location: None,
         image_name: None,
         deployment_config: None,
+        promoted_from_deployment_id: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

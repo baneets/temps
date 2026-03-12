@@ -745,6 +745,7 @@ impl DeploymentService {
                 "source_deployment_id": deployment_id,
             }))),
             deployment_config: Set(target_deployment.deployment_config.clone()),
+            promoted_from_deployment_id: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         };
@@ -1163,6 +1164,468 @@ impl DeploymentService {
                 );
             }
         }
+    }
+
+    /// Promote a deployment to a different environment.
+    /// Creates a new deployment in the target environment using the source
+    /// deployment's image. The target environment must belong to the same project.
+    pub async fn promote_deployment(
+        &self,
+        project_id: i32,
+        source_deployment_id: i32,
+        target_environment_id: i32,
+    ) -> Result<Deployment, DeploymentError> {
+        use temps_entities::deployments::DeploymentMetadata;
+
+        // Fetch the source deployment
+        let source = deployments::Entity::find_by_id(source_deployment_id)
+            .filter(deployments::Column::ProjectId.eq(project_id))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DeploymentError::NotFound(format!(
+                    "Source deployment {} not found in project {}",
+                    source_deployment_id, project_id
+                ))
+            })?;
+
+        // Validate state — only successful deployments can be promoted
+        let valid_states = ["deployed", "completed", "ready"];
+        if !valid_states.contains(&source.state.as_str()) {
+            return Err(DeploymentError::InvalidDeploymentState(format!(
+                "Cannot promote deployment in '{}' state. Only deployed/completed/ready deployments can be promoted.",
+                source.state
+            )));
+        }
+
+        // Must have an image to promote
+        let image_name = source.image_name.clone().ok_or_else(|| {
+            DeploymentError::Other(format!(
+                "Source deployment {} has no image — cannot promote",
+                source_deployment_id
+            ))
+        })?;
+
+        // Fetch target environment and verify it belongs to the same project
+        let target_env = environments::Entity::find_by_id(target_environment_id)
+            .filter(environments::Column::ProjectId.eq(project_id))
+            .filter(environments::Column::DeletedAt.is_null())
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                DeploymentError::NotFound(format!(
+                    "Target environment {} not found in project {}",
+                    target_environment_id, project_id
+                ))
+            })?;
+
+        let project = projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| DeploymentError::NotFound("Project not found".to_string()))?;
+
+        info!(
+            "Promoting deployment {} to environment '{}' (project {}, image: {})",
+            source_deployment_id, target_env.name, project_id, image_name
+        );
+
+        let preset = temps_presets::get_preset_by_slug(project.preset.as_str())
+            .ok_or_else(|| DeploymentError::NotFound("Preset not found".to_string()))?;
+
+        let now = chrono::Utc::now();
+
+        // Get next deployment number
+        let deployment_count = deployments::Entity::find()
+            .filter(deployments::Column::ProjectId.eq(project_id))
+            .count(self.db.as_ref())
+            .await
+            .map_err(|e| DeploymentError::Other(format!("Failed to count deployments: {}", e)))?;
+        let deployment_number = deployment_count + 1;
+
+        let promote_slug = format!("{}-{}", project.slug, deployment_number);
+
+        let promote_metadata = DeploymentMetadata {
+            // Reuse build info from source
+            builder: source.metadata.as_ref().and_then(|m| m.builder.clone()),
+            image_size_bytes: source.metadata.as_ref().and_then(|m| m.image_size_bytes),
+            ..Default::default()
+        };
+
+        // Merge deployment config for the target environment
+        let merged_config = if let Some(project_config) = &project.deployment_config {
+            if let Some(env_config) = &target_env.deployment_config {
+                Some(project_config.merge(env_config))
+            } else {
+                Some(project_config.clone())
+            }
+        } else {
+            target_env.deployment_config.clone()
+        };
+
+        let deployment_config_snapshot = merged_config.map(|config| {
+            temps_entities::deployment_config::DeploymentConfigSnapshot::from_config(
+                &config,
+                std::collections::HashMap::new(),
+            )
+        });
+
+        let new_deployment = deployments::ActiveModel {
+            id: sea_orm::NotSet,
+            project_id: Set(project_id),
+            environment_id: Set(target_environment_id),
+            slug: Set(promote_slug.clone()),
+            state: Set("running".to_string()),
+            metadata: Set(Some(promote_metadata)),
+            branch_ref: Set(source.branch_ref.clone()),
+            tag_ref: Set(source.tag_ref.clone()),
+            commit_sha: Set(source.commit_sha.clone()),
+            commit_message: Set(source.commit_message.clone()),
+            commit_author: Set(source.commit_author.clone()),
+            commit_json: Set(source.commit_json.clone()),
+            image_name: Set(Some(image_name.clone())),
+            started_at: Set(Some(now)),
+            finished_at: Set(None),
+            deploying_at: Set(Some(now)),
+            ready_at: Set(None),
+            static_dir_location: Set(source.static_dir_location.clone()),
+            screenshot_location: Set(None),
+            cancelled_reason: Set(None),
+            context_vars: Set(Some(serde_json::json!({
+                "trigger": "promotion",
+                "source_deployment_id": source_deployment_id,
+                "source_environment_id": source.environment_id,
+            }))),
+            deployment_config: Set(deployment_config_snapshot),
+            promoted_from_deployment_id: Set(Some(source_deployment_id)),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+
+        let promoted_deployment = new_deployment.insert(self.db.as_ref()).await.map_err(|e| {
+            DeploymentError::Other(format!("Failed to create promoted deployment: {}", e))
+        })?;
+
+        let promoted_id = promoted_deployment.id;
+        info!(
+            "Created promoted deployment #{} (from #{} to environment '{}')",
+            promoted_id, source_deployment_id, target_env.name
+        );
+
+        // Same logic as rollback — for static presets, just update env pointer
+        if preset.project_type() == temps_presets::ProjectType::Static {
+            info!("Promotion: Static preset detected — updating environment only");
+
+            let mut active_env: environments::ActiveModel = target_env.into();
+            active_env.current_deployment_id = Set(Some(promoted_id));
+            active_env.update(self.db.as_ref()).await?;
+
+            let mut active_dep: deployments::ActiveModel = promoted_deployment.clone().into();
+            active_dep.state = Set("completed".to_string());
+            active_dep.finished_at = Set(Some(chrono::Utc::now()));
+            active_dep.update(self.db.as_ref()).await?;
+        } else {
+            // Verify the Docker image still exists
+            match self.deployer.image_exists(&image_name).await {
+                Ok(true) => {
+                    info!("Promotion: Image '{}' exists locally", image_name);
+                }
+                Ok(false) => {
+                    let mut active_dep: deployments::ActiveModel =
+                        promoted_deployment.clone().into();
+                    active_dep.state = Set("failed".to_string());
+                    active_dep.finished_at = Set(Some(chrono::Utc::now()));
+                    active_dep.cancelled_reason = Set(Some(format!(
+                        "Docker image '{}' no longer exists locally",
+                        image_name
+                    )));
+                    let _ = active_dep.update(self.db.as_ref()).await;
+
+                    return Err(DeploymentError::Other(format!(
+                        "Cannot promote: Docker image '{}' no longer exists locally. \
+                         Consider redeploying from source instead.",
+                        image_name
+                    )));
+                }
+                Err(e) => {
+                    return Err(DeploymentError::Other(format!(
+                        "Cannot promote: failed to verify Docker image '{}': {}",
+                        image_name, e
+                    )));
+                }
+            }
+
+            // --- Create per-job log paths (matching rollback/normal deployment pattern) ---
+            let deploy_log_id = format!(
+                "{}/{}/{}/{:02}/{:02}/{:02}/{:02}/deployment-{}-job-deploy_container.log",
+                project.slug,
+                target_env.slug,
+                now.format("%Y"),
+                now.format("%m"),
+                now.format("%d"),
+                now.format("%H"),
+                now.format("%M"),
+                promoted_id
+            );
+            let complete_log_id = format!(
+                "{}/{}/{}/{:02}/{:02}/{:02}/{:02}/deployment-{}-job-mark_deployment_complete.log",
+                project.slug,
+                target_env.slug,
+                now.format("%Y"),
+                now.format("%m"),
+                now.format("%d"),
+                now.format("%H"),
+                now.format("%M"),
+                promoted_id
+            );
+
+            self.log_service
+                .create_log_path(&deploy_log_id)
+                .await
+                .map_err(|e| {
+                    DeploymentError::Other(format!("Failed to create deploy log path: {}", e))
+                })?;
+            self.log_service
+                .create_log_path(&complete_log_id)
+                .await
+                .map_err(|e| {
+                    DeploymentError::Other(format!("Failed to create complete log path: {}", e))
+                })?;
+
+            // --- Create deployment_jobs records ---
+            use temps_entities::{deployment_jobs, types::JobStatus};
+
+            let deploy_job_record = deployment_jobs::ActiveModel {
+                deployment_id: Set(promoted_id),
+                job_id: Set("deploy_container".to_string()),
+                job_type: Set("DeployImageJob".to_string()),
+                name: Set("Deploy Container".to_string()),
+                description: Set(Some(format!("Promote: deploy image {}", image_name))),
+                status: Set(JobStatus::Running),
+                log_id: Set(deploy_log_id.clone()),
+                job_config: Set(None),
+                dependencies: Set(None),
+                execution_order: Set(Some(0)),
+                started_at: Set(Some(now)),
+                ..Default::default()
+            };
+            let deploy_job_model =
+                deploy_job_record
+                    .insert(self.db.as_ref())
+                    .await
+                    .map_err(|e| {
+                        DeploymentError::Other(format!("Failed to create deploy job record: {}", e))
+                    })?;
+
+            let complete_job_record = deployment_jobs::ActiveModel {
+                deployment_id: Set(promoted_id),
+                job_id: Set("mark_deployment_complete".to_string()),
+                job_type: Set("MarkDeploymentCompleteJob".to_string()),
+                name: Set("Mark Deployment Complete".to_string()),
+                description: Set(Some("Finalize promoted deployment".to_string())),
+                status: Set(JobStatus::Pending),
+                log_id: Set(complete_log_id.clone()),
+                job_config: Set(None),
+                dependencies: Set(Some(
+                    serde_json::to_value(vec!["deploy_container"]).unwrap_or_default(),
+                )),
+                execution_order: Set(Some(1)),
+                ..Default::default()
+            };
+            let complete_job_model =
+                complete_job_record
+                    .insert(self.db.as_ref())
+                    .await
+                    .map_err(|e| {
+                        DeploymentError::Other(format!(
+                            "Failed to create complete job record: {}",
+                            e
+                        ))
+                    })?;
+
+            // Stop current environment containers before deploying
+            info!(
+                "Promotion: Stopping current containers for environment {}",
+                target_environment_id
+            );
+            self.stop_environment_containers(target_environment_id, promoted_id)
+                .await;
+
+            info!("Promotion: Deploying image: {}", image_name);
+
+            // Execute DeployImageJob with external image
+            let mut deploy_builder = crate::jobs::DeployImageJobBuilder::new()
+                .job_id("deploy_container".to_string())
+                .build_job_id("external-image".to_string())
+                .target(crate::jobs::DeploymentTarget::Docker {
+                    registry_url: "local".to_string(),
+                    network: Some(temps_core::NETWORK_NAME.to_string()),
+                })
+                .service_name(promote_slug.clone())
+                .health_check_path(None)
+                .replicas(
+                    target_env
+                        .deployment_config
+                        .as_ref()
+                        .map(|c| c.replicas as u32)
+                        .or_else(|| {
+                            project
+                                .deployment_config
+                                .as_ref()
+                                .map(|c| c.replicas as u32)
+                        })
+                        .unwrap_or(1),
+                )
+                .port(
+                    target_env
+                        .deployment_config
+                        .as_ref()
+                        .and_then(|c| c.exposed_port)
+                        .or_else(|| {
+                            project
+                                .deployment_config
+                                .as_ref()
+                                .and_then(|c| c.exposed_port)
+                        })
+                        .unwrap_or(3000) as u32,
+                )
+                .log_id(deploy_log_id.clone())
+                .log_service(self.log_service.clone());
+
+            // Apply container log rotation settings from config
+            if let Ok(settings) = self.config_service.get_settings().await {
+                deploy_builder =
+                    deploy_builder.container_log_config(temps_deployer::ContainerLogConfig::new(
+                        settings.container_logs.max_size.clone(),
+                        settings.container_logs.max_file,
+                    ));
+            }
+
+            let deploy_job = deploy_builder
+                .build(self.deployer.clone())
+                .map_err(|e| DeploymentError::Other(format!("Failed to create deploy job: {}", e)))?
+                .with_external_image_tag(image_name.clone());
+
+            // Create workflow context for the promoted deployment
+            let mock_log_writer = Arc::new(crate::test_utils::MockLogWriter::new(0));
+            let mut promote_context = temps_core::WorkflowContext::new(
+                format!("promote-{}", promoted_id),
+                promoted_id,
+                project_id,
+                target_environment_id,
+                mock_log_writer,
+            );
+
+            match deploy_job.execute(promote_context.clone()).await {
+                Ok(job_result) => {
+                    info!("Promotion: Deploy job completed successfully");
+                    promote_context = job_result.context;
+
+                    let mut active_job: deployment_jobs::ActiveModel = deploy_job_model.into();
+                    active_job.status = Set(JobStatus::Success);
+                    active_job.finished_at = Set(Some(chrono::Utc::now()));
+                    let _ = active_job.update(self.db.as_ref()).await;
+                }
+                Err(e) => {
+                    error!("Promotion: Deploy job failed: {}", e);
+
+                    let mut active_job: deployment_jobs::ActiveModel = deploy_job_model.into();
+                    active_job.status = Set(JobStatus::Failure);
+                    active_job.finished_at = Set(Some(chrono::Utc::now()));
+                    active_job.error_message = Set(Some(format!("Deploy failed: {}", e)));
+                    let _ = active_job.update(self.db.as_ref()).await;
+
+                    let mut active_complete: deployment_jobs::ActiveModel =
+                        complete_job_model.into();
+                    active_complete.status = Set(JobStatus::Cancelled);
+                    active_complete.error_message = Set(Some("Deploy job failed".to_string()));
+                    let _ = active_complete.update(self.db.as_ref()).await;
+
+                    let mut active_dep: deployments::ActiveModel =
+                        promoted_deployment.clone().into();
+                    active_dep.state = Set("failed".to_string());
+                    active_dep.finished_at = Set(Some(chrono::Utc::now()));
+                    active_dep.cancelled_reason = Set(Some(format!("Deploy failed: {}", e)));
+                    let _ = active_dep.update(self.db.as_ref()).await;
+
+                    return Err(DeploymentError::Other(format!(
+                        "Failed to deploy image during promotion: {}",
+                        e
+                    )));
+                }
+            }
+
+            // Execute MarkDeploymentCompleteJob
+            info!("Promotion: Marking deployment {} as complete", promoted_id);
+
+            let mut active_complete: deployment_jobs::ActiveModel = complete_job_model.into();
+            active_complete.status = Set(JobStatus::Running);
+            active_complete.started_at = Set(Some(chrono::Utc::now()));
+            let complete_job_model =
+                active_complete
+                    .update(self.db.as_ref())
+                    .await
+                    .map_err(|e| {
+                        DeploymentError::Other(format!(
+                            "Failed to update complete job status: {}",
+                            e
+                        ))
+                    })?;
+
+            let mark_complete_job = crate::jobs::MarkDeploymentCompleteJobBuilder::new()
+                .job_id("mark_deployment_complete".to_string())
+                .deployment_id(promoted_id)
+                .db(self.db.clone())
+                .log_id(complete_log_id)
+                .log_service(self.log_service.clone())
+                .container_deployer(self.deployer.clone())
+                .queue(self.queue_service.clone())
+                .config_service(self.config_service.clone())
+                .encryption_service(self.encryption_service.clone())
+                .build()
+                .map_err(|e| {
+                    DeploymentError::Other(format!("Failed to create mark complete job: {}", e))
+                })?;
+
+            match mark_complete_job.execute(promote_context).await {
+                Ok(_) => {
+                    info!("Promotion: Mark complete job executed successfully");
+
+                    let mut active_job: deployment_jobs::ActiveModel = complete_job_model.into();
+                    active_job.status = Set(JobStatus::Success);
+                    active_job.finished_at = Set(Some(chrono::Utc::now()));
+                    let _ = active_job.update(self.db.as_ref()).await;
+                }
+                Err(e) => {
+                    error!("Promotion: Mark complete job failed: {}", e);
+
+                    let mut active_job: deployment_jobs::ActiveModel = complete_job_model.into();
+                    active_job.status = Set(JobStatus::Failure);
+                    active_job.finished_at = Set(Some(chrono::Utc::now()));
+                    active_job.error_message = Set(Some(format!("Mark complete failed: {}", e)));
+                    let _ = active_job.update(self.db.as_ref()).await;
+
+                    return Err(DeploymentError::Other(format!(
+                        "Failed to mark deployment complete during promotion: {}",
+                        e
+                    )));
+                }
+            }
+
+            info!(
+                "Promotion completed - deployment {} is now active",
+                promoted_id
+            );
+        }
+
+        // Re-fetch the promoted deployment to get the final state
+        let final_deployment = deployments::Entity::find_by_id(promoted_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| DeploymentError::Other("Promoted deployment disappeared".to_string()))?;
+
+        Ok(self
+            .map_db_deployment_to_deployment(final_deployment, true, None)
+            .await)
     }
 
     /// Tears down a specific deployment, removing containers and cleaning up resources

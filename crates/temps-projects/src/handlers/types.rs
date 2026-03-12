@@ -354,6 +354,21 @@ impl ProjectResponse {
                     .clone()
                     .map(|c| c.anti_affinity)
                     .unwrap_or(true),
+                on_demand: project
+                    .deployment_config
+                    .clone()
+                    .map(|c| c.on_demand)
+                    .unwrap_or(false),
+                idle_timeout_seconds: project
+                    .deployment_config
+                    .clone()
+                    .map(|c| c.idle_timeout_seconds)
+                    .unwrap_or(300),
+                wake_timeout_seconds: project
+                    .deployment_config
+                    .clone()
+                    .map(|c| c.wake_timeout_seconds)
+                    .unwrap_or(30),
             },
         }
     }

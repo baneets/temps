@@ -227,7 +227,7 @@ pub struct DeployResult {
     pub status: ContainerStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum ContainerStatus {
     Created,
     Running,

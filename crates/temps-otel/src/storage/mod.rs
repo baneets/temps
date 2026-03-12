@@ -11,8 +11,9 @@ use async_trait::async_trait;
 
 use crate::error::OtelError;
 use crate::types::{
-    HealthSummary, Insight, InsightStatus, LogQuery, LogRecord, MetricBucket, MetricPoint,
-    MetricQuery, SpanRecord, StorageQuota, TraceQuery, TraceSummary,
+    GenAiEvent, GenAiSpanDetail, GenAiTraceSummary, HealthSummary, Insight, InsightStatus,
+    LogQuery, LogRecord, MetricBucket, MetricPoint, MetricQuery, SpanRecord, StorageQuota,
+    TraceQuery, TraceSummary,
 };
 
 /// Result type for storage operations.
@@ -82,6 +83,35 @@ pub trait OtelStorage: Send + Sync {
 
     /// Query log records from the fast-query store.
     async fn query_logs(&self, query: LogQuery) -> StorageResult<Vec<LogRecord>>;
+
+    // ── GenAI queries ────────────────────────────────────────────────
+
+    /// Query GenAI trace summaries — traces that contain spans with `gen_ai.*` attributes.
+    /// Returns aggregated per-trace summaries with model, system, and token counts.
+    async fn query_genai_trace_summaries(
+        &self,
+        query: TraceQuery,
+    ) -> StorageResult<Vec<GenAiTraceSummary>>;
+
+    /// Get all spans for a GenAI trace — includes both GenAI-attributed spans
+    /// and their child spans (HTTP, DB, tool execution, etc.) to show the full
+    /// trace tree. Spans are enriched with extracted semantic convention fields.
+    async fn get_genai_trace_spans(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> StorageResult<Vec<GenAiSpanDetail>>;
+
+    /// Count distinct GenAI traces matching the given filters.
+    async fn count_genai_traces(&self, query: TraceQuery) -> StorageResult<u64>;
+
+    /// Get GenAI-related events from span events in a trace.
+    /// Returns events matching `gen_ai.*` event names.
+    async fn get_genai_trace_events(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> StorageResult<Vec<GenAiEvent>>;
 
     // ── Insights ────────────────────────────────────────────────────
 

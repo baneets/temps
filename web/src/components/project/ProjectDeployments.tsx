@@ -1,16 +1,33 @@
-import { ProjectResponse } from '@/api/client'
+import { EnvironmentResponse, ProjectResponse } from '@/api/client'
 import {
   cancelDeploymentMutation,
+  getEnvironmentsOptions,
   getProjectDeploymentsOptions,
+  promoteDeploymentMutation,
   rollbackToDeploymentMutation,
   triggerProjectPipelineMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import DeploymentListItem from '@/components/deployment/DeploymentListItem'
 import { RedeploymentModal } from '@/components/deployments/RedeploymentModal'
 import { Card } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { KeyboardShortcut } from '@/components/ui/keyboard-shortcut'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   getErrorMessage,
   getExpiredTokenMessage,
@@ -21,7 +38,8 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
-import { PlusIcon } from 'lucide-react'
+import { Label } from '@/components/ui/label'
+import { ArrowUpRight, PlusIcon } from 'lucide-react'
 import { EmptyPlaceholder } from '@/components/ui/empty-placeholder'
 
 const ITEMS_PER_PAGE = 10
@@ -31,6 +49,8 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
   const [selectedDeployment, setSelectedDeployment] = useState<number | null>(
     null
   )
+  const [promoteDeploymentId, setPromoteDeploymentId] = useState<number | null>(null)
+  const [promoteTargetEnv, setPromoteTargetEnv] = useState<string>('')
   const [searchParams, setSearchParams] = useSearchParams()
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const initialDeploymentCountRef = useRef<number | null>(null)
@@ -230,6 +250,66 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
     )
   }
 
+  // --- Promote deployment ---
+  const environmentsQuery = useQuery({
+    ...getEnvironmentsOptions({
+      path: { project_id: project.id },
+    }),
+  })
+
+  const promoteDeploymentMut = useMutation({
+    ...promoteDeploymentMutation(),
+    meta: {
+      errorTitle: 'Failed to promote deployment',
+    },
+    onSuccess: () => {
+      toast.success('Deployment promoted successfully')
+      setPromoteDeploymentId(null)
+      setPromoteTargetEnv('')
+      refetch()
+    },
+    onError: (error: any) => {
+      if (isExpiredTokenError(error)) {
+        toast.error(getExpiredTokenMessage(error))
+      } else if (error.detail) {
+        toast.error(error.detail)
+      } else {
+        toast.error(getErrorMessage(error, 'Failed to promote deployment'))
+      }
+    },
+  })
+
+  const handlePromoteDeployment = async () => {
+    if (!promoteDeploymentId || !promoteTargetEnv) return
+    toast.promise(
+      promoteDeploymentMut.mutateAsync({
+        path: {
+          project_id: project.id,
+          deployment_id: promoteDeploymentId,
+        },
+        body: {
+          target_environment_id: parseInt(promoteTargetEnv),
+        },
+      }),
+      {
+        loading: 'Promoting deployment...',
+        success: 'Deployment promoted successfully',
+        error: 'Failed to promote deployment',
+      }
+    )
+  }
+
+  // Get environments that are different from the deployment's environment
+  const getPromoteTargetEnvironments = (deploymentId: number) => {
+    const deployment = deploymentsData?.deployments.find(
+      (d) => d.id === deploymentId
+    )
+    if (!deployment || !environmentsQuery.data) return []
+    return (environmentsQuery.data as EnvironmentResponse[]).filter(
+      (env) => env.id !== deployment.environment_id
+    )
+  }
+
   if (error) {
     return (
       <ErrorAlert
@@ -360,6 +440,10 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
                 }}
                 onCancel={() => handleCancelDeployment(deployment.id)}
                 onRollback={() => handleRollbackDeployment(deployment.id)}
+                onPromote={() => {
+                  setPromoteDeploymentId(deployment.id)
+                  setPromoteTargetEnv('')
+                }}
               />
             </Link>
           ))}
@@ -402,6 +486,68 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
         }
         isLoading={createDeployment.isPending}
       />
+
+      {/* Promote deployment dialog */}
+      <Dialog
+        open={promoteDeploymentId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPromoteDeploymentId(null)
+            setPromoteTargetEnv('')
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ArrowUpRight className="h-5 w-5" />
+              Promote Deployment
+            </DialogTitle>
+            <DialogDescription>
+              Deploy the same image to another environment. This is useful for
+              promoting a validated deployment to production.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Target Environment</Label>
+              <Select value={promoteTargetEnv} onValueChange={setPromoteTargetEnv}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select environment..." />
+                </SelectTrigger>
+                <SelectContent>
+                  {promoteDeploymentId &&
+                    getPromoteTargetEnvironments(promoteDeploymentId).map(
+                      (env) => (
+                        <SelectItem key={env.id} value={String(env.id)}>
+                          {env.name}
+                          {env.protected && ' (protected)'}
+                        </SelectItem>
+                      )
+                    )}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setPromoteDeploymentId(null)
+                setPromoteTargetEnv('')
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handlePromoteDeployment}
+              disabled={!promoteTargetEnv || promoteDeploymentMut.isPending}
+            >
+              {promoteDeploymentMut.isPending ? 'Promoting...' : 'Promote'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

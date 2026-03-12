@@ -141,6 +141,8 @@ pub struct Model {
     /// This captures what resources, replicas, environment variables, and settings were used for this specific deployment
     /// Allows tracking changes in configuration over time
     pub deployment_config: Option<DeploymentConfigSnapshot>,
+    /// ID of the source deployment this was promoted from (if applicable)
+    pub promoted_from_deployment_id: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

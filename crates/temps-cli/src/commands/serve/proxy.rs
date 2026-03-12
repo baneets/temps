@@ -1,12 +1,53 @@
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 use temps_config::ServerConfig;
 use temps_core::CookieCrypto;
 use temps_database::DbConnection;
+use temps_deployer::ContainerDeployer;
+use temps_proxy::on_demand::{ContainerLifecycle, OnDemandError};
 use temps_proxy::ProxyShutdownSignal;
 use tracing::{error, info, warn};
 
 use super::shutdown::CtrlCShutdownSignal;
+
+/// Adapter bridging `temps_deployer::ContainerDeployer` to `temps_proxy::on_demand::ContainerLifecycle`.
+struct ContainerLifecycleAdapter {
+    deployer: Arc<dyn ContainerDeployer>,
+}
+
+#[async_trait]
+impl ContainerLifecycle for ContainerLifecycleAdapter {
+    async fn start_container(&self, container_id: &str) -> Result<(), OnDemandError> {
+        self.deployer
+            .start_container(container_id)
+            .await
+            .map_err(|e| OnDemandError::ContainerOperation {
+                container_id: container_id.to_string(),
+                reason: e.to_string(),
+            })
+    }
+
+    async fn stop_container(&self, container_id: &str) -> Result<(), OnDemandError> {
+        self.deployer
+            .stop_container(container_id)
+            .await
+            .map_err(|e| OnDemandError::ContainerOperation {
+                container_id: container_id.to_string(),
+                reason: e.to_string(),
+            })
+    }
+
+    async fn is_container_healthy(&self, container_id: &str) -> Result<bool, OnDemandError> {
+        match self.deployer.get_container_info(container_id).await {
+            Ok(info) => Ok(info.status == temps_deployer::ContainerStatus::Running),
+            Err(e) => Err(OnDemandError::ContainerOperation {
+                container_id: container_id.to_string(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+}
 
 /// Initialize and start the proxy server
 #[allow(clippy::too_many_arguments)]
@@ -75,6 +116,38 @@ pub fn start_proxy_server(
         config.data_dir.clone(),
     )) as Box<dyn ProxyShutdownSignal>;
 
+    // Create container lifecycle adapter for on-demand scale-to-zero.
+    // Uses a local Docker runtime — remote node containers are handled via
+    // the deployer's agent protocol during the full wake flow.
+    let container_lifecycle: Option<Arc<dyn ContainerLifecycle>> = {
+        let docker_rt = tokio::runtime::Runtime::new()?;
+        match docker_rt.block_on(async {
+            let docker = bollard::Docker::connect_with_defaults()
+                .map_err(|e| anyhow::anyhow!("Docker connect failed: {}", e))?;
+            docker
+                .ping()
+                .await
+                .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
+            Ok::<_, anyhow::Error>(docker)
+        }) {
+            Ok(docker) => {
+                let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                    Arc::new(docker),
+                    true,
+                    "temps".to_string(),
+                );
+                let adapter = ContainerLifecycleAdapter {
+                    deployer: Arc::new(docker_runtime) as Arc<dyn ContainerDeployer>,
+                };
+                Some(Arc::new(adapter) as Arc<dyn ContainerLifecycle>)
+            }
+            Err(e) => {
+                warn!("Docker not available for on-demand scale-to-zero: {}", e);
+                None
+            }
+        }
+    };
+
     match temps_proxy::setup_proxy_server(
         db,
         proxy_config,
@@ -83,6 +156,7 @@ pub fn start_proxy_server(
         route_table,
         shutdown_signal,
         config.clone(),
+        container_lifecycle,
     ) {
         Ok(_) => {
             info!("Proxy server exited");

@@ -28,6 +28,7 @@ import {
   MoreHorizontal,
   ScrollText,
   Settings,
+  Sparkles,
   SquareTerminal,
 } from 'lucide-react'
 
@@ -83,6 +84,11 @@ const navMainAll = [
     title: 'Monitoring',
     url: '/monitoring',
     icon: Activity,
+  },
+  {
+    title: 'AI Gateway',
+    url: '/ai-gateway',
+    icon: Sparkles,
   },
   {
     title: 'Email',

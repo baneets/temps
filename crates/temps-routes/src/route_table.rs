@@ -102,6 +102,16 @@ fn build_container_backend_addr(
     }
 }
 
+/// Information about a sleeping on-demand environment, returned from route loading.
+#[derive(Clone, Debug)]
+pub struct SleepingEnvironmentEntry {
+    pub domain: String,
+    pub environment_id: i32,
+    pub project_id: i32,
+    pub deployment_id: i32,
+    pub wake_timeout_seconds: i32,
+}
+
 /// A single backend entry: network address plus container metadata for tracking.
 #[derive(Clone, Debug)]
 pub struct BackendEntry {
@@ -250,6 +260,10 @@ impl RouteInfo {
 /// - `tls_routes`: Exact hostname matches for TLS SNI routing
 /// - `http_wildcards`: Wildcard patterns for HTTP Host header routing
 /// - `tls_wildcards`: Wildcard patterns for TLS SNI routing
+///
+/// Callback invoked after each route table reload with the list of sleeping environments.
+pub type OnSleepingCallback = Arc<dyn Fn(Vec<SleepingEnvironmentEntry>) + Send + Sync>;
+
 pub struct CachedPeerTable {
     /// Exact hostname -> RouteInfo for HTTP routes (route_type = 'http')
     /// Used for matching on HTTP Host header (Layer 7)
@@ -271,6 +285,9 @@ pub struct CachedPeerTable {
 
     /// Database connection for loading routes
     db: Arc<DatabaseConnection>,
+
+    /// Optional callback invoked after each route reload with sleeping environment entries.
+    on_sleeping_callback: parking_lot::Mutex<Option<OnSleepingCallback>>,
 }
 
 impl CachedPeerTable {
@@ -282,7 +299,13 @@ impl CachedPeerTable {
             tls_wildcards: Arc::new(RwLock::new(WildcardMatcher::new())),
             routes: Arc::new(RwLock::new(HashMap::new())),
             db,
+            on_sleeping_callback: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Set a callback that fires after each `load_routes()` with the sleeping environment entries.
+    pub fn set_on_sleeping_callback(&self, callback: OnSleepingCallback) {
+        *self.on_sleeping_callback.lock() = Some(callback);
     }
 
     /// Get route by HTTP Host header
@@ -322,9 +345,10 @@ impl CachedPeerTable {
         None
     }
 
-    /// Load all routes from the database into the cache with full models
-    /// This queries environment_domains, custom_routes, and project_custom_domains
-    pub async fn load_routes(&self) -> Result<(), sea_orm::DbErr> {
+    /// Load all routes from the database into the cache with full models.
+    /// This queries environment_domains, custom_routes, and project_custom_domains.
+    /// Returns a list of sleeping on-demand environments that were skipped during route loading.
+    pub async fn load_routes(&self) -> Result<Vec<SleepingEnvironmentEntry>, sea_orm::DbErr> {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
         use temps_entities::{
             custom_routes, deployments, environment_domains, environments, project_custom_domains,
@@ -332,6 +356,7 @@ impl CachedPeerTable {
         };
 
         let mut routes = HashMap::new();
+        let mut sleeping_environments: Vec<SleepingEnvironmentEntry> = Vec::new();
 
         // Build entity caches as we go - only cache what we actually need for routing
         let mut projects_cache: HashMap<i32, Arc<projects::Model>> = HashMap::new();
@@ -380,6 +405,27 @@ impl CachedPeerTable {
 
             if let Some(environment) = environments_cache.get(&env_domain.environment_id) {
                 if let Some(deployment_id) = environment.current_deployment_id {
+                    // Skip sleeping on-demand environments — record them separately
+                    if environment.sleeping {
+                        let wake_timeout = environment
+                            .deployment_config
+                            .as_ref()
+                            .map(|c| c.wake_timeout_seconds)
+                            .unwrap_or(30);
+                        sleeping_environments.push(SleepingEnvironmentEntry {
+                            domain: env_domain.domain.clone(),
+                            environment_id: environment.id,
+                            project_id: environment.project_id,
+                            deployment_id,
+                            wake_timeout_seconds: wake_timeout,
+                        });
+                        debug!(
+                            "Skipping sleeping environment domain: {} (env={}, deploy={})",
+                            env_domain.domain, environment.id, deployment_id
+                        );
+                        continue;
+                    }
+
                     // Fetch deployment if not cached
                     if !deployments_cache.contains_key(&deployment_id) {
                         if let Ok(Some(dep)) = deployments::Entity::find_by_id(deployment_id)
@@ -578,6 +624,27 @@ impl CachedPeerTable {
 
             if let Some(environment) = environments_cache.get(&custom_domain.environment_id) {
                 if let Some(deployment_id) = environment.current_deployment_id {
+                    // Skip sleeping on-demand environments — record them separately
+                    if environment.sleeping {
+                        let wake_timeout = environment
+                            .deployment_config
+                            .as_ref()
+                            .map(|c| c.wake_timeout_seconds)
+                            .unwrap_or(30);
+                        sleeping_environments.push(SleepingEnvironmentEntry {
+                            domain: custom_domain.domain.clone(),
+                            environment_id: environment.id,
+                            project_id: environment.project_id,
+                            deployment_id,
+                            wake_timeout_seconds: wake_timeout,
+                        });
+                        debug!(
+                            "Skipping sleeping environment custom domain: {} (env={}, deploy={})",
+                            custom_domain.domain, environment.id, deployment_id
+                        );
+                        continue;
+                    }
+
                     // Fetch deployment if not cached
                     if !deployments_cache.contains_key(&deployment_id) {
                         if let Ok(Some(dep)) = deployments::Entity::find_by_id(deployment_id)
@@ -696,6 +763,37 @@ impl CachedPeerTable {
         for env in all_envs {
             if let Some(deployment_id) = env.current_deployment_id {
                 let main_url = &env.subdomain;
+
+                // Skip sleeping on-demand environments — record them separately
+                if env.sleeping {
+                    let wake_timeout = env
+                        .deployment_config
+                        .as_ref()
+                        .map(|c| c.wake_timeout_seconds)
+                        .unwrap_or(30);
+                    // Record both the raw main_url and the full preview domain
+                    sleeping_environments.push(SleepingEnvironmentEntry {
+                        domain: main_url.clone(),
+                        environment_id: env.id,
+                        project_id: env.project_id,
+                        deployment_id,
+                        wake_timeout_seconds: wake_timeout,
+                    });
+                    let full_domain = format!("{}.{}", main_url, preview_domain);
+                    sleeping_environments.push(SleepingEnvironmentEntry {
+                        domain: full_domain,
+                        environment_id: env.id,
+                        project_id: env.project_id,
+                        deployment_id,
+                        wake_timeout_seconds: wake_timeout,
+                    });
+                    debug!(
+                        "Skipping sleeping environment: {} (env={}, deploy={})",
+                        main_url, env.id, deployment_id
+                    );
+                    continue;
+                }
+
                 // Cache environment if not already cached
                 environments_cache
                     .entry(env.id)
@@ -848,6 +946,11 @@ impl CachedPeerTable {
             .await?;
 
         for env in all_active_envs {
+            // Skip sleeping on-demand environments — they are already recorded
+            if env.sleeping {
+                continue;
+            }
+
             // Cache environment if not already cached
             environments_cache
                 .entry(env.id)
@@ -974,11 +1077,23 @@ impl CachedPeerTable {
         *self.http_wildcards.write() = http_wildcards_matcher;
         *self.tls_wildcards.write() = tls_wildcards_matcher;
 
+        if !sleeping_environments.is_empty() {
+            info!(
+                "Route table: {} sleeping on-demand environments skipped",
+                sleeping_environments.len()
+            );
+        }
+
         debug!(
             "Route table loaded with {} total entries ({} HTTP exact, {} TLS exact, {} HTTP wildcards, {} TLS wildcards)",
             route_count, http_routes_count, tls_routes_count, http_wildcards_count, tls_wildcards_count
         );
-        Ok(())
+        // Notify callback with sleeping environments (for on-demand wake-on-request)
+        if let Some(callback) = self.on_sleeping_callback.lock().as_ref() {
+            callback(sleeping_environments.clone());
+        }
+
+        Ok(sleeping_environments)
     }
 
     /// Get route information for a host (O(1) lookup)

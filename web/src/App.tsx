@@ -175,6 +175,11 @@ const NodesPage = lazy(() =>
     default: m.NodesPage,
   }))
 )
+const AiGateway = lazy(() =>
+  import('./pages/AiGateway').then((m) => ({
+    default: m.AiGatewayPage,
+  }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -282,6 +287,8 @@ const FullAppRoutes = () => {
                   <Route path="providers/edit/:id" element={<EditNotificationProvider />} />
                   <Route path=":section" element={<MonitoringSettings />} />
                 </Route>
+                {/* AI Gateway - top-level platform feature */}
+                <Route path="/ai-gateway" element={<AiGateway />} />
                 {/* Email - top-level platform feature */}
                 <Route path="/email" element={<Email />} />
                 <Route path="/email/:id" element={<EmailDetail />} />

@@ -207,6 +207,7 @@ pub fn setup_proxy_server(
     route_table: Arc<CachedPeerTable>,
     shutdown_signal: Box<dyn ProxyShutdownSignal>,
     config: Arc<ServerConfig>,
+    container_lifecycle: Option<Arc<dyn crate::on_demand::ContainerLifecycle>>,
 ) -> Result<()> {
     // Setup plugin system (async operation in sync context)
     let context = tokio::runtime::Runtime::new()?
@@ -261,7 +262,7 @@ pub fn setup_proxy_server(
         Arc::new(SessionManagerImpl::new(db.clone(), crypto.clone())) as Arc<dyn SessionManager>;
 
     // Create the main load balancer
-    let lb = LoadBalancer::new(
+    let mut lb = LoadBalancer::new(
         upstream_resolver,
         proxy_log_handle,
         project_context_resolver,
@@ -274,6 +275,37 @@ pub fn setup_proxy_server(
         challenge_service,
         proxy_config.disable_https_redirect,
     );
+
+    // Wire up on-demand scale-to-zero if container lifecycle is provided
+    if let Some(lifecycle) = container_lifecycle {
+        let on_demand_manager = Arc::new(crate::on_demand::OnDemandManager::new(
+            db.clone(),
+            lifecycle,
+        ));
+
+        // Register callback so sleeping domains are populated on every route reload
+        let on_demand_for_callback = Arc::clone(&on_demand_manager);
+        route_table.set_on_sleeping_callback(Arc::new(move |entries| {
+            on_demand_for_callback.clear_sleeping_domains();
+            for entry in entries {
+                on_demand_for_callback.register_sleeping_domain(
+                    entry.domain.clone(),
+                    crate::on_demand::SleepingEnvironmentInfo {
+                        environment_id: entry.environment_id,
+                        project_id: entry.project_id,
+                        deployment_id: entry.deployment_id,
+                        wake_timeout_seconds: entry.wake_timeout_seconds,
+                    },
+                );
+            }
+        }));
+
+        // Start background idle sweep (checks every 60 seconds)
+        on_demand_manager.start_sweep_task(std::time::Duration::from_secs(60));
+
+        lb = lb.with_on_demand_manager(on_demand_manager);
+        info!("On-demand scale-to-zero enabled");
+    }
 
     // Setup Pingora server with explicit configuration
     // Disable upgrade mode to avoid "Console API failed to start: channel closed" error

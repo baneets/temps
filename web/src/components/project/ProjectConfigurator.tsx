@@ -12,6 +12,7 @@ import {
   BranchInfo,
   ExternalServiceInfo,
 } from '@/api/client/types.gen'
+import { ImportEnvDialog } from '@/components/ui/import-env-dialog'
 import { CreateServiceDialog } from '@/components/storage/CreateServiceDialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -66,6 +67,7 @@ import {
   Plus,
   Server,
   Settings,
+  Upload,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -216,6 +218,7 @@ export function ProjectConfigurator({
   const [selectedServiceType, setSelectedServiceType] =
     useState<ServiceTypeRoute | null>(null)
   const [showSecrets, setShowSecrets] = useState<{ [key: number]: boolean }>({})
+  const [isImportEnvOpen, setIsImportEnvOpen] = useState(false)
   const [newlyCreatedServiceIds, setNewlyCreatedServiceIds] = useState<
     number[]
   >([])
@@ -915,16 +918,43 @@ export function ProjectConfigurator({
               Configure environment variables for your project
             </p>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={addEnvironmentVariable}
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            Add Variable
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setIsImportEnvOpen(true)}
+            >
+              <Upload className="h-4 w-4 mr-2" />
+              Import .env
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={addEnvironmentVariable}
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add Variable
+            </Button>
+          </div>
         </div>
+
+        <ImportEnvDialog
+          isOpen={isImportEnvOpen}
+          onOpenChange={setIsImportEnvOpen}
+          existingKeys={new Set(watchedEnvVars.map((v) => v.key).filter(Boolean))}
+          showEnvironmentSelection={false}
+          onImport={async (variables) => {
+            const currentVars = form.getValues('environmentVariables') || []
+            const newVars = variables.map((v) => ({
+              key: v.key,
+              value: v.value,
+              isSecret: false,
+            }))
+            form.setValue('environmentVariables', [...currentVars, ...newVars])
+          }}
+        />
 
         {watchedEnvVars.length > 0 ? (
           <div className="space-y-3">

@@ -1,0 +1,587 @@
+export const metadata = {
+  title: 'AI Gateway',
+  description: 'OpenAI-compatible AI gateway built into Temps. Route requests to OpenAI, Anthropic, Gemini, and more with centralized API key management.',
+  alternates: {
+    canonical: '/docs/ai-gateway',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Quick Start', id: 'quick-start' },
+  { title: 'Supported Providers', id: 'providers' },
+  { title: 'Chat Completions', id: 'chat-completions' },
+  { title: 'Vision & Image Attachments', id: 'vision' },
+  { title: 'Tool Calling (Function Calling)', id: 'tool-calling' },
+  { title: 'Streaming', id: 'streaming' },
+  { title: 'Embeddings', id: 'embeddings' },
+  { title: 'Provider Key Management', id: 'key-management' },
+  { title: 'Usage & Analytics', id: 'usage' },
+]
+
+# AI Gateway
+
+OpenAI-compatible AI gateway built into Temps. Use any OpenAI SDK to call OpenAI, Anthropic, Gemini, xAI, Mistral, and DeepSeek &mdash; just change the base URL. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+The AI Gateway provides a unified, OpenAI-compatible API for all major LLM providers. Your existing OpenAI SDK code works unchanged &mdash; just point it at your Temps instance.
+
+<Row>
+  <Col>
+    **What's Included**
+    - OpenAI API wire-compatible endpoints
+    - Multi-provider routing (OpenAI, Anthropic, Gemini, xAI, Mistral, DeepSeek)
+    - Tool calling / function calling across all providers
+    - Vision / image attachments (base64 and URL)
+    - SSE streaming with consistent format
+    - Centralized API key management
+    - Per-user usage tracking and analytics
+    - JSON mode / structured output
+  </Col>
+  <Col>
+    **Why It Matters**
+    - Zero code changes &mdash; works with any OpenAI SDK
+    - Centralized key management (devs never see API keys)
+    - Switch providers without changing client code
+    - Built-in usage analytics and cost tracking
+    - Self-hosted &mdash; your data stays on your infrastructure
+    - No per-request fees beyond provider costs
+    - Transparent translation for Anthropic and Gemini
+  </Col>
+</Row>
+
+### Key Features
+
+<Properties>
+  <Property name="Drop-In Replacement">
+    100% OpenAI SDK compatible. Works with Python, Node.js, Go, Rust, and any other OpenAI client library.
+  </Property>
+  <Property name="Transparent Translation">
+    Automatically translates requests/responses for Anthropic Messages API and Gemini generateContent API.
+  </Property>
+  <Property name="Vision Support">
+    Send images as base64 data URIs or HTTP URLs. Translated to each provider's native format automatically.
+  </Property>
+  <Property name="Tool Calling">
+    OpenAI-format tools work across all providers. Function definitions, tool_choice, and tool results are translated transparently.
+  </Property>
+  <Property name="Streaming">
+    Server-Sent Events (SSE) streaming with consistent `data: {...}\n\n` format across all providers.
+  </Property>
+  <Property name="Usage Analytics">
+    Track token usage, costs, and request counts per user, model, and provider.
+  </Property>
+</Properties>
+
+---
+
+## Quick Start {{ anchor: true, id: 'quick-start' }}
+
+Point any OpenAI SDK at your Temps instance. The only changes are `base_url` and `api_key`.
+
+<CodeGroup title="Setup">
+
+```python {{ title: 'Python' }}
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://your-temps-instance.com/ai/v1",
+    api_key="your-temps-api-key",
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",  # or "claude-sonnet-4-20250514", "gemini-2.5-pro", etc.
+    messages=[
+        {"role": "user", "content": "Hello!"}
+    ],
+)
+
+print(response.choices[0].message.content)
+```
+
+```typescript {{ title: 'Node.js' }}
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "https://your-temps-instance.com/ai/v1",
+  apiKey: "your-temps-api-key",
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4o", // or "claude-sonnet-4-20250514", "gemini-2.5-pro", etc.
+  messages: [
+    { role: "user", content: "Hello!" }
+  ],
+});
+
+console.log(response.choices[0].message.content);
+```
+
+```bash {{ title: 'cURL' }}
+curl https://your-temps-instance.com/ai/v1/chat/completions \
+  -H "Authorization: Bearer your-temps-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+</CodeGroup>
+
+---
+
+## Supported Providers {{ anchor: true, id: 'providers' }}
+
+The gateway routes requests to the correct provider based on the model name:
+
+| Model Prefix | Provider | Examples |
+|---|---|---|
+| `gpt-*`, `o1-*`, `o3-*` | OpenAI | `gpt-4o`, `gpt-4o-mini`, `o3-mini` |
+| `claude-*` | Anthropic | `claude-sonnet-4-20250514`, `claude-haiku-4-5-20251001` |
+| `gemini-*` | Google Gemini | `gemini-2.5-pro`, `gemini-2.5-flash` |
+| `grok-*` | xAI | `grok-3`, `grok-3-mini` |
+| `mistral-*`, `codestral-*` | Mistral | `mistral-large-latest`, `codestral-latest` |
+| `deepseek-*` | DeepSeek | `deepseek-chat`, `deepseek-reasoner` |
+
+<Note>
+  All providers use the same OpenAI-compatible API format. The gateway handles protocol translation automatically for Anthropic and Gemini.
+</Note>
+
+---
+
+## Chat Completions {{ anchor: true, id: 'chat-completions' }}
+
+Standard chat completions work identically to the OpenAI API.
+
+```python {{ title: 'Multi-turn conversation' }}
+response = client.chat.completions.create(
+    model="claude-sonnet-4-20250514",
+    messages=[
+        {"role": "system", "content": "You are a helpful coding assistant."},
+        {"role": "user", "content": "Write a Python function to calculate fibonacci numbers."},
+        {"role": "assistant", "content": "Here's a fibonacci function:\n\n```python\ndef fib(n):\n    if n <= 1:\n        return n\n    return fib(n-1) + fib(n-2)\n```"},
+        {"role": "user", "content": "Can you make it iterative for better performance?"},
+    ],
+    temperature=0.7,
+    max_tokens=500,
+)
+```
+
+---
+
+## Vision & Image Attachments {{ anchor: true, id: 'vision' }}
+
+Send images to vision-capable models. The gateway translates image formats automatically for each provider.
+
+### Base64 Image
+
+<CodeGroup title="Send base64 image">
+
+```python {{ title: 'Python' }}
+import base64
+
+# Read image and encode to base64
+with open("screenshot.png", "rb") as f:
+    image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+
+response = client.chat.completions.create(
+    model="gpt-4o",  # or claude-sonnet-4-20250514, gemini-2.5-pro
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What's in this image? Describe it in detail."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image_data}"
+                    },
+                },
+            ],
+        }
+    ],
+    max_tokens=1000,
+)
+
+print(response.choices[0].message.content)
+```
+
+```typescript {{ title: 'Node.js' }}
+import fs from "fs";
+
+// Read image and encode to base64
+const imageData = fs.readFileSync("screenshot.png").toString("base64");
+
+const response = await client.chat.completions.create({
+  model: "gpt-4o", // or claude-sonnet-4-20250514, gemini-2.5-pro
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "What's in this image? Describe it in detail." },
+        {
+          type: "image_url",
+          image_url: {
+            url: `data:image/png;base64,${imageData}`,
+          },
+        },
+      ],
+    },
+  ],
+  max_tokens: 1000,
+});
+
+console.log(response.choices[0].message.content);
+```
+
+```bash {{ title: 'cURL' }}
+# Base64 encode an image (macOS)
+IMAGE_B64=$(base64 -i screenshot.png)
+
+curl https://your-temps-instance.com/ai/v1/chat/completions \
+  -H "Authorization: Bearer your-temps-api-key" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"gpt-4o\",
+    \"messages\": [{
+      \"role\": \"user\",
+      \"content\": [
+        {\"type\": \"text\", \"text\": \"What's in this image?\"},
+        {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,${IMAGE_B64}\"}}
+      ]
+    }],
+    \"max_tokens\": 1000
+  }"
+```
+
+</CodeGroup>
+
+### Image from URL
+
+```python {{ title: 'Image URL' }}
+response = client.chat.completions.create(
+    model="gemini-2.5-pro",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe what you see in this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/photo.jpg"
+                    },
+                },
+            ],
+        }
+    ],
+)
+```
+
+### Multiple Images
+
+```python {{ title: 'Multiple images' }}
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Compare these two screenshots. What changed?"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{before_image}"},
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{after_image}"},
+                },
+            ],
+        }
+    ],
+)
+```
+
+<Note>
+  Supported image formats: PNG, JPEG, GIF, WebP. Base64 data URIs work with all providers. HTTP URLs work with OpenAI and Gemini; Anthropic requires base64.
+</Note>
+
+---
+
+## Tool Calling (Function Calling) {{ anchor: true, id: 'tool-calling' }}
+
+Define tools using the OpenAI format. The gateway translates them to each provider's native format.
+
+<CodeGroup title="Tool calling">
+
+```python {{ title: 'Python' }}
+import json
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get current weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "City name, e.g. 'London'"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "description": "Temperature unit"
+                    }
+                },
+                "required": ["location"]
+            }
+        }
+    }
+]
+
+# Step 1: Send message with tools
+response = client.chat.completions.create(
+    model="claude-sonnet-4-20250514",  # works with any provider
+    messages=[
+        {"role": "user", "content": "What's the weather like in London?"}
+    ],
+    tools=tools,
+)
+
+message = response.choices[0].message
+
+# Step 2: Check if the model wants to call a tool
+if message.tool_calls:
+    tool_call = message.tool_calls[0]
+    args = json.loads(tool_call.function.arguments)
+    print(f"Model wants to call: {tool_call.function.name}({args})")
+
+    # Step 3: Execute the tool and send the result back
+    weather_result = get_weather(args["location"])  # your function
+
+    follow_up = client.chat.completions.create(
+        model="claude-sonnet-4-20250514",
+        messages=[
+            {"role": "user", "content": "What's the weather like in London?"},
+            message,  # assistant message with tool_calls
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(weather_result),
+            },
+        ],
+        tools=tools,
+    )
+
+    print(follow_up.choices[0].message.content)
+```
+
+```typescript {{ title: 'Node.js' }}
+const tools = [
+  {
+    type: "function" as const,
+    function: {
+      name: "get_weather",
+      description: "Get current weather for a city",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string", description: "City name" },
+          unit: { type: "string", enum: ["celsius", "fahrenheit"] },
+        },
+        required: ["location"],
+      },
+    },
+  },
+];
+
+// Step 1: Send message with tools
+const response = await client.chat.completions.create({
+  model: "claude-sonnet-4-20250514", // works with any provider
+  messages: [
+    { role: "user", content: "What's the weather like in London?" }
+  ],
+  tools,
+});
+
+const message = response.choices[0].message;
+
+// Step 2: Check if the model wants to call a tool
+if (message.tool_calls) {
+  const toolCall = message.tool_calls[0];
+  const args = JSON.parse(toolCall.function.arguments);
+  console.log(`Calling: ${toolCall.function.name}(${JSON.stringify(args)})`);
+
+  // Step 3: Execute the tool and send result back
+  const weatherResult = await getWeather(args.location);
+
+  const followUp = await client.chat.completions.create({
+    model: "claude-sonnet-4-20250514",
+    messages: [
+      { role: "user", content: "What's the weather like in London?" },
+      message, // assistant message with tool_calls
+      {
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(weatherResult),
+      },
+    ],
+    tools,
+  });
+
+  console.log(followUp.choices[0].message.content);
+}
+```
+
+</CodeGroup>
+
+### Tool Choice
+
+Control whether the model should call tools:
+
+```python {{ title: 'Tool choice options' }}
+# Let the model decide (default)
+tool_choice="auto"
+
+# Force the model to call a tool
+tool_choice="required"
+
+# Force a specific tool
+tool_choice={"type": "function", "function": {"name": "get_weather"}}
+
+# Don't use tools (even if provided)
+tool_choice="none"
+```
+
+---
+
+## Streaming {{ anchor: true, id: 'streaming' }}
+
+SSE streaming works identically to the OpenAI API. All providers produce the same `data: {...}\n\n` format.
+
+<CodeGroup title="Streaming">
+
+```python {{ title: 'Python' }}
+stream = client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[
+        {"role": "user", "content": "Write a haiku about deployment automation."}
+    ],
+    stream=True,
+)
+
+for chunk in stream:
+    content = chunk.choices[0].delta.content
+    if content:
+        print(content, end="", flush=True)
+
+print()  # newline at end
+```
+
+```typescript {{ title: 'Node.js' }}
+const stream = await client.chat.completions.create({
+  model: "gemini-2.5-flash",
+  messages: [
+    { role: "user", content: "Write a haiku about deployment automation." }
+  ],
+  stream: true,
+});
+
+for await (const chunk of stream) {
+  const content = chunk.choices[0]?.delta?.content;
+  if (content) {
+    process.stdout.write(content);
+  }
+}
+
+console.log(); // newline at end
+```
+
+</CodeGroup>
+
+---
+
+## Embeddings {{ anchor: true, id: 'embeddings' }}
+
+Generate embeddings using OpenAI-compatible models.
+
+```python {{ title: 'Embeddings' }}
+response = client.embeddings.create(
+    model="text-embedding-3-small",
+    input="The quick brown fox jumps over the lazy dog",
+)
+
+embedding = response.data[0].embedding
+print(f"Dimensions: {len(embedding)}")
+```
+
+<Note>
+  Embeddings are currently supported for OpenAI models only. Anthropic and Gemini embedding support is planned.
+</Note>
+
+---
+
+## Provider Key Management {{ anchor: true, id: 'key-management' }}
+
+Manage provider API keys through the Temps admin panel or API. Keys are encrypted at rest using AES-256-GCM.
+
+```bash {{ title: 'Add a provider key via API' }}
+# Add an OpenAI key
+curl -X POST https://your-temps-instance.com/ai/providers/keys \
+  -H "Authorization: Bearer your-admin-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "api_key": "sk-...",
+    "label": "Production OpenAI Key"
+  }'
+
+# Add an Anthropic key
+curl -X POST https://your-temps-instance.com/ai/providers/keys \
+  -H "Authorization: Bearer your-admin-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "anthropic",
+    "api_key": "sk-ant-...",
+    "label": "Production Anthropic Key"
+  }'
+```
+
+<Note>
+  Developers only need a Temps API key. Provider API keys are managed centrally by administrators and never exposed to end users.
+</Note>
+
+---
+
+## Usage & Analytics {{ anchor: true, id: 'usage' }}
+
+Track token usage and costs per user, model, and provider through the Temps dashboard or API.
+
+```bash {{ title: 'Query usage' }}
+# Get usage summary for a project
+curl https://your-temps-instance.com/ai/usage/summary?period=7d \
+  -H "Authorization: Bearer your-admin-api-key"
+```
+
+Response:
+
+```json
+{
+  "total_requests": 1523,
+  "total_tokens": 2847392,
+  "prompt_tokens": 1923847,
+  "completion_tokens": 923545,
+  "by_model": [
+    {"model": "gpt-4o", "requests": 842, "total_tokens": 1523000},
+    {"model": "claude-sonnet-4-20250514", "requests": 481, "total_tokens": 924392},
+    {"model": "gemini-2.5-pro", "requests": 200, "total_tokens": 400000}
+  ]
+}
+```

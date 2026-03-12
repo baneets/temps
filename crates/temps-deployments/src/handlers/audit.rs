@@ -46,6 +46,14 @@ pub struct EnvironmentTeardownAudit {
     pub environment_id: i32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeploymentPromotedAudit {
+    pub context: AuditContext,
+    pub project_id: i32,
+    pub source_deployment_id: i32,
+    pub target_environment_id: i32,
+}
+
 // ── Container action audits ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +172,7 @@ impl_audit_operation!(DeploymentPausedAudit, "DEPLOYMENT_PAUSED");
 impl_audit_operation!(DeploymentResumedAudit, "DEPLOYMENT_RESUMED");
 impl_audit_operation!(DeploymentCancelledAudit, "DEPLOYMENT_CANCELLED");
 impl_audit_operation!(DeploymentTeardownAudit, "DEPLOYMENT_TEARDOWN");
+impl_audit_operation!(DeploymentPromotedAudit, "DEPLOYMENT_PROMOTED");
 impl_audit_operation!(EnvironmentTeardownAudit, "ENVIRONMENT_TEARDOWN");
 impl_audit_operation!(ContainerActionAudit, "CONTAINER_ACTION");
 impl_audit_operation!(ExternalImagePushedAudit, "EXTERNAL_IMAGE_PUSHED");

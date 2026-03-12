@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { GitBranch, Loader2, Network, Plus, Shield, X } from 'lucide-react'
+import { GitBranch, Loader2, Moon, Network, Plus, Shield, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
@@ -74,9 +74,13 @@ export function EnvironmentConfigurationCard({
     replicas: environment.deployment_config?.replicas?.toString() ?? '1',
     exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
     attack_mode: environment.attack_mode ?? false,
+    protected: environment.protected ?? false,
     anti_affinity: environment.deployment_config?.antiAffinity ?? true,
     target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
     target_labels: (environment.deployment_config?.targetLabels ?? {}) as Record<string, string>,
+    on_demand: environment.deployment_config?.onDemand ?? false,
+    idle_timeout_seconds: environment.deployment_config?.idleTimeoutSeconds?.toString() ?? '300',
+    wake_timeout_seconds: environment.deployment_config?.wakeTimeoutSeconds?.toString() ?? '30',
     security: {
       enabled: environment.deployment_config?.security?.enabled ?? false,
       headers: {
@@ -121,9 +125,13 @@ export function EnvironmentConfigurationCard({
       replicas: environment.deployment_config?.replicas?.toString() ?? '1',
       exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
       attack_mode: environment.attack_mode ?? false,
+      protected: environment.protected ?? false,
       anti_affinity: environment.deployment_config?.antiAffinity ?? true,
       target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
       target_labels: (environment.deployment_config?.targetLabels ?? {}) as Record<string, string>,
+      on_demand: environment.deployment_config?.onDemand ?? false,
+      idle_timeout_seconds: environment.deployment_config?.idleTimeoutSeconds?.toString() ?? '300',
+      wake_timeout_seconds: environment.deployment_config?.wakeTimeoutSeconds?.toString() ?? '30',
       security: {
         enabled: environment.deployment_config?.security?.enabled ?? false,
         headers: {
@@ -189,6 +197,7 @@ export function EnvironmentConfigurationCard({
         exposed_port: formData.exposed_port
           ? parseInt(formData.exposed_port)
           : null,
+        protected: formData.protected,
         anti_affinity: formData.anti_affinity,
         target_nodes:
           formData.target_nodes.length > 0 ? formData.target_nodes : null,
@@ -196,6 +205,13 @@ export function EnvironmentConfigurationCard({
           Object.keys(formData.target_labels).length > 0
             ? formData.target_labels
             : null,
+        on_demand: formData.on_demand,
+        idle_timeout_seconds: formData.idle_timeout_seconds
+          ? parseInt(formData.idle_timeout_seconds)
+          : null,
+        wake_timeout_seconds: formData.wake_timeout_seconds
+          ? parseInt(formData.wake_timeout_seconds)
+          : null,
         security: formData.security,
       },
     })
@@ -371,6 +387,83 @@ export function EnvironmentConfigurationCard({
               </div>
             </div>
 
+            {/* On-Demand (Scale-to-Zero) */}
+            <div className="border-t pt-6">
+              <div className="flex items-center gap-2 mb-4">
+                <Moon className="h-4 w-4" />
+                <h3 className="text-sm font-medium">On-Demand (Scale-to-Zero)</h3>
+              </div>
+              <div className="space-y-4">
+                <div className="flex items-center gap-3 p-3 border rounded-lg">
+                  <div className="flex-1">
+                    <Label className="text-sm font-medium">Enable On-Demand</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Automatically stop containers after a period of inactivity
+                      and start them when a new request arrives.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={formData.on_demand}
+                    onCheckedChange={(checked) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        on_demand: checked,
+                      }))
+                    }
+                  />
+                </div>
+
+                {formData.on_demand && (
+                  <div className="space-y-4 p-4 border rounded-lg bg-muted/30">
+                    <div>
+                      <Label>Idle Timeout (seconds)</Label>
+                      <Input
+                        type="number"
+                        min="60"
+                        max="86400"
+                        value={formData.idle_timeout_seconds}
+                        onChange={(e) =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            idle_timeout_seconds: e.target.value,
+                          }))
+                        }
+                        placeholder="300"
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Seconds of inactivity before containers are stopped (60–86400). Default: 300 (5 minutes).
+                      </p>
+                    </div>
+                    <div>
+                      <Label>Wake Timeout (seconds)</Label>
+                      <Input
+                        type="number"
+                        min="5"
+                        max="120"
+                        value={formData.wake_timeout_seconds}
+                        onChange={(e) =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            wake_timeout_seconds: e.target.value,
+                          }))
+                        }
+                        placeholder="30"
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Maximum seconds to wait for containers to start when waking (5–120). Default: 30.
+                      </p>
+                    </div>
+                    {environment.sleeping && (
+                      <div className="flex items-center gap-2 p-2 rounded-md bg-yellow-500/10 border border-yellow-500/20 text-yellow-600 dark:text-yellow-400 text-xs">
+                        <Moon className="h-3.5 w-3.5" />
+                        This environment is currently sleeping. It will wake on the next request.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Node Scheduling */}
             {activeNodes.length > 0 && (
               <div className="border-t pt-6">
@@ -379,6 +472,29 @@ export function EnvironmentConfigurationCard({
                   <h3 className="text-sm font-medium">Node Scheduling</h3>
                 </div>
                 <div className="space-y-4">
+                  {/* Protected environment toggle */}
+                  <div className="flex items-center gap-3 p-3 border rounded-lg">
+                    <div className="flex-1">
+                      <Label className="text-sm font-medium flex items-center gap-1.5">
+                        <Shield className="h-4 w-4" />
+                        Protected
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        Git pushes will not auto-deploy to this environment.
+                        Deployments must be promoted from another environment.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={formData.protected}
+                      onCheckedChange={(checked) =>
+                        setFormData((prev) => ({
+                          ...prev,
+                          protected: checked,
+                        }))
+                      }
+                    />
+                  </div>
+
                   {/* Anti-affinity toggle */}
                   <div className="flex items-center gap-3 p-3 border rounded-lg">
                     <div className="flex-1">

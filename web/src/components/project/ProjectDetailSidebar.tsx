@@ -21,6 +21,7 @@ import {
   Key,
   Globe,
   Boxes,
+  Bot,
   Workflow,
 } from 'lucide-react'
 import {
@@ -151,6 +152,11 @@ const baseNavItems: NavItem[] = [
     title: 'Traces',
     url: 'traces',
     icon: Workflow,
+  },
+  {
+    title: 'AI Activity',
+    url: 'ai-activity',
+    icon: Bot,
   },
 
   // Debugging (Medium Frequency)

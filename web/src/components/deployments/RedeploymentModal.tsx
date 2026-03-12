@@ -103,7 +103,7 @@ export function RedeploymentModal({
   const [branchNotFound, setBranchNotFound] = useState(false)
 
   // Derive effective values (either user-selected or initial/default)
-  const effectiveBranch = selectedBranch || initialBranch
+  const effectiveBranch = selectedBranch !== '' ? selectedBranch : initialBranch
   const effectiveEnvironment = selectedEnvironment ?? initialEnvironment
 
   // Reset form state when modal opens or default values change
@@ -132,12 +132,16 @@ export function RedeploymentModal({
     setDeploymentType('branch')
     setSelectedBranch(selectedEnv.branch)
     setBranchNotFound(false)
+  }, [selectedEnvironment, environmentsQuery.data])
 
-    // Check if branch exists in available branches
-    if (availableBranches.length > 0 && !availableBranches.includes(selectedEnv.branch)) {
-      setBranchNotFound(true)
+  // Check if the selected branch exists in available branches (after branches load)
+  useEffect(() => {
+    if (!selectedBranch || availableBranches.length === 0) {
+      setBranchNotFound(false)
+      return
     }
-  }, [selectedEnvironment, environmentsQuery.data, availableBranches])
+    setBranchNotFound(!availableBranches.includes(selectedBranch))
+  }, [selectedBranch, availableBranches])
 
   const validateCommit = (commit: string) => {
     const commitRegex = /^[0-9a-f]{7,40}$/

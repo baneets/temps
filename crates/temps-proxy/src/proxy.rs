@@ -1,3 +1,4 @@
+use crate::on_demand::OnDemandManager;
 use crate::service::challenge_service::ChallengeService;
 use crate::service::ip_access_control_service::IpAccessControlService;
 use crate::service::proxy_log_batch_writer::ProxyLogBatchHandle;
@@ -387,6 +388,7 @@ pub struct LoadBalancer {
     ip_access_control_service: Arc<IpAccessControlService>,
     challenge_service: Arc<ChallengeService>,
     disable_https_redirect: bool,
+    on_demand_manager: Option<Arc<OnDemandManager>>,
 }
 
 impl LoadBalancer {
@@ -416,7 +418,14 @@ impl LoadBalancer {
             ip_access_control_service,
             challenge_service,
             disable_https_redirect,
+            on_demand_manager: None,
         }
+    }
+
+    /// Set the on-demand manager for scale-to-zero wake-on-request.
+    pub fn with_on_demand_manager(mut self, manager: Arc<OnDemandManager>) -> Self {
+        self.on_demand_manager = Some(manager);
+        self
     }
 
     // Test-only accessors for integration tests
@@ -544,6 +553,36 @@ impl LoadBalancer {
                 ctx.request_id
             );
         }
+    }
+
+    /// Generate HTML for the "waking up" interstitial page.
+    /// Displayed when a request hits a sleeping on-demand environment.
+    /// Auto-refreshes every 3 seconds until the environment is awake.
+    fn generate_waking_html() -> String {
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="3">
+    <title>Waking Up</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
+        .container { text-align: center; max-width: 480px; padding: 40px; }
+        .spinner { width: 48px; height: 48px; border: 4px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 24px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        h1 { font-size: 1.5rem; margin-bottom: 12px; color: #f1f5f9; }
+        p { color: #94a3b8; line-height: 1.6; margin: 0; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="spinner"></div>
+        <h1>Waking Up</h1>
+        <p>This environment is starting up. The page will refresh automatically.</p>
+    </div>
+</body>
+</html>"#.to_string()
     }
 
     /// Generate HTML for CAPTCHA challenge page
@@ -1974,6 +2013,58 @@ impl ProxyHttp for LoadBalancer {
             }
         }
 
+        // On-demand: check if this host maps to a sleeping environment.
+        // Sleeping environments are excluded from the route table, so we must
+        // check before project context resolution. Serve a "waking up" page and
+        // trigger an async wake.
+        if let Some(ref on_demand) = self.on_demand_manager {
+            let host_without_port = ctx.host.split(':').next().unwrap_or(&ctx.host);
+            if let Some(sleeping_info) = on_demand.get_sleeping_environment(host_without_port) {
+                info!(
+                    environment_id = sleeping_info.environment_id,
+                    host = %ctx.host,
+                    "Request hit sleeping environment, serving wake page"
+                );
+
+                // Trigger async wake (doesn't block the response)
+                let on_demand_clone = Arc::clone(on_demand);
+                let env_id = sleeping_info.environment_id;
+                let wake_timeout = sleeping_info.wake_timeout_seconds;
+                tokio::spawn(async move {
+                    match on_demand_clone.wake_environment(env_id, wake_timeout).await {
+                        Ok(()) => {
+                            info!(environment_id = env_id, "Environment woke up successfully");
+                        }
+                        Err(e) => {
+                            error!(
+                                environment_id = env_id,
+                                error = %e,
+                                "Failed to wake environment"
+                            );
+                        }
+                    }
+                });
+
+                // Serve a "waking up" HTML page with auto-refresh
+                let html = Self::generate_waking_html();
+                let html_bytes = Bytes::from(html);
+
+                let mut response = ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
+                response.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                response.insert_header("Retry-After", "3")?;
+                response.insert_header("Cache-Control", "no-store")?;
+                response.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                session
+                    .write_response_header(Box::new(response), false)
+                    .await?;
+                session.write_response_body(Some(html_bytes), true).await?;
+
+                ctx.routing_status = "sleeping".to_string();
+                return Ok(true);
+            }
+        }
+
         // Resolve project context early to set routing status for all requests
         let project_context = self
             .project_context_resolver
@@ -1985,6 +2076,11 @@ impl ProxyHttp for LoadBalancer {
             ctx.environment = Some(project_ctx.environment.clone());
             ctx.deployment = Some(project_ctx.deployment.clone());
             ctx.routing_status = "routed".to_string();
+
+            // Record activity for on-demand idle tracking
+            if let Some(ref on_demand) = self.on_demand_manager {
+                on_demand.record_activity(project_ctx.environment.id);
+            }
 
             // Check if this is a CAPTCHA endpoint - allow these to bypass attack mode
             // This includes:

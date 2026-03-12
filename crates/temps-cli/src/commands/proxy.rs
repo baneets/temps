@@ -272,6 +272,7 @@ impl ProxyCommand {
             route_table,
             shutdown_signal,
             config.clone(),
+            None, // on-demand not available in standalone proxy mode
         ) {
             Ok(_) => {
                 info!("Proxy server exited");

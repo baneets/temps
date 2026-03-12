@@ -609,6 +609,23 @@ impl OtelStorage for TimescaleDbStorage {
             values.push(environment_id.into());
             param_idx += 1;
         }
+        if let Some(ref attrs) = query.attributes {
+            for (key, value) in attrs {
+                where_clauses.push(format!(
+                    "attributes->>${}::text = ${}",
+                    param_idx,
+                    param_idx + 1
+                ));
+                values.push(key.clone().into());
+                values.push(value.clone().into());
+                param_idx += 2;
+            }
+        }
+        if let Some(ref pattern) = query.name_pattern {
+            where_clauses.push(format!("name ILIKE ${}", param_idx));
+            values.push(format!("%{}%", pattern).into());
+            param_idx += 1;
+        }
 
         let where_sql = where_clauses.join(" AND ");
 
@@ -686,6 +703,23 @@ impl OtelStorage for TimescaleDbStorage {
         if let Some(environment_id) = query.environment_id {
             where_clauses.push(format!("e.id = ${}", param_idx));
             values.push(environment_id.into());
+            param_idx += 1;
+        }
+        if let Some(ref attrs) = query.attributes {
+            for (key, value) in attrs {
+                where_clauses.push(format!(
+                    "s.attributes->>${}::text = ${}",
+                    param_idx,
+                    param_idx + 1
+                ));
+                values.push(key.clone().into());
+                values.push(value.clone().into());
+                param_idx += 2;
+            }
+        }
+        if let Some(ref pattern) = query.name_pattern {
+            where_clauses.push(format!("s.name ILIKE ${}", param_idx));
+            values.push(format!("%{}%", pattern).into());
             param_idx += 1;
         }
 
@@ -837,6 +871,23 @@ impl OtelStorage for TimescaleDbStorage {
                 param_idx
             ));
             values.push(environment_id.into());
+            param_idx += 1;
+        }
+        if let Some(ref attrs) = query.attributes {
+            for (key, value) in attrs {
+                where_clauses.push(format!(
+                    "attributes->>${}::text = ${}",
+                    param_idx,
+                    param_idx + 1
+                ));
+                values.push(key.clone().into());
+                values.push(value.clone().into());
+                param_idx += 2;
+            }
+        }
+        if let Some(ref pattern) = query.name_pattern {
+            where_clauses.push(format!("name ILIKE ${}", param_idx));
+            values.push(format!("%{}%", pattern).into());
             let _ = param_idx;
         }
 
@@ -889,6 +940,395 @@ impl OtelStorage for TimescaleDbStorage {
             .collect();
 
         Ok(spans)
+    }
+
+    async fn query_genai_trace_summaries(
+        &self,
+        query: TraceQuery,
+    ) -> StorageResult<Vec<GenAiTraceSummary>> {
+        let limit = query.limit.unwrap_or(50).min(100);
+        let offset = query.offset.unwrap_or(0);
+
+        // Base filter: must have gen_ai.system or gen_ai.provider.name (deprecated → current)
+        let mut where_clauses = vec![
+            "s.project_id = $1".to_string(),
+            "(s.attributes ? 'gen_ai.system' OR s.attributes ? 'gen_ai.provider.name')".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![query.project_id.into()];
+        let mut param_idx = 2u32;
+
+        if let Some(ref svc) = query.service_name {
+            where_clauses.push(format!("s.service_name = ${}", param_idx));
+            values.push(svc.clone().into());
+            param_idx += 1;
+        }
+        if let Some(start) = query.start_time {
+            where_clauses.push(format!("s.start_time >= ${}", param_idx));
+            values.push(start.into());
+            param_idx += 1;
+        }
+        if let Some(end) = query.end_time {
+            where_clauses.push(format!("s.start_time <= ${}", param_idx));
+            values.push(end.into());
+            param_idx += 1;
+        }
+        if let Some(ref attrs) = query.attributes {
+            for (key, value) in attrs {
+                // Handle deprecated attribute names with COALESCE
+                match key.as_str() {
+                    "gen_ai.system" => {
+                        where_clauses.push(format!(
+                            "COALESCE(s.attributes->>'gen_ai.provider.name', s.attributes->>'gen_ai.system') = ${}",
+                            param_idx
+                        ));
+                        values.push(value.clone().into());
+                        param_idx += 1;
+                    }
+                    "gen_ai.usage.input_tokens" => {
+                        where_clauses.push(format!(
+                            "COALESCE(s.attributes->>'gen_ai.usage.input_tokens', s.attributes->>'gen_ai.usage.prompt_tokens') = ${}",
+                            param_idx
+                        ));
+                        values.push(value.clone().into());
+                        param_idx += 1;
+                    }
+                    _ => {
+                        where_clauses.push(format!(
+                            "s.attributes->>${}::text = ${}",
+                            param_idx,
+                            param_idx + 1
+                        ));
+                        values.push(key.clone().into());
+                        values.push(value.clone().into());
+                        param_idx += 2;
+                    }
+                }
+            }
+        }
+
+        let where_sql = where_clauses.join(" AND ");
+
+        let sql = format!(
+            r#"
+            SELECT
+                s.trace_id,
+                (array_agg(s.name ORDER BY
+                    CASE WHEN s.parent_span_id IS NULL THEN 0 ELSE 1 END,
+                    s.duration_ms DESC
+                ))[1] AS root_span_name,
+                (array_agg(s.service_name ORDER BY
+                    CASE WHEN s.parent_span_id IS NULL THEN 0 ELSE 1 END,
+                    s.duration_ms DESC
+                ))[1] AS service_name,
+                (array_agg(
+                    COALESCE(s.attributes->>'gen_ai.provider.name', s.attributes->>'gen_ai.system')
+                    ORDER BY s.start_time ASC)
+                    FILTER (WHERE COALESCE(s.attributes->>'gen_ai.provider.name', s.attributes->>'gen_ai.system') IS NOT NULL)
+                )[1] AS gen_ai_system,
+                (array_agg(s.attributes->>'gen_ai.request.model' ORDER BY s.start_time ASC)
+                    FILTER (WHERE s.attributes->>'gen_ai.request.model' IS NOT NULL)
+                )[1] AS gen_ai_model,
+                (array_agg(s.attributes->>'gen_ai.operation.name' ORDER BY s.start_time ASC)
+                    FILTER (WHERE s.attributes->>'gen_ai.operation.name' IS NOT NULL)
+                )[1] AS gen_ai_operation,
+                MIN(s.start_time) AS start_time,
+                MAX(s.duration_ms) AS duration_ms,
+                COUNT(*)::bigint AS span_count,
+                COUNT(*) FILTER (WHERE s.status_code = 'ERROR')::bigint AS error_count,
+                (SUM(COALESCE(
+                    (s.attributes->>'gen_ai.usage.input_tokens')::bigint,
+                    (s.attributes->>'gen_ai.usage.prompt_tokens')::bigint
+                )) FILTER (WHERE COALESCE(
+                    s.attributes->>'gen_ai.usage.input_tokens',
+                    s.attributes->>'gen_ai.usage.prompt_tokens'
+                ) IS NOT NULL))::bigint AS total_input_tokens,
+                (SUM(COALESCE(
+                    (s.attributes->>'gen_ai.usage.output_tokens')::bigint,
+                    (s.attributes->>'gen_ai.usage.completion_tokens')::bigint
+                )) FILTER (WHERE COALESCE(
+                    s.attributes->>'gen_ai.usage.output_tokens',
+                    s.attributes->>'gen_ai.usage.completion_tokens'
+                ) IS NOT NULL))::bigint AS total_output_tokens,
+                (SUM((s.attributes->>'gen_ai.usage.cache_creation.input_tokens')::bigint)
+                    FILTER (WHERE s.attributes->>'gen_ai.usage.cache_creation.input_tokens' IS NOT NULL))::bigint
+                    AS total_cache_creation_input_tokens,
+                (SUM((s.attributes->>'gen_ai.usage.cache_read.input_tokens')::bigint)
+                    FILTER (WHERE s.attributes->>'gen_ai.usage.cache_read.input_tokens' IS NOT NULL))::bigint
+                    AS total_cache_read_input_tokens
+            FROM otel_spans s
+            WHERE {where_sql}
+            GROUP BY s.trace_id
+            ORDER BY MIN(s.start_time) DESC
+            LIMIT ${param_idx} OFFSET ${next_param}
+            "#,
+            next_param = param_idx + 1
+        );
+        values.push((limit as i64).into());
+        values.push((offset as i64).into());
+
+        let results = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                &sql,
+                values,
+            ))
+            .await?;
+
+        let summaries = results
+            .iter()
+            .filter_map(|row| {
+                Some(GenAiTraceSummary {
+                    trace_id: row.try_get("", "trace_id").ok()?,
+                    root_span_name: row.try_get("", "root_span_name").ok()?,
+                    service_name: row.try_get("", "service_name").ok()?,
+                    gen_ai_system: row.try_get("", "gen_ai_system").ok().flatten(),
+                    gen_ai_model: row.try_get("", "gen_ai_model").ok().flatten(),
+                    gen_ai_operation: row.try_get("", "gen_ai_operation").ok().flatten(),
+                    start_time: row.try_get("", "start_time").ok()?,
+                    duration_ms: row.try_get("", "duration_ms").ok()?,
+                    span_count: row.try_get("", "span_count").ok()?,
+                    error_count: row.try_get("", "error_count").ok()?,
+                    total_input_tokens: row.try_get("", "total_input_tokens").ok().flatten(),
+                    total_output_tokens: row.try_get("", "total_output_tokens").ok().flatten(),
+                    total_cache_creation_input_tokens: row
+                        .try_get("", "total_cache_creation_input_tokens")
+                        .ok()
+                        .flatten(),
+                    total_cache_read_input_tokens: row
+                        .try_get("", "total_cache_read_input_tokens")
+                        .ok()
+                        .flatten(),
+                })
+            })
+            .collect();
+
+        Ok(summaries)
+    }
+
+    async fn get_genai_trace_spans(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> StorageResult<Vec<GenAiSpanDetail>> {
+        // Fetch ALL spans in the trace — not just those with gen_ai.system/provider.name.
+        // This ensures child spans (HTTP, DB, tool execution) that are part of the
+        // GenAI trace tree are included, giving a complete trace view.
+        // The trace is already known to be a GenAI trace (discovered by query_genai_trace_summaries).
+        let sql = r#"
+            SELECT span_id, parent_span_id, name, kind, start_time, duration_ms,
+                   status_code, attributes
+            FROM otel_spans
+            WHERE project_id = $1 AND trace_id = $2
+            ORDER BY start_time ASC
+        "#;
+
+        let results = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                sql,
+                vec![project_id.into(), trace_id.to_string().into()],
+            ))
+            .await?;
+
+        let spans = results
+            .iter()
+            .filter_map(|row| {
+                let attributes: serde_json::Value = row.try_get("", "attributes").ok()?;
+                let attrs: std::collections::BTreeMap<String, String> = attributes
+                    .as_object()
+                    .map(|obj| {
+                        obj.iter()
+                            .map(|(k, v)| {
+                                (k.clone(), v.as_str().unwrap_or(&v.to_string()).to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let kind_str: String = row.try_get("", "kind").ok()?;
+                let kind = match kind_str.as_str() {
+                    "Server" => SpanKind::Server,
+                    "Client" => SpanKind::Client,
+                    "Producer" => SpanKind::Producer,
+                    "Consumer" => SpanKind::Consumer,
+                    "Internal" => SpanKind::Internal,
+                    _ => SpanKind::Internal,
+                };
+
+                let status_str: String = row.try_get("", "status_code").ok()?;
+                let status_code = match status_str.as_str() {
+                    "OK" => SpanStatusCode::Ok,
+                    "ERROR" => SpanStatusCode::Error,
+                    _ => SpanStatusCode::Unset,
+                };
+
+                Some(GenAiSpanDetail::from_span_attrs(
+                    row.try_get("", "span_id").ok()?,
+                    row.try_get("", "parent_span_id").ok().flatten(),
+                    row.try_get("", "name").ok()?,
+                    kind,
+                    row.try_get("", "start_time").ok()?,
+                    row.try_get("", "duration_ms").ok()?,
+                    status_code,
+                    attrs,
+                ))
+            })
+            .collect();
+
+        Ok(spans)
+    }
+
+    async fn get_genai_trace_events(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> StorageResult<Vec<GenAiEvent>> {
+        // Query span events from spans in this trace that have gen_ai-related events.
+        // Events are stored as JSONB arrays in the otel_spans table.
+        let sql = r#"
+            SELECT span_id, events
+            FROM otel_spans
+            WHERE project_id = $1 AND trace_id = $2
+              AND jsonb_array_length(COALESCE(events, '[]'::jsonb)) > 0
+            ORDER BY start_time ASC
+        "#;
+
+        let results = self
+            .db
+            .query_all(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                sql,
+                vec![project_id.into(), trace_id.to_string().into()],
+            ))
+            .await?;
+
+        let mut events = Vec::new();
+        for row in &results {
+            let span_id: String = match row.try_get("", "span_id") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let events_json: serde_json::Value = match row.try_get("", "events") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if let Some(event_array) = events_json.as_array() {
+                for event in event_array {
+                    let event_name = event
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+
+                    // Only include gen_ai-related events
+                    if !event_name.starts_with("gen_ai.") {
+                        continue;
+                    }
+
+                    let timestamp_ns = event
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(chrono::Utc::now);
+
+                    let attrs: std::collections::BTreeMap<String, String> = event
+                        .get("attributes")
+                        .and_then(|v| v.as_object())
+                        .map(|obj| {
+                            obj.iter()
+                                .map(|(k, v)| {
+                                    (k.clone(), v.as_str().unwrap_or(&v.to_string()).to_string())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    events.push(GenAiEvent {
+                        span_id: span_id.clone(),
+                        trace_id: trace_id.to_string(),
+                        event_name: event_name.to_string(),
+                        timestamp: timestamp_ns,
+                        attributes: attrs,
+                    });
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
+    async fn count_genai_traces(&self, query: TraceQuery) -> StorageResult<u64> {
+        let mut where_clauses = vec![
+            "project_id = $1".to_string(),
+            "(attributes ? 'gen_ai.system' OR attributes ? 'gen_ai.provider.name')".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![query.project_id.into()];
+        let mut param_idx = 2u32;
+
+        if let Some(ref svc) = query.service_name {
+            where_clauses.push(format!("service_name = ${}", param_idx));
+            values.push(svc.clone().into());
+            param_idx += 1;
+        }
+        if let Some(start) = query.start_time {
+            where_clauses.push(format!("start_time >= ${}", param_idx));
+            values.push(start.into());
+            param_idx += 1;
+        }
+        if let Some(end) = query.end_time {
+            where_clauses.push(format!("start_time <= ${}", param_idx));
+            values.push(end.into());
+            param_idx += 1;
+        }
+        if let Some(ref attrs) = query.attributes {
+            for (key, value) in attrs {
+                match key.as_str() {
+                    "gen_ai.system" => {
+                        where_clauses.push(format!(
+                            "COALESCE(attributes->>'gen_ai.provider.name', attributes->>'gen_ai.system') = ${}",
+                            param_idx
+                        ));
+                        values.push(value.clone().into());
+                        param_idx += 1;
+                    }
+                    _ => {
+                        where_clauses.push(format!(
+                            "attributes->>${}::text = ${}",
+                            param_idx,
+                            param_idx + 1
+                        ));
+                        values.push(key.clone().into());
+                        values.push(value.clone().into());
+                        param_idx += 2;
+                    }
+                }
+            }
+        }
+        let _ = param_idx;
+
+        let where_sql = where_clauses.join(" AND ");
+        let sql = format!(
+            "SELECT COUNT(DISTINCT trace_id)::bigint AS cnt FROM otel_spans WHERE {where_sql}"
+        );
+
+        let result = self
+            .db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                &sql,
+                values,
+            ))
+            .await?;
+
+        if let Some(row) = result {
+            let cnt: i64 = row.try_get("", "cnt").unwrap_or(0);
+            Ok(cnt as u64)
+        } else {
+            Ok(0)
+        }
     }
 
     async fn query_logs(&self, query: LogQuery) -> StorageResult<Vec<LogRecord>> {

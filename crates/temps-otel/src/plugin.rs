@@ -157,6 +157,8 @@ impl OtelConfig {
         query_handler::get_health,
         query_handler::get_quota,
         query_handler::get_pipeline_stats,
+        query_handler::query_genai_traces,
+        query_handler::get_genai_trace,
     ),
     components(
         schemas(
@@ -186,6 +188,11 @@ impl OtelConfig {
             crate::types::HealthStatus,
             crate::types::StorageQuota,
             crate::types::PipelineStats,
+            query_handler::GenAiTraceSummariesResponse,
+            query_handler::GenAiTraceDetailResponse,
+            crate::types::GenAiTraceSummary,
+            crate::types::GenAiSpanDetail,
+            crate::types::GenAiEvent,
         )
     ),
     info(
@@ -195,7 +202,8 @@ impl OtelConfig {
     ),
     tags(
         (name = "OTel Ingest", description = "OTLP/HTTP ingest endpoints (protobuf)"),
-        (name = "OTel", description = "Query endpoints for the monitoring UI")
+        (name = "OTel", description = "Query endpoints for the monitoring UI"),
+        (name = "GenAI", description = "GenAI agent activity tracing endpoints")
     )
 )]
 pub struct OtelApiDoc;

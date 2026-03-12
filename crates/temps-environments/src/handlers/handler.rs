@@ -107,6 +107,8 @@ pub async fn get_environments(
             branch: env.branch,
             is_preview: env.is_preview,
             deployment_config: env.deployment_config,
+            protected: env.protected,
+            sleeping: env.sleeping,
         });
     }
 
@@ -158,6 +160,8 @@ pub async fn get_environment(
         branch: env.branch,
         is_preview: env.is_preview,
         deployment_config: env.deployment_config,
+        protected: env.protected,
+        sleeping: env.sleeping,
     }))
 }
 
@@ -621,6 +625,189 @@ pub async fn update_environment_settings(
         branch: updated_environment.branch,
         is_preview: updated_environment.is_preview,
         deployment_config: updated_environment.deployment_config,
+        protected: updated_environment.protected,
+        sleeping: updated_environment.sleeping,
+    })
+    .into_response())
+}
+
+/// Wake a sleeping on-demand environment
+///
+/// Manually wake an environment that has been put to sleep by the on-demand
+/// idle timeout. Sets `sleeping = false` on the environment. The proxy will
+/// detect the state change and start containers on the next request.
+#[utoipa::path(
+    post,
+    path = "/projects/{project_id}/environments/{env_id}/wake",
+    tag = "Environments",
+    responses(
+        (status = 200, description = "Environment woken up", body = EnvironmentResponse),
+        (status = 400, description = "On-demand not enabled for this environment"),
+        (status = 404, description = "Environment not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("env_id" = i32, Path, description = "Environment ID")
+    )
+)]
+pub async fn wake_environment(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, env_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EnvironmentsWrite);
+
+    let updated_environment = state
+        .environment_service
+        .set_sleeping(project_id, env_id, false)
+        .await?;
+
+    info!(
+        environment_id = env_id,
+        project_id = project_id,
+        user_id = auth.user_id(),
+        "Environment manually woken up"
+    );
+
+    let audit_context = AuditContext {
+        user_id: auth.user_id(),
+        ip_address: Some(metadata.ip_address.to_string()),
+        user_agent: metadata.user_agent,
+    };
+
+    let _ = state
+        .audit_service
+        .create_audit_log(&EnvironmentSettingsUpdatedAudit {
+            context: audit_context,
+            project_id,
+            project_name: String::new(),
+            project_slug: String::new(),
+            environment_id: env_id,
+            environment_name: updated_environment.name.clone(),
+            environment_slug: updated_environment.slug.clone(),
+            updated_settings: EnvironmentSettingsUpdatedFields {
+                cpu_request: None,
+                cpu_limit: None,
+                memory_request: None,
+                memory_limit: None,
+                branch: None,
+                replicas: None,
+                security_updated: false,
+            },
+        })
+        .await;
+
+    let main_url = state
+        .environment_service
+        .compute_environment_url(&updated_environment.subdomain)
+        .await;
+
+    Ok(Json(EnvironmentResponse {
+        id: updated_environment.id,
+        project_id: updated_environment.project_id,
+        name: updated_environment.name,
+        slug: updated_environment.slug,
+        main_url,
+        current_deployment_id: updated_environment.current_deployment_id,
+        created_at: updated_environment.created_at.timestamp_millis(),
+        updated_at: updated_environment.updated_at.timestamp_millis(),
+        branch: updated_environment.branch,
+        is_preview: updated_environment.is_preview,
+        deployment_config: updated_environment.deployment_config,
+        protected: updated_environment.protected,
+        sleeping: updated_environment.sleeping,
+    })
+    .into_response())
+}
+
+/// Sleep an on-demand environment
+///
+/// Manually put an on-demand environment to sleep. Sets `sleeping = true`.
+/// The proxy will stop sending traffic and the idle sweep will stop containers.
+#[utoipa::path(
+    post,
+    path = "/projects/{project_id}/environments/{env_id}/sleep",
+    tag = "Environments",
+    responses(
+        (status = 200, description = "Environment put to sleep", body = EnvironmentResponse),
+        (status = 400, description = "On-demand not enabled for this environment"),
+        (status = 404, description = "Environment not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("env_id" = i32, Path, description = "Environment ID")
+    )
+)]
+pub async fn sleep_environment(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, env_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EnvironmentsWrite);
+
+    let updated_environment = state
+        .environment_service
+        .set_sleeping(project_id, env_id, true)
+        .await?;
+
+    info!(
+        environment_id = env_id,
+        project_id = project_id,
+        user_id = auth.user_id(),
+        "Environment manually put to sleep"
+    );
+
+    let audit_context = AuditContext {
+        user_id: auth.user_id(),
+        ip_address: Some(metadata.ip_address.to_string()),
+        user_agent: metadata.user_agent,
+    };
+
+    let _ = state
+        .audit_service
+        .create_audit_log(&EnvironmentSettingsUpdatedAudit {
+            context: audit_context,
+            project_id,
+            project_name: String::new(),
+            project_slug: String::new(),
+            environment_id: env_id,
+            environment_name: updated_environment.name.clone(),
+            environment_slug: updated_environment.slug.clone(),
+            updated_settings: EnvironmentSettingsUpdatedFields {
+                cpu_request: None,
+                cpu_limit: None,
+                memory_request: None,
+                memory_limit: None,
+                branch: None,
+                replicas: None,
+                security_updated: false,
+            },
+        })
+        .await;
+
+    let main_url = state
+        .environment_service
+        .compute_environment_url(&updated_environment.subdomain)
+        .await;
+
+    Ok(Json(EnvironmentResponse {
+        id: updated_environment.id,
+        project_id: updated_environment.project_id,
+        name: updated_environment.name,
+        slug: updated_environment.slug,
+        main_url,
+        current_deployment_id: updated_environment.current_deployment_id,
+        created_at: updated_environment.created_at.timestamp_millis(),
+        updated_at: updated_environment.updated_at.timestamp_millis(),
+        branch: updated_environment.branch,
+        is_preview: updated_environment.is_preview,
+        deployment_config: updated_environment.deployment_config,
+        protected: updated_environment.protected,
+        sleeping: updated_environment.sleeping,
     })
     .into_response())
 }
@@ -764,6 +951,8 @@ pub async fn create_environment(
             branch: environment.branch,
             is_preview: environment.is_preview,
             deployment_config: environment.deployment_config,
+            protected: environment.protected,
+            sleeping: environment.sleeping,
         }),
     )
         .into_response())
@@ -784,6 +973,15 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route(
             "/projects/{project_id}/environments/{id_or_slug}/settings",
             put(update_environment_settings),
+        )
+        // Environment wake/sleep (on-demand)
+        .route(
+            "/projects/{project_id}/environments/{env_id}/wake",
+            post(wake_environment),
+        )
+        .route(
+            "/projects/{project_id}/environments/{env_id}/sleep",
+            post(sleep_environment),
         )
         // Environment domains
         .route(
@@ -828,6 +1026,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         get_environment,
         create_environment,
         update_environment_settings,
+        wake_environment,
+        sleep_environment,
         delete_environment,
         get_environment_domains,
         add_environment_domain,

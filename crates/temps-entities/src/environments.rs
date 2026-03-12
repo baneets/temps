@@ -31,6 +31,12 @@ pub struct Model {
     /// Indicates if this is a preview environment (auto-created per branch)
     /// Use the 'branch' field to track which branch this preview is for
     pub is_preview: bool,
+    /// When true, git pushes do NOT auto-deploy to this environment.
+    /// Deployments must be promoted from another environment.
+    pub protected: bool,
+    /// When true, the environment's containers have been stopped due to inactivity
+    /// (on-demand mode). They will be started on the next incoming request.
+    pub sleeping: bool,
 }
 
 impl Model {

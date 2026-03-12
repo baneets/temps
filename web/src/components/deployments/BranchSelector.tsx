@@ -124,7 +124,7 @@ export function BranchSelector({
     })
   }, [providedBranches, branchesQuery.data, defaultBranch])
 
-  const effectiveBranch = value || defaultBranch || ''
+  const effectiveBranch = value !== undefined ? value : (defaultBranch ?? '')
 
   // Notify parent when branches are loaded
   useEffect(() => {

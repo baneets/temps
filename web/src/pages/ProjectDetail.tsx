@@ -39,6 +39,7 @@ import { ErrorEventDetail } from './ErrorEventDetail'
 import { ErrorGroupDetail } from './ErrorGroupDetail'
 import RequestLogs from './RequestLogs'
 import Traces from './Traces'
+import { ProjectAgentActivity } from './AiGateway'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import {
@@ -380,6 +381,10 @@ export function ProjectDetail() {
               <Route
                 path="traces/*"
                 element={<Traces project={project} />}
+              />
+              <Route
+                path="ai-activity"
+                element={<ProjectAgentActivity projectId={project.id} />}
               />
               <Route
                 path="errors"

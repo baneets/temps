@@ -75,4 +75,10 @@ pub fn configure_routes() -> Router<OtelAppState> {
             "/otel/pipeline-stats",
             get(query_handler::get_pipeline_stats),
         )
+        // GenAI agent activity endpoints
+        .route("/otel/genai/traces", get(query_handler::query_genai_traces))
+        .route(
+            "/otel/genai/traces/{project_id}/{trace_id}",
+            get(query_handler::get_genai_trace),
+        )
 }

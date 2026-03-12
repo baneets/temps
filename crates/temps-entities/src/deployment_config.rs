@@ -293,6 +293,23 @@ pub struct DeploymentConfig {
     /// Defaults to `true` — replicas spread by default.
     #[serde(default = "default_anti_affinity")]
     pub anti_affinity: bool,
+
+    /// Enable on-demand mode (scale-to-zero).
+    /// When enabled, containers are stopped after `idle_timeout_seconds` of no traffic
+    /// and automatically started when a new request arrives.
+    #[serde(default)]
+    pub on_demand: bool,
+
+    /// Seconds of inactivity before containers are stopped in on-demand mode.
+    /// Only used when `on_demand` is true. Min: 60, Max: 86400 (24h).
+    /// Default: 300 (5 minutes).
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_seconds: i32,
+
+    /// Max seconds to wait for containers to start when waking from on-demand sleep.
+    /// Requests return 503 if exceeded. Default: 30.
+    #[serde(default = "default_wake_timeout")]
+    pub wake_timeout_seconds: i32,
 }
 
 /// Deployment configuration snapshot for deployments
@@ -351,6 +368,14 @@ fn default_anti_affinity() -> bool {
     true
 }
 
+fn default_idle_timeout() -> i32 {
+    300
+}
+
+fn default_wake_timeout() -> i32 {
+    30
+}
+
 impl Default for DeploymentConfig {
     fn default() -> Self {
         Self {
@@ -367,6 +392,9 @@ impl Default for DeploymentConfig {
             target_nodes: None,
             target_labels: None,
             anti_affinity: true,
+            on_demand: false,
+            idle_timeout_seconds: 300,
+            wake_timeout_seconds: 30,
         }
     }
 }
@@ -434,6 +462,17 @@ impl DeploymentConfig {
                 .clone()
                 .or_else(|| self.target_labels.clone()),
             anti_affinity: other.anti_affinity,
+            on_demand: other.on_demand || self.on_demand,
+            idle_timeout_seconds: if other.idle_timeout_seconds != 300 {
+                other.idle_timeout_seconds
+            } else {
+                self.idle_timeout_seconds
+            },
+            wake_timeout_seconds: if other.wake_timeout_seconds != 30 {
+                other.wake_timeout_seconds
+            } else {
+                self.wake_timeout_seconds
+            },
         }
     }
 
@@ -457,6 +496,22 @@ impl DeploymentConfig {
         if let Some(port) = self.exposed_port {
             if !(1..=65535).contains(&port) {
                 return Err(format!("Port {} is not in valid range (1-65535)", port));
+            }
+        }
+
+        // Idle timeout should be in valid range when on-demand is enabled
+        if self.on_demand {
+            if !(60..=86400).contains(&self.idle_timeout_seconds) {
+                return Err(format!(
+                    "Idle timeout {} is not in valid range (60-86400 seconds)",
+                    self.idle_timeout_seconds
+                ));
+            }
+            if !(5..=120).contains(&self.wake_timeout_seconds) {
+                return Err(format!(
+                    "Wake timeout {} is not in valid range (5-120 seconds)",
+                    self.wake_timeout_seconds
+                ));
             }
         }
 
@@ -541,6 +596,7 @@ mod tests {
             target_nodes: None,
             target_labels: None,
             anti_affinity: true,
+            ..Default::default()
         };
 
         let env_config = DeploymentConfig {
@@ -557,6 +613,7 @@ mod tests {
             target_nodes: None,
             target_labels: None,
             anti_affinity: true,
+            ..Default::default()
         };
 
         let merged = project_config.merge(&env_config);
@@ -671,6 +728,7 @@ mod tests {
             target_nodes: None,
             target_labels: None,
             anti_affinity: true,
+            ..Default::default()
         };
 
         let json = serde_json::to_value(&config).unwrap();
@@ -695,6 +753,7 @@ mod tests {
             target_nodes: None,
             target_labels: None,
             anti_affinity: true,
+            ..Default::default()
         };
 
         let mut env_vars = HashMap::new();

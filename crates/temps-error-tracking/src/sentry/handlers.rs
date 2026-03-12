@@ -62,7 +62,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
 /// Ingest a Sentry event (JSON payload)
 #[utoipa::path(
     post,
-    path = "/api/{project_id}/store/",
+    path = "/{project_id}/store/",
     params(
         ("project_id" = i32, Path, description = "Project ID")
     ),
@@ -149,7 +149,7 @@ async fn ingest_sentry_event(
 /// Ingest a Sentry envelope (binary payload)
 #[utoipa::path(
     post,
-    path = "/api/{project_id}/envelope/",
+    path = "/{project_id}/envelope/",
     params(
         ("project_id" = i32, Path, description = "Project ID")
     ),

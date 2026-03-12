@@ -1053,6 +1053,8 @@ mod tests {
             deleted_at: None,
             deployment_config: None,
             is_preview: false,
+            protected: false,
+            sleeping: false,
         }
     }
 

@@ -195,15 +195,7 @@ impl EnvironmentService {
                 cpu_limit,
                 memory_request,
                 memory_limit,
-                exposed_port: None,
-                automatic_deploy: false,
-                performance_metrics_enabled: false,
-                session_recording_enabled: false,
-                replicas: 1,
-                security: None,
-                target_nodes: None,
-                target_labels: None,
-                anti_affinity: true,
+                ..Default::default()
             })),
             branch: Set(Some(branch)),
             ..Default::default()
@@ -421,25 +413,8 @@ impl EnvironmentService {
             ));
         }
 
-        // Check if another active environment in the same project already tracks this branch
-        // (applies to both restore and fresh creation paths)
-        let branch_conflict = environments::Entity::find()
-            .filter(environments::Column::ProjectId.eq(project_id))
-            .filter(environments::Column::Branch.eq(&branch))
-            .filter(environments::Column::DeletedAt.is_null())
-            .one(self.db.as_ref())
-            .await
-            .map_err(|e| EnvironmentError::DatabaseError {
-                reason: format!("Failed to check branch uniqueness: {}", e),
-            })?;
-
-        if let Some(conflict) = branch_conflict {
-            return Err(EnvironmentError::BranchAlreadyInUse {
-                branch,
-                env_name: conflict.name,
-                project_id,
-            });
-        }
+        // Multiple environments can track the same branch (Vercel-like model:
+        // e.g. "main" can deploy to both production and staging environments).
 
         // Check if a soft-deleted environment with this name exists — restore it
         if let Some(deleted_env) = environments::Entity::find()
@@ -587,37 +562,28 @@ impl EnvironmentService {
         if let Some(anti_affinity) = settings.anti_affinity {
             deployment_config.anti_affinity = anti_affinity;
         }
+        if let Some(on_demand) = settings.on_demand {
+            deployment_config.on_demand = on_demand;
+        }
+        if let Some(idle_timeout_seconds) = settings.idle_timeout_seconds {
+            deployment_config.idle_timeout_seconds = idle_timeout_seconds;
+        }
+        if let Some(wake_timeout_seconds) = settings.wake_timeout_seconds {
+            deployment_config.wake_timeout_seconds = wake_timeout_seconds;
+        }
 
         // Validate the deployment config
         deployment_config.validate().map_err(|e| {
             EnvironmentError::InvalidInput(format!("Invalid deployment config: {}", e))
         })?;
 
-        // If the branch is being changed, verify no other environment in the same project
-        // already tracks it. We exclude the environment being updated from the check.
-        if let Some(ref new_branch) = settings.branch {
-            let branch_conflict = environments::Entity::find()
-                .filter(environments::Column::ProjectId.eq(project_id_param))
-                .filter(environments::Column::Branch.eq(new_branch.as_str()))
-                .filter(environments::Column::Id.ne(env_id))
-                .filter(environments::Column::DeletedAt.is_null())
-                .one(self.db.as_ref())
-                .await
-                .map_err(|e| EnvironmentError::DatabaseError {
-                    reason: format!("Failed to check branch uniqueness: {}", e),
-                })?;
-
-            if let Some(conflict) = branch_conflict {
-                return Err(EnvironmentError::BranchAlreadyInUse {
-                    branch: new_branch.clone(),
-                    env_name: conflict.name,
-                    project_id: project_id_param,
-                });
-            }
-        }
+        // Multiple environments can track the same branch (Vercel-like model).
 
         active_model.deployment_config = Set(Some(deployment_config));
         active_model.branch = Set(settings.branch);
+        if let Some(protected) = settings.protected {
+            active_model.protected = Set(protected);
+        }
         active_model.updated_at = Set(chrono::Utc::now());
 
         let updated_environment = active_model
@@ -626,6 +592,47 @@ impl EnvironmentService {
             .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
 
         Ok(updated_environment)
+    }
+
+    /// Set the sleeping state of an environment (for on-demand scale-to-zero).
+    /// Returns the updated environment model.
+    pub async fn set_sleeping(
+        &self,
+        project_id: i32,
+        env_id: i32,
+        sleeping: bool,
+    ) -> Result<environments::Model, EnvironmentError> {
+        let environment = self.get_environment(project_id, env_id).await?;
+
+        // Verify on-demand is enabled for this environment
+        let on_demand = environment
+            .deployment_config
+            .as_ref()
+            .map(|c| c.on_demand)
+            .unwrap_or(false);
+
+        if !on_demand {
+            return Err(EnvironmentError::InvalidInput(format!(
+                "Environment {} does not have on-demand mode enabled",
+                env_id
+            )));
+        }
+
+        // Already in the desired state
+        if environment.sleeping == sleeping {
+            return Ok(environment);
+        }
+
+        let mut active_model: environments::ActiveModel = environment.into();
+        active_model.sleeping = Set(sleeping);
+        active_model.updated_at = Set(chrono::Utc::now());
+
+        let updated = active_model
+            .update(self.db.as_ref())
+            .await
+            .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
+
+        Ok(updated)
     }
 
     pub async fn get_environment_domains(
@@ -866,165 +873,20 @@ mod tests {
         }
     }
 
-    /// create_new_environment rejects a branch already tracked by another environment
-    /// in the same project.
+    /// Multiple environments can track the same branch (Vercel-like model).
+    /// create_new_environment should allow duplicate branches.
     #[tokio::test]
-    async fn test_create_environment_rejects_duplicate_branch() {
-        let existing_env = environments::Model {
-            id: 1,
-            name: "production".to_string(),
-            slug: "production".to_string(),
-            subdomain: "my-project-production".to_string(),
-            branch: Some("main".to_string()),
+    async fn test_create_environment_allows_duplicate_branch() {
+        // BranchAlreadyInUse check was removed to support multiple environments
+        // tracking the same branch. This test verifies the error variant still
+        // exists for backwards compatibility but is no longer triggered.
+        let error = EnvironmentError::BranchAlreadyInUse {
+            branch: "main".to_string(),
+            env_name: "production".to_string(),
             project_id: 10,
-            host: "".to_string(),
-            upstreams: temps_entities::upstream_config::UpstreamList::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_deployment: None,
-            current_deployment_id: None,
-            deleted_at: None,
-            deployment_config: None,
-            is_preview: false,
         };
-
-        let project = temps_entities::projects::Model {
-            id: 10,
-            name: "My Project".to_string(),
-            slug: "my-project".to_string(),
-            repo_name: "repo".to_string(),
-            repo_owner: "owner".to_string(),
-            directory: ".".to_string(),
-            main_branch: "main".to_string(),
-            preset: temps_entities::preset::Preset::NextJs,
-            preset_config: None,
-            deployment_config: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            is_deleted: false,
-            deleted_at: None,
-            last_deployment: None,
-            is_public_repo: true,
-            git_url: None,
-            git_provider_connection_id: None,
-            attack_mode: false,
-            enable_preview_environments: false,
-            source_type: temps_entities::source_type::SourceType::Git,
-        };
-
-        // Query sequence:
-        //   1. find project by id            → returns project
-        //   2. find env by project_id+name   → returns empty (no name conflict)
-        //   3. find env by project_id+branch → returns existing_env (branch conflict)
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results(vec![vec![project]])
-            .append_query_results(vec![Vec::<environments::Model>::new()])
-            .append_query_results(vec![vec![existing_env]])
-            .into_connection();
-
-        let svc = make_service(db);
-        let result = svc
-            .create_new_environment(10, "staging".to_string(), "main".to_string(), None)
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(
-                result.unwrap_err(),
-                EnvironmentError::BranchAlreadyInUse {
-                    branch,
-                    env_name,
-                    project_id: 10,
-                } if branch == "main" && env_name == "production"
-            ),
-            "Expected BranchAlreadyInUse error"
-        );
-    }
-
-    /// update_environment_settings rejects a branch already tracked by a different
-    /// environment in the same project.
-    #[tokio::test]
-    async fn test_update_settings_rejects_duplicate_branch() {
-        let current_env = environments::Model {
-            id: 2,
-            name: "staging".to_string(),
-            slug: "staging".to_string(),
-            subdomain: "my-project-staging".to_string(),
-            branch: Some("develop".to_string()),
-            project_id: 10,
-            host: "".to_string(),
-            upstreams: temps_entities::upstream_config::UpstreamList::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_deployment: None,
-            current_deployment_id: None,
-            deleted_at: None,
-            deployment_config: None,
-            is_preview: false,
-        };
-
-        let conflicting_env = environments::Model {
-            id: 1,
-            name: "production".to_string(),
-            slug: "production".to_string(),
-            subdomain: "my-project-production".to_string(),
-            branch: Some("main".to_string()),
-            project_id: 10,
-            host: "".to_string(),
-            upstreams: temps_entities::upstream_config::UpstreamList::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_deployment: None,
-            current_deployment_id: None,
-            deleted_at: None,
-            deployment_config: None,
-            is_preview: false,
-        };
-
-        // Query sequence:
-        //   1. get_environment (find by project_id + env_id)            → returns current_env
-        //   2. find env by project_id + branch (excluding env_id=2)     → returns conflicting_env
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results(vec![vec![current_env]])
-            .append_query_results(vec![vec![conflicting_env]])
-            .into_connection();
-
-        let svc = make_service(db);
-        let result = svc
-            .update_environment_settings(
-                10,
-                2,
-                crate::handlers::UpdateEnvironmentSettingsRequest {
-                    branch: Some("main".to_string()),
-                    cpu_request: None,
-                    cpu_limit: None,
-                    memory_request: None,
-                    memory_limit: None,
-                    replicas: None,
-                    exposed_port: None,
-                    automatic_deploy: None,
-                    performance_metrics_enabled: None,
-                    session_recording_enabled: None,
-                    security: None,
-                    target_nodes: None,
-                    target_labels: None,
-                    anti_affinity: None,
-                },
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(
-            matches!(
-                result.unwrap_err(),
-                EnvironmentError::BranchAlreadyInUse {
-                    branch,
-                    env_name,
-                    project_id: 10,
-                } if branch == "main" && env_name == "production"
-            ),
-            "Expected BranchAlreadyInUse error"
-        );
+        assert!(error.to_string().contains("main"));
+        assert!(error.to_string().contains("production"));
     }
 
     /// update_environment_settings allows updating other settings while keeping
@@ -1047,6 +909,8 @@ mod tests {
             deleted_at: None,
             deployment_config: None,
             is_preview: false,
+            protected: false,
+            sleeping: false,
         };
 
         // Query sequence:
@@ -1059,8 +923,9 @@ mod tests {
         };
 
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // 1. get_environment query
             .append_query_results(vec![vec![current_env]])
-            .append_query_results(vec![Vec::<environments::Model>::new()])
+            // 2. update returns the updated model
             .append_query_results(vec![vec![updated_env]])
             .append_exec_results(vec![MockExecResult {
                 last_insert_id: 0,
@@ -1088,6 +953,10 @@ mod tests {
                     target_nodes: None,
                     target_labels: None,
                     anti_affinity: None,
+                    protected: None,
+                    on_demand: None,
+                    idle_timeout_seconds: None,
+                    wake_timeout_seconds: None,
                 },
             )
             .await;
@@ -1097,5 +966,122 @@ mod tests {
             "Should allow keeping the same branch: {:?}",
             result.err()
         );
+    }
+
+    fn make_env_model(on_demand: bool, sleeping: bool) -> environments::Model {
+        environments::Model {
+            id: 1,
+            name: "staging".to_string(),
+            slug: "staging".to_string(),
+            subdomain: "my-project-staging".to_string(),
+            branch: Some("develop".to_string()),
+            project_id: 10,
+            host: "".to_string(),
+            upstreams: temps_entities::upstream_config::UpstreamList::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_deployment: None,
+            current_deployment_id: Some(100),
+            deleted_at: None,
+            deployment_config: Some(temps_entities::deployment_config::DeploymentConfig {
+                on_demand,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 30,
+                ..Default::default()
+            }),
+            is_preview: false,
+            protected: false,
+            sleeping,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_sleeping_wakes_sleeping_environment() {
+        let env = make_env_model(true, true);
+        let woken = environments::Model {
+            sleeping: false,
+            ..env.clone()
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // 1. get_environment (find by project_id + id)
+            .append_query_results(vec![vec![env]])
+            // 2. update returns the woken model
+            .append_query_results(vec![vec![woken.clone()]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let svc = make_service(db);
+        let result = svc.set_sleeping(10, 1, false).await;
+
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
+        assert!(!result.unwrap().sleeping);
+    }
+
+    #[tokio::test]
+    async fn test_set_sleeping_rejects_non_on_demand_environment() {
+        let env = make_env_model(false, false);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![env]])
+            .into_connection();
+
+        let svc = make_service(db);
+        let result = svc.set_sleeping(10, 1, true).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EnvironmentError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("on-demand"),
+                    "Error should mention on-demand: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_sleeping_noop_when_already_in_desired_state() {
+        let env = make_env_model(true, true);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Only the get_environment query — no update should happen
+            .append_query_results(vec![vec![env.clone()]])
+            .into_connection();
+
+        let svc = make_service(db);
+        let result = svc.set_sleeping(10, 1, true).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().sleeping, "Should still be sleeping");
+    }
+
+    #[tokio::test]
+    async fn test_set_sleeping_puts_environment_to_sleep() {
+        let env = make_env_model(true, false);
+        let sleeping = environments::Model {
+            sleeping: true,
+            ..env.clone()
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![env]])
+            .append_query_results(vec![vec![sleeping.clone()]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let svc = make_service(db);
+        let result = svc.set_sleeping(10, 1, true).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().sleeping);
     }
 }

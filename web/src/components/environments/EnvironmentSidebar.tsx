@@ -1,4 +1,9 @@
 import { EnvironmentResponse } from '@/api/client'
+import {
+  sleepEnvironmentMutation,
+  wakeEnvironmentMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
@@ -7,8 +12,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { Box, Settings } from 'lucide-react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { Box, Loader2, Moon, Play, Settings } from 'lucide-react'
 import { useCallback } from 'react'
+import { toast } from 'sonner'
 
 interface EnvironmentSidebarProps {
   environment: EnvironmentResponse
@@ -31,6 +38,27 @@ export function EnvironmentSidebar({
   onViewChange,
   isStatic,
 }: EnvironmentSidebarProps) {
+  const queryClient = useQueryClient()
+  const isOnDemand = environment.deployment_config?.onDemand ?? false
+
+  const wakeMutation = useMutation({
+    ...wakeEnvironmentMutation(),
+    onSuccess: () => {
+      toast.success('Environment is waking up')
+      queryClient.invalidateQueries({ queryKey: ['environment'] })
+    },
+    meta: { errorTitle: 'Failed to wake environment' },
+  })
+
+  const sleepMutation = useMutation({
+    ...sleepEnvironmentMutation(),
+    onSuccess: () => {
+      toast.success('Environment is going to sleep')
+      queryClient.invalidateQueries({ queryKey: ['environment'] })
+    },
+    meta: { errorTitle: 'Failed to sleep environment' },
+  })
+
   const navItems: NavItem[] = [
     {
       title: 'Containers',
@@ -84,14 +112,71 @@ export function EnvironmentSidebar({
       <div className="hidden lg:flex w-64 border-r bg-muted/30 flex-col h-full">
         {/* Environment Info */}
         <div className="p-4 border-b">
-          <div className="space-y-1">
-            <h3 className="font-semibold text-sm truncate">
-              {environment.name}
-            </h3>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <h3 className="font-semibold text-sm truncate">
+                {environment.name}
+              </h3>
+              {environment.sleeping && (
+                <Badge variant="outline" className="text-[10px] gap-1 text-yellow-600 dark:text-yellow-400 border-yellow-500/30 bg-yellow-500/10">
+                  <Moon className="h-3 w-3" />
+                  Sleeping
+                </Badge>
+              )}
+            </div>
             {environment.branch && (
               <p className="text-xs text-muted-foreground truncate">
                 Branch: {environment.branch}
               </p>
+            )}
+            {isOnDemand && (
+              <div className="pt-1">
+                {environment.sleeping ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-7 text-xs"
+                    disabled={wakeMutation.isPending}
+                    onClick={() =>
+                      wakeMutation.mutate({
+                        path: {
+                          project_id: environment.project_id,
+                          env_id: environment.id,
+                        },
+                      })
+                    }
+                  >
+                    {wakeMutation.isPending ? (
+                      <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+                    ) : (
+                      <Play className="h-3 w-3 mr-1.5" />
+                    )}
+                    Wake Up
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full h-7 text-xs text-muted-foreground"
+                    disabled={sleepMutation.isPending}
+                    onClick={() =>
+                      sleepMutation.mutate({
+                        path: {
+                          project_id: environment.project_id,
+                          env_id: environment.id,
+                        },
+                      })
+                    }
+                  >
+                    {sleepMutation.isPending ? (
+                      <Loader2 className="h-3 w-3 mr-1.5 animate-spin" />
+                    ) : (
+                      <Moon className="h-3 w-3 mr-1.5" />
+                    )}
+                    Sleep
+                  </Button>
+                )}
+              </div>
             )}
           </div>
         </div>

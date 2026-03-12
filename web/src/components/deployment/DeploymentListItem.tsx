@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useQuery } from '@tanstack/react-query'
 import {
+  ArrowUpRight,
   GitBranch,
   GitCommit,
   MoreHorizontal,
@@ -29,6 +30,7 @@ interface DeploymentListItemProps {
   onRedeploy?: () => void
   onCancel?: () => void
   onRollback?: () => void
+  onPromote?: () => void
   onDeploymentUpdate?: (updatedDeployment: DeploymentResponse) => void
 }
 
@@ -37,6 +39,7 @@ export default function DeploymentListItem({
   onRedeploy,
   onCancel,
   onRollback,
+  onPromote,
   onDeploymentUpdate,
 }: DeploymentListItemProps) {
   const { refetch, data: refreshedDeployment } = useQuery({
@@ -175,15 +178,26 @@ export default function DeploymentListItem({
             </DropdownMenuItem>
             {(deployment.status === 'superseded' ||
               deployment.status === 'completed') && (
-              <DropdownMenuItem
-                onClick={(e) => {
-                  e.preventDefault()
-                  onRollback?.()
-                }}
-              >
-                <RotateCcw className="mr-2 h-4 w-4" />
-                Rollback to this
-              </DropdownMenuItem>
+              <>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onRollback?.()
+                  }}
+                >
+                  <RotateCcw className="mr-2 h-4 w-4" />
+                  Rollback to this
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onPromote?.()
+                  }}
+                >
+                  <ArrowUpRight className="mr-2 h-4 w-4" />
+                  Promote to...
+                </DropdownMenuItem>
+              </>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

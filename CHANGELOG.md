@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- GenAI OTel tracing: collect and visualize AI conversations from OpenTelemetry `gen_ai.*` spans with support for Vercel AI SDK `ai.*` attribute fallbacks; includes conversation view, token usage aggregation, and tool call detail
+- Deployment promotion: promote deployments between environments with environment protection settings (required reviewers, branch restrictions)
+- On-demand scale-to-zero environments: environments sleep after configurable idle timeout and wake automatically on incoming HTTP requests via proxy integration
+- AI usage analytics: per-model token tracking with agent/session context, BYOK vs platform key breakdown
+- Vercel AI SDK tracing examples (Node.js) and Python GenAI tracing examples
+- AI tracing documentation page
+
+### Fixed
+- GenAI trace token counts showed as zero: PostgreSQL `SUM(bigint)` returns `numeric` type, causing Sea-ORM `try_get::<Option<i64>>` to silently fail; added `::bigint` cast to all SUM expressions
+
+### Added
 - Multi-node cluster support: distribute deployments across a control plane and multiple worker nodes connected via WireGuard private networking
 - `temps-agent` crate: worker node agent with Docker runtime, token-based authentication, and deploy/status/stop/logs API endpoints
 - `temps-wireguard` crate: WireGuard tunnel management for secure node-to-node networking

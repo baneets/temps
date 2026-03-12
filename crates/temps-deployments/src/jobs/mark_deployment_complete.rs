@@ -601,6 +601,35 @@ impl MarkDeploymentCompleteJob {
             deployment.project_id, now
         );
 
+        // Reset sleeping state if environment was sleeping (on-demand mode).
+        // A fresh deployment means containers are now running, so sleeping=false.
+        // Use a direct UPDATE to avoid issues with ActiveModel field tracking.
+        let sleeping_reset = environments::Entity::update_many()
+            .col_expr(
+                environments::Column::Sleeping,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .col_expr(
+                environments::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(environments::Column::Id.eq(environment_id))
+            .filter(environments::Column::Sleeping.eq(true))
+            .exec(self.db.as_ref())
+            .await
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!(
+                    "Failed to reset sleeping state for environment {}: {}",
+                    environment_id, e
+                ))
+            })?;
+        if sleeping_reset.rows_affected > 0 {
+            info!(
+                "Reset sleeping state for environment {} after deployment",
+                environment_id
+            );
+        }
+
         self.log("Deployment is now LIVE and ready for traffic!".to_string())
             .await?;
 

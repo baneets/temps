@@ -84,6 +84,12 @@ pub struct EnvironmentResponse {
     /// Deployment configuration for this environment (overrides project-level config)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_config: Option<DeploymentConfig>,
+    /// When true, git pushes do NOT auto-deploy to this environment.
+    /// Deployments must be promoted from another environment.
+    pub protected: bool,
+    /// When true, the environment's containers are currently stopped due to
+    /// inactivity (on-demand mode) and will start on the next request.
+    pub sleeping: bool,
 }
 
 impl From<temps_entities::environments::Model> for EnvironmentResponse {
@@ -100,6 +106,8 @@ impl From<temps_entities::environments::Model> for EnvironmentResponse {
             branch: env.branch,
             is_preview: env.is_preview,
             deployment_config: env.deployment_config,
+            protected: env.protected,
+            sleeping: env.sleeping,
         }
     }
 }
@@ -169,6 +177,20 @@ pub struct UpdateEnvironmentSettingsRequest {
     /// environment on the same node. Defaults to `true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anti_affinity: Option<bool>,
+    /// When true, git pushes do NOT auto-deploy to this environment.
+    /// Deployments must be promoted from another environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protected: Option<bool>,
+    /// Enable on-demand mode (scale-to-zero). Containers are stopped after
+    /// idle_timeout_seconds of no traffic and started on the next request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_demand: Option<bool>,
+    /// Seconds of inactivity before stopping containers (60-86400). Default: 300.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_seconds: Option<i32>,
+    /// Max seconds to wait for containers to start on wake (5-120). Default: 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_timeout_seconds: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

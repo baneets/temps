@@ -246,6 +246,37 @@ impl OtelService {
         self.storage.query_logs(query).await
     }
 
+    pub async fn query_genai_trace_summaries(
+        &self,
+        query: TraceQuery,
+    ) -> Result<Vec<GenAiTraceSummary>, OtelError> {
+        self.storage.query_genai_trace_summaries(query).await
+    }
+
+    pub async fn get_genai_trace_spans(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> Result<Vec<GenAiSpanDetail>, OtelError> {
+        self.storage
+            .get_genai_trace_spans(project_id, trace_id)
+            .await
+    }
+
+    pub async fn count_genai_traces(&self, query: TraceQuery) -> Result<u64, OtelError> {
+        self.storage.count_genai_traces(query).await
+    }
+
+    pub async fn get_genai_trace_events(
+        &self,
+        project_id: i32,
+        trace_id: &str,
+    ) -> Result<Vec<GenAiEvent>, OtelError> {
+        self.storage
+            .get_genai_trace_events(project_id, trace_id)
+            .await
+    }
+
     pub async fn list_insights(
         &self,
         project_id: i32,
@@ -586,5 +617,227 @@ mod tests {
         assert!(svc.check_rate_limit(1).is_ok());
         let result = svc.check_rate_limit(1);
         assert!(matches!(result, Err(OtelError::RateLimitExceeded { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_query_genai_traces_filters_by_gen_ai_system() {
+        let mock = MockOtelStorage::new();
+        let (svc, storage) = make_service(mock);
+
+        let now = chrono::Utc::now();
+        let mut genai_attrs = std::collections::BTreeMap::new();
+        genai_attrs.insert("gen_ai.system".to_string(), "openai".to_string());
+        genai_attrs.insert("gen_ai.request.model".to_string(), "gpt-4".to_string());
+        genai_attrs.insert("gen_ai.usage.input_tokens".to_string(), "100".to_string());
+
+        let genai_span = SpanRecord {
+            project_id: 1,
+            deployment_id: None,
+            resource: ResourceInfo::default(),
+            trace_id: "genai-trace-1".into(),
+            span_id: "span-1".into(),
+            parent_span_id: None,
+            name: "chat".into(),
+            kind: SpanKind::Client,
+            start_time: now,
+            end_time: now,
+            duration_ms: 500.0,
+            status_code: SpanStatusCode::Ok,
+            status_message: String::new(),
+            attributes: genai_attrs,
+            events: vec![],
+        };
+
+        let normal_span = SpanRecord {
+            trace_id: "normal-trace".into(),
+            span_id: "span-2".into(),
+            name: "GET /api".into(),
+            attributes: std::collections::BTreeMap::new(),
+            ..genai_span.clone()
+        };
+
+        storage
+            .spans
+            .lock()
+            .unwrap()
+            .extend(vec![genai_span, normal_span]);
+
+        let summaries = svc
+            .query_genai_trace_summaries(TraceQuery {
+                project_id: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].trace_id, "genai-trace-1");
+        assert_eq!(summaries[0].gen_ai_system.as_deref(), Some("openai"));
+        assert_eq!(summaries[0].gen_ai_model.as_deref(), Some("gpt-4"));
+    }
+
+    #[tokio::test]
+    async fn test_get_genai_trace_spans() {
+        let mock = MockOtelStorage::new();
+        let (svc, storage) = make_service(mock);
+
+        let now = chrono::Utc::now();
+        let mut attrs = std::collections::BTreeMap::new();
+        attrs.insert("gen_ai.system".to_string(), "anthropic".to_string());
+        attrs.insert(
+            "gen_ai.request.model".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        attrs.insert("gen_ai.operation.name".to_string(), "chat".to_string());
+        attrs.insert("gen_ai.usage.input_tokens".to_string(), "50".to_string());
+        attrs.insert("gen_ai.usage.output_tokens".to_string(), "200".to_string());
+
+        let span = SpanRecord {
+            project_id: 1,
+            deployment_id: None,
+            resource: ResourceInfo::default(),
+            trace_id: "trace-abc".into(),
+            span_id: "span-1".into(),
+            parent_span_id: None,
+            name: "chat".into(),
+            kind: SpanKind::Client,
+            start_time: now,
+            end_time: now,
+            duration_ms: 1200.0,
+            status_code: SpanStatusCode::Ok,
+            status_message: String::new(),
+            attributes: attrs,
+            events: vec![],
+        };
+
+        storage.spans.lock().unwrap().push(span);
+
+        let details = svc.get_genai_trace_spans(1, "trace-abc").await.unwrap();
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].gen_ai_system.as_deref(), Some("anthropic"));
+        assert_eq!(
+            details[0].gen_ai_model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+        assert_eq!(details[0].gen_ai_operation.as_deref(), Some("chat"));
+        assert_eq!(details[0].input_tokens, Some(50));
+        assert_eq!(details[0].output_tokens, Some(200));
+    }
+
+    #[tokio::test]
+    async fn test_genai_handles_deprecated_provider_name() {
+        let mock = MockOtelStorage::new();
+        let (svc, storage) = make_service(mock);
+
+        let now = chrono::Utc::now();
+
+        // Use the new gen_ai.provider.name attribute (not deprecated gen_ai.system)
+        let mut new_attrs = std::collections::BTreeMap::new();
+        new_attrs.insert("gen_ai.provider.name".to_string(), "anthropic".to_string());
+        new_attrs.insert(
+            "gen_ai.request.model".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        );
+        new_attrs.insert("gen_ai.usage.input_tokens".to_string(), "100".to_string());
+
+        // Use deprecated gen_ai.usage.prompt_tokens and gen_ai.system
+        let mut old_attrs = std::collections::BTreeMap::new();
+        old_attrs.insert("gen_ai.system".to_string(), "openai".to_string());
+        old_attrs.insert("gen_ai.request.model".to_string(), "gpt-4".to_string());
+        old_attrs.insert("gen_ai.usage.prompt_tokens".to_string(), "50".to_string());
+        old_attrs.insert(
+            "gen_ai.usage.completion_tokens".to_string(),
+            "150".to_string(),
+        );
+
+        for (tid, attrs) in [("new-trace", new_attrs), ("old-trace", old_attrs)] {
+            storage.spans.lock().unwrap().push(SpanRecord {
+                project_id: 1,
+                deployment_id: None,
+                resource: ResourceInfo::default(),
+                trace_id: tid.into(),
+                span_id: format!("{}-s1", tid),
+                parent_span_id: None,
+                name: "chat".into(),
+                kind: SpanKind::Client,
+                start_time: now,
+                end_time: now,
+                duration_ms: 100.0,
+                status_code: SpanStatusCode::Ok,
+                status_message: String::new(),
+                attributes: attrs,
+                events: vec![],
+            });
+        }
+
+        // Both should be found
+        let count = svc
+            .count_genai_traces(TraceQuery {
+                project_id: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // Get details for the span with deprecated attributes
+        let details = svc.get_genai_trace_spans(1, "old-trace").await.unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].gen_ai_system.as_deref(), Some("openai"));
+        assert_eq!(details[0].input_tokens, Some(50));
+        assert_eq!(details[0].output_tokens, Some(150));
+
+        // Get details for the span with new attributes
+        let details = svc.get_genai_trace_spans(1, "new-trace").await.unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].gen_ai_system.as_deref(), Some("anthropic"));
+        assert_eq!(details[0].input_tokens, Some(100));
+    }
+
+    #[tokio::test]
+    async fn test_count_genai_traces() {
+        let mock = MockOtelStorage::new();
+        let (svc, storage) = make_service(mock);
+
+        let now = chrono::Utc::now();
+        let mut genai_attrs = std::collections::BTreeMap::new();
+        genai_attrs.insert("gen_ai.system".to_string(), "openai".to_string());
+
+        // Two GenAI traces, one normal trace
+        for (tid, has_genai) in [("t1", true), ("t2", true), ("t3", false)] {
+            let attrs = if has_genai {
+                genai_attrs.clone()
+            } else {
+                std::collections::BTreeMap::new()
+            };
+            storage.spans.lock().unwrap().push(SpanRecord {
+                project_id: 1,
+                deployment_id: None,
+                resource: ResourceInfo::default(),
+                trace_id: tid.into(),
+                span_id: format!("{}-s1", tid),
+                parent_span_id: None,
+                name: "op".into(),
+                kind: SpanKind::Client,
+                start_time: now,
+                end_time: now,
+                duration_ms: 100.0,
+                status_code: SpanStatusCode::Ok,
+                status_message: String::new(),
+                attributes: attrs,
+                events: vec![],
+            });
+        }
+
+        let count = svc
+            .count_genai_traces(TraceQuery {
+                project_id: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(count, 2);
     }
 }

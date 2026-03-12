@@ -377,8 +377,353 @@ pub struct TraceQuery {
     pub environment_id: Option<i32>,
     /// Filter by deployment ID (direct column on otel_spans).
     pub deployment_id: Option<i32>,
+    /// Filter by span attributes (exact match on JSONB keys).
+    /// e.g. {"gen_ai.system": "openai", "gen_ai.request.model": "gpt-4"}
+    pub attributes: Option<BTreeMap<String, String>>,
+    /// Filter by span name pattern (ILIKE).
+    pub name_pattern: Option<String>,
     pub limit: Option<u64>,
     pub offset: Option<u64>,
+}
+
+/// Summary of a GenAI conversation — aggregated from OTel spans with `gen_ai.*` attributes.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GenAiTraceSummary {
+    pub trace_id: String,
+    pub root_span_name: String,
+    pub service_name: String,
+    /// The GenAI provider (e.g. "openai", "anthropic") from `gen_ai.provider.name`.
+    pub gen_ai_system: Option<String>,
+    /// The requested model from `gen_ai.request.model`.
+    pub gen_ai_model: Option<String>,
+    /// The operation type from `gen_ai.operation.name` (e.g. "chat", "embeddings").
+    pub gen_ai_operation: Option<String>,
+    #[schema(value_type = String, format = DateTime)]
+    pub start_time: DateTime<Utc>,
+    pub duration_ms: f64,
+    pub span_count: i64,
+    pub error_count: i64,
+    /// Total input tokens across all spans in this trace.
+    pub total_input_tokens: Option<i64>,
+    /// Total output tokens across all spans in this trace.
+    pub total_output_tokens: Option<i64>,
+    /// Total cache-creation input tokens across all spans.
+    pub total_cache_creation_input_tokens: Option<i64>,
+    /// Total cache-read input tokens across all spans.
+    pub total_cache_read_input_tokens: Option<i64>,
+}
+
+/// A single GenAI span with extracted semantic convention fields.
+///
+/// Fields are aligned with the OpenTelemetry GenAI Semantic Conventions spec:
+/// <https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/>
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GenAiSpanDetail {
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub name: String,
+    pub kind: SpanKind,
+    #[schema(value_type = String, format = DateTime)]
+    pub start_time: DateTime<Utc>,
+    pub duration_ms: f64,
+    pub status_code: SpanStatusCode,
+
+    // ── Core identification (Required/Conditionally Required) ────────
+    /// The GenAI provider from `gen_ai.provider.name` (falls back to deprecated `gen_ai.system`).
+    pub gen_ai_system: Option<String>,
+    /// The operation type from `gen_ai.operation.name` (e.g. "chat", "embeddings", "execute_tool").
+    pub gen_ai_operation: Option<String>,
+
+    // ── Model information ────────────────────────────────────────────
+    /// The requested model from `gen_ai.request.model`.
+    pub gen_ai_model: Option<String>,
+    /// The model that actually generated the response from `gen_ai.response.model`.
+    pub gen_ai_response_model: Option<String>,
+
+    // ── Request parameters (Recommended) ─────────────────────────────
+    /// Temperature setting from `gen_ai.request.temperature`.
+    pub request_temperature: Option<f64>,
+    /// Max tokens from `gen_ai.request.max_tokens`.
+    pub request_max_tokens: Option<i64>,
+    /// Top-p setting from `gen_ai.request.top_p`.
+    pub request_top_p: Option<f64>,
+    /// Top-k setting from `gen_ai.request.top_k`.
+    pub request_top_k: Option<f64>,
+    /// Frequency penalty from `gen_ai.request.frequency_penalty`.
+    pub request_frequency_penalty: Option<f64>,
+    /// Presence penalty from `gen_ai.request.presence_penalty`.
+    pub request_presence_penalty: Option<f64>,
+    /// Stop sequences from `gen_ai.request.stop_sequences`.
+    pub request_stop_sequences: Option<Vec<String>>,
+    /// Seed for reproducibility from `gen_ai.request.seed`.
+    pub request_seed: Option<i64>,
+    /// Number of choices requested from `gen_ai.request.choice.count`.
+    pub request_choice_count: Option<i64>,
+
+    // ── Response information (Recommended) ───────────────────────────
+    /// Unique completion ID from `gen_ai.response.id` (e.g. "chatcmpl-123").
+    pub response_id: Option<String>,
+    /// Reasons the model stopped from `gen_ai.response.finish_reasons` (e.g. ["stop"]).
+    pub response_finish_reasons: Option<Vec<String>>,
+    /// Output content type from `gen_ai.output.type` (text, json, image, speech).
+    pub output_type: Option<String>,
+
+    // ── Token usage (Recommended) ────────────────────────────────────
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    /// Tokens written to provider cache from `gen_ai.usage.cache_creation.input_tokens`.
+    pub cache_creation_input_tokens: Option<i64>,
+    /// Tokens served from provider cache from `gen_ai.usage.cache_read.input_tokens`.
+    pub cache_read_input_tokens: Option<i64>,
+
+    // ── Conversation tracking ────────────────────────────────────────
+    /// Unique conversation/session/thread ID from `gen_ai.conversation.id`.
+    pub conversation_id: Option<String>,
+
+    // ── Error information ────────────────────────────────────────────
+    /// Error type from `error.type` when the span status is ERROR.
+    pub error_type: Option<String>,
+
+    // ── Server information ───────────────────────────────────────────
+    /// GenAI server address from `server.address`.
+    pub server_address: Option<String>,
+    /// GenAI server port from `server.port`.
+    pub server_port: Option<i64>,
+
+    // ── Agent attributes (Agent spans) ───────────────────────────────
+    /// Agent identifier from `gen_ai.agent.id`.
+    pub agent_id: Option<String>,
+    /// Agent name from `gen_ai.agent.name`.
+    pub agent_name: Option<String>,
+    /// Agent description from `gen_ai.agent.description`.
+    pub agent_description: Option<String>,
+    /// Agent version from `gen_ai.agent.version`.
+    pub agent_version: Option<String>,
+
+    // ── Tool execution attributes (execute_tool spans) ───────────────
+    /// Tool name from `gen_ai.tool.name`.
+    pub tool_name: Option<String>,
+    /// Tool call ID from `gen_ai.tool.call.id`.
+    pub tool_call_id: Option<String>,
+    /// Tool type from `gen_ai.tool.type` (function, extension, datastore).
+    pub tool_type: Option<String>,
+    /// Tool description from `gen_ai.tool.description`.
+    pub tool_description: Option<String>,
+
+    // ── Embeddings attributes ────────────────────────────────────────
+    /// Output embedding dimensions from `gen_ai.embeddings.dimension.count`.
+    pub embeddings_dimension_count: Option<i64>,
+    /// Requested encoding formats from `gen_ai.request.encoding_formats`.
+    pub request_encoding_formats: Option<Vec<String>>,
+
+    // ── Retrieval attributes ─────────────────────────────────────────
+    /// Data source identifier from `gen_ai.data_source.id`.
+    pub data_source_id: Option<String>,
+
+    // ── OpenAI-specific attributes ───────────────────────────────────
+    /// OpenAI API type from `openai.api.type` (chat_completions, responses).
+    pub openai_api_type: Option<String>,
+    /// Requested service tier from `openai.request.service_tier`.
+    pub openai_request_service_tier: Option<String>,
+    /// Actual service tier from `openai.response.service_tier`.
+    pub openai_response_service_tier: Option<String>,
+    /// System fingerprint from `openai.response.system_fingerprint`.
+    pub openai_system_fingerprint: Option<String>,
+
+    // ── AWS Bedrock-specific attributes ──────────────────────────────
+    /// AWS Bedrock guardrail ID from `aws.bedrock.guardrail.id`.
+    pub aws_bedrock_guardrail_id: Option<String>,
+    /// AWS Bedrock knowledge base ID from `aws.bedrock.knowledge_base.id`.
+    pub aws_bedrock_knowledge_base_id: Option<String>,
+
+    // ── Azure AI Inference-specific attributes ───────────────────────
+    /// Azure resource provider namespace from `azure.resource_provider.namespace`.
+    pub azure_resource_provider_namespace: Option<String>,
+
+    // ── Opt-in content attributes ────────────────────────────────────
+    /// Chat history input from `gen_ai.input.messages` (opt-in, JSON string).
+    pub input_messages: Option<String>,
+    /// Model output from `gen_ai.output.messages` (opt-in, JSON string).
+    pub output_messages: Option<String>,
+    /// System instructions from `gen_ai.system_instructions` (opt-in, JSON string).
+    pub system_instructions: Option<String>,
+    /// Tool definitions from `gen_ai.tool.definitions` (opt-in, JSON string).
+    pub tool_definitions: Option<String>,
+    /// Tool call arguments from `gen_ai.tool.call.arguments` (opt-in, JSON string).
+    pub tool_call_arguments: Option<String>,
+    /// Tool call result from `gen_ai.tool.call.result` (opt-in, JSON string).
+    pub tool_call_result: Option<String>,
+    /// Retrieval query text from `gen_ai.retrieval.query.text` (opt-in).
+    pub retrieval_query_text: Option<String>,
+    /// Retrieved documents from `gen_ai.retrieval.documents` (opt-in, JSON string).
+    pub retrieval_documents: Option<String>,
+
+    /// All span attributes for extensibility.
+    pub attributes: BTreeMap<String, String>,
+}
+
+/// A GenAI-related event extracted from span events.
+///
+/// Covers `gen_ai.client.inference.operation.details` and `gen_ai.evaluation.result`
+/// events per the OTel GenAI semantic conventions.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GenAiEvent {
+    pub span_id: String,
+    pub trace_id: String,
+    pub event_name: String,
+    #[schema(value_type = String, format = DateTime)]
+    pub timestamp: DateTime<Utc>,
+    /// All event attributes.
+    pub attributes: BTreeMap<String, String>,
+}
+
+impl GenAiSpanDetail {
+    /// Extract all GenAI semantic convention fields from a flat attributes map.
+    ///
+    /// This centralizes the mapping from OTel attribute keys to struct fields,
+    /// handling both current and deprecated attribute names.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_span_attrs(
+        span_id: String,
+        parent_span_id: Option<String>,
+        name: String,
+        kind: SpanKind,
+        start_time: DateTime<Utc>,
+        duration_ms: f64,
+        status_code: SpanStatusCode,
+        attrs: BTreeMap<String, String>,
+    ) -> Self {
+        let get = |key: &str| -> Option<String> { attrs.get(key).cloned() };
+        let get_f64 = |key: &str| -> Option<f64> { attrs.get(key).and_then(|v| v.parse().ok()) };
+        let get_i64 = |key: &str| -> Option<i64> { attrs.get(key).and_then(|v| v.parse().ok()) };
+        let get_or = |primary: &str, fallback: &str| -> Option<String> {
+            attrs.get(primary).or_else(|| attrs.get(fallback)).cloned()
+        };
+        let get_i64_or = |primary: &str, fallback: &str| -> Option<i64> {
+            attrs
+                .get(primary)
+                .or_else(|| attrs.get(fallback))
+                .and_then(|v| v.parse().ok())
+        };
+        let get_string_array = |key: &str| -> Option<Vec<String>> {
+            attrs.get(key).map(|v| {
+                // Try JSON array first, then comma-separated
+                serde_json::from_str::<Vec<String>>(v)
+                    .unwrap_or_else(|_| v.split(',').map(|s| s.trim().to_string()).collect())
+            })
+        };
+
+        Self {
+            span_id,
+            parent_span_id,
+            name,
+            kind,
+            start_time,
+            duration_ms,
+            status_code,
+
+            // Core identification (standard → deprecated → Vercel AI SDK fallback)
+            gen_ai_system: get_or("gen_ai.provider.name", "gen_ai.system")
+                .or_else(|| get("ai.model.provider")),
+            gen_ai_operation: get_or("gen_ai.operation.name", "ai.operationId"),
+
+            // Model (standard → Vercel AI SDK fallback)
+            gen_ai_model: get_or("gen_ai.request.model", "ai.model.id"),
+            gen_ai_response_model: get("gen_ai.response.model"),
+
+            // Request parameters
+            request_temperature: get_f64("gen_ai.request.temperature"),
+            request_max_tokens: get_i64("gen_ai.request.max_tokens"),
+            request_top_p: get_f64("gen_ai.request.top_p"),
+            request_top_k: get_f64("gen_ai.request.top_k"),
+            request_frequency_penalty: get_f64("gen_ai.request.frequency_penalty"),
+            request_presence_penalty: get_f64("gen_ai.request.presence_penalty"),
+            request_stop_sequences: get_string_array("gen_ai.request.stop_sequences"),
+            request_seed: get_i64("gen_ai.request.seed"),
+            request_choice_count: get_i64("gen_ai.request.choice.count"),
+
+            // Response
+            response_id: get("gen_ai.response.id"),
+            response_finish_reasons: get_string_array("gen_ai.response.finish_reasons"),
+            output_type: get("gen_ai.output.type"),
+
+            // Token usage (standard → deprecated → Vercel AI SDK)
+            input_tokens: get_i64_or("gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens")
+                .or_else(|| get_i64("ai.usage.promptTokens")),
+            output_tokens: get_i64_or(
+                "gen_ai.usage.output_tokens",
+                "gen_ai.usage.completion_tokens",
+            )
+            .or_else(|| get_i64("ai.usage.completionTokens")),
+            cache_creation_input_tokens: get_i64("gen_ai.usage.cache_creation.input_tokens"),
+            cache_read_input_tokens: get_i64("gen_ai.usage.cache_read.input_tokens"),
+
+            // Conversation
+            conversation_id: get("gen_ai.conversation.id"),
+
+            // Error
+            error_type: get("error.type"),
+
+            // Server
+            server_address: get("server.address"),
+            server_port: get_i64("server.port"),
+
+            // Agent
+            agent_id: get("gen_ai.agent.id"),
+            agent_name: get("gen_ai.agent.name"),
+            agent_description: get("gen_ai.agent.description"),
+            agent_version: get("gen_ai.agent.version"),
+
+            // Tool (standard → Vercel AI SDK fallback)
+            tool_name: get_or("gen_ai.tool.name", "ai.toolCall.name"),
+            tool_call_id: get_or("gen_ai.tool.call.id", "ai.toolCall.id"),
+            tool_type: get("gen_ai.tool.type"),
+            tool_description: get("gen_ai.tool.description"),
+
+            // Embeddings
+            embeddings_dimension_count: get_i64("gen_ai.embeddings.dimension.count"),
+            request_encoding_formats: get_string_array("gen_ai.request.encoding_formats"),
+
+            // Retrieval
+            data_source_id: get("gen_ai.data_source.id"),
+
+            // OpenAI-specific
+            openai_api_type: get("openai.api.type"),
+            openai_request_service_tier: get("openai.request.service_tier"),
+            openai_response_service_tier: get("openai.response.service_tier"),
+            openai_system_fingerprint: get("openai.response.system_fingerprint"),
+
+            // AWS Bedrock-specific
+            aws_bedrock_guardrail_id: get("aws.bedrock.guardrail.id"),
+            aws_bedrock_knowledge_base_id: get("aws.bedrock.knowledge_base.id"),
+
+            // Azure AI Inference-specific
+            azure_resource_provider_namespace: get("azure.resource_provider.namespace"),
+
+            // Opt-in content (standard → Vercel AI SDK fallback)
+            input_messages: get_or("gen_ai.input.messages", "ai.prompt.messages"),
+            output_messages: get("gen_ai.output.messages").or_else(|| {
+                // Vercel AI SDK stores output as plain text in ai.response.text;
+                // wrap it into the standard messages JSON array format.
+                get("ai.response.text").map(|text| {
+                    serde_json::json!([{"role": "assistant", "content": text}]).to_string()
+                })
+            }),
+            system_instructions: get("gen_ai.system_instructions"),
+            tool_definitions: get("gen_ai.tool.definitions"),
+            tool_call_arguments: get_or("gen_ai.tool.call.arguments", "ai.toolCall.args"),
+            tool_call_result: get_or("gen_ai.tool.call.result", "ai.toolCall.result"),
+            retrieval_query_text: get("gen_ai.retrieval.query.text"),
+            retrieval_documents: get("gen_ai.retrieval.documents"),
+
+            attributes: attrs,
+        }
+    }
+
+    /// Returns true if this span has any GenAI-related attributes.
+    pub fn is_genai_span(&self) -> bool {
+        self.gen_ai_system.is_some() || self.gen_ai_operation.is_some()
+    }
 }
 
 /// Filter for querying metrics.
@@ -609,5 +954,566 @@ mod tests {
             AttributeValue::String(s) => assert_eq!(s, "test"),
             _ => panic!("Expected String variant"),
         }
+    }
+
+    // ── TraceQuery attribute filters ───────────────────────────────
+
+    #[test]
+    fn test_trace_query_default_has_no_attributes() {
+        let q = TraceQuery::default();
+        assert!(q.attributes.is_none());
+        assert!(q.name_pattern.is_none());
+    }
+
+    #[test]
+    fn test_trace_query_with_attributes() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("gen_ai.system".to_string(), "openai".to_string());
+        attrs.insert("gen_ai.request.model".to_string(), "gpt-4".to_string());
+
+        let q = TraceQuery {
+            project_id: 1,
+            attributes: Some(attrs.clone()),
+            ..Default::default()
+        };
+
+        assert_eq!(q.attributes.as_ref().unwrap().len(), 2);
+        assert_eq!(
+            q.attributes.as_ref().unwrap().get("gen_ai.system").unwrap(),
+            "openai"
+        );
+    }
+
+    // ── GenAI types serde ──────────────────────────────────────────
+
+    #[test]
+    fn test_genai_trace_summary_serialization() {
+        let summary = GenAiTraceSummary {
+            trace_id: "abc123".into(),
+            root_span_name: "chat".into(),
+            service_name: "my-agent".into(),
+            gen_ai_system: Some("openai".into()),
+            gen_ai_model: Some("gpt-4".into()),
+            gen_ai_operation: Some("chat".into()),
+            start_time: chrono::Utc::now(),
+            duration_ms: 1500.0,
+            span_count: 3,
+            error_count: 0,
+            total_input_tokens: Some(100),
+            total_output_tokens: Some(250),
+            total_cache_creation_input_tokens: Some(50),
+            total_cache_read_input_tokens: Some(30),
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"gen_ai_system\":\"openai\""));
+        assert!(json.contains("\"total_input_tokens\":100"));
+        assert!(json.contains("\"total_cache_creation_input_tokens\":50"));
+    }
+
+    #[test]
+    fn test_genai_span_detail_serialization() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("gen_ai.system".to_string(), "anthropic".to_string());
+        attrs.insert("gen_ai.usage.input_tokens".to_string(), "50".to_string());
+
+        let detail = GenAiSpanDetail {
+            span_id: "span1".into(),
+            parent_span_id: None,
+            name: "gen_ai.chat".into(),
+            kind: SpanKind::Client,
+            start_time: chrono::Utc::now(),
+            duration_ms: 800.0,
+            status_code: SpanStatusCode::Ok,
+            gen_ai_system: Some("anthropic".into()),
+            gen_ai_operation: Some("chat".into()),
+            gen_ai_model: Some("claude-sonnet-4-20250514".into()),
+            gen_ai_response_model: Some("claude-sonnet-4-20250514".into()),
+            request_temperature: Some(0.7),
+            request_max_tokens: Some(4096),
+            request_top_p: None,
+            request_top_k: None,
+            request_frequency_penalty: None,
+            request_presence_penalty: None,
+            request_stop_sequences: None,
+            request_seed: None,
+            request_choice_count: None,
+            response_id: Some("msg_abc123".into()),
+            response_finish_reasons: Some(vec!["stop".into()]),
+            output_type: Some("text".into()),
+            input_tokens: Some(50),
+            output_tokens: Some(200),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(30),
+            conversation_id: Some("conv-1".into()),
+            error_type: None,
+            server_address: Some("api.anthropic.com".into()),
+            server_port: Some(443),
+            agent_id: None,
+            agent_name: None,
+            agent_description: None,
+            agent_version: None,
+            tool_name: None,
+            tool_call_id: None,
+            tool_type: None,
+            tool_description: None,
+            embeddings_dimension_count: None,
+            request_encoding_formats: None,
+            data_source_id: None,
+            openai_api_type: None,
+            openai_request_service_tier: None,
+            openai_response_service_tier: None,
+            openai_system_fingerprint: None,
+            aws_bedrock_guardrail_id: None,
+            aws_bedrock_knowledge_base_id: None,
+            azure_resource_provider_namespace: None,
+            input_messages: None,
+            output_messages: None,
+            system_instructions: None,
+            tool_definitions: None,
+            tool_call_arguments: None,
+            tool_call_result: None,
+            retrieval_query_text: None,
+            retrieval_documents: None,
+            attributes: attrs,
+        };
+
+        let json = serde_json::to_string(&detail).unwrap();
+        let parsed: GenAiSpanDetail = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.gen_ai_system.as_deref(), Some("anthropic"));
+        assert_eq!(parsed.input_tokens, Some(50));
+        assert_eq!(parsed.output_tokens, Some(200));
+        assert_eq!(parsed.response_id.as_deref(), Some("msg_abc123"));
+        assert_eq!(parsed.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(parsed.cache_read_input_tokens, Some(30));
+        assert_eq!(parsed.request_temperature, Some(0.7));
+    }
+
+    // ── from_span_attrs extraction tests ─────────────────────────────
+
+    fn make_detail(attrs: Vec<(&str, &str)>) -> GenAiSpanDetail {
+        let map: BTreeMap<String, String> = attrs
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        GenAiSpanDetail::from_span_attrs(
+            "span-1".into(),
+            None,
+            "test-span".into(),
+            SpanKind::Client,
+            chrono::Utc::now(),
+            100.0,
+            SpanStatusCode::Ok,
+            map,
+        )
+    }
+
+    #[test]
+    fn test_from_span_attrs_openai_chat_completion() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.operation.name", "chat"),
+            ("gen_ai.request.model", "gpt-4o"),
+            ("gen_ai.response.model", "gpt-4o-2024-08-06"),
+            ("gen_ai.request.temperature", "0.9"),
+            ("gen_ai.request.max_tokens", "2048"),
+            ("gen_ai.request.top_p", "0.95"),
+            ("gen_ai.request.frequency_penalty", "0.5"),
+            ("gen_ai.request.presence_penalty", "0.3"),
+            ("gen_ai.request.seed", "42"),
+            ("gen_ai.request.choice.count", "2"),
+            ("gen_ai.request.stop_sequences", r#"["END","STOP"]"#),
+            ("gen_ai.response.id", "chatcmpl-abc123"),
+            ("gen_ai.response.finish_reasons", r#"["stop"]"#),
+            ("gen_ai.output.type", "text"),
+            ("gen_ai.usage.input_tokens", "150"),
+            ("gen_ai.usage.output_tokens", "300"),
+            ("gen_ai.conversation.id", "thread-xyz"),
+            ("server.address", "api.openai.com"),
+            ("server.port", "443"),
+            ("openai.api.type", "chat_completions"),
+            ("openai.request.service_tier", "auto"),
+            ("openai.response.service_tier", "default"),
+            ("openai.response.system_fingerprint", "fp_abc123"),
+        ]);
+
+        assert_eq!(d.gen_ai_system.as_deref(), Some("openai"));
+        assert_eq!(d.gen_ai_operation.as_deref(), Some("chat"));
+        assert_eq!(d.gen_ai_model.as_deref(), Some("gpt-4o"));
+        assert_eq!(
+            d.gen_ai_response_model.as_deref(),
+            Some("gpt-4o-2024-08-06")
+        );
+        assert_eq!(d.request_temperature, Some(0.9));
+        assert_eq!(d.request_max_tokens, Some(2048));
+        assert_eq!(d.request_top_p, Some(0.95));
+        assert_eq!(d.request_frequency_penalty, Some(0.5));
+        assert_eq!(d.request_presence_penalty, Some(0.3));
+        assert_eq!(d.request_seed, Some(42));
+        assert_eq!(d.request_choice_count, Some(2));
+        assert_eq!(
+            d.request_stop_sequences,
+            Some(vec!["END".to_string(), "STOP".to_string()])
+        );
+        assert_eq!(d.response_id.as_deref(), Some("chatcmpl-abc123"));
+        assert_eq!(d.response_finish_reasons, Some(vec!["stop".to_string()]));
+        assert_eq!(d.output_type.as_deref(), Some("text"));
+        assert_eq!(d.input_tokens, Some(150));
+        assert_eq!(d.output_tokens, Some(300));
+        assert_eq!(d.conversation_id.as_deref(), Some("thread-xyz"));
+        assert_eq!(d.server_address.as_deref(), Some("api.openai.com"));
+        assert_eq!(d.server_port, Some(443));
+        assert_eq!(d.openai_api_type.as_deref(), Some("chat_completions"));
+        assert_eq!(d.openai_request_service_tier.as_deref(), Some("auto"));
+        assert_eq!(d.openai_response_service_tier.as_deref(), Some("default"));
+        assert_eq!(d.openai_system_fingerprint.as_deref(), Some("fp_abc123"));
+        assert!(d.is_genai_span());
+    }
+
+    #[test]
+    fn test_from_span_attrs_anthropic_with_cache_tokens() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "anthropic"),
+            ("gen_ai.operation.name", "chat"),
+            ("gen_ai.request.model", "claude-sonnet-4-20250514"),
+            ("gen_ai.response.model", "claude-sonnet-4-20250514"),
+            ("gen_ai.usage.input_tokens", "100"),
+            ("gen_ai.usage.output_tokens", "250"),
+            ("gen_ai.usage.cache_creation.input_tokens", "80"),
+            ("gen_ai.usage.cache_read.input_tokens", "60"),
+            ("gen_ai.response.id", "msg_01abc"),
+            ("gen_ai.response.finish_reasons", r#"["end_turn"]"#),
+        ]);
+
+        assert_eq!(d.gen_ai_system.as_deref(), Some("anthropic"));
+        assert_eq!(d.input_tokens, Some(100));
+        assert_eq!(d.output_tokens, Some(250));
+        assert_eq!(d.cache_creation_input_tokens, Some(80));
+        assert_eq!(d.cache_read_input_tokens, Some(60));
+        assert_eq!(
+            d.response_finish_reasons,
+            Some(vec!["end_turn".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_from_span_attrs_deprecated_gen_ai_system_fallback() {
+        // Old instrumentation uses gen_ai.system instead of gen_ai.provider.name
+        let d = make_detail(vec![
+            ("gen_ai.system", "openai"),
+            ("gen_ai.operation.name", "chat"),
+            ("gen_ai.request.model", "gpt-4"),
+        ]);
+
+        assert_eq!(d.gen_ai_system.as_deref(), Some("openai"));
+        assert_eq!(d.gen_ai_model.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn test_from_span_attrs_provider_name_overrides_deprecated_system() {
+        // When both are present, gen_ai.provider.name should win
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "anthropic"),
+            ("gen_ai.system", "old-value"),
+            ("gen_ai.operation.name", "chat"),
+        ]);
+
+        assert_eq!(d.gen_ai_system.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn test_from_span_attrs_deprecated_token_field_fallback() {
+        // Old instrumentation uses prompt_tokens/completion_tokens
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.usage.prompt_tokens", "50"),
+            ("gen_ai.usage.completion_tokens", "100"),
+        ]);
+
+        assert_eq!(d.input_tokens, Some(50));
+        assert_eq!(d.output_tokens, Some(100));
+    }
+
+    #[test]
+    fn test_from_span_attrs_new_token_fields_override_deprecated() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.usage.input_tokens", "50"),
+            ("gen_ai.usage.prompt_tokens", "999"),
+            ("gen_ai.usage.output_tokens", "100"),
+            ("gen_ai.usage.completion_tokens", "999"),
+        ]);
+
+        assert_eq!(d.input_tokens, Some(50));
+        assert_eq!(d.output_tokens, Some(100));
+    }
+
+    #[test]
+    fn test_from_span_attrs_embeddings_operation() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.operation.name", "embeddings"),
+            ("gen_ai.request.model", "text-embedding-3-small"),
+            ("gen_ai.embeddings.dimension.count", "1536"),
+            ("gen_ai.request.encoding_formats", r#"["float","base64"]"#),
+            ("gen_ai.usage.input_tokens", "8"),
+        ]);
+
+        assert_eq!(d.gen_ai_operation.as_deref(), Some("embeddings"));
+        assert_eq!(d.embeddings_dimension_count, Some(1536));
+        assert_eq!(
+            d.request_encoding_formats,
+            Some(vec!["float".to_string(), "base64".to_string()])
+        );
+        assert_eq!(d.input_tokens, Some(8));
+        assert!(d.output_tokens.is_none());
+    }
+
+    #[test]
+    fn test_from_span_attrs_retrieval_operation() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "pinecone"),
+            ("gen_ai.operation.name", "retrieval"),
+            ("gen_ai.data_source.id", "my-knowledge-base"),
+            ("gen_ai.request.model", "text-embedding-3-small"),
+            ("gen_ai.request.top_k", "5"),
+            ("gen_ai.retrieval.query.text", "What is GenAI?"),
+            ("gen_ai.retrieval.documents", r#"[{"id":"doc1"}]"#),
+        ]);
+
+        assert_eq!(d.gen_ai_operation.as_deref(), Some("retrieval"));
+        assert_eq!(d.data_source_id.as_deref(), Some("my-knowledge-base"));
+        assert_eq!(d.request_top_k, Some(5.0));
+        assert_eq!(d.retrieval_query_text.as_deref(), Some("What is GenAI?"));
+        assert!(d.retrieval_documents.is_some());
+    }
+
+    #[test]
+    fn test_from_span_attrs_execute_tool_operation() {
+        let d = make_detail(vec![
+            ("gen_ai.operation.name", "execute_tool"),
+            ("gen_ai.tool.name", "get_weather"),
+            ("gen_ai.tool.call.id", "call_abc123"),
+            ("gen_ai.tool.type", "function"),
+            ("gen_ai.tool.description", "Get current weather"),
+            ("gen_ai.tool.call.arguments", r#"{"city":"London"}"#),
+            ("gen_ai.tool.call.result", r#"{"temp":22}"#),
+        ]);
+
+        assert_eq!(d.gen_ai_operation.as_deref(), Some("execute_tool"));
+        assert_eq!(d.tool_name.as_deref(), Some("get_weather"));
+        assert_eq!(d.tool_call_id.as_deref(), Some("call_abc123"));
+        assert_eq!(d.tool_type.as_deref(), Some("function"));
+        assert_eq!(d.tool_description.as_deref(), Some("Get current weather"));
+        assert_eq!(
+            d.tool_call_arguments.as_deref(),
+            Some(r#"{"city":"London"}"#)
+        );
+        assert_eq!(d.tool_call_result.as_deref(), Some(r#"{"temp":22}"#));
+    }
+
+    #[test]
+    fn test_from_span_attrs_agent_invoke_span() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.operation.name", "invoke_agent"),
+            ("gen_ai.agent.id", "agent-001"),
+            ("gen_ai.agent.name", "Research Assistant"),
+            ("gen_ai.agent.description", "Helps with research tasks"),
+            ("gen_ai.agent.version", "2.0.0"),
+            ("gen_ai.request.model", "gpt-4o"),
+            ("gen_ai.conversation.id", "conv-123"),
+        ]);
+
+        assert_eq!(d.gen_ai_operation.as_deref(), Some("invoke_agent"));
+        assert_eq!(d.agent_id.as_deref(), Some("agent-001"));
+        assert_eq!(d.agent_name.as_deref(), Some("Research Assistant"));
+        assert_eq!(
+            d.agent_description.as_deref(),
+            Some("Helps with research tasks")
+        );
+        assert_eq!(d.agent_version.as_deref(), Some("2.0.0"));
+        assert_eq!(d.conversation_id.as_deref(), Some("conv-123"));
+    }
+
+    #[test]
+    fn test_from_span_attrs_aws_bedrock_provider() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "aws.bedrock"),
+            ("gen_ai.operation.name", "chat"),
+            ("gen_ai.request.model", "anthropic.claude-3-sonnet"),
+            ("aws.bedrock.guardrail.id", "sgi5gkybzqak"),
+            ("aws.bedrock.knowledge_base.id", "XFWUPB9PAW"),
+        ]);
+
+        assert_eq!(d.gen_ai_system.as_deref(), Some("aws.bedrock"));
+        assert_eq!(d.aws_bedrock_guardrail_id.as_deref(), Some("sgi5gkybzqak"));
+        assert_eq!(
+            d.aws_bedrock_knowledge_base_id.as_deref(),
+            Some("XFWUPB9PAW")
+        );
+    }
+
+    #[test]
+    fn test_from_span_attrs_azure_ai_inference_provider() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "azure.ai.inference"),
+            ("gen_ai.operation.name", "chat"),
+            ("gen_ai.request.model", "gpt-4o"),
+            (
+                "azure.resource_provider.namespace",
+                "Microsoft.CognitiveServices",
+            ),
+            ("server.address", "my-endpoint.openai.azure.com"),
+            ("server.port", "443"),
+        ]);
+
+        assert_eq!(d.gen_ai_system.as_deref(), Some("azure.ai.inference"));
+        assert_eq!(
+            d.azure_resource_provider_namespace.as_deref(),
+            Some("Microsoft.CognitiveServices")
+        );
+        assert_eq!(
+            d.server_address.as_deref(),
+            Some("my-endpoint.openai.azure.com")
+        );
+    }
+
+    #[test]
+    fn test_from_span_attrs_error_span() {
+        let map: BTreeMap<String, String> = [
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.operation.name", "chat"),
+            ("error.type", "RateLimitError"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+
+        let d = GenAiSpanDetail::from_span_attrs(
+            "span-err".into(),
+            None,
+            "chat gpt-4".into(),
+            SpanKind::Client,
+            chrono::Utc::now(),
+            50.0,
+            SpanStatusCode::Error,
+            map,
+        );
+
+        assert_eq!(d.status_code, SpanStatusCode::Error);
+        assert_eq!(d.error_type.as_deref(), Some("RateLimitError"));
+    }
+
+    #[test]
+    fn test_from_span_attrs_opt_in_content_fields() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.operation.name", "chat"),
+            (
+                "gen_ai.input.messages",
+                r#"[{"role":"user","content":"Hi"}]"#,
+            ),
+            (
+                "gen_ai.output.messages",
+                r#"[{"role":"assistant","content":"Hello!"}]"#,
+            ),
+            (
+                "gen_ai.system_instructions",
+                r#"[{"content":"Be helpful"}]"#,
+            ),
+            ("gen_ai.tool.definitions", r#"[{"name":"get_weather"}]"#),
+        ]);
+
+        assert!(d.input_messages.is_some());
+        assert!(d.output_messages.is_some());
+        assert!(d.system_instructions.is_some());
+        assert!(d.tool_definitions.is_some());
+    }
+
+    #[test]
+    fn test_from_span_attrs_non_genai_span() {
+        // A plain HTTP span that's part of a GenAI trace
+        let d = make_detail(vec![
+            ("http.method", "POST"),
+            ("http.url", "https://api.openai.com/v1/chat/completions"),
+            ("http.status_code", "200"),
+        ]);
+
+        assert!(d.gen_ai_system.is_none());
+        assert!(d.gen_ai_operation.is_none());
+        assert!(!d.is_genai_span());
+        // The raw attributes are still preserved
+        assert_eq!(d.attributes.get("http.method").unwrap(), "POST");
+    }
+
+    #[test]
+    fn test_from_span_attrs_empty_attributes() {
+        let d = make_detail(vec![]);
+
+        assert!(d.gen_ai_system.is_none());
+        assert!(d.gen_ai_operation.is_none());
+        assert!(d.gen_ai_model.is_none());
+        assert!(d.input_tokens.is_none());
+        assert!(d.output_tokens.is_none());
+        assert!(!d.is_genai_span());
+    }
+
+    #[test]
+    fn test_from_span_attrs_comma_separated_string_array() {
+        // Some instrumentations may send arrays as comma-separated strings
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.response.finish_reasons", "stop, length"),
+            ("gen_ai.request.stop_sequences", "END, DONE"),
+        ]);
+
+        assert_eq!(
+            d.response_finish_reasons,
+            Some(vec!["stop".to_string(), "length".to_string()])
+        );
+        assert_eq!(
+            d.request_stop_sequences,
+            Some(vec!["END".to_string(), "DONE".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_from_span_attrs_invalid_numeric_values_ignored() {
+        let d = make_detail(vec![
+            ("gen_ai.provider.name", "openai"),
+            ("gen_ai.usage.input_tokens", "not-a-number"),
+            ("gen_ai.request.temperature", "invalid"),
+            ("server.port", "abc"),
+        ]);
+
+        assert!(d.input_tokens.is_none());
+        assert!(d.request_temperature.is_none());
+        assert!(d.server_port.is_none());
+    }
+
+    #[test]
+    fn test_genai_event_serialization() {
+        let event = GenAiEvent {
+            span_id: "span-1".into(),
+            trace_id: "trace-1".into(),
+            event_name: "gen_ai.client.inference.operation.details".into(),
+            timestamp: chrono::Utc::now(),
+            attributes: BTreeMap::from([
+                ("gen_ai.usage.input_tokens".to_string(), "100".to_string()),
+                ("gen_ai.response.id".to_string(), "chatcmpl-abc".to_string()),
+            ]),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: GenAiEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.event_name,
+            "gen_ai.client.inference.operation.details"
+        );
+        assert_eq!(
+            parsed.attributes.get("gen_ai.usage.input_tokens").unwrap(),
+            "100"
+        );
     }
 }
