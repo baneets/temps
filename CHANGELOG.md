@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Vercel AI SDK tracing examples (Node.js) and Python GenAI tracing examples
 - AI tracing documentation page
 
+### Changed
+- Embedded userspace WireGuard via defguard/boringtun: replaced shell-out to `wg` and `ip` CLI with pure Rust implementations (`defguard_wireguard_rs` + `x25519-dalek`); eliminates `wireguard-tools` system package dependency entirely
+
 ### Fixed
 - GenAI trace token counts showed as zero: PostgreSQL `SUM(bigint)` returns `numeric` type, causing Sea-ORM `try_get::<Option<i64>>` to silently fail; added `::bigint` cast to all SUM expressions
 
