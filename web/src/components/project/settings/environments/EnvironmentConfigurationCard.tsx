@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { GitBranch, Loader2, Moon, Network, Plus, Shield, X } from 'lucide-react'
+import { GitBranch, KeyRound, Loader2, Moon, Network, Plus, Shield, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
@@ -81,6 +81,8 @@ export function EnvironmentConfigurationCard({
     on_demand: environment.deployment_config?.onDemand ?? false,
     idle_timeout_seconds: environment.deployment_config?.idleTimeoutSeconds?.toString() ?? '300',
     wake_timeout_seconds: environment.deployment_config?.wakeTimeoutSeconds?.toString() ?? '30',
+    password_enabled: environment.deployment_config?.security?.passwordProtection?.enabled ?? false,
+    password: '',
     security: {
       enabled: environment.deployment_config?.security?.enabled ?? false,
       headers: {
@@ -132,6 +134,8 @@ export function EnvironmentConfigurationCard({
       on_demand: environment.deployment_config?.onDemand ?? false,
       idle_timeout_seconds: environment.deployment_config?.idleTimeoutSeconds?.toString() ?? '300',
       wake_timeout_seconds: environment.deployment_config?.wakeTimeoutSeconds?.toString() ?? '30',
+      password_enabled: environment.deployment_config?.security?.passwordProtection?.enabled ?? false,
+      password: '',
       security: {
         enabled: environment.deployment_config?.security?.enabled ?? false,
         headers: {
@@ -213,6 +217,11 @@ export function EnvironmentConfigurationCard({
           ? parseInt(formData.wake_timeout_seconds)
           : null,
         security: formData.security,
+        password: formData.password_enabled
+          ? (formData.password || null)
+          : (formData.password_enabled === false && environment.deployment_config?.security?.passwordProtection?.enabled
+            ? ''
+            : null),
       },
     })
   }
@@ -744,6 +753,57 @@ export function EnvironmentConfigurationCard({
                       </Select>
                       <p className="text-xs text-muted-foreground mt-1">
                         Choose a preset or customize headers manually
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Password Protection */}
+                <div className="flex items-center gap-3 p-3 border rounded-lg">
+                  <div className="flex-1">
+                    <Label className="text-sm font-medium flex items-center gap-1.5">
+                      <KeyRound className="h-4 w-4" />
+                      Password Protection
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Require a password to access this environment. Visitors see an HTML password form before reaching the site.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={formData.password_enabled}
+                    onCheckedChange={(checked) =>
+                      setFormData((prev) => ({
+                        ...prev,
+                        password_enabled: checked,
+                        password: checked ? prev.password : '',
+                      }))
+                    }
+                  />
+                </div>
+
+                {formData.password_enabled && (
+                  <div className="space-y-3 p-4 border rounded-lg bg-muted/30">
+                    <div>
+                      <Label>Password</Label>
+                      <Input
+                        type="password"
+                        value={formData.password}
+                        onChange={(e) =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            password: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          environment.deployment_config?.security?.passwordProtection?.enabled
+                            ? 'Leave empty to keep current password'
+                            : 'Enter a password'
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {environment.deployment_config?.security?.passwordProtection?.enabled
+                          ? 'A password is currently set. Enter a new one to change it, or leave empty to keep the current password.'
+                          : 'Set a password that visitors must enter to access this environment. The password is securely hashed.'}
                       </p>
                     </div>
                   </div>

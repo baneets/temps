@@ -11057,6 +11057,7 @@ name = "temps-environments"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "axum 0.8.6",
  "axum-macros",
  "chrono",
@@ -11747,6 +11748,7 @@ name = "temps-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "async-trait",
  "axum 0.8.6",
  "base64 0.22.1",
@@ -11757,6 +11759,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "hmac",
  "htmd",
  "http-body-util",
  "hyper 1.7.0",
@@ -11802,6 +11805,7 @@ dependencies = [
  "tokio-test",
  "tower 0.4.13",
  "tracing",
+ "url",
  "utoipa",
  "uuid",
  "woothee",

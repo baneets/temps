@@ -2199,6 +2199,139 @@ impl ProxyHttp for LoadBalancer {
                     ));
                 }
             }
+
+            // Password wall: check if environment has password protection enabled
+            let password_protection = project_ctx
+                .environment
+                .deployment_config
+                .as_ref()
+                .and_then(|dc| dc.security.as_ref())
+                .and_then(|s| s.password_protection.as_ref())
+                .filter(|pp| pp.enabled);
+
+            if let Some(pp) = password_protection {
+                let password_hash = pp.password_hash.clone();
+                let env_id = project_ctx.environment.id;
+
+                // Check if this is the password verify POST endpoint
+                if ctx.path == "/_temps/password-verify" && ctx.method == "POST" {
+                    // Read the POST body to get the password
+                    let body = session.read_request_body().await.map_err(|e| {
+                        error!("Failed to read password verify body: {}", e);
+                        e
+                    })?;
+
+                    let body_str = body
+                        .as_ref()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .unwrap_or_default();
+
+                    // Parse form data (application/x-www-form-urlencoded)
+                    let params: Vec<(String, String)> =
+                        url::form_urlencoded::parse(body_str.as_bytes())
+                            .into_owned()
+                            .collect();
+
+                    let password = params
+                        .iter()
+                        .find(|(k, _)| k == "password")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("");
+
+                    let redirect = params
+                        .iter()
+                        .find(|(k, _)| k == "redirect")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("/");
+
+                    if crate::handler::password_wall::verify_password(password, &password_hash) {
+                        // Password correct — set cookie and redirect
+                        let host = ctx.host.clone();
+                        let set_cookie = crate::handler::password_wall::build_set_cookie_header(
+                            env_id,
+                            &password_hash,
+                            &host,
+                        );
+
+                        let mut resp = ResponseHeader::build(303, None)?;
+                        resp.insert_header("Location", redirect)?;
+                        resp.insert_header("Set-Cookie", &set_cookie)?;
+                        resp.insert_header("Cache-Control", "no-store")?;
+                        resp.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                        session.write_response_header(Box::new(resp), true).await?;
+                        ctx.routing_status = "password_verified".to_string();
+                        return Ok(true);
+                    } else {
+                        // Wrong password — show form again with error
+                        let html = crate::handler::password_wall::generate_password_form_html(
+                            redirect, true,
+                        );
+                        let html_bytes = Bytes::from(html);
+
+                        let mut resp = ResponseHeader::build(StatusCode::OK, None)?;
+                        resp.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                        resp.insert_header("Cache-Control", "no-store")?;
+                        resp.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                        session.write_response_header(Box::new(resp), false).await?;
+                        session.write_response_body(Some(html_bytes), true).await?;
+                        ctx.routing_status = "password_wrong".to_string();
+                        return Ok(true);
+                    }
+                }
+
+                // Check for valid password cookie
+                let has_valid_cookie = session
+                    .req_header()
+                    .headers
+                    .get_all("Cookie")
+                    .iter()
+                    .filter_map(|h| h.to_str().ok())
+                    .flat_map(|s| Cookie::split_parse(s).filter_map(Result::ok))
+                    .find(|c| c.name() == crate::handler::password_wall::PASSWORD_COOKIE_NAME)
+                    .map(|c| {
+                        crate::handler::password_wall::validate_cookie(
+                            c.value(),
+                            env_id,
+                            &password_hash,
+                        )
+                    })
+                    .unwrap_or(false);
+
+                if !has_valid_cookie {
+                    // No valid cookie — show password form
+                    let current_path = if let Some(ref qs) = ctx.query_string {
+                        if qs.is_empty() {
+                            ctx.path.clone()
+                        } else {
+                            format!("{}?{}", ctx.path, qs)
+                        }
+                    } else {
+                        ctx.path.clone()
+                    };
+
+                    let show_error = ctx
+                        .query_string
+                        .as_deref()
+                        .is_some_and(|q| q.contains("error=1"));
+                    let html = crate::handler::password_wall::generate_password_form_html(
+                        &current_path,
+                        show_error,
+                    );
+                    let html_bytes = Bytes::from(html);
+
+                    let mut resp = ResponseHeader::build(StatusCode::OK, None)?;
+                    resp.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                    resp.insert_header("Cache-Control", "no-store")?;
+                    resp.insert_header("X-Request-ID", &ctx.request_id)?;
+
+                    session.write_response_header(Box::new(resp), false).await?;
+                    session.write_response_body(Some(html_bytes), true).await?;
+                    ctx.routing_status = "password_wall".to_string();
+                    return Ok(true);
+                }
+            }
         } else {
             ctx.routing_status = "no_project".to_string();
         }

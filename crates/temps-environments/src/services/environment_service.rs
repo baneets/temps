@@ -553,6 +553,35 @@ impl EnvironmentService {
         if let Some(security) = settings.security {
             deployment_config.security = Some(security);
         }
+        // Handle password protection: hash plaintext password with argon2
+        if let Some(ref password) = settings.password {
+            let mut security = deployment_config.security.clone().unwrap_or_default();
+            if password.is_empty() {
+                // Empty string removes password protection
+                security.password_protection = None;
+            } else {
+                use argon2::password_hash::{rand_core::OsRng, SaltString};
+                use argon2::{Argon2, PasswordHasher};
+                let salt = SaltString::generate(&mut OsRng);
+                let argon2 = Argon2::default();
+                let hash = argon2
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|e| {
+                        EnvironmentError::InvalidInput(format!(
+                            "Failed to hash password for environment {}: {}",
+                            env_id, e
+                        ))
+                    })?
+                    .to_string();
+                security.password_protection = Some(
+                    temps_entities::deployment_config::PasswordProtectionConfig {
+                        enabled: true,
+                        password_hash: hash,
+                    },
+                );
+            }
+            deployment_config.security = Some(security);
+        }
         if settings.target_nodes.is_some() {
             deployment_config.target_nodes = settings.target_nodes;
         }
@@ -957,6 +986,7 @@ mod tests {
                     on_demand: None,
                     idle_timeout_seconds: None,
                     wake_timeout_seconds: None,
+                    password: None,
                 },
             )
             .await;

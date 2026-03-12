@@ -1213,6 +1213,10 @@ export type CreateEnvironmentVariableRequest = {
 
 export type CreateExternalServiceRequest = {
     name: string;
+    /**
+     * Target node ID for the service. Omit or null to run on the control plane.
+     */
+    node_id?: number | null;
     parameters: {
         [key: string]: unknown;
     };
@@ -3728,6 +3732,10 @@ export type ExternalServiceInfo = {
     created_at: string;
     id: number;
     name: string;
+    /**
+     * Node ID where the service runs. Null means control plane (local).
+     */
+    node_id?: number | null;
     service_type: ServiceTypeRoute;
     status: string;
     updated_at: string;
@@ -6498,6 +6506,24 @@ export type PaginationParams = {
     per_page?: number;
 };
 
+/**
+ * Password protection configuration
+ *
+ * When enabled, the proxy shows an HTML password form before allowing access.
+ * After the user enters the correct password, an HMAC-signed cookie is set
+ * so subsequent requests pass through without re-entering the password.
+ */
+export type PasswordProtectionConfig = {
+    /**
+     * Whether password protection is enabled
+     */
+    enabled: boolean;
+    /**
+     * The bcrypt-hashed password (never stored or returned in plaintext)
+     */
+    passwordHash: string;
+};
+
 export type PathVisitors = {
     name: string;
     percentage: number;
@@ -7288,6 +7314,16 @@ export type PublicRepositoryInfo = {
     stars: number;
 };
 
+/**
+ * Public settings response containing only non-sensitive feature flags
+ */
+export type PublicSettingsResponse = {
+    /**
+     * Whether demo mode is enabled
+     */
+    demo_enabled: boolean;
+};
+
 export type PurgeLogsRequest = {
     /**
      * Delete all logs before this timestamp (ISO 8601)
@@ -7765,6 +7801,18 @@ export type RunExternalServiceBackupRequest = {
 };
 
 /**
+ * S3 credentials distributed to agents for backup/restore operations.
+ */
+export type S3CredentialsResponse = {
+    access_key_id: string;
+    bucket_name: string;
+    endpoint?: string | null;
+    force_path_style: boolean;
+    region: string;
+    secret_key: string;
+};
+
+/**
  * Response type for S3 source
  */
 export type S3SourceResponse = {
@@ -7893,6 +7941,7 @@ export type SecurityConfig = {
     enabled?: boolean | null;
     geoRestrictions?: null | GeoRestrictionsConfig;
     headers?: null | SecurityHeadersConfig;
+    passwordProtection?: null | PasswordProtectionConfig;
     rateLimiting?: null | RateLimitConfig;
 };
 
@@ -9522,6 +9571,13 @@ export type UpdateEnvironmentSettingsRequest = {
      * idle_timeout_seconds of no traffic and started on the next request.
      */
     on_demand?: boolean | null;
+    /**
+     * Set a password to protect this environment. The proxy will show an HTML
+     * password form before allowing access. The password is bcrypt-hashed
+     * server-side and never stored in plaintext.
+     * Send an empty string to remove password protection.
+     */
+    password?: string | null;
     /**
      * Enable/disable performance metrics collection
      */
@@ -18485,6 +18541,46 @@ export type NodeHeartbeatResponses = {
 };
 
 export type NodeHeartbeatResponse = NodeHeartbeatResponses[keyof NodeHeartbeatResponses];
+
+export type GetS3CredentialsData = {
+    body?: never;
+    path: {
+        /**
+         * Node ID
+         */
+        node_id: number;
+        /**
+         * S3 source ID
+         */
+        s3_source_id: number;
+    };
+    query?: never;
+    url: '/internal/nodes/{node_id}/s3-credentials/{s3_source_id}';
+};
+
+export type GetS3CredentialsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * S3 source not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetS3CredentialsResponses = {
+    /**
+     * S3 credentials
+     */
+    200: S3CredentialsResponse;
+};
+
+export type GetS3CredentialsResponse = GetS3CredentialsResponses[keyof GetS3CredentialsResponses];
 
 export type ListIpAccessControlData = {
     body?: never;
@@ -27780,6 +27876,29 @@ export type GetJoinTokenStatusResponses = {
 };
 
 export type GetJoinTokenStatusResponse = GetJoinTokenStatusResponses[keyof GetJoinTokenStatusResponses];
+
+export type GetPublicSettingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/public';
+};
+
+export type GetPublicSettingsErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPublicSettingsResponses = {
+    /**
+     * Public settings
+     */
+    200: PublicSettingsResponse;
+};
+
+export type GetPublicSettingsResponse = GetPublicSettingsResponses[keyof GetPublicSettingsResponses];
 
 export type ListTemplatesData = {
     body?: never;

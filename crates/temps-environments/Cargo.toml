@@ -30,3 +30,4 @@ axum-macros = { workspace = true }
 http = { workspace = true }
 futures-util = { workspace = true }
 slug = { workspace = true }
+argon2 = { workspace = true }

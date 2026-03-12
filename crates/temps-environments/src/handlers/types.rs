@@ -191,6 +191,12 @@ pub struct UpdateEnvironmentSettingsRequest {
     /// Max seconds to wait for containers to start on wake (5-120). Default: 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wake_timeout_seconds: Option<i32>,
+    /// Set a password to protect this environment. The proxy will show an HTML
+    /// password form before allowing access. The password is bcrypt-hashed
+    /// server-side and never stored in plaintext.
+    /// Send an empty string to remove password protection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

@@ -45,6 +45,10 @@ pub struct SecurityConfig {
     /// Geographic restrictions (future: country blocking, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_restrictions: Option<GeoRestrictionsConfig>,
+
+    /// Password protection: shows an HTML password form before allowing access
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_protection: Option<PasswordProtectionConfig>,
 }
 
 /// Security headers configuration (subset of global SecurityHeadersSettings)
@@ -122,6 +126,21 @@ pub struct GeoRestrictionsConfig {
     pub allowed_countries: Vec<String>,
 }
 
+/// Password protection configuration
+///
+/// When enabled, the proxy shows an HTML password form before allowing access.
+/// After the user enters the correct password, an HMAC-signed cookie is set
+/// so subsequent requests pass through without re-entering the password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, FromJsonQueryResult)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordProtectionConfig {
+    /// Whether password protection is enabled
+    pub enabled: bool,
+
+    /// The bcrypt-hashed password (never stored or returned in plaintext)
+    pub password_hash: String,
+}
+
 impl SecurityConfig {
     /// Create a new security configuration with default values
     pub fn new() -> Self {
@@ -159,6 +178,10 @@ impl SecurityConfig {
                 .geo_restrictions
                 .clone()
                 .or_else(|| self.geo_restrictions.clone()),
+            password_protection: other
+                .password_protection
+                .clone()
+                .or_else(|| self.password_protection.clone()),
         }
     }
 }

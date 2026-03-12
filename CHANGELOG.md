@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AI usage analytics: per-model token tracking with agent/session context, BYOK vs platform key breakdown
 - Vercel AI SDK tracing examples (Node.js) and Python GenAI tracing examples
 - AI tracing documentation page
+- Environment password protection: cookie-based password wall for environments with HMAC-signed cookies, argon2 password hashing, and HTML password form served by the proxy; set via environment settings API with automatic cookie invalidation on password change
 
 ### Changed
 - Embedded userspace WireGuard via defguard/boringtun: replaced shell-out to `wg` and `ip` CLI with pure Rust implementations (`defguard_wireguard_rs` + `x25519-dalek`); eliminates `wireguard-tools` system package dependency entirely
