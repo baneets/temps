@@ -147,6 +147,11 @@ impl AiProvider for OpenAiCompatProvider {
         let mut req = request.clone();
         req.stream = false;
 
+        // Sanitize request for OpenAI model compatibility
+        if self.info.id == "openai" {
+            sanitize_openai_request(&mut req);
+        }
+
         let response = self
             .client
             .post(&url)
@@ -191,6 +196,10 @@ impl AiProvider for OpenAiCompatProvider {
 
         let mut req = request.clone();
         req.stream = true;
+
+        if self.info.id == "openai" {
+            sanitize_openai_request(&mut req);
+        }
 
         // Inject stream_options.include_usage so the final chunk includes token counts
         let extra = req.extra.get_or_insert_with(Default::default);
@@ -285,6 +294,35 @@ impl AiProvider for OpenAiCompatProvider {
     }
 }
 
+/// Returns true if the model is an OpenAI o-series reasoning model.
+fn is_o_series_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+}
+
+/// Sanitize a chat completion request for OpenAI API compatibility.
+///
+/// - All OpenAI models: rewrite `max_tokens` → `max_completion_tokens`
+/// - O-series reasoning models (o1, o3, o4-mini, etc.): strip unsupported
+///   parameters (`temperature`, `top_p`, `frequency_penalty`, `presence_penalty`)
+fn sanitize_openai_request(req: &mut ChatCompletionRequest) {
+    // Rewrite max_tokens → max_completion_tokens for all OpenAI models
+    if let Some(value) = req.max_tokens.take() {
+        let extra = req.extra.get_or_insert_with(Default::default);
+        extra
+            .entry("max_completion_tokens")
+            .or_insert_with(|| serde_json::json!(value));
+    }
+
+    // O-series models reject sampling parameters
+    if is_o_series_model(&req.model) {
+        req.temperature = None;
+        req.top_p = None;
+        req.frequency_penalty = None;
+        req.presence_penalty = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +387,143 @@ mod tests {
         assert!(!models.is_empty());
         assert!(models.iter().any(|m| m.id == "gpt-4o"));
         assert!(models.iter().all(|m| m.owned_by == "openai"));
+    }
+
+    fn test_request(model: &str) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: model.to_string(),
+            messages: vec![],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            stop: None,
+            n: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            seed: None,
+            user: None,
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn test_sanitize_rewrites_max_tokens() {
+        let mut req = test_request("gpt-5-nano");
+        req.max_tokens = Some(500);
+
+        sanitize_openai_request(&mut req);
+
+        assert!(req.max_tokens.is_none());
+        let extra = req.extra.as_ref().unwrap();
+        assert_eq!(
+            extra.get("max_completion_tokens").unwrap(),
+            &serde_json::json!(500)
+        );
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("max_completion_tokens"));
+        assert!(!json.contains("\"max_tokens\""));
+    }
+
+    #[test]
+    fn test_sanitize_noop_when_no_max_tokens() {
+        let mut req = test_request("gpt-5-nano");
+
+        sanitize_openai_request(&mut req);
+
+        assert!(req.max_tokens.is_none());
+        assert!(req.extra.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_preserves_existing_max_completion_tokens() {
+        let mut extra = serde_json::Map::new();
+        extra.insert("max_completion_tokens".to_string(), serde_json::json!(1000));
+
+        let mut req = test_request("gpt-5-nano");
+        req.max_tokens = Some(500);
+        req.extra = Some(extra);
+
+        sanitize_openai_request(&mut req);
+
+        assert!(req.max_tokens.is_none());
+        assert_eq!(
+            req.extra
+                .as_ref()
+                .unwrap()
+                .get("max_completion_tokens")
+                .unwrap(),
+            &serde_json::json!(1000)
+        );
+    }
+
+    #[test]
+    fn test_sanitize_strips_sampling_params_for_o_series() {
+        let mut req = test_request("o3");
+        req.temperature = Some(0.7);
+        req.top_p = Some(0.9);
+        req.frequency_penalty = Some(0.5);
+        req.presence_penalty = Some(0.3);
+        req.max_tokens = Some(500);
+
+        sanitize_openai_request(&mut req);
+
+        assert!(req.temperature.is_none());
+        assert!(req.top_p.is_none());
+        assert!(req.frequency_penalty.is_none());
+        assert!(req.presence_penalty.is_none());
+        assert!(req.max_tokens.is_none());
+        assert_eq!(
+            req.extra
+                .as_ref()
+                .unwrap()
+                .get("max_completion_tokens")
+                .unwrap(),
+            &serde_json::json!(500)
+        );
+    }
+
+    #[test]
+    fn test_sanitize_strips_sampling_params_for_o4_mini() {
+        let mut req = test_request("o4-mini");
+        req.temperature = Some(0.5);
+        req.top_p = Some(0.8);
+
+        sanitize_openai_request(&mut req);
+
+        assert!(req.temperature.is_none());
+        assert!(req.top_p.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_keeps_sampling_params_for_gpt() {
+        let mut req = test_request("gpt-5-nano");
+        req.temperature = Some(0.7);
+        req.top_p = Some(0.9);
+        req.frequency_penalty = Some(0.5);
+        req.presence_penalty = Some(0.3);
+
+        sanitize_openai_request(&mut req);
+
+        assert_eq!(req.temperature, Some(0.7));
+        assert_eq!(req.top_p, Some(0.9));
+        assert_eq!(req.frequency_penalty, Some(0.5));
+        assert_eq!(req.presence_penalty, Some(0.3));
+    }
+
+    #[test]
+    fn test_is_o_series_model() {
+        assert!(is_o_series_model("o3"));
+        assert!(is_o_series_model("o3-pro"));
+        assert!(is_o_series_model("o3-mini"));
+        assert!(is_o_series_model("o4-mini"));
+        assert!(is_o_series_model("o1-preview"));
+        assert!(!is_o_series_model("gpt-5-nano"));
+        assert!(!is_o_series_model("gpt-4o"));
+        assert!(!is_o_series_model("grok-3"));
     }
 }
