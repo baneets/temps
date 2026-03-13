@@ -126,13 +126,13 @@ function EnvironmentVariableRow({
   }
 
   return (
-    <div className="flex items-center justify-between p-2 border rounded-md">
-      <span className="font-mono text-sm">{variable.key}</span>
-      <div className="flex items-center gap-2">
+    <div className="flex items-center justify-between gap-2 p-2 border rounded-md overflow-hidden">
+      <span className="font-mono text-sm truncate min-w-0">{variable.key}</span>
+      <div className="flex items-center gap-2 shrink-0">
         {isVisible ? (
-          <span className="font-mono text-sm">{data?.value}</span>
+          <span className="font-mono text-sm truncate max-w-[120px] sm:max-w-none">{data?.value}</span>
         ) : (
-          <span className="font-mono text-sm">••••••••••••</span>
+          <span className="font-mono text-sm">••••••••</span>
         )}
         <Button variant="ghost" size="sm" onClick={toggleVisibility}>
           {isVisible ? (
@@ -184,9 +184,9 @@ function CurrentDeployment({
   if (!deployment) return null
 
   return (
-    <div className="rounded-lg border p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+    <div className="rounded-lg border p-3 sm:p-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <Badge
             variant={
               deployment.status === 'success'
@@ -195,6 +195,7 @@ function CurrentDeployment({
                   ? 'destructive'
                   : 'secondary'
             }
+            className="shrink-0"
           >
             {deployment.status}
           </Badge>
@@ -204,7 +205,7 @@ function CurrentDeployment({
             className="text-sm text-muted-foreground"
           />
         </div>
-        <Button variant="outline" size="sm" asChild>
+        <Button variant="outline" size="sm" asChild className="w-full sm:w-auto">
           <Link to={`/projects/${project.slug}/deployments/${deployment.id}`}>
             View Deployment
           </Link>
@@ -423,7 +424,7 @@ export function EnvironmentDetail({
                     className="flex items-center justify-between rounded-lg border p-3 gap-2"
                   >
                     <div className="flex items-center gap-2 overflow-hidden">
-                      <span className="font-mono text-sm truncate max-w-[calc(100vw-12rem)]">
+                      <span className="font-mono text-sm truncate">
                         {domain.domain}
                       </span>
                     </div>
@@ -557,7 +558,7 @@ export function EnvironmentDetail({
               onOpenChange={setShowDeleteConfirm}
             >
               <AlertDialogTrigger asChild>
-                <Button variant="destructive" disabled={isProduction}>
+                <Button variant="destructive" disabled={isProduction} className="w-full sm:w-auto">
                   <Trash2 className="h-4 w-4 mr-2" />
                   Delete Environment
                 </Button>

@@ -144,7 +144,7 @@ export function EnvironmentDashboard({
 
       {/* Main Content */}
       <div className="flex-1 overflow-auto flex flex-col">
-        <div className="flex-1 p-6">{renderContent()}</div>
+        <div className="flex-1 p-3 sm:p-6">{renderContent()}</div>
       </div>
     </div>
   )

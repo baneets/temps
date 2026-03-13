@@ -74,9 +74,9 @@ export function EnvironmentsTabsView({
     return (
       <div className="flex flex-col h-full">
         <div className="p-6 border-b bg-background">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-3xl font-bold">Environments</h1>
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <h1 className="text-2xl sm:text-3xl font-bold">Environments</h1>
               <p className="text-sm text-muted-foreground mt-1">
                 Manage and monitor your environments
               </p>
@@ -108,10 +108,10 @@ export function EnvironmentsTabsView({
         onValueChange={(value) => setSelectedEnvId(parseInt(value))}
         className="flex flex-col h-full"
       >
-        <div className="border-b bg-background sticky top-0 z-10">
+        <div className="border-b bg-background sm:sticky sm:top-0 sm:z-10">
           <div className="px-2 py-0">
-            <div className="flex items-center justify-between mb-4">
-              <h1 className="text-3xl font-bold">Environments</h1>
+            <div className="hidden sm:flex items-center justify-between gap-2 mb-4">
+              <h1 className="text-3xl font-bold truncate">Environments</h1>
               <CreateEnvironmentDialog
                 open={isCreateDialogOpen}
                 onOpenChange={setIsCreateDialogOpen}
@@ -124,7 +124,31 @@ export function EnvironmentsTabsView({
                 }}
               />
             </div>
-            <TabsList className="w-full justify-start overflow-x-auto h-auto p-0 bg-transparent border-b rounded-none">
+            <div className="flex items-center justify-between gap-2 sm:hidden py-1.5">
+              <TabsList className="justify-start overflow-x-auto h-auto p-0 bg-transparent border-b-0 rounded-none">
+                {environments.map((env) => (
+                  <TabsTrigger
+                    key={env.id}
+                    value={env.id.toString()}
+                    className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-3 py-1.5"
+                  >
+                    <span className="font-medium text-sm">{env.name}</span>
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+              <CreateEnvironmentDialog
+                open={isCreateDialogOpen}
+                onOpenChange={setIsCreateDialogOpen}
+                project={project}
+                onSubmit={async (values) => {
+                  await createEnv.mutateAsync({
+                    path: { project_id: project.id || 0 },
+                    body: values,
+                  })
+                }}
+              />
+            </div>
+            <TabsList className="hidden sm:flex w-full justify-start overflow-x-auto h-auto p-0 bg-transparent border-b rounded-none">
               {environments.map((env) => (
                 <TabsTrigger
                   key={env.id}

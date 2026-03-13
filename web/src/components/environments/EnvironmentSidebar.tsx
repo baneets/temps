@@ -97,9 +97,9 @@ export function EnvironmentSidebar({
                 <TabsTrigger
                   key={item.view}
                   value={item.view}
-                  className="rounded-none border-b-2 border-b-transparent data-[state=active]:border-b-primary data-[state=active]:bg-transparent"
+                  className="rounded-none border-b-2 border-b-transparent data-[state=active]:border-b-primary data-[state=active]:bg-transparent py-1.5 sm:py-2"
                 >
-                  <Icon className="h-4 w-4 mr-2" />
+                  <Icon className="h-4 w-4 mr-1.5" />
                   <span className="text-sm">{item.title}</span>
                 </TabsTrigger>
               )

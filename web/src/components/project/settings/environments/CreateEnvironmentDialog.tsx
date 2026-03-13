@@ -64,9 +64,9 @@ export function CreateEnvironmentDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger asChild>
-        <Button>
-          <Plus className="h-4 w-4 mr-2" />
-          Add Environment
+        <Button className="shrink-0">
+          <Plus className="h-4 w-4 sm:mr-2" />
+          <span className="hidden sm:inline">Add Environment</span>
         </Button>
       </DialogTrigger>
       <DialogContent>
