@@ -1,5 +1,6 @@
 use super::audit::{
     EnvironmentDeletedAudit, EnvironmentSettingsUpdatedAudit, EnvironmentSettingsUpdatedFields,
+    EnvironmentSleepStateChangedAudit,
 };
 use super::types::AppState;
 use axum::Router;
@@ -634,8 +635,9 @@ pub async fn update_environment_settings(
 /// Wake a sleeping on-demand environment
 ///
 /// Manually wake an environment that has been put to sleep by the on-demand
-/// idle timeout. Sets `sleeping = false` on the environment. The proxy will
-/// detect the state change and start containers on the next request.
+/// idle timeout. Starts containers, waits for health checks, then sets
+/// `sleeping = false`. If no OnDemandWaker is available (proxy not running
+/// in same process), falls back to setting the DB flag only.
 #[utoipa::path(
     post,
     path = "/projects/{project_id}/environments/{env_id}/wake",
@@ -644,6 +646,7 @@ pub async fn update_environment_settings(
         (status = 200, description = "Environment woken up", body = EnvironmentResponse),
         (status = 400, description = "On-demand not enabled for this environment"),
         (status = 404, description = "Environment not found"),
+        (status = 429, description = "Too many state transitions, retry after cooldown"),
         (status = 500, description = "Internal server error")
     ),
     params(
@@ -659,9 +662,61 @@ pub async fn wake_environment(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsWrite);
 
+    // Cooldown: reject if last state change was less than 30 seconds ago
+    let environment = state
+        .environment_service
+        .get_environment(project_id, env_id)
+        .await?;
+
+    let seconds_since_update = (chrono::Utc::now() - environment.updated_at).num_seconds();
+    if seconds_since_update < 30 {
+        return Err(temps_core::error_builder::too_many_requests()
+            .title("State Transition Cooldown")
+            .detail(format!(
+                "Environment {} was updated {}s ago. Please wait at least 30s between state transitions.",
+                env_id, seconds_since_update
+            ))
+            .build());
+    }
+
+    // Use the full container lifecycle wake if available
+    if let Some(ref waker) = state.on_demand_waker {
+        let wake_timeout = environment
+            .deployment_config
+            .as_ref()
+            .map(|c| c.wake_timeout_seconds)
+            .unwrap_or(30);
+
+        waker
+            .wake_environment(env_id, wake_timeout)
+            .await
+            .map_err(|e| {
+                error!(
+                    environment_id = env_id,
+                    error = %e,
+                    "Failed to wake environment via OnDemandWaker"
+                );
+                temps_core::error_builder::internal_server_error()
+                    .title("Wake Failed")
+                    .detail(format!("Failed to wake environment {}: {}", env_id, e))
+                    .build()
+            })?;
+    } else {
+        // No OnDemandWaker available — cannot safely wake without starting containers
+        return Err(temps_core::error_builder::internal_server_error()
+            .title("Wake Unavailable")
+            .detail(format!(
+                "Cannot wake environment {}: on-demand container lifecycle manager is not available. \
+                 The environment will be woken automatically when the next request arrives via the proxy.",
+                env_id
+            ))
+            .build());
+    }
+
+    // Re-read the environment after wake
     let updated_environment = state
         .environment_service
-        .set_sleeping(project_id, env_id, false)
+        .get_environment(project_id, env_id)
         .await?;
 
     info!(
@@ -679,23 +734,14 @@ pub async fn wake_environment(
 
     let _ = state
         .audit_service
-        .create_audit_log(&EnvironmentSettingsUpdatedAudit {
+        .create_audit_log(&EnvironmentSleepStateChangedAudit {
             context: audit_context,
             project_id,
-            project_name: String::new(),
-            project_slug: String::new(),
             environment_id: env_id,
             environment_name: updated_environment.name.clone(),
             environment_slug: updated_environment.slug.clone(),
-            updated_settings: EnvironmentSettingsUpdatedFields {
-                cpu_request: None,
-                cpu_limit: None,
-                memory_request: None,
-                memory_limit: None,
-                branch: None,
-                replicas: None,
-                security_updated: false,
-            },
+            previous_state: "sleeping",
+            new_state: "awake",
         })
         .await;
 
@@ -724,8 +770,8 @@ pub async fn wake_environment(
 
 /// Sleep an on-demand environment
 ///
-/// Manually put an on-demand environment to sleep. Sets `sleeping = true`.
-/// The proxy will stop sending traffic and the idle sweep will stop containers.
+/// Manually put an on-demand environment to sleep. Stops containers and sets
+/// `sleeping = true`. If no OnDemandWaker is available, falls back to DB flag only.
 #[utoipa::path(
     post,
     path = "/projects/{project_id}/environments/{env_id}/sleep",
@@ -734,6 +780,7 @@ pub async fn wake_environment(
         (status = 200, description = "Environment put to sleep", body = EnvironmentResponse),
         (status = 400, description = "On-demand not enabled for this environment"),
         (status = 404, description = "Environment not found"),
+        (status = 429, description = "Too many state transitions, retry after cooldown"),
         (status = 500, description = "Internal server error")
     ),
     params(
@@ -749,9 +796,48 @@ pub async fn sleep_environment(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsWrite);
 
+    // Cooldown: reject if last state change was less than 30 seconds ago
+    let environment = state
+        .environment_service
+        .get_environment(project_id, env_id)
+        .await?;
+
+    let seconds_since_update = (chrono::Utc::now() - environment.updated_at).num_seconds();
+    if seconds_since_update < 30 {
+        return Err(temps_core::error_builder::too_many_requests()
+            .title("State Transition Cooldown")
+            .detail(format!(
+                "Environment {} was updated {}s ago. Please wait at least 30s between state transitions.",
+                env_id, seconds_since_update
+            ))
+            .build());
+    }
+
+    // Use the full container lifecycle sleep if available
+    if let Some(ref waker) = state.on_demand_waker {
+        waker.sleep_environment(env_id).await.map_err(|e| {
+            error!(
+                environment_id = env_id,
+                error = %e,
+                "Failed to sleep environment via OnDemandWaker"
+            );
+            temps_core::error_builder::internal_server_error()
+                .title("Sleep Failed")
+                .detail(format!("Failed to sleep environment {}: {}", env_id, e))
+                .build()
+        })?;
+    } else {
+        // Fallback: set DB flag only
+        state
+            .environment_service
+            .set_sleeping(project_id, env_id, true)
+            .await?;
+    }
+
+    // Re-read the environment after sleep
     let updated_environment = state
         .environment_service
-        .set_sleeping(project_id, env_id, true)
+        .get_environment(project_id, env_id)
         .await?;
 
     info!(
@@ -769,23 +855,14 @@ pub async fn sleep_environment(
 
     let _ = state
         .audit_service
-        .create_audit_log(&EnvironmentSettingsUpdatedAudit {
+        .create_audit_log(&EnvironmentSleepStateChangedAudit {
             context: audit_context,
             project_id,
-            project_name: String::new(),
-            project_slug: String::new(),
             environment_id: env_id,
             environment_name: updated_environment.name.clone(),
             environment_slug: updated_environment.slug.clone(),
-            updated_settings: EnvironmentSettingsUpdatedFields {
-                cpu_request: None,
-                cpu_limit: None,
-                memory_request: None,
-                memory_limit: None,
-                branch: None,
-                replicas: None,
-                security_updated: false,
-            },
+            previous_state: "awake",
+            new_state: "sleeping",
         })
         .await;
 

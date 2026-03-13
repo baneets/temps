@@ -16,6 +16,7 @@ use sea_orm::{
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use temps_core::OnDemandWaker;
 use temps_entities::{deployment_containers, environments};
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -278,25 +279,58 @@ impl OnDemandManager {
             .all(self.db.as_ref())
             .await?;
 
-        // Stop all containers in parallel
+        // Stop all containers in parallel, tracking failures
         let stop_futures: Vec<_> = containers
             .iter()
             .map(|c| {
                 let container_id = c.container_id.clone();
                 let lifecycle = Arc::clone(&self.container_lifecycle);
                 async move {
-                    if let Err(e) = lifecycle.stop_container(&container_id).await {
-                        warn!(
-                            container_id = %container_id,
-                            error = %e,
-                            "Failed to stop container during sleep"
-                        );
+                    match lifecycle.stop_container(&container_id).await {
+                        Ok(()) => Ok(container_id),
+                        Err(e) => {
+                            warn!(
+                                container_id = %container_id,
+                                error = %e,
+                                "Failed to stop container during sleep"
+                            );
+                            Err((container_id, e))
+                        }
                     }
                 }
             })
             .collect();
 
-        futures::future::join_all(stop_futures).await;
+        let results = futures::future::join_all(stop_futures).await;
+
+        let failed: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+        if !failed.is_empty() {
+            // Some containers failed to stop — revert sleeping state to avoid
+            // inconsistency where DB says sleeping but containers are still running
+            error!(
+                environment_id = environment_id,
+                failed_count = failed.len(),
+                total = containers.len(),
+                "Failed to stop some containers during sleep, reverting sleeping state"
+            );
+            let _ = self
+                .db
+                .execute(Statement::from_sql_and_values(
+                    sea_orm::DatabaseBackend::Postgres,
+                    "UPDATE environments SET sleeping = false WHERE id = $1",
+                    [environment_id.into()],
+                ))
+                .await;
+            self.notify_route_change().await;
+            return Err(OnDemandError::ContainerOperation {
+                container_id: "multiple".to_string(),
+                reason: format!(
+                    "Failed to stop {}/{} containers during sleep",
+                    failed.len(),
+                    containers.len()
+                ),
+            });
+        }
 
         info!(
             environment_id = environment_id,
@@ -609,6 +643,30 @@ impl OnDemandManager {
                 });
             })
             .expect("Failed to spawn on-demand sweep thread");
+    }
+}
+
+/// Bridge implementation so the proxy's OnDemandManager can be injected into
+/// the environments handler AppState via the plugin system.
+#[async_trait]
+impl OnDemandWaker for OnDemandManager {
+    async fn wake_environment(
+        &self,
+        environment_id: i32,
+        wake_timeout_seconds: i32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.wake_environment(environment_id, wake_timeout_seconds)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+
+    async fn sleep_environment(
+        &self,
+        environment_id: i32,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        self.sleep_environment(environment_id)
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
 

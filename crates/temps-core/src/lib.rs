@@ -8,6 +8,7 @@ pub mod error_builder;
 pub mod external_plugin;
 pub mod jobs;
 pub mod notifications;
+pub mod on_demand;
 pub mod openapi;
 pub mod plugin;
 pub mod problemdetails;
@@ -34,6 +35,7 @@ pub use deployment::*;
 pub use error::*;
 pub use error_builder::*;
 pub use jobs::*;
+pub use on_demand::*;
 pub use utils::*;
 
 // Re-export external dependencies

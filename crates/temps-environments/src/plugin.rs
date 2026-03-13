@@ -60,12 +60,14 @@ impl TempsPlugin for EnvironmentsPlugin {
         let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
         let env_var_service = context.require_service::<EnvVarService>();
         let deployment_service = context.require_service::<dyn temps_core::DeploymentCanceller>();
+        let on_demand_waker = context.get_service::<dyn temps_core::OnDemandWaker>();
 
         let app_state = crate::handlers::create_environment_app_state(
             environment_service,
             env_var_service,
             audit_service,
             deployment_service,
+            on_demand_waker,
         );
 
         let routes = crate::handlers::configure_routes().with_state(app_state);

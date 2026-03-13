@@ -1,6 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    Set, Statement, TransactionTrait,
 };
 use serde::Serialize;
 use slug::slugify;
@@ -58,23 +58,29 @@ impl From<EnvironmentError> for Problem {
             EnvironmentError::InvalidInput(msg) => {
                 temps_core::error_builder::bad_request().detail(msg).build()
             }
-            EnvironmentError::DatabaseConnectionError(msg) => {
+            EnvironmentError::DatabaseConnectionError(_) => {
+                // Log full details server-side, return generic message to client
+                warn!("Database connection error: {}", error);
                 temps_core::error_builder::internal_server_error()
-                    .detail(msg)
+                    .detail("A database error occurred while processing the request")
                     .build()
             }
-            EnvironmentError::DatabaseError { reason } => {
+            EnvironmentError::DatabaseError { .. } => {
+                warn!("Database error: {}", error);
                 temps_core::error_builder::internal_server_error()
-                    .detail(reason)
+                    .detail("A database error occurred while processing the request")
                     .build()
             }
             EnvironmentError::BranchAlreadyInUse { .. } => temps_core::error_builder::bad_request()
                 .title("Branch Already In Use")
                 .detail(error.to_string())
                 .build(),
-            EnvironmentError::Other(msg) => temps_core::error_builder::internal_server_error()
-                .detail(msg)
-                .build(),
+            EnvironmentError::Other(_) => {
+                warn!("Environment error: {}", error);
+                temps_core::error_builder::internal_server_error()
+                    .detail("An internal error occurred while processing the request")
+                    .build()
+            }
         }
     }
 }
@@ -111,7 +117,16 @@ impl EnvironmentService {
     }
 
     pub async fn compute_environment_url(&self, environment_slug: &str) -> String {
-        let settings = self.config_service.get_settings().await.unwrap_or_default();
+        let settings = match self.config_service.get_settings().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "Failed to load settings for URL computation, using defaults: {}",
+                    e
+                );
+                Default::default()
+            }
+        };
 
         // Use external_url if configured, otherwise fall back to preview_domain
         let base_domain = settings.preview_domain.clone();
@@ -631,6 +646,8 @@ impl EnvironmentService {
     }
 
     /// Set the sleeping state of an environment (for on-demand scale-to-zero).
+    /// Uses atomic CAS (UPDATE WHERE) to prevent race conditions between
+    /// concurrent API calls and proxy-initiated state transitions.
     /// Returns the updated environment model.
     pub async fn set_sleeping(
         &self,
@@ -638,9 +655,9 @@ impl EnvironmentService {
         env_id: i32,
         sleeping: bool,
     ) -> Result<environments::Model, EnvironmentError> {
+        // First verify the environment exists, belongs to the project, and has on-demand enabled
         let environment = self.get_environment(project_id, env_id).await?;
 
-        // Verify on-demand is enabled for this environment
         let on_demand = environment
             .deployment_config
             .as_ref()
@@ -659,16 +676,24 @@ impl EnvironmentService {
             return Ok(environment);
         }
 
-        let mut active_model: environments::ActiveModel = environment.into();
-        active_model.sleeping = Set(sleeping);
-        active_model.updated_at = Set(chrono::Utc::now());
-
-        let updated = active_model
-            .update(self.db.as_ref())
+        // Atomic CAS: only succeeds if state hasn't changed since we read it
+        let result = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                "UPDATE environments SET sleeping = $1, updated_at = NOW() WHERE id = $2 AND project_id = $3 AND sleeping = $4",
+                [sleeping.into(), env_id.into(), project_id.into(), (!sleeping).into()],
+            ))
             .await
             .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
 
-        Ok(updated)
+        if result.rows_affected() == 0 {
+            // Another caller already changed the state — re-read and return current
+            return self.get_environment(project_id, env_id).await;
+        }
+
+        // Re-read the updated environment
+        self.get_environment(project_id, env_id).await
     }
 
     pub async fn get_environment_domains(

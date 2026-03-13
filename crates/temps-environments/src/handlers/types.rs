@@ -12,6 +12,9 @@ pub struct AppState {
     pub env_var_service: Arc<EnvVarService>,
     pub audit_service: Arc<dyn AuditLogger>,
     pub deployment_service: Arc<dyn DeploymentCanceller>,
+    /// Optional on-demand waker for starting/stopping containers during wake/sleep.
+    /// Only available when the proxy's OnDemandManager is registered.
+    pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
 }
 
 pub fn create_environment_app_state(
@@ -19,12 +22,14 @@ pub fn create_environment_app_state(
     env_var_service: Arc<EnvVarService>,
     audit_service: Arc<dyn AuditLogger>,
     deployment_service: Arc<dyn DeploymentCanceller>,
+    on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
 ) -> Arc<AppState> {
     Arc::new(AppState {
         environment_service,
         env_var_service,
         audit_service,
         deployment_service,
+        on_demand_waker,
     })
 }
 

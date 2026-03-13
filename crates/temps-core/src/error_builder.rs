@@ -119,3 +119,12 @@ pub fn conflict() -> ErrorBuilder {
         .detail("The request could not be completed due to a conflict with the current state of the resource")
         .value("error_code", "CONFLICT")
 }
+
+pub fn too_many_requests() -> ErrorBuilder {
+    ErrorBuilder::new(StatusCode::TOO_MANY_REQUESTS)
+        .type_("https://temps.sh/probs/too-many-requests")
+        .title("Too Many Requests")
+        .instance("/error/too-many-requests")
+        .detail("Rate limit exceeded, please retry later")
+        .value("error_code", "TOO_MANY_REQUESTS")
+}

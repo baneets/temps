@@ -515,6 +515,14 @@ impl DeploymentConfig {
             }
         }
 
+        // Replicas must be at least 1
+        if self.replicas < 1 {
+            return Err(format!(
+                "Replicas must be at least 1, got {}",
+                self.replicas
+            ));
+        }
+
         // Port should be in valid range
         if let Some(port) = self.exposed_port {
             if !(1..=65535).contains(&port) {
