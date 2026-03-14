@@ -22,7 +22,7 @@ use temps_config::ServerConfig;
 use temps_core::plugin::{ServiceRegistrationContext, TempsPlugin};
 use temps_database::DbConnection;
 use temps_routes::CachedPeerTable;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use async_trait::async_trait;
 use std::future::Future;
@@ -307,6 +307,20 @@ pub fn setup_proxy_server(
                 );
             }
         }));
+
+        // Reload routes so the callback populates on-demand configs.
+        // The initial load_routes() in start_listening() runs before this callback
+        // is registered, so without this reload the configs DashMap stays empty
+        // until the next PG NOTIFY event, and the idle sweep has nothing to check.
+        {
+            let rt = tokio::runtime::Runtime::new()?;
+            if let Err(e) = rt.block_on(route_table.load_routes()) {
+                error!(
+                    "Failed to reload routes for on-demand config population: {}",
+                    e
+                );
+            }
+        }
 
         // Start background idle sweep (checks every 60 seconds)
         on_demand_manager.start_sweep_task(std::time::Duration::from_secs(60));
