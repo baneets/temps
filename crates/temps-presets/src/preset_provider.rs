@@ -224,9 +224,10 @@ mod tests {
     #[test]
     fn test_registry_register() {
         let mut registry = PresetProviderRegistry::new();
+        let initial_count = registry.providers.len();
         registry.register(Box::new(MockProvider));
 
-        assert_eq!(registry.providers.len(), 1);
+        assert_eq!(registry.providers.len(), initial_count + 1);
         assert!(registry.by_slug.contains_key("nextjs"));
     }
 

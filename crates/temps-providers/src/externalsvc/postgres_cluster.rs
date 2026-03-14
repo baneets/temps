@@ -700,7 +700,7 @@ mod tests {
         assert!(script.contains("$MONITOR_HOSTNAME"));
         assert!(script.contains("chown -R postgres:postgres"));
         // Must patch pg_hba.conf to allow autoctl_node trust auth for node registration
-        assert!(script.contains("autoctl_node.*trust"));
+        assert!(script.contains("autoctl_node 0.0.0.0/0 trust"));
         assert!(script.contains("hostssl pg_auto_failover autoctl_node 0.0.0.0/0 trust"));
     }
 
