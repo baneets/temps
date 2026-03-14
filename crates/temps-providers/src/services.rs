@@ -5550,4 +5550,208 @@ mod tests {
         // Plain port string doesn't match any pattern, stays as-is
         assert_eq!(env_vars["DATABASE_PORT"], "5432");
     }
+
+    // ── Cluster validation tests ──────────────────────────────────────
+
+    #[cfg(feature = "docker-tests")]
+    async fn insert_test_service(
+        db: &DatabaseConnection,
+        name: &str,
+        service_type: &str,
+        topology: &str,
+        status: &str,
+    ) -> i32 {
+        use sea_orm::ActiveValue::Set;
+
+        let model = external_services::ActiveModel {
+            name: Set(name.to_string()),
+            service_type: Set(service_type.to_string()),
+            version: Set(None),
+            status: Set(status.to_string()),
+            config: Set(None),
+            node_id: Set(None),
+            topology: Set(topology.to_string()),
+            error_message: Set(None),
+            ..Default::default()
+        };
+        let result = model.insert(db).await.unwrap();
+        result.id
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_initialize_cluster_not_found() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let result = manager
+            .initialize_cluster(
+                99999,
+                &[ClusterMemberRequest {
+                    role: "primary".to_string(),
+                    node_id: None,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExternalServiceError::ServiceNotFound { id: 99999 }
+        ));
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_initialize_cluster_unsupported_type() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        // S3 does not support cluster topology
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-s3-cluster",
+            "s3",
+            "cluster",
+            "creating",
+        )
+        .await;
+
+        let result = manager
+            .initialize_cluster(
+                service_id,
+                &[ClusterMemberRequest {
+                    role: "primary".to_string(),
+                    node_id: None,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExternalServiceError::InitializationFailed { .. }
+        ));
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_initialize_cluster_invalid_role() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-pg-bad-role",
+            "postgres",
+            "cluster",
+            "creating",
+        )
+        .await;
+
+        let result = manager
+            .initialize_cluster(
+                service_id,
+                &[ClusterMemberRequest {
+                    role: "invalid_role".to_string(),
+                    node_id: None,
+                }],
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_not_found() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let result = manager.retry_cluster(99999, &[]).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ExternalServiceError::ServiceNotFound { id: 99999 }
+        ));
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_standalone_rejected() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-standalone-retry",
+            "postgres",
+            "standalone",
+            "failed",
+        )
+        .await;
+
+        let result = manager.retry_cluster(service_id, &[]).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed for standalone topology, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_wrong_status() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-running-retry",
+            "postgres",
+            "cluster",
+            "running",
+        )
+        .await;
+
+        let result = manager.retry_cluster(service_id, &[]).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed for running status, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "docker-tests")]
+    #[tokio::test]
+    async fn test_retry_cluster_no_members() {
+        let (manager, _test_db) = setup_test_manager().await;
+
+        let service_id = insert_test_service(
+            manager.db.as_ref(),
+            "test-no-members-retry",
+            "postgres",
+            "cluster",
+            "failed",
+        )
+        .await;
+
+        // Empty member request + no preserved members in DB
+        let result = manager.retry_cluster(service_id, &[]).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ExternalServiceError::ParameterValidationFailed { .. }),
+            "Expected ParameterValidationFailed for missing members, got: {:?}",
+            err
+        );
+    }
 }
