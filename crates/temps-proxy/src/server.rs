@@ -283,9 +283,9 @@ pub fn setup_proxy_server(
             lifecycle,
         ));
 
-        // Register callback so sleeping domains are populated on every route reload
+        // Register callback so sleeping domains and on-demand configs are populated on every route reload
         let on_demand_for_callback = Arc::clone(&on_demand_manager);
-        route_table.set_on_sleeping_callback(Arc::new(move |entries| {
+        route_table.set_on_sleeping_callback(Arc::new(move |entries, on_demand_configs| {
             on_demand_for_callback.clear_sleeping_domains();
             for entry in entries {
                 on_demand_for_callback.register_sleeping_domain(
@@ -296,6 +296,14 @@ pub fn setup_proxy_server(
                         deployment_id: entry.deployment_id,
                         wake_timeout_seconds: entry.wake_timeout_seconds,
                     },
+                );
+            }
+            // Register on-demand configs so the idle sweep can track awake environments
+            for config in on_demand_configs {
+                on_demand_for_callback.register_on_demand_environment(
+                    config.environment_id,
+                    config.idle_timeout_seconds,
+                    config.wake_timeout_seconds,
                 );
             }
         }));

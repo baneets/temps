@@ -112,6 +112,14 @@ pub struct SleepingEnvironmentEntry {
     pub wake_timeout_seconds: i32,
 }
 
+/// On-demand config for an awake environment that should be tracked for idle timeout.
+#[derive(Clone, Debug)]
+pub struct OnDemandConfigEntry {
+    pub environment_id: i32,
+    pub idle_timeout_seconds: i32,
+    pub wake_timeout_seconds: i32,
+}
+
 /// A single backend entry: network address plus container metadata for tracking.
 #[derive(Clone, Debug)]
 pub struct BackendEntry {
@@ -261,8 +269,9 @@ impl RouteInfo {
 /// - `http_wildcards`: Wildcard patterns for HTTP Host header routing
 /// - `tls_wildcards`: Wildcard patterns for TLS SNI routing
 ///
-/// Callback invoked after each route table reload with the list of sleeping environments.
-pub type OnSleepingCallback = Arc<dyn Fn(Vec<SleepingEnvironmentEntry>) + Send + Sync>;
+/// Callback invoked after each route table reload with sleeping environments and on-demand configs.
+pub type OnSleepingCallback =
+    Arc<dyn Fn(Vec<SleepingEnvironmentEntry>, Vec<OnDemandConfigEntry>) + Send + Sync>;
 
 pub struct CachedPeerTable {
     /// Exact hostname -> RouteInfo for HTTP routes (route_type = 'http')
@@ -1088,9 +1097,32 @@ impl CachedPeerTable {
             "Route table loaded with {} total entries ({} HTTP exact, {} TLS exact, {} HTTP wildcards, {} TLS wildcards)",
             route_count, http_routes_count, tls_routes_count, http_wildcards_count, tls_wildcards_count
         );
-        // Notify callback with sleeping environments (for on-demand wake-on-request)
+        // Collect on-demand configs for awake environments so the idle sweep can track them.
+        let on_demand_configs: Vec<OnDemandConfigEntry> = environments_cache
+            .values()
+            .filter(|env| !env.sleeping)
+            .filter_map(|env| {
+                let dc = env.deployment_config.as_ref()?;
+                if dc.on_demand {
+                    Some(OnDemandConfigEntry {
+                        environment_id: env.id,
+                        idle_timeout_seconds: dc.idle_timeout_seconds,
+                        wake_timeout_seconds: dc.wake_timeout_seconds,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        debug!(
+            "Found {} on-demand configs for idle tracking",
+            on_demand_configs.len()
+        );
+
+        // Notify callback with sleeping environments and on-demand configs
         if let Some(callback) = self.on_sleeping_callback.lock().as_ref() {
-            callback(sleeping_environments.clone());
+            callback(sleeping_environments.clone(), on_demand_configs);
         }
 
         Ok(sleeping_environments)
