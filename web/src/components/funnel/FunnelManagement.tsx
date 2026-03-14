@@ -1,13 +1,24 @@
 import { ProjectResponse, FunnelResponse } from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Calendar } from '@/components/ui/calendar'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   listFunnelsOptions,
   deleteFunnelMutation,
 } from '@/api/client/@tanstack/react-query.gen'
+import { formatDateForAPI } from '@/lib/date'
+import { cn } from '@/lib/utils'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { BarChart3, Plus } from 'lucide-react'
+import { format, subDays } from 'date-fns'
+import { BarChart3, Calendar as CalendarIcon, Plus } from 'lucide-react'
+import * as React from 'react'
+import { DateRange } from 'react-day-picker'
 import { useNavigate } from 'react-router-dom'
 import { FunnelCard } from './FunnelCard'
 
@@ -18,6 +29,18 @@ interface FunnelManagementProps {
 export function FunnelManagement({ project }: FunnelManagementProps) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const [dateRange, setDateRange] = React.useState<DateRange | undefined>({
+    from: subDays(new Date(), 30),
+    to: new Date(),
+  })
+
+  const dateRangeQuery = React.useMemo(() => {
+    if (!dateRange?.from || !dateRange?.to) return null
+    return {
+      start_date: formatDateForAPI(dateRange.from),
+      end_date: formatDateForAPI(dateRange.to),
+    }
+  }, [dateRange])
 
   const {
     data: funnels,
@@ -55,21 +78,59 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-semibold">Funnels</h2>
           <p className="text-muted-foreground">
             Track user conversion through defined steps
           </p>
         </div>
-        <Button
-          onClick={() =>
-            navigate(`/projects/${project.slug}/analytics/funnels/create`)
-          }
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Create Funnel
-        </Button>
+        <div className="flex items-center gap-2">
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  'justify-start text-left font-normal',
+                  !dateRange && 'text-muted-foreground'
+                )}
+              >
+                <CalendarIcon className="mr-2 h-4 w-4" />
+                {dateRange?.from ? (
+                  dateRange.to ? (
+                    <>
+                      {format(dateRange.from, 'LLL dd, y')} -{' '}
+                      {format(dateRange.to, 'LLL dd, y')}
+                    </>
+                  ) : (
+                    format(dateRange.from, 'LLL dd, y')
+                  )
+                ) : (
+                  <span>Pick a date range</span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="end">
+              <Calendar
+                initialFocus
+                mode="range"
+                defaultMonth={dateRange?.from}
+                selected={dateRange}
+                onSelect={setDateRange}
+                numberOfMonths={2}
+                disabled={(date) => date > new Date()}
+              />
+            </PopoverContent>
+          </Popover>
+          <Button
+            onClick={() =>
+              navigate(`/projects/${project.slug}/analytics/funnels/create`)
+            }
+          >
+            <Plus className="h-4 w-4 mr-2" />
+            Create Funnel
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -138,6 +199,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
               key={funnel.id}
               funnel={funnel}
               project={project}
+              dateRange={dateRangeQuery!}
               onDelete={() => handleDelete(funnel.id)}
               onView={() =>
                 navigate(

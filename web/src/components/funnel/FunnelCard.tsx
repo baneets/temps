@@ -8,10 +8,8 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { getFunnelMetricsOptions } from '@/api/client/@tanstack/react-query.gen'
-import { formatDateForAPI } from '@/lib/date'
 import { useQuery } from '@tanstack/react-query'
-import { subDays } from 'date-fns'
-import { useMemo } from 'react'
+import { format } from 'date-fns'
 import {
   Users,
   TrendingUp,
@@ -19,11 +17,18 @@ import {
   Trash2,
   Pencil,
   ChevronRight,
+  CalendarDays,
 } from 'lucide-react'
+
+interface DateRangeQuery {
+  start_date: string
+  end_date: string
+}
 
 interface FunnelCardProps {
   funnel: FunnelResponse
   project: ProjectResponse
+  dateRange: DateRangeQuery
   onDelete: () => void
   onView: () => void
   onEdit: () => void
@@ -32,18 +37,11 @@ interface FunnelCardProps {
 export function FunnelCard({
   funnel,
   project,
+  dateRange,
   onDelete,
   onView,
   onEdit,
 }: FunnelCardProps) {
-  const dateRange = useMemo(() => {
-    const now = new Date()
-    return {
-      start_date: formatDateForAPI(subDays(now, 30)),
-      end_date: formatDateForAPI(now),
-    }
-  }, [])
-
   const {
     data: metrics,
     isLoading: metricsLoading,
@@ -73,6 +71,12 @@ export function FunnelCard({
                 {funnel.description}
               </CardDescription>
             )}
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-1">
+              <CalendarDays className="h-3 w-3" />
+              <span>
+                {format(new Date(dateRange.start_date), 'MMM d, y')} – {format(new Date(dateRange.end_date), 'MMM d, y')}
+              </span>
+            </div>
           </div>
           <div className="flex gap-1">
             <Button
