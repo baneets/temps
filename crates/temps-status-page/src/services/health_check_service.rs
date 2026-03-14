@@ -45,19 +45,31 @@ impl HealthCheckService {
     pub async fn run_all_checks(&self) -> Result<(), StatusPageError> {
         debug!("Starting health check cycle");
 
-        // Get all active monitors
-        let monitors = status_monitors::Entity::find()
+        // Single query: join monitors with environments to skip on-demand ones.
+        // Health checks go through the proxy, which resets the idle timer and
+        // would prevent scale-to-zero from ever triggering.
+        let monitors_with_envs = status_monitors::Entity::find()
             .filter(status_monitors::Column::IsActive.eq(true))
+            .find_also_related(environments::Entity)
             .all(self.db.as_ref())
             .await?;
 
-        debug!("Found {} active monitors to check", monitors.len());
+        let total_monitors = monitors_with_envs.len();
+        debug!("Found {} active monitors to check", total_monitors);
+
+        let filtered_monitors: Vec<_> = Self::filter_on_demand_monitors(monitors_with_envs);
+
+        debug!(
+            "Running checks for {} monitors ({} skipped as on-demand)",
+            filtered_monitors.len(),
+            total_monitors - filtered_monitors.len()
+        );
 
         // Run checks concurrently with a limit
         let semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Limit concurrent checks
         let mut tasks = Vec::new();
 
-        for monitor in monitors {
+        for monitor in filtered_monitors {
             let db = self.db.clone();
             let http_client = self.http_client.clone();
             let config_service = self.config_service.clone();
@@ -548,6 +560,35 @@ impl HealthCheckService {
         }
     }
 
+    /// Filter out monitors whose environment has on_demand enabled.
+    /// Health checks go through the proxy and reset the idle timer,
+    /// which would prevent scale-to-zero from ever triggering.
+    fn filter_on_demand_monitors(
+        monitors_with_envs: Vec<(status_monitors::Model, Option<environments::Model>)>,
+    ) -> Vec<status_monitors::Model> {
+        monitors_with_envs
+            .into_iter()
+            .filter(|(monitor, env)| {
+                if let Some(env) = env {
+                    let is_on_demand = env
+                        .deployment_config
+                        .as_ref()
+                        .map(|dc| dc.on_demand)
+                        .unwrap_or(false);
+                    if is_on_demand {
+                        debug!(
+                            "Skipping monitor {} for on-demand environment {} ({})",
+                            monitor.id, env.id, env.name
+                        );
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|(monitor, _)| monitor)
+            .collect()
+    }
+
     /// Check a specific environment using its deployment URL
     pub async fn check_environment(
         &self,
@@ -614,5 +655,136 @@ impl HealthCheckService {
             Ok(Err(_)) => Ok(("major_outage".to_string(), Some(response_time_ms))),
             Err(_) => Ok(("major_outage".to_string(), Some(10000))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temps_entities::deployment_config::DeploymentConfig;
+    use temps_entities::upstream_config::UpstreamList;
+
+    fn make_monitor(id: i32, env_id: Option<i32>) -> status_monitors::Model {
+        status_monitors::Model {
+            id,
+            project_id: 1,
+            environment_id: env_id,
+            name: format!("monitor-{}", id),
+            monitor_type: "web".to_string(),
+            check_interval_seconds: 60,
+            is_active: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn make_env(id: i32, on_demand: bool) -> environments::Model {
+        let deployment_config = if on_demand {
+            Some(DeploymentConfig {
+                on_demand: true,
+                idle_timeout_seconds: 60,
+                ..Default::default()
+            })
+        } else {
+            Some(DeploymentConfig::default())
+        };
+
+        environments::Model {
+            id,
+            name: format!("env-{}", id),
+            slug: format!("env-{}", id),
+            subdomain: format!("proj-env-{}", id),
+            last_deployment: None,
+            host: String::new(),
+            upstreams: UpstreamList::default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            project_id: 1,
+            current_deployment_id: Some(1),
+            branch: None,
+            deleted_at: None,
+            deployment_config,
+            is_preview: false,
+            protected: false,
+            sleeping: false,
+        }
+    }
+
+    #[test]
+    fn test_filter_skips_on_demand_monitors() {
+        let input = vec![
+            (make_monitor(1, Some(10)), Some(make_env(10, true))),
+            (make_monitor(2, Some(20)), Some(make_env(20, false))),
+        ];
+
+        let result = HealthCheckService::filter_on_demand_monitors(input);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 2);
+    }
+
+    #[test]
+    fn test_filter_keeps_monitors_without_environment() {
+        let input = vec![(make_monitor(1, None), None)];
+
+        let result = HealthCheckService::filter_on_demand_monitors(input);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, 1);
+    }
+
+    #[test]
+    fn test_filter_keeps_normal_monitors() {
+        let input = vec![
+            (make_monitor(1, Some(10)), Some(make_env(10, false))),
+            (make_monitor(2, Some(20)), Some(make_env(20, false))),
+            (make_monitor(3, Some(30)), Some(make_env(30, false))),
+        ];
+
+        let result = HealthCheckService::filter_on_demand_monitors(input);
+
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_filter_skips_all_on_demand() {
+        let input = vec![
+            (make_monitor(1, Some(10)), Some(make_env(10, true))),
+            (make_monitor(2, Some(20)), Some(make_env(20, true))),
+        ];
+
+        let result = HealthCheckService::filter_on_demand_monitors(input);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_filter_keeps_monitor_with_no_deployment_config() {
+        let mut env = make_env(10, false);
+        env.deployment_config = None;
+
+        let input = vec![(make_monitor(1, Some(10)), Some(env))];
+
+        let result = HealthCheckService::filter_on_demand_monitors(input);
+
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_mixed_on_demand_and_normal() {
+        let input = vec![
+            (make_monitor(1, Some(10)), Some(make_env(10, true))), // on-demand -> skip
+            (make_monitor(2, Some(20)), Some(make_env(20, false))), // normal -> keep
+            (make_monitor(3, None), None),                         // no env -> keep
+            (make_monitor(4, Some(40)), Some(make_env(40, true))), // on-demand -> skip
+            (make_monitor(5, Some(50)), Some(make_env(50, false))), // normal -> keep
+        ];
+
+        let result = HealthCheckService::filter_on_demand_monitors(input);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].id, 2);
+        assert_eq!(result[1].id, 3);
+        assert_eq!(result[2].id, 5);
     }
 }
