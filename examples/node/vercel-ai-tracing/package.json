@@ -16,7 +16,7 @@
     "@opentelemetry/sdk-node": "^0.57.0",
     "@opentelemetry/sdk-trace-node": "^1.30.0",
     "@opentelemetry/semantic-conventions": "^1.30.0",
-    "ai": "^4.3.0",
+    "ai": "^5.0.52",
     "tsx": "^4.19.0",
     "zod": "^3.25.76"
   }
