@@ -799,15 +799,17 @@ impl CachedPeerTable {
                     .entry(env.id)
                     .or_insert_with(|| Arc::new(env.clone()));
 
-                // Fetch deployment if not cached
+                // Fetch deployment if not cached.
+                // Accept any state — if current_deployment_id points here, it should be routable.
+                // The previous "completed" filter caused a race: mark_deployment_complete sets
+                // current_deployment_id (fires PG NOTIFY) BEFORE setting state="completed",
+                // so the route table reload would skip the deployment and never confirm.
                 if !deployments_cache.contains_key(&deployment_id) {
                     if let Ok(Some(dep)) = deployments::Entity::find_by_id(deployment_id)
                         .one(self.db.as_ref())
                         .await
                     {
-                        if dep.state == "completed" {
-                            deployments_cache.insert(dep.id, Arc::new(dep));
-                        }
+                        deployments_cache.insert(dep.id, Arc::new(dep));
                     }
                 }
 
@@ -957,15 +959,13 @@ impl CachedPeerTable {
                 .or_insert_with(|| Arc::new(env.clone()));
 
             if let Some(deployment_id) = env.current_deployment_id {
-                // Fetch deployment if not cached
+                // Fetch deployment if not cached (accept any state — same rationale as section 4)
                 if !deployments_cache.contains_key(&deployment_id) {
                     if let Ok(Some(dep)) = deployments::Entity::find_by_id(deployment_id)
                         .one(self.db.as_ref())
                         .await
                     {
-                        if dep.state == "completed" {
-                            deployments_cache.insert(dep.id, Arc::new(dep));
-                        }
+                        deployments_cache.insert(dep.id, Arc::new(dep));
                     }
                 }
 
