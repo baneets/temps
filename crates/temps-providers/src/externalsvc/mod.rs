@@ -6,6 +6,7 @@ use utoipa::ToSchema;
 
 pub mod mongodb;
 pub mod postgres;
+pub mod postgres_cluster;
 pub mod redis;
 pub mod rustfs;
 pub mod s3;
@@ -13,6 +14,10 @@ pub mod s3;
 // Test utilities for backup and restore testing
 #[cfg(test)]
 pub mod test_utils;
+
+// Integration tests for service clusters
+#[cfg(test)]
+mod cluster_integration_tests;
 
 /// Shared mutex for tests that mutate the DEPLOYMENT_MODE environment variable.
 /// This must be shared across all test modules (postgres, redis, etc.) because
@@ -23,6 +28,7 @@ pub(crate) static DEPLOYMENT_MODE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex
 // Re-export services for easier access
 pub use mongodb::MongodbService;
 pub use postgres::PostgresService;
+pub use postgres_cluster::PostgresClusterService;
 pub use redis::RedisService;
 pub use rustfs::RustfsService;
 pub use s3::S3Service;
@@ -318,6 +324,39 @@ pub struct AvailableContainer {
     pub exposed_ports: Vec<u16>,
 }
 
+/// Specification for a cluster member to be created.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterMemberSpec {
+    /// Service-type-specific role (e.g., "monitor", "primary", "replica", "arbiter", "sentinel", "node")
+    pub role: String,
+    /// Target worker node ID. None = local (control plane).
+    pub node_id: Option<i32>,
+    /// Stable ordinal for this member (0, 1, 2, ...)
+    pub ordinal: i32,
+    /// WireGuard IP or hostname for inter-member communication
+    pub hostname: Option<String>,
+}
+
+/// Result from initializing a single cluster member.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterMemberResult {
+    pub ordinal: i32,
+    pub role: String,
+    pub container_id: String,
+    pub container_name: String,
+    pub port: Option<i32>,
+    pub status: String,
+}
+
+/// Info about an existing cluster member, used for connection string generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterMemberInfo {
+    pub role: String,
+    pub hostname: String,
+    pub port: i32,
+    pub status: String,
+}
+
 #[async_trait]
 #[allow(clippy::too_many_arguments)]
 pub trait ExternalService: Send + Sync {
@@ -481,6 +520,54 @@ pub trait ExternalService: Send + Sync {
         Err(anyhow::anyhow!(
             "Getting current version not implemented for this service"
         ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Cluster lifecycle methods (opt-in for service types that support clustering)
+    // -----------------------------------------------------------------------
+
+    /// Whether this service type supports cluster topology.
+    fn supports_cluster(&self) -> bool {
+        false
+    }
+
+    /// Valid roles for this service type in cluster mode.
+    /// Used for validation when creating or modifying cluster members.
+    fn valid_cluster_roles(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Initialize a cluster with the given member specifications.
+    /// Members must be created in the returned order (monitor first, then primary, then replicas).
+    ///
+    /// Returns a Vec of `ClusterMemberResult` with container details for each member.
+    async fn init_cluster(
+        &self,
+        _config: ServiceConfig,
+        _members: Vec<ClusterMemberSpec>,
+    ) -> Result<Vec<ClusterMemberResult>> {
+        Err(anyhow::anyhow!(
+            "Cluster mode not supported for service type {}",
+            self.get_type()
+        ))
+    }
+
+    /// Build the connection string for a cluster, given all member addresses.
+    /// E.g., multi-host libpq for Postgres, replica set URI for MongoDB.
+    fn cluster_connection_string(
+        &self,
+        _members: &[ClusterMemberInfo],
+        _config: &ServiceConfig,
+    ) -> Result<String> {
+        Err(anyhow::anyhow!(
+            "Cluster connection string not supported for service type {}",
+            self.get_type()
+        ))
+    }
+
+    /// Get the Docker image to use for cluster members (may differ from standalone).
+    fn get_cluster_docker_image(&self) -> (String, String) {
+        self.get_default_docker_image()
     }
 
     /// Import an existing running Docker container as a managed service

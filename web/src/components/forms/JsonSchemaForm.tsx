@@ -89,6 +89,11 @@ interface JsonSchemaFormProps {
    * @default [['host', 'port'], ['username', 'password']]
    */
   pairedFields?: [string, string][]
+
+  /**
+   * Fields to hide from the form (they won't be rendered or submitted)
+   */
+  hiddenFields?: string[]
 }
 
 /**
@@ -108,11 +113,15 @@ export function JsonSchemaForm({
     ['host', 'port'],
     ['username', 'password'],
   ],
+  hiddenFields = [],
 }: JsonSchemaFormProps) {
-  // Get list of property names in order
+  // Get list of property names in order, excluding hidden fields
   const propertyNames = useMemo(
-    () => Object.keys(schema.properties),
-    [schema.properties]
+    () =>
+      Object.keys(schema.properties).filter(
+        (name) => !hiddenFields.includes(name)
+      ),
+    [schema.properties, hiddenFields]
   )
 
   // Create Zod schema from JSON Schema
@@ -191,6 +200,9 @@ export function JsonSchemaForm({
     const cleanedValues: Record<string, string | null | number> = {}
 
     Object.entries(values).forEach(([key, value]) => {
+      // Skip hidden fields
+      if (hiddenFields.includes(key)) return
+
       const prop = schema.properties[key]
       const types = Array.isArray(prop.type) ? prop.type : [prop.type]
       const isNullable = types.includes('null')

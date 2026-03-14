@@ -98,19 +98,33 @@ pub async fn create_service(
         HashMap::new();
     let mut exposed_ports: Vec<String> = Vec::new();
     let mut first_host_port: u16 = 0;
+    let mut has_auto_assign = false;
 
     for pm in &request.port_mappings {
         let container_port_key = format!("{}/tcp", pm.container_port);
         exposed_ports.push(container_port_key.clone());
-        port_bindings.insert(
-            container_port_key,
-            Some(vec![bollard::models::PortBinding {
-                host_ip: Some("0.0.0.0".to_string()),
-                host_port: Some(pm.host_port.to_string()),
-            }]),
-        );
-        if first_host_port == 0 {
-            first_host_port = pm.host_port;
+
+        if pm.host_port == 0 {
+            // Auto-assign: let Docker pick a free host port
+            has_auto_assign = true;
+            port_bindings.insert(
+                container_port_key,
+                Some(vec![bollard::models::PortBinding {
+                    host_ip: Some("0.0.0.0".to_string()),
+                    host_port: None,
+                }]),
+            );
+        } else {
+            port_bindings.insert(
+                container_port_key,
+                Some(vec![bollard::models::PortBinding {
+                    host_ip: Some("0.0.0.0".to_string()),
+                    host_port: Some(pm.host_port.to_string()),
+                }]),
+            );
+            if first_host_port == 0 {
+                first_host_port = pm.host_port;
+            }
         }
     }
 
@@ -157,6 +171,36 @@ pub async fn create_service(
         ..Default::default()
     };
 
+    // Pull the image if not already present locally
+    {
+        use bollard::query_parameters::CreateImageOptions;
+        use futures::StreamExt;
+
+        let image_ref = request.image.as_str();
+        tracing::info!(image = %image_ref, "Pulling image (if not present)...");
+
+        let mut pull_stream = docker.create_image(
+            Some(CreateImageOptions {
+                from_image: Some(image_ref.to_string()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+
+        while let Some(result) = pull_stream.next().await {
+            if let Err(e) = result {
+                tracing::error!(image = %image_ref, "Failed to pull image: {}", e);
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to pull image '{}': {}", image_ref, e),
+                )
+                .into_response();
+            }
+        }
+        tracing::info!(image = %image_ref, "Image ready");
+    }
+
     let create_opts = bollard::query_parameters::CreateContainerOptionsBuilder::new()
         .name(&container_name)
         .build();
@@ -181,6 +225,42 @@ pub async fn create_service(
                     format!("Container created but failed to start: {}", e),
                 )
                 .into_response();
+            }
+
+            // If any port was auto-assigned, inspect the container to get the actual port
+            if has_auto_assign && first_host_port == 0 {
+                match docker
+                    .inspect_container(&container_name, None::<InspectContainerOptions>)
+                    .await
+                {
+                    Ok(info) => {
+                        if let Some(network_settings) = &info.network_settings {
+                            if let Some(ports) = &network_settings.ports {
+                                // Find the first mapped port
+                                for bindings in ports.values().flatten() {
+                                    for binding in bindings {
+                                        if let Some(hp) = &binding.host_port {
+                                            if let Ok(port) = hp.parse::<u16>() {
+                                                first_host_port = port;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if first_host_port > 0 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            container = %container_name,
+                            "Failed to inspect container for auto-assigned port: {}",
+                            e
+                        );
+                    }
+                }
             }
 
             tracing::info!(

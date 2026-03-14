@@ -25,8 +25,8 @@ use super::audit::{
 use crate::handlers::types::{
     AvailableContainerInfo, CreateExternalServiceRequest, EnvironmentVariableInfo,
     ExternalServiceDetails, ExternalServiceInfo, ImportExternalServiceRequest, LinkServiceRequest,
-    ProjectServiceInfo, ProviderMetadata, ServiceParameter, ServiceTypeInfo, ServiceTypeRoute,
-    UpdateExternalServiceRequest, UpgradeExternalServiceRequest,
+    ProjectServiceInfo, ProviderMetadata, RetryClusterRequest, ServiceParameter, ServiceTypeInfo,
+    ServiceTypeRoute, UpdateExternalServiceRequest, UpgradeExternalServiceRequest,
 };
 use crate::services::EnvironmentVariableOptions;
 use temps_core::AuditContext;
@@ -241,6 +241,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/external-services/{id}/health", get(check_health))
         .route("/external-services/{id}/start", post(start_service))
         .route("/external-services/{id}/stop", post(stop_service))
+        .route("/external-services/{id}/retry", post(retry_cluster))
         .route("/external-services/{id}/upgrade", post(upgrade_service))
         .route(
             "/external-services/{id}/projects",
@@ -420,6 +421,15 @@ async fn create_service(
         version: request.version.clone(),
         parameters: request.parameters,
         node_id: request.node_id,
+        topology: request.topology,
+        members: request
+            .members
+            .into_iter()
+            .map(|m| crate::services::ClusterMemberRequest {
+                role: m.role,
+                node_id: m.node_id,
+            })
+            .collect(),
     };
 
     match app_state
@@ -783,6 +793,83 @@ async fn start_service(
         Err(e) => Err(internal_server_error()
             .detail(format!("Failed to get service details: {}", e))
             .build()),
+    }
+}
+
+/// Retry a failed cluster service initialization.
+///
+/// Cleans up any leftover containers from the previous attempt and
+/// re-runs cluster initialization with the provided member specifications.
+#[utoipa::path(
+    post,
+    path = "/external-services/{id}/retry",
+    tag = "External Services",
+    request_body = RetryClusterRequest,
+    responses(
+        (status = 200, description = "Cluster retry initiated", body = ExternalServiceInfo),
+        (status = 400, description = "Service is not a failed cluster"),
+        (status = 404, description = "Service not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn retry_cluster(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+    Json(request): Json<RetryClusterRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesWrite);
+
+    let members: Vec<crate::services::ClusterMemberRequest> = request
+        .members
+        .into_iter()
+        .map(|m| crate::services::ClusterMemberRequest {
+            role: m.role,
+            node_id: m.node_id,
+        })
+        .collect();
+
+    match app_state
+        .external_service_manager
+        .retry_cluster(id, &members)
+        .await
+    {
+        Ok(service) => {
+            let audit = ExternalServiceStatusChangedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                service_id: service.id,
+                name: service.name.clone(),
+                service_type: service.service_type.to_string(),
+                new_status: "retry".to_string(),
+            };
+
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok((StatusCode::OK, Json(service)))
+        }
+        Err(e) => {
+            error!("Failed to retry cluster service {}: {}", id, e);
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                Err(not_found()
+                    .detail(format!("Service {} not found", id))
+                    .build())
+            } else if msg.contains("only valid for") || msg.contains("must be in") {
+                Err(bad_request().detail(msg).build())
+            } else {
+                Err(internal_server_error()
+                    .detail(format!("Failed to retry cluster: {}", e))
+                    .build())
+            }
+        }
     }
 }
 
@@ -1298,6 +1385,7 @@ async fn get_service_preview_environment_variables_masked(
         delete_service,
         start_service,
         stop_service,
+        retry_cluster,
         link_service_to_project,
         unlink_service_from_project,
         list_service_projects,
@@ -1327,6 +1415,7 @@ async fn get_service_preview_environment_variables_masked(
         CreateExternalServiceRequest,
         UpdateExternalServiceRequest,
         UpgradeExternalServiceRequest,
+        RetryClusterRequest,
         ImportExternalServiceRequest,
         AvailableContainerInfo,
         LinkServiceRequest,

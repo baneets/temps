@@ -43,6 +43,7 @@ pub struct RemoteServiceCreateParams {
 
 #[derive(Debug, serde::Serialize)]
 pub struct RemotePortMapping {
+    /// Host port to bind. `0` means let Docker auto-assign a free port.
     pub host_port: u16,
     pub container_port: u16,
 }

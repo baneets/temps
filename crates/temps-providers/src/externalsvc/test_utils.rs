@@ -319,6 +319,8 @@ pub fn create_mock_external_service(
         slug: None,
         config: Some(serde_json::json!({}).to_string()),
         node_id: None,
+        topology: "standalone".to_string(),
+        error_message: None,
     }
 }
 

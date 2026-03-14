@@ -13,7 +13,6 @@ use crate::{
     handlers::{self, create_domain_app_state_with_dns, DomainAppState},
     tls::{repository::DefaultCertificateRepository, TlsServiceBuilder},
 };
-use rustls::crypto::CryptoProvider;
 use temps_dns::services::DnsProviderService;
 
 /// Domains Plugin for managing DNS records and TLS certificates
@@ -41,7 +40,6 @@ impl TempsPlugin for DomainsPlugin {
         context: &'a ServiceRegistrationContext,
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
         Box::pin(async move {
-            CryptoProvider::install_default(rustls::crypto::ring::default_provider()).unwrap();
             // Get required dependencies from the service registry
             let db = context.require_service::<sea_orm::DatabaseConnection>();
             let encryption_service = context.require_service::<temps_core::EncryptionService>();

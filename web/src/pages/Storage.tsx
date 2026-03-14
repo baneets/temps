@@ -31,6 +31,7 @@ export function Storage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [selectedService, setSelectedService] = useState<ExternalServiceInfo | null>(null)
+  const [isCreateDropdownOpen, setIsCreateDropdownOpen] = useState(false)
 
   // Get active tab from URL or default to 'external'
   const activeTab = searchParams.get('tab') || 'external'
@@ -52,8 +53,11 @@ export function Storage() {
     setBreadcrumbs([{ label: 'Storage', href: '/storage' }])
   }, [setBreadcrumbs])
 
-  // Keyboard shortcut: N to create new service (navigate to create page)
-  useKeyboardShortcut({ key: 'n', path: '/storage/create' })
+  // Keyboard shortcut: N to open the create service dropdown
+  useKeyboardShortcut({
+    key: 'n',
+    callback: () => setIsCreateDropdownOpen(true),
+  })
 
   usePageTitle('Storage')
 
@@ -114,7 +118,11 @@ export function Storage() {
         <div className="flex items-center justify-end mb-4">
           <div className="flex items-center gap-2">
             <ImportServiceButton onSuccess={() => refetch()} />
-            <CreateServiceButton onSuccess={() => refetch()} />
+            <CreateServiceButton
+              onSuccess={() => refetch()}
+              open={isCreateDropdownOpen}
+              onOpenChange={setIsCreateDropdownOpen}
+            />
           </div>
         </div>
 

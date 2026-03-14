@@ -53,6 +53,7 @@ import {
   MoreVertical,
   Pencil,
   RefreshCcw,
+  Server,
   Trash2,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -70,6 +71,7 @@ export function ServiceDetail() {
   const [isBackupDialogOpen, setIsBackupDialogOpen] = useState(false)
   const [isStopDialogOpen, setIsStopDialogOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [prevStatus, setPrevStatus] = useState<string | undefined>(undefined)
   const [visibleParameters, setVisibleParameters] = useState<Set<string>>(
     new Set()
   )
@@ -84,6 +86,10 @@ export function ServiceDetail() {
       path: { id: parseInt(id!) },
     }),
     enabled: !!id,
+    refetchInterval: (query) => {
+      const status = query.state.data?.service?.status
+      return status === 'creating' ? 2000 : false
+    },
   })
 
   // Query for environment variables
@@ -127,6 +133,19 @@ export function ServiceDetail() {
 
   usePageTitle(service?.service?.name || 'Service Details')
 
+  // Notify when cluster creation completes or fails
+  useEffect(() => {
+    const currentStatus = service?.service?.status
+    if (prevStatus === 'creating' && currentStatus === 'running') {
+      toast.success('Cluster created successfully')
+    } else if (prevStatus === 'creating' && currentStatus === 'failed') {
+      toast.error('Cluster creation failed')
+    }
+    if (currentStatus) {
+      setPrevStatus(currentStatus)
+    }
+  }, [service?.service?.status, prevStatus])
+
   const startService = useMutation({
     ...startServiceMutation(),
     meta: {
@@ -146,6 +165,37 @@ export function ServiceDetail() {
     onSuccess: () => {
       toast.success('Service stopped successfully')
       refetch()
+    },
+  })
+
+  const retryCluster = useMutation({
+    mutationFn: async (options: {
+      path: { id: number }
+      body: { members: { role: string; node_id?: number }[] }
+    }) => {
+      const response = await fetch(
+        `/api/external-services/${options.path.id}/retry`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(options.body),
+        }
+      )
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}))
+        throw new Error(error.detail || 'Retry failed')
+      }
+      return response.json()
+    },
+    onSuccess: () => {
+      toast.success('Cluster retry initiated')
+      refetch()
+    },
+    onError: (error: Error) => {
+      toast.error('Failed to retry cluster', {
+        description: error.message,
+      })
     },
   })
 
@@ -272,6 +322,12 @@ export function ServiceDetail() {
                   />
                   {service.service.service_type}
                 </Badge>
+                {service.service.topology === 'cluster' && (
+                  <Badge variant="outline" className="gap-1.5">
+                    <Server className="h-3 w-3" />
+                    Cluster
+                  </Badge>
+                )}
               </div>
               <p className="text-sm text-muted-foreground">
                 Created <TimeAgo date={service.service.created_at} />
@@ -410,6 +466,154 @@ export function ServiceDetail() {
               )}
             </CardContent>
           </Card>
+
+          {/* Cluster Creation Progress */}
+          {service.service.topology === 'cluster' &&
+            service.service.status === 'creating' && (
+              <Alert>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <AlertDescription>
+                  <span className="font-medium">
+                    Creating cluster members...
+                  </span>{' '}
+                  This may take a minute. Members will appear below as they are
+                  provisioned.
+                </AlertDescription>
+              </Alert>
+            )}
+
+          {/* Cluster Creation Failed */}
+          {service.service.topology === 'cluster' &&
+            service.service.status === 'failed' && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription className="flex items-center justify-between gap-4">
+                  <div>
+                    <span className="font-medium">
+                      Cluster creation failed.
+                    </span>{' '}
+                    {(service.service as Record<string, unknown>).error_message
+                      ? String(
+                          (service.service as Record<string, unknown>)
+                            .error_message
+                        )
+                      : 'An unknown error occurred.'}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={retryCluster.isPending}
+                    onClick={() => {
+                      // Reconstruct members from preserved service_members records,
+                      // or send empty array to let the backend reconstruct.
+                      const members =
+                        service.service.members &&
+                        service.service.members.length > 0
+                          ? service.service.members.map(
+                              (m: { role: string; node_id?: number | null }) => ({
+                                role: m.role,
+                                node_id: m.node_id ?? undefined,
+                              })
+                            )
+                          : []
+                      retryCluster.mutate({
+                        path: { id: parseInt(id!) },
+                        body: { members },
+                      })
+                    }}
+                  >
+                    {retryCluster.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                    ) : (
+                      <RefreshCcw className="h-4 w-4 mr-1" />
+                    )}
+                    Retry
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+
+          {/* Cluster Members Section */}
+          {service.service.topology === 'cluster' &&
+            service.service.members &&
+            service.service.members.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <span>Cluster Members</span>
+                    <Badge variant="outline">
+                      {service.service.members.length}
+                    </Badge>
+                  </CardTitle>
+                  <CardDescription>
+                    pg_auto_failover cluster nodes
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-2">
+                    {service.service.members.map((member) => (
+                      <div
+                        key={member.id}
+                        className="flex items-center justify-between p-3 rounded-md border border-border"
+                      >
+                        <div className="flex items-center gap-3">
+                          {member.status === 'creating' ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground flex-shrink-0" />
+                          ) : (
+                            <Server className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                          )}
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-sm">
+                                {member.container_name}
+                              </span>
+                              <Badge
+                                variant={
+                                  member.role === 'primary'
+                                    ? 'default'
+                                    : 'secondary'
+                                }
+                                className="capitalize text-xs"
+                              >
+                                {member.role}
+                              </Badge>
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              {member.hostname && (
+                                <span>{member.hostname}</span>
+                              )}
+                              {member.port && <span>:{member.port}</span>}
+                              {member.node_id && (
+                                <span className="ml-1">
+                                  (node {member.node_id})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <Badge
+                          variant={
+                            member.status === 'running'
+                              ? 'default'
+                              : member.status === 'failed'
+                                ? 'destructive'
+                                : member.status === 'creating'
+                                  ? 'outline'
+                                  : 'secondary'
+                          }
+                          className="capitalize"
+                        >
+                          {member.status === 'creating' && (
+                            <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                          )}
+                          {member.status}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
           {/* Service Configuration Section */}
           <Card>

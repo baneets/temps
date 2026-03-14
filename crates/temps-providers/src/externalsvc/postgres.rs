@@ -154,7 +154,7 @@ fn default_username() -> String {
     "postgres".to_string()
 }
 
-fn generate_password() -> String {
+pub fn generate_password() -> String {
     use rand::{distributions::Alphanumeric, Rng};
     rand::thread_rng()
         .sample_iter(&Alphanumeric)

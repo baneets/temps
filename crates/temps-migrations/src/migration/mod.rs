@@ -42,6 +42,8 @@ mod m20260310_000004_add_is_byok_to_ai_usage_logs;
 mod m20260310_000005_add_agent_tracking_to_ai_usage_logs;
 mod m20260310_000006_add_environment_protection;
 mod m20260311_000001_add_on_demand_environments;
+mod m20260313_000001_add_service_members;
+mod m20260313_000002_add_service_error_message;
 
 pub struct Migrator;
 
@@ -91,6 +93,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260310_000005_add_agent_tracking_to_ai_usage_logs::Migration),
             Box::new(m20260310_000006_add_environment_protection::Migration),
             Box::new(m20260311_000001_add_on_demand_environments::Migration),
+            Box::new(m20260313_000001_add_service_members::Migration),
+            Box::new(m20260313_000002_add_service_error_message::Migration),
         ]
     }
 }

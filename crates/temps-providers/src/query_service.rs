@@ -81,18 +81,46 @@ impl QueryService {
                         ))
                     })?;
 
-                // Parse port from string
-                let port = config
-                    .port
-                    .unwrap_or_else(|| "5432".to_string())
-                    .parse::<u16>()
-                    .map_err(|e| {
-                        DataError::InvalidConfiguration(format!("Invalid port number: {}", e))
-                    })?;
+                // For cluster services, resolve the primary data node's address
+                // instead of using the stored config host/port (which may point to
+                // the monitor or use default values).
+                let (host, port) = match self
+                    .external_service_manager
+                    .get_cluster_primary_address(service_id)
+                    .await
+                {
+                    Ok(Some((primary_host, primary_port))) => {
+                        debug!(
+                            "Using cluster primary {}:{} for service {} explorer",
+                            primary_host, primary_port, service_id
+                        );
+                        (primary_host, primary_port)
+                    }
+                    Ok(None) => {
+                        // Standalone service — use config host/port as before
+                        let port = config
+                            .port
+                            .unwrap_or_else(|| "5432".to_string())
+                            .parse::<u16>()
+                            .map_err(|e| {
+                                DataError::InvalidConfiguration(format!(
+                                    "Invalid port number: {}",
+                                    e
+                                ))
+                            })?;
+                        (config.host.clone(), port)
+                    }
+                    Err(e) => {
+                        return Err(DataError::ConnectionFailed(format!(
+                            "Failed to resolve cluster primary for service {}: {}",
+                            service_id, e
+                        )));
+                    }
+                };
 
                 // Connect to the specified database (not the configured one)
                 let pg_source = PostgresSource::connect(
-                    &config.host,
+                    &host,
                     port,
                     &config.username,
                     &config.password.unwrap_or_default(),

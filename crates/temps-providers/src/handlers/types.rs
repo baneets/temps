@@ -169,6 +169,31 @@ pub struct ExternalServiceInfo {
     /// Node ID where the service runs. Null means control plane (local).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<i32>,
+    /// Service topology: "standalone" (single container) or "cluster" (HA multi-member).
+    #[schema(example = "standalone")]
+    pub topology: String,
+    /// Cluster members (empty for standalone services).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<ServiceMemberInfo>,
+    /// Error message from failed initialization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Public info about a cluster member.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ServiceMemberInfo {
+    pub id: i32,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<i32>,
+    pub container_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<i32>,
+    pub status: String,
+    pub ordinal: i32,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -260,6 +285,38 @@ pub struct CreateExternalServiceRequest {
     /// Target node ID for the service. Omit or null to run on the control plane.
     #[serde(default)]
     pub node_id: Option<i32>,
+    /// Service topology: "standalone" (default) or "cluster" (HA multi-member).
+    #[serde(default = "default_topology")]
+    #[schema(example = "standalone")]
+    pub topology: String,
+    /// Cluster member specifications. Required when topology is "cluster".
+    #[serde(default)]
+    pub members: Vec<ClusterMemberRequest>,
+}
+
+fn default_topology() -> String {
+    "standalone".to_string()
+}
+
+/// Request spec for a single cluster member.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ClusterMemberRequest {
+    /// Service-type-specific role (e.g., "monitor", "primary", "replica")
+    #[schema(example = "primary")]
+    pub role: String,
+    /// Target worker node ID. Omit or null to run on the control plane.
+    #[serde(default)]
+    pub node_id: Option<i32>,
+}
+
+/// Request body for retrying a failed cluster initialization.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RetryClusterRequest {
+    /// Cluster member specifications (same format as create).
+    /// If omitted, the original member configuration is reconstructed from
+    /// the preserved service_members records.
+    #[serde(default)]
+    pub members: Vec<ClusterMemberRequest>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

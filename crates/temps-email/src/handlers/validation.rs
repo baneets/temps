@@ -266,9 +266,17 @@ pub async fn validate_email(
         .await
         .map_err(|e| {
             error!("Failed to validate email: {}", e);
-            internal_server_error()
-                .detail(format!("Failed to validate email: {}", e))
-                .build()
+            match &e {
+                crate::errors::EmailError::Validation(msg) if msg.contains("timed out") => {
+                    bad_request().detail(format!("{}", e)).build()
+                }
+                crate::errors::EmailError::Validation(_) => {
+                    bad_request().detail(format!("{}", e)).build()
+                }
+                _ => internal_server_error()
+                    .detail(format!("Failed to validate email: {}", e))
+                    .build(),
+            }
         })?;
 
     Ok((StatusCode::OK, Json(ValidateEmailResponse::from(result))))

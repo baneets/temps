@@ -3,8 +3,11 @@
 //! This service provides email validation capabilities to check if an email
 //! address exists without sending any email.
 
-use check_if_email_exists::{check_email, CheckEmailInputBuilder, CheckEmailOutput, Reachable};
+use check_if_email_exists::{
+    check_email, CheckEmailInputBuilder, CheckEmailInputProxy, CheckEmailOutput, Reachable,
+};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::errors::EmailError;
@@ -248,16 +251,67 @@ impl ValidationService {
     ) -> Result<ValidateEmailResponse, EmailError> {
         info!("Validating email: {}", request.email);
 
-        // Build the check email input using the builder pattern (v0.11 API)
-        let input = CheckEmailInputBuilder::default()
-            .to_email(request.email.clone())
+        use check_if_email_exists::smtp::verif_method::VerifMethod;
+
+        let mut builder = CheckEmailInputBuilder::default();
+        builder.to_email(request.email.clone());
+
+        let from_email = self
+            .config
+            .from_email
+            .clone()
+            .unwrap_or_else(|| "noreply@temps.sh".to_string());
+        let hello_name = self
+            .config
+            .hello_name
+            .clone()
+            .unwrap_or_else(|| "temps.sh".to_string());
+
+        // Build proxy input if provided
+        let proxy_input = request.proxy.as_ref().map(|p| CheckEmailInputProxy {
+            host: p.host.clone(),
+            port: p.port,
+            username: p.username.clone(),
+            password: p.password.clone(),
+            timeout_ms: Some(10_000),
+        });
+
+        // Always set a VerifMethod with SMTP timeout to avoid hanging
+        let verif_method = VerifMethod::new_with_same_config_for_all(
+            proxy_input,
+            hello_name,
+            from_email,
+            25,
+            Some(Duration::from_secs(10)),
+            1,
+        );
+        builder.verif_method(verif_method);
+
+        let input = builder
             .build()
             .map_err(|e| EmailError::Validation(format!("Failed to build email input: {}", e)))?;
 
         debug!("Calling check_email for: {}", request.email);
 
-        // Perform the validation - returns a single CheckEmailOutput
-        let output = check_email(&input).await;
+        // Outer timeout as a safety net
+        let output = tokio::time::timeout(Duration::from_secs(20), async {
+            // Catch panics from the library (e.g. duplicate rustls crypto provider install)
+            let result =
+                tokio::task::spawn(async move { check_email(&input).await }).await;
+            result.map_err(|e| {
+                EmailError::Validation(format!(
+                    "Email validation failed for internal error: {}",
+                    e
+                ))
+            })
+        })
+        .await
+        .map_err(|_| {
+            EmailError::Validation(format!(
+                "Email validation timed out for {}. SMTP port 25 may be blocked — consider using a SOCKS5 proxy.",
+                request.email
+            ))
+        })??;
 
         debug!(
             "Email validation result for {}: is_reachable={:?}",

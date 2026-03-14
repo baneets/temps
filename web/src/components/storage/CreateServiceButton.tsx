@@ -12,7 +12,15 @@ import { getProvidersMetadataOptions } from '@/api/client/@tanstack/react-query.
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 
-export function CreateServiceButton({ onSuccess }: { onSuccess?: () => void }) {
+export function CreateServiceButton({
+  onSuccess,
+  open,
+  onOpenChange,
+}: {
+  onSuccess?: () => void
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+}) {
   const navigate = useNavigate()
 
   const { data: providers, isLoading } = useQuery({
@@ -20,7 +28,7 @@ export function CreateServiceButton({ onSuccess }: { onSuccess?: () => void }) {
   })
 
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
         <Button className="gap-2" disabled={isLoading}>
           {isLoading ? (

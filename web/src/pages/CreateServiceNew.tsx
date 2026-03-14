@@ -1,23 +1,250 @@
 import {
+  adminListNodesOptions,
   createServiceMutation,
   getProviderMetadataOptions,
   getServiceTypeParametersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
-import { ServiceTypeRoute } from '@/api/client/types.gen'
+import {
+  ClusterMemberRequest,
+  NodeInfoResponse,
+  ServiceTypeRoute,
+} from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
 import { JsonSchemaForm } from '@/components/forms/JsonSchemaForm'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { customAlphabet } from 'nanoid'
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, Plus, Server, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 // Create a custom nanoid with lowercase alphanumeric characters
 const generateId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 4)
+
+/** Service types that support HA cluster topology */
+const CLUSTER_SERVICE_TYPES: ServiceTypeRoute[] = ['postgres']
+
+/** Default cluster roles for each service type */
+const DEFAULT_CLUSTER_ROLES: Record<string, string[]> = {
+  postgres: ['monitor', 'primary', 'replica'],
+}
+
+const ROLE_DESCRIPTIONS: Record<string, string> = {
+  monitor: 'pg_auto_failover monitor — coordinates failover',
+  primary: 'Read-write primary node',
+  replica: 'Read-only hot standby',
+}
+
+function ClusterMemberConfig({
+  members,
+  onMembersChange,
+  nodes,
+  serviceType,
+}: {
+  members: ClusterMemberRequest[]
+  onMembersChange: (members: ClusterMemberRequest[]) => void
+  nodes: NodeInfoResponse[]
+  serviceType: string
+}) {
+  const roles = DEFAULT_CLUSTER_ROLES[serviceType] || []
+
+  const addMember = () => {
+    // Default to replica if we already have all required roles
+    const hasMonitor = members.some((m) => m.role === 'monitor')
+    const hasPrimary = members.some((m) => m.role === 'primary')
+    const defaultRole = !hasMonitor
+      ? 'monitor'
+      : !hasPrimary
+        ? 'primary'
+        : 'replica'
+    onMembersChange([...members, { role: defaultRole, node_id: null }])
+  }
+
+  const removeMember = (index: number) => {
+    onMembersChange(members.filter((_, i) => i !== index))
+  }
+
+  const updateMember = (
+    index: number,
+    field: keyof ClusterMemberRequest,
+    value: string | number | null
+  ) => {
+    const updated = [...members]
+    if (field === 'node_id') {
+      updated[index] = {
+        ...updated[index],
+        node_id: value === null ? null : Number(value),
+      }
+    } else {
+      updated[index] = { ...updated[index], [field]: value as string }
+    }
+    onMembersChange(updated)
+  }
+
+  // Validation: warn about missing required roles
+  const hasMonitor = members.some((m) => m.role === 'monitor')
+  const hasPrimary = members.some((m) => m.role === 'primary')
+  const hasReplica = members.some((m) => m.role === 'replica')
+  const allHaveNodes = members.every((m) => m.node_id !== null)
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <Label>Cluster Members</Label>
+          <p className="text-sm text-muted-foreground">
+            Assign each member to a different node for true HA
+          </p>
+        </div>
+        <Button type="button" variant="outline" size="sm" onClick={addMember}>
+          <Plus className="h-4 w-4 mr-1" />
+          Add Member
+        </Button>
+      </div>
+
+      {members.length === 0 && (
+        <div className="text-sm text-muted-foreground text-center py-4 border border-dashed rounded-md">
+          No members configured. Add at least a monitor, primary, and replica.
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {members.map((member, index) => (
+          <div
+            key={index}
+            className="flex items-start gap-3 p-3 border rounded-lg bg-muted/30"
+          >
+            <div className="flex items-center justify-center h-8 w-8 rounded-full bg-primary/10 text-primary text-xs font-medium flex-shrink-0 mt-1">
+              {index + 1}
+            </div>
+
+            <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Role</Label>
+                <Select
+                  value={member.role}
+                  onValueChange={(v) => updateMember(index, 'role', v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {roles.map((role) => (
+                      <SelectItem key={role} value={role}>
+                        <span className="capitalize">{role}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {ROLE_DESCRIPTIONS[member.role] && (
+                  <p className="text-xs text-muted-foreground">
+                    {ROLE_DESCRIPTIONS[member.role]}
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs">Node</Label>
+                <Select
+                  value={
+                    member.node_id !== null && member.node_id !== undefined
+                      ? String(member.node_id)
+                      : 'control-plane'
+                  }
+                  onValueChange={(v) =>
+                    updateMember(
+                      index,
+                      'node_id',
+                      v === 'control-plane' ? null : Number(v)
+                    )
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select node..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="control-plane">
+                      <div className="flex items-center gap-2">
+                        <Server className="h-3 w-3" />
+                        Control Plane
+                      </div>
+                    </SelectItem>
+                    {nodes.map((node) => (
+                      <SelectItem key={node.id} value={String(node.id)}>
+                        <div className="flex items-center gap-2">
+                          <Server className="h-3 w-3" />
+                          {node.name}
+                          <span className="text-muted-foreground text-xs">
+                            ({node.private_address})
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 flex-shrink-0 mt-1 text-muted-foreground hover:text-destructive"
+              onClick={() => removeMember(index)}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ))}
+      </div>
+
+      {members.length > 0 && (!hasMonitor || !hasPrimary || !hasReplica) && (
+        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+          A PostgreSQL cluster requires at least:{' '}
+          <span className={hasMonitor ? 'line-through opacity-50' : 'font-medium'}>
+            1 monitor
+          </span>
+          ,{' '}
+          <span className={hasPrimary ? 'line-through opacity-50' : 'font-medium'}>
+            1 primary
+          </span>
+          ,{' '}
+          <span className={hasReplica ? 'line-through opacity-50' : 'font-medium'}>
+            1 replica
+          </span>
+        </div>
+      )}
+
+      {members.length >= 3 &&
+        hasMonitor &&
+        hasPrimary &&
+        hasReplica &&
+        !allHaveNodes && (
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
+            For true high availability, assign each member to a different node.
+            Members on the control plane share the same machine.
+          </div>
+        )}
+
+      {members.length >= 3 && hasMonitor && hasPrimary && hasReplica && allHaveNodes && (
+        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-800 dark:text-emerald-200">
+          Cluster configuration looks good. Members will communicate via their
+          private addresses.
+        </div>
+      )}
+    </div>
+  )
+}
 
 export function CreateService() {
   const navigate = useNavigate()
@@ -31,6 +258,30 @@ export function CreateService() {
   )
 
   const [serviceName, setServiceName] = useState(defaultName)
+  const supportsCluster =
+    serviceType !== null &&
+    CLUSTER_SERVICE_TYPES.includes(serviceType as ServiceTypeRoute)
+  const [topology, setTopology] = useState<'standalone' | 'cluster'>(
+    'standalone'
+  )
+  const [clusterMembers, setClusterMembers] = useState<ClusterMemberRequest[]>(
+    []
+  )
+
+  // When switching to cluster topology, pre-populate default members
+  useEffect(() => {
+    if (topology === 'cluster' && clusterMembers.length === 0 && serviceType) {
+      const defaultRoles = DEFAULT_CLUSTER_ROLES[serviceType]
+      if (defaultRoles) {
+        setClusterMembers(
+          defaultRoles.map((role) => ({ role, node_id: null }))
+        )
+      }
+    }
+    if (topology === 'standalone') {
+      setClusterMembers([])
+    }
+  }, [topology, serviceType])
 
   useEffect(() => {
     setBreadcrumbs([
@@ -38,6 +289,19 @@ export function CreateService() {
       { label: 'Create Service', href: '/storage/create' },
     ])
   }, [setBreadcrumbs])
+
+  // Fetch available nodes for cluster member assignment
+  const { data: nodesResponse } = useQuery({
+    ...adminListNodesOptions(),
+    enabled: supportsCluster && topology === 'cluster',
+  })
+  const nodes = useMemo(
+    () =>
+      (nodesResponse?.nodes ?? []).filter(
+        (n: NodeInfoResponse) => n.status === 'active'
+      ),
+    [nodesResponse]
+  )
 
   // Fetch provider metadata for display
   const { data: providerMetadata } = useQuery({
@@ -65,7 +329,11 @@ export function CreateService() {
       errorTitle: 'Failed to create service',
     },
     onSuccess: (data) => {
-      toast.success('Service created successfully')
+      if (data.status === 'creating') {
+        toast.success('Cluster creation started — tracking progress...')
+      } else {
+        toast.success('Service created successfully')
+      }
       navigate(`/storage/${data.id}`)
     },
   })
@@ -89,11 +357,22 @@ export function CreateService() {
       }
     })
 
+    // For cluster topology, remove standalone-only params so the backend uses HA defaults
+    if (topology === 'cluster') {
+      delete cleanedParameters['docker_image']
+      delete cleanedParameters['host']
+      delete cleanedParameters['port']
+    }
+
     await createServiceMut.mutateAsync({
       body: {
         service_type: serviceType as ServiceTypeRoute,
         name: serviceName,
         parameters: cleanedParameters,
+        ...(topology === 'cluster' && {
+          topology: 'cluster',
+          members: clusterMembers,
+        }),
       },
     })
   }
@@ -198,6 +477,69 @@ export function CreateService() {
           </p>
         </div>
 
+        {/* Topology Selector (only for service types that support clustering) */}
+        {supportsCluster && (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Topology</Label>
+              <p className="text-sm text-muted-foreground">
+                Choose standalone for a single instance, or cluster for
+                high-availability with automatic failover
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setTopology('standalone')}
+                className={`flex flex-col gap-1.5 rounded-lg border-2 p-4 text-left transition-colors ${
+                  topology === 'standalone'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-muted-foreground/50'
+                }`}
+              >
+                <span className="font-medium text-sm">Standalone</span>
+                <span className="text-xs text-muted-foreground">
+                  Single container. Simple, fast. No failover.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTopology('cluster')}
+                className={`flex flex-col gap-1.5 rounded-lg border-2 p-4 text-left transition-colors ${
+                  topology === 'cluster'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-muted-foreground/50'
+                }`}
+              >
+                <span className="font-medium text-sm">
+                  Cluster (HA)
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Multi-node with pg_auto_failover. Requires 3+ nodes.
+                </span>
+              </button>
+            </div>
+
+            {topology === 'cluster' && (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Docker image will be set to{' '}
+                  <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">
+                    gotempsh/postgres-ha:18-bookworm
+                  </code>{' '}
+                  automatically (includes pg_auto_failover).
+                </p>
+                <ClusterMemberConfig
+                  members={clusterMembers}
+                  onMembersChange={setClusterMembers}
+                  nodes={nodes}
+                  serviceType={serviceType}
+                />
+              </>
+            )}
+          </div>
+        )}
+
         {/* JSON Schema Form for Parameters */}
         <JsonSchemaForm
           schema={jsonSchema as any}
@@ -205,6 +547,11 @@ export function CreateService() {
           onCancel={() => navigate('/storage')}
           submitText="Create Service"
           isSubmitting={createServiceMut.isPending}
+          hiddenFields={
+            topology === 'cluster'
+              ? ['host', 'port', 'docker_image']
+              : []
+          }
         />
       </div>
     </div>

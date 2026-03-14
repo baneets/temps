@@ -64,6 +64,11 @@ pub struct ServeCommand {
 
 impl ServeCommand {
     pub fn execute(self) -> anyhow::Result<()> {
+        // Install the rustls crypto provider once at startup. Both temps-domains
+        // and check-if-email-exists try to install it themselves — calling it here
+        // first satisfies the library's internal Once guard and prevents panics.
+        check_if_email_exists::initialize_crypto_provider();
+
         // Set screenshot provider from CLI flag (takes precedence over env var)
         // This allows: temps serve --screenshot-provider=noop
         if let Some(ref provider) = self.screenshot_provider {

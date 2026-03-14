@@ -55,3 +55,4 @@ docker-tests = []
 tokio-test = "0.4"
 testcontainers = { workspace = true }
 hyper = { version = "1", features = ["client", "http1", "http2"] }
+tokio-postgres = "0.7"

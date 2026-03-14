@@ -5348,8 +5348,8 @@ export const updateEnvironmentSettings = <ThrowOnError extends boolean = false>(
 
 /**
  * Sleep an on-demand environment
- * Manually put an on-demand environment to sleep. Sets `sleeping = true`.
- * The proxy will stop sending traffic and the idle sweep will stop containers.
+ * Manually put an on-demand environment to sleep. Stops containers and sets
+ * `sleeping = true`. If no OnDemandWaker is available, falls back to DB flag only.
  */
 export const sleepEnvironment = <ThrowOnError extends boolean = false>(options: Options<SleepEnvironmentData, ThrowOnError>) => {
     return (options.client ?? client).post<SleepEnvironmentResponses, SleepEnvironmentErrors, ThrowOnError>({
@@ -5371,8 +5371,9 @@ export const teardownEnvironment = <ThrowOnError extends boolean = false>(option
 /**
  * Wake a sleeping on-demand environment
  * Manually wake an environment that has been put to sleep by the on-demand
- * idle timeout. Sets `sleeping = false` on the environment. The proxy will
- * detect the state change and start containers on the next request.
+ * idle timeout. Starts containers, waits for health checks, then sets
+ * `sleeping = false`. If no OnDemandWaker is available (proxy not running
+ * in same process), falls back to setting the DB flag only.
  */
 export const wakeEnvironment = <ThrowOnError extends boolean = false>(options: Options<WakeEnvironmentData, ThrowOnError>) => {
     return (options.client ?? client).post<WakeEnvironmentResponses, WakeEnvironmentErrors, ThrowOnError>({

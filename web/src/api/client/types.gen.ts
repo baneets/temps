@@ -703,6 +703,20 @@ export type CliLoginRequest = {
     username: string;
 };
 
+/**
+ * Request spec for a single cluster member.
+ */
+export type ClusterMemberRequest = {
+    /**
+     * Target worker node ID. Omit or null to run on the control plane.
+     */
+    node_id?: number | null;
+    /**
+     * Service-type-specific role (e.g., "monitor", "primary", "replica")
+     */
+    role: string;
+};
+
 export type CommitExistsResponse = {
     commit_sha?: string | null;
     exists: boolean;
@@ -1212,6 +1226,10 @@ export type CreateEnvironmentVariableRequest = {
 };
 
 export type CreateExternalServiceRequest = {
+    /**
+     * Cluster member specifications. Required when topology is "cluster".
+     */
+    members?: Array<ClusterMemberRequest>;
     name: string;
     /**
      * Target node ID for the service. Omit or null to run on the control plane.
@@ -1221,6 +1239,10 @@ export type CreateExternalServiceRequest = {
         [key: string]: unknown;
     };
     service_type: ServiceTypeRoute;
+    /**
+     * Service topology: "standalone" (default) or "cluster" (HA multi-member).
+     */
+    topology?: string;
     version?: string | null;
 };
 
@@ -3731,6 +3753,10 @@ export type ExternalServiceInfo = {
     connection_info?: string | null;
     created_at: string;
     id: number;
+    /**
+     * Cluster members (empty for standalone services).
+     */
+    members?: Array<ServiceMemberInfo>;
     name: string;
     /**
      * Node ID where the service runs. Null means control plane (local).
@@ -3738,6 +3764,10 @@ export type ExternalServiceInfo = {
     node_id?: number | null;
     service_type: ServiceTypeRoute;
     status: string;
+    /**
+     * Service topology: "standalone" (single container) or "cluster" (HA multi-member).
+     */
+    topology: string;
     updated_at: string;
     version?: string | null;
 };
@@ -8134,6 +8164,20 @@ export type ServiceAccessInfo = {
  * What to do with a service during migration
  */
 export type ServiceAction = 'create' | 'link-external' | 'skip';
+
+/**
+ * Public info about a cluster member.
+ */
+export type ServiceMemberInfo = {
+    container_name: string;
+    hostname?: string | null;
+    id: number;
+    node_id?: number | null;
+    ordinal: number;
+    port?: number | null;
+    role: string;
+    status: string;
+};
 
 export type ServiceParameter = {
     choices?: Array<string> | null;
@@ -23477,6 +23521,10 @@ export type SleepEnvironmentErrors = {
      */
     404: unknown;
     /**
+     * Too many state transitions, retry after cooldown
+     */
+    429: unknown;
+    /**
      * Internal server error
      */
     500: unknown;
@@ -23552,6 +23600,10 @@ export type WakeEnvironmentErrors = {
      * Environment not found
      */
     404: unknown;
+    /**
+     * Too many state transitions, retry after cooldown
+     */
+    429: unknown;
     /**
      * Internal server error
      */

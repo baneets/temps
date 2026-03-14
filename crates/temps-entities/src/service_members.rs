@@ -5,36 +5,37 @@ use serde::{Deserialize, Serialize};
 use temps_core::DBDateTime;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
-#[sea_orm(table_name = "external_services")]
+#[sea_orm(table_name = "service_members")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub name: String,
-    pub service_type: String,
-    pub version: Option<String>,
+    pub service_id: i32,
+    /// Node this member runs on. NULL = local node (control plane).
+    pub node_id: Option<i32>,
+    /// Service-type-specific role: 'primary', 'replica', 'monitor', 'arbiter', 'sentinel', 'node'
+    pub role: String,
+    pub container_id: Option<String>,
+    pub container_name: String,
+    /// WireGuard IP or DNS name for inter-member communication
+    pub hostname: Option<String>,
+    pub port: Option<i32>,
     pub status: String,
+    /// Stable member identity (member-0, member-1, etc.)
+    pub ordinal: i32,
+    /// Encrypted member-specific config overrides
+    pub config: Option<String>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
-    pub slug: Option<String>,
-    /// Encrypted JSON configuration for the service
-    pub config: Option<String>,
-    /// Node this service runs on. NULL = local node (single-node mode).
-    pub node_id: Option<i32>,
-    /// Service topology: 'standalone' (single container) or 'cluster' (multiple members).
-    #[sea_orm(default_value = "standalone")]
-    pub topology: String,
-    /// Error message from failed initialization (null if no error).
-    pub error_message: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::external_service_backups::Entity")]
-    Backups,
-    #[sea_orm(has_many = "super::project_services::Entity")]
-    ProjectServices,
-    #[sea_orm(has_many = "super::service_members::Entity")]
-    Members,
+    #[sea_orm(
+        belongs_to = "super::external_services::Entity",
+        from = "Column::ServiceId",
+        to = "super::external_services::Column::Id"
+    )]
+    Service,
     #[sea_orm(
         belongs_to = "super::nodes::Entity",
         from = "Column::NodeId",
@@ -43,21 +44,9 @@ pub enum Relation {
     Node,
 }
 
-impl Related<super::external_service_backups::Entity> for Entity {
+impl Related<super::external_services::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::Backups.def()
-    }
-}
-
-impl Related<super::project_services::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::ProjectServices.def()
-    }
-}
-
-impl Related<super::service_members::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Members.def()
+        Relation::Service.def()
     }
 }
 
