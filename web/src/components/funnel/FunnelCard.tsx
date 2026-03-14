@@ -11,6 +11,7 @@ import { getFunnelMetricsOptions } from '@/api/client/@tanstack/react-query.gen'
 import { formatDateForAPI } from '@/lib/date'
 import { useQuery } from '@tanstack/react-query'
 import { subDays } from 'date-fns'
+import { useMemo } from 'react'
 import {
   Users,
   TrendingUp,
@@ -35,6 +36,14 @@ export function FunnelCard({
   onView,
   onEdit,
 }: FunnelCardProps) {
+  const dateRange = useMemo(() => {
+    const now = new Date()
+    return {
+      start_date: formatDateForAPI(subDays(now, 30)),
+      end_date: formatDateForAPI(now),
+    }
+  }, [])
+
   const {
     data: metrics,
     isLoading: metricsLoading,
@@ -45,10 +54,7 @@ export function FunnelCard({
         project_id: project.id,
         funnel_id: funnel.id,
       },
-      query: {
-        start_date: formatDateForAPI(subDays(new Date(), 30)),
-        end_date: formatDateForAPI(new Date()),
-      },
+      query: dateRange,
     }),
     retry: false,
   })
