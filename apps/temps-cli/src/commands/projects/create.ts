@@ -23,6 +23,8 @@ import {
   selectRepository,
   selectBranch,
   detectAndSelectPreset,
+  findRepositoryByName,
+  fetchGitConnections,
 } from '../../lib/git-connection.js'
 import { selectStorageServices } from '../../lib/service-setup.js'
 
@@ -33,11 +35,14 @@ interface CreateOptions {
   preset?: string
   connection?: string
   repo?: string
+  yes?: boolean
 }
 
 export async function create(options: CreateOptions): Promise<void> {
   await requireAuth()
   await setupClient()
+
+  const skipPrompts = options.yes ?? false
 
   newline()
   console.log(colors.bold(`${icons.sparkles} Create New Project`))
@@ -46,33 +51,104 @@ export async function create(options: CreateOptions): Promise<void> {
 
   try {
     // Step 1: Select Git Connection
-    const connection = await selectGitConnection()
+    let connection
+    if (options.connection) {
+      // Resolve connection by ID
+      const connections = await fetchGitConnections()
+      const connId = parseInt(options.connection, 10)
+      connection = connections.find((c) => c.id === connId)
+      if (!connection) {
+        error(`Git connection with ID ${options.connection} not found.`)
+        return
+      }
+      info(`Using git connection: ${connection.account_name}`)
+    } else if (options.repo && skipPrompts) {
+      // Auto-find the connection that has this repo
+      const parts = options.repo.split('/')
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        error('Repository must be in owner/name format (e.g., myorg/myrepo)')
+        return
+      }
+      const connections = await fetchGitConnections()
+      for (const conn of connections) {
+        const repo = await findRepositoryByName(conn.id, parts[0], parts[1])
+        if (repo) {
+          connection = conn
+          info(`Auto-selected git connection: ${conn.account_name}`)
+          break
+        }
+      }
+      if (!connection) {
+        error(`Repository "${options.repo}" not found in any git connection.`)
+        return
+      }
+    } else {
+      connection = await selectGitConnection()
+    }
     if (!connection) {
       error('No git connection selected. Please set up a git provider first.')
       return
     }
 
     // Step 2: Select Repository
-    const repository = await selectRepository(connection.id)
+    let repository
+    if (options.repo) {
+      // Parse owner/name format
+      const parts = options.repo.split('/')
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        error('Repository must be in owner/name format (e.g., myorg/myrepo)')
+        return
+      }
+      repository = await findRepositoryByName(connection.id, parts[0], parts[1])
+      if (!repository) {
+        error(`Repository "${options.repo}" not found in connection "${connection.account_name}".`)
+        return
+      }
+      info(`Using repository: ${repository.owner}/${repository.name}`)
+    } else {
+      repository = await selectRepository(connection.id)
+    }
     if (!repository) {
       error('No repository selected.')
       return
     }
 
     // Step 3: Select Branch
-    const branch = await selectBranch(connection.id, repository)
+    let branch: string
+    if (options.branch) {
+      branch = options.branch
+      info(`Using branch: ${branch}`)
+    } else {
+      branch = await selectBranch(connection.id, repository)
+    }
 
     // Step 4: Detect and Select Preset
-    const { preset, directory } = await detectAndSelectPreset(repository.id, branch)
+    let preset: string
+    let directory: string
+    if (options.preset) {
+      preset = options.preset
+      directory = options.directory || './'
+      info(`Using preset: ${preset}, directory: ${directory}`)
+    } else {
+      const detected = await detectAndSelectPreset(repository.id, branch)
+      preset = detected.preset
+      directory = detected.directory
+    }
 
     // Step 5: Configure Project Name
-    const projectName = await configureProjectName(repository, directory)
+    let projectName: string
+    if (options.name) {
+      projectName = options.name
+      info(`Using project name: ${projectName}`)
+    } else {
+      projectName = await configureProjectName(repository, directory)
+    }
 
-    // Step 6: Select Storage Services
-    const serviceIds = await selectStorageServices()
+    // Step 6: Select Storage Services (skip with --yes)
+    const serviceIds = skipPrompts ? [] : await selectStorageServices()
 
-    // Step 7: Configure Environment Variables
-    const envVars = await configureEnvironmentVariables()
+    // Step 7: Configure Environment Variables (skip with --yes)
+    const envVars = skipPrompts ? [] : await configureEnvironmentVariables()
 
     // Step 8: Create the Project
     const project = await withSpinner('Creating project...', async () => {
@@ -122,15 +198,20 @@ export async function create(options: CreateOptions): Promise<void> {
 
     newline()
 
-    // Ask if user wants to set as default
-    const setDefault = await promptConfirm({
-      message: 'Set as default project?',
-      default: true,
-    })
-
-    if (setDefault) {
+    // Ask if user wants to set as default (auto-set with --yes)
+    if (skipPrompts) {
       config.set('defaultProject', project.slug)
       success(`Default project set to "${project.slug}"`)
+    } else {
+      const setDefault = await promptConfirm({
+        message: 'Set as default project?',
+        default: true,
+      })
+
+      if (setDefault) {
+        config.set('defaultProject', project.slug)
+        success(`Default project set to "${project.slug}"`)
+      }
     }
 
     newline()

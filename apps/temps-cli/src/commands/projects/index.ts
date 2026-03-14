@@ -27,7 +27,12 @@ export function registerProjectsCommands(program: Command): void {
     .description('Create a new project')
     .option('-n, --name <name>', 'Project name')
     .option('-d, --description <description>', 'Project description')
-    .option('--repo <repository>', 'Git repository URL')
+    .option('--repo <repository>', 'Repository in owner/name format')
+    .option('--branch <branch>', 'Git branch')
+    .option('--directory <directory>', 'Root directory (relative to repo)')
+    .option('--preset <preset>', 'Build preset (e.g., nextjs, nodejs, static, docker)')
+    .option('--connection <id>', 'Git connection ID')
+    .option('-y, --yes', 'Skip optional prompts (services, env vars, set-default)')
     .action(create)
 
   projects
