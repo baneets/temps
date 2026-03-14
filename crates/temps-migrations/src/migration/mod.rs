@@ -44,6 +44,7 @@ mod m20260310_000006_add_environment_protection;
 mod m20260311_000001_add_on_demand_environments;
 mod m20260313_000001_add_service_members;
 mod m20260313_000002_add_service_error_message;
+mod m20260314_000001_update_environment_route_trigger;
 
 pub struct Migrator;
 
@@ -95,6 +96,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260311_000001_add_on_demand_environments::Migration),
             Box::new(m20260313_000001_add_service_members::Migration),
             Box::new(m20260313_000002_add_service_error_message::Migration),
+            Box::new(m20260314_000001_update_environment_route_trigger::Migration),
         ]
     }
 }
