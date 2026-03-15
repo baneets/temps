@@ -375,7 +375,7 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <Button
             variant="ghost"
@@ -394,7 +394,7 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Pause/Resume */}
           <Button
             variant="outline"
@@ -464,8 +464,7 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
       <div className="flex flex-col lg:flex-row gap-4">
         {/* Globe container */}
         <div
-          className="flex-1 rounded-lg border bg-card overflow-hidden relative"
-          style={{ minHeight: 550 }}
+          className="flex-1 rounded-lg border bg-card overflow-hidden relative min-h-[350px] sm:min-h-[550px]"
           onMouseEnter={() => setIsHovered(true)}
           onMouseLeave={() => setIsHovered(false)}
         >
@@ -506,8 +505,7 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
 
           {/* Feed content */}
           <div
-            className="flex-1 overflow-y-auto p-2 space-y-0.5"
-            style={{ maxHeight: 550 - 48 }}
+            className="flex-1 overflow-y-auto p-2 space-y-0.5 max-h-[300px] sm:max-h-[502px]"
           >
             {activityEvents.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center p-6">

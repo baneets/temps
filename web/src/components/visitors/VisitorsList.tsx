@@ -145,7 +145,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle>Visitors</CardTitle>
               <CardDescription>
@@ -154,7 +154,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
                   : 'Browse and analyze visitor sessions'}
               </CardDescription>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-4">
               <div className="flex items-center gap-2">
                 <Switch
                   id="hide-ghost"
@@ -174,7 +174,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
                   setCrawlerFilter(value)
                 }
               >
-                <SelectTrigger className="w-[140px]">
+                <SelectTrigger className="w-[120px] sm:w-[140px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -187,7 +187,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
                 value={limit.toString()}
                 onValueChange={(value) => setLimit(parseInt(value))}
               >
-                <SelectTrigger className="w-[100px]">
+                <SelectTrigger className="w-[90px] sm:w-[100px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -224,13 +224,14 @@ export function VisitorsList({ project }: VisitorsListProps) {
           ) : (
             <>
               <TooltipProvider>
+                <div className="overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-[280px]">Visitor</TableHead>
+                      <TableHead className="w-[200px] sm:w-[280px]">Visitor</TableHead>
                       <TableHead>Location</TableHead>
-                      <TableHead>Source</TableHead>
-                      <TableHead>Browser / OS</TableHead>
+                      <TableHead className="hidden md:table-cell">Source</TableHead>
+                      <TableHead className="hidden lg:table-cell">Browser / OS</TableHead>
                       <TableHead>First Seen</TableHead>
                       <TableHead>Last Seen</TableHead>
                     </TableRow>
@@ -249,15 +250,21 @@ export function VisitorsList({ project }: VisitorsListProps) {
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               </TooltipProvider>
 
               {/* Pagination */}
               {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-6">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mt-6">
                   <div className="text-sm text-muted-foreground">
-                    Showing {(page - 1) * limit + 1} to{' '}
-                    {Math.min(page * limit, data.filtered_count)} of{' '}
-                    {data.filtered_count} visitors
+                    <span className="hidden sm:inline">
+                      Showing {(page - 1) * limit + 1} to{' '}
+                      {Math.min(page * limit, data.filtered_count)} of{' '}
+                      {data.filtered_count} visitors
+                    </span>
+                    <span className="sm:hidden">
+                      {page} / {totalPages}
+                    </span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
@@ -267,9 +274,9 @@ export function VisitorsList({ project }: VisitorsListProps) {
                       disabled={page === 1}
                     >
                       <ChevronLeft className="h-4 w-4" />
-                      Previous
+                      <span className="hidden sm:inline">Previous</span>
                     </Button>
-                    <div className="flex items-center gap-1">
+                    <div className="hidden sm:flex items-center gap-1">
                       {[...Array(Math.min(5, totalPages))].map((_, idx) => {
                         const pageNum = page - 2 + idx
                         if (pageNum < 1 || pageNum > totalPages) return null
@@ -294,7 +301,7 @@ export function VisitorsList({ project }: VisitorsListProps) {
                       }
                       disabled={page === totalPages}
                     >
-                      Next
+                      <span className="hidden sm:inline">Next</span>
                       <ChevronRight className="h-4 w-4" />
                     </Button>
                   </div>
@@ -380,12 +387,12 @@ function VisitorRow({ visitor, onClick }: VisitorRowProps) {
       </TableCell>
 
       {/* Source / Referrer */}
-      <TableCell>
+      <TableCell className="hidden md:table-cell">
         <VisitorSource visitor={visitor} />
       </TableCell>
 
       {/* Browser / OS */}
-      <TableCell>
+      <TableCell className="hidden lg:table-cell">
         <div className="flex items-center gap-1.5">
           <span className="text-sm">
             {browserInfo?.name || 'Unknown'}

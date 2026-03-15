@@ -26,7 +26,6 @@ import { format } from 'date-fns'
 import {
   Calendar,
   Clock,
-  ExternalLink,
   Globe,
   Loader2,
   Monitor,
@@ -56,6 +55,7 @@ function formatOsInfo(replay: SessionReplayWithVisitorDto): string | null {
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
+  if (seconds === 0) return '< 1s'
   if (seconds < 60) return `${seconds}s`
   const mins = Math.floor(seconds / 60)
   const secs = seconds % 60
@@ -176,15 +176,16 @@ export function SessionReplays({
               </div>
             </div>
           ) : (
+            <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Visitor</TableHead>
-                  <TableHead>Browser / OS</TableHead>
-                  <TableHead>Location</TableHead>
+                  <TableHead className="hidden md:table-cell">Browser / OS</TableHead>
+                  <TableHead className="hidden sm:table-cell">Location</TableHead>
                   <TableHead>Duration</TableHead>
-                  <TableHead>Viewport</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead className="hidden lg:table-cell">Viewport</TableHead>
+                  <TableHead className="hidden sm:table-cell">Created</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
@@ -197,7 +198,7 @@ export function SessionReplays({
                         <span className="text-sm font-medium">{replay.visitor_id}</span>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <div className="flex flex-col gap-0.5">
@@ -224,7 +225,7 @@ export function SessionReplays({
                         )}
                       </Tooltip>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden sm:table-cell">
                       {formatLocation(replay) ? (
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -251,7 +252,7 @@ export function SessionReplays({
                         <span className="text-sm">{formatDuration(replay.duration || 0)}</span>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden lg:table-cell">
                       <div className="flex items-center gap-1">
                         <Monitor className="h-3 w-3 text-muted-foreground" />
                         <span className="text-xs text-muted-foreground">
@@ -259,7 +260,7 @@ export function SessionReplays({
                         </span>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden sm:table-cell">
                       <div className="flex items-center gap-1">
                         <Calendar className="h-3 w-3 text-muted-foreground" />
                         <span className="text-xs text-muted-foreground">
@@ -276,17 +277,17 @@ export function SessionReplays({
                             replay.visitor_id
                           )
                         }
-                        className="gap-2"
+                        className="gap-1.5"
                       >
                         <Play className="h-3 w-3" />
-                        Watch
-                        <ExternalLink className="h-3 w-3" />
+                        <span className="hidden sm:inline">Watch</span>
                       </Button>
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+            </div>
           )}
         </CardContent>
       </Card>

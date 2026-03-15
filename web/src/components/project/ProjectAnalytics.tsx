@@ -73,7 +73,13 @@ import { CreateFunnel } from '@/pages/CreateFunnel'
 import { EditFunnel } from '@/pages/EditFunnel'
 import RequestLogs from '@/pages/RequestLogs'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { format, subDays } from 'date-fns'
+import { format } from 'date-fns'
+import {
+  getDateRangeFromFilter,
+  QUICK_FILTERS,
+  type QuickFilter,
+  type AnalyticsDateFilter,
+} from '@/hooks/useAnalyticsDateRange'
 import {
   Calendar as CalendarIcon,
   Code2,
@@ -410,17 +416,6 @@ export function VisitorChart({
   )
 }
 
-const QUICK_FILTERS = [
-  { label: 'Today', value: 'today' },
-  { label: 'Yesterday', value: 'yesterday' },
-  { label: 'Last 24 hours', value: '24hours' },
-  { label: 'Last 7 Days', value: '7days' },
-  { label: 'Last 30 Days', value: '30days' },
-  { label: 'Custom', value: 'custom' },
-] as const
-
-type QuickFilter = (typeof QUICK_FILTERS)[number]['value']
-
 interface AnalyticsFiltersProps {
   project: ProjectResponse
   activeFilter: QuickFilter
@@ -664,56 +659,7 @@ function PagesTab({ project }: PagesTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -831,56 +777,7 @@ function EventDetailTab({ project }: EventDetailTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -954,56 +851,7 @@ function SessionReplaysTab({ project }: SessionReplaysTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -1068,56 +916,7 @@ function JourneyTab({ project }: JourneyTabProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const queryClient = useQueryClient()
 
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days':
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-      case '30days':
-        return {
-          startDate: subDays(now, 30),
-          endDate: now,
-        }
-      default:
-        return {
-          startDate: subDays(now, 7),
-          endDate: now,
-        }
-    }
-  }, [dateFilter])
-
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   const handleRefresh = React.useCallback(() => {
     setIsRefreshing(true)
@@ -1167,10 +966,6 @@ function JourneyTab({ project }: JourneyTabProps) {
 
 interface ProjectAnalyticsProps {
   project: ProjectResponse
-}
-interface AnalyticsDateFilter {
-  quickFilter: QuickFilter
-  dateRange: DateRange | undefined
 }
 
 export function ProjectAnalytics({ project }: ProjectAnalyticsProps) {
@@ -1272,58 +1067,7 @@ function ProjectAnalyticsOverview({ project }: ProjectAnalyticsOverviewProps) {
   const [isRefreshing, setIsRefreshing] = React.useState(false)
   const [showSetupOverride] = React.useState(false)
   const queryClient = useQueryClient()
-  const getDateRange = React.useCallback(() => {
-    const now = new Date()
-
-    if (dateFilter.quickFilter === 'custom' && dateFilter.dateRange) {
-      return {
-        startDate: dateFilter.dateRange.from,
-        endDate: dateFilter.dateRange.to,
-      }
-    }
-
-    switch (dateFilter.quickFilter) {
-      case 'today':
-        return {
-          startDate: new Date(now.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      case 'yesterday': {
-        const yesterday = new Date(now)
-        yesterday.setDate(yesterday.getDate() - 1)
-        return {
-          startDate: new Date(yesterday.setHours(0, 0, 0, 0)),
-          endDate: new Date(yesterday.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '24hours': {
-        const twentyFourHoursAgo = new Date(now)
-        twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24)
-        return {
-          startDate: twentyFourHoursAgo,
-          endDate: now,
-        }
-      }
-      case '7days': {
-        const sevenDaysAgo = new Date(now)
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
-        return {
-          startDate: new Date(sevenDaysAgo.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      }
-      case '30days':
-      default: {
-        const thirtyDaysAgo = new Date(now)
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-        return {
-          startDate: new Date(thirtyDaysAgo.setHours(0, 0, 0, 0)),
-          endDate: new Date(now.setHours(23, 59, 59, 999)),
-        }
-      }
-    }
-  }, [dateFilter])
-  const { startDate, endDate } = getDateRange()
+  const { startDate, endDate } = getDateRangeFromFilter(dateFilter)
 
   // Chart zoom handler — sets a custom date range from drag selection
   const handleChartZoom = React.useCallback(

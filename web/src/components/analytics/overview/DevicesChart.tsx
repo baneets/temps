@@ -12,7 +12,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import type { LucideIcon } from 'lucide-react'
-import { Monitor, Smartphone, Tablet } from 'lucide-react'
+import { BarChart3, Monitor, Smartphone, Tablet } from 'lucide-react'
 import * as React from 'react'
 
 const DEVICE_ICONS: Record<string, LucideIcon> = {
@@ -105,6 +105,7 @@ export function DevicesChart({
           </div>
         ) : !sortedDevices.length ? (
           <div className="flex flex-col items-center justify-center py-8 text-center">
+            <BarChart3 className="h-8 w-8 text-muted-foreground/30 mb-2" />
             <p className="text-sm text-muted-foreground">
               No data available for the selected period
             </p>

@@ -91,11 +91,11 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
               <Button
                 variant="outline"
                 className={cn(
-                  'justify-start text-left font-normal',
+                  'justify-start text-left font-normal text-xs sm:text-sm',
                   !dateRange && 'text-muted-foreground'
                 )}
               >
-                <CalendarIcon className="mr-2 h-4 w-4" />
+                <CalendarIcon className="mr-1.5 h-4 w-4 shrink-0" />
                 {dateRange?.from ? (
                   dateRange.to ? (
                     <>
@@ -117,7 +117,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
                 defaultMonth={dateRange?.from}
                 selected={dateRange}
                 onSelect={setDateRange}
-                numberOfMonths={2}
+                numberOfMonths={typeof window !== 'undefined' && window.innerWidth < 640 ? 1 : 2}
                 disabled={(date) => date > new Date()}
               />
             </PopoverContent>
@@ -126,9 +126,10 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
             onClick={() =>
               navigate(`/projects/${project.slug}/analytics/funnels/create`)
             }
+            className="shrink-0"
           >
-            <Plus className="h-4 w-4 mr-2" />
-            Create Funnel
+            <Plus className="h-4 w-4 sm:mr-2" />
+            <span className="hidden sm:inline">Create Funnel</span>
           </Button>
         </div>
       </div>
