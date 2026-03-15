@@ -316,7 +316,7 @@ export function ReferrersChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedReferrers.map((referrer) => (
               <button
                 type="button"

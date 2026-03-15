@@ -133,7 +133,7 @@ export function BrowsersChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedBrowsers.map((browser) => (
               <button
                 type="button"

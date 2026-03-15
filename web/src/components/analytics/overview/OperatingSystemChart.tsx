@@ -173,7 +173,7 @@ export function OperatingSystemChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedItems.map((item) => (
               <button
                 type="button"

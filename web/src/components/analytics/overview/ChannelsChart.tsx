@@ -198,7 +198,7 @@ export function ChannelsChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedItems.map((item) => {
               const Icon = selectedChannel
                 ? null

@@ -166,7 +166,7 @@ export function LanguagesChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedLanguages.map((lang) => (
               <div key={lang.code} className="space-y-2">
                 <div className="flex items-center justify-between">

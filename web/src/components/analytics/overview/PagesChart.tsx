@@ -150,7 +150,7 @@ export function PagesChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedPages.map((page) => (
               <button
                 type="button"
@@ -161,7 +161,7 @@ export function PagesChart({
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <FileText className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm font-medium text-muted-foreground truncate max-w-[300px]">
+                    <span className="text-sm font-medium text-muted-foreground truncate max-w-[150px] sm:max-w-[300px]">
                       {page.page}
                     </span>
                   </div>

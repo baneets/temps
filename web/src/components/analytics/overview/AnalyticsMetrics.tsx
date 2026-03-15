@@ -107,15 +107,15 @@ export function AnalyticsMetrics({
       ]
     : baseMetrics
 
-  const gridCols = isDemoMode ? 'sm:grid-cols-4' : 'sm:grid-cols-3'
+  const gridCols = isDemoMode ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'
   const skeletonCount = isDemoMode ? 4 : 3
 
   return (
     <>
       {isLoading ? (
-        <div className={`grid grid-cols-1 ${gridCols} gap-4`}>
+        <div className={`grid ${gridCols} gap-3 sm:gap-4`}>
           {[...Array(skeletonCount)].map((_, i) => (
-            <div key={i} className="space-y-2 p-4 rounded-lg border">
+            <div key={i} className="space-y-2 p-3 sm:p-4 rounded-lg border">
               <div className="h-4 w-20 bg-muted animate-pulse rounded" />
               <div className="h-8 w-16 bg-muted animate-pulse rounded" />
             </div>
@@ -128,33 +128,33 @@ export function AnalyticsMetrics({
           </p>
         </div>
       ) : (
-        <div className={`grid grid-cols-1 ${gridCols} gap-4`}>
+        <div className={`grid ${gridCols} gap-3 sm:gap-4`}>
           {metrics.map((metric: any) => {
             const Icon = metric.icon
             const isComingSoon = metric.isComingSoon
             return (
               <div
                 key={metric.label}
-                className={`flex flex-col p-4 rounded-lg border bg-card transition-colors ${
+                className={`flex flex-col p-3 sm:p-4 rounded-lg border bg-card transition-colors ${
                   isComingSoon
                     ? 'border-dashed border-muted-foreground/30'
                     : 'hover:bg-accent/50'
                 }`}
               >
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-1 sm:mb-2">
                   <Icon
-                    className={`h-5 w-5 ${isComingSoon ? 'text-muted-foreground/50' : 'text-muted-foreground'}`}
+                    className={`h-4 w-4 sm:h-5 sm:w-5 ${isComingSoon ? 'text-muted-foreground/50' : 'text-muted-foreground'}`}
                   />
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-0.5 sm:space-y-1">
                   <p
-                    className={`text-2xl font-bold ${isComingSoon ? 'text-muted-foreground/50' : ''}`}
+                    className={`text-xl sm:text-2xl font-bold ${isComingSoon ? 'text-muted-foreground/50' : ''}`}
                   >
                     {typeof metric.value === 'number'
                       ? metric.value.toLocaleString()
                       : metric.value}
                   </p>
-                  <p className="text-sm text-muted-foreground">{metric.label}</p>
+                  <p className="text-xs sm:text-sm text-muted-foreground">{metric.label}</p>
                 </div>
               </div>
             )

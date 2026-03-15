@@ -78,7 +78,7 @@ export function UTMCampaignsChart({
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle>UTM Campaigns</CardTitle>
             <CardDescription>
@@ -135,7 +135,7 @@ export function UTMCampaignsChart({
             </p>
           </div>
         ) : (
-          <div className="space-y-3" style={{ minHeight: '400px' }}>
+          <div className="space-y-3">
             {sortedItems.map((item) => (
               <div key={item.value} className="space-y-2">
                 <div className="flex items-center justify-between">
