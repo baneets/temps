@@ -146,6 +146,7 @@ export function ProjectOverview({
       }
       return false // Stop polling when deployment has screenshot or failed
     },
+    refetchOnWindowFocus: true,
   })
 
   // Use fresh deployment data if available, otherwise fall back to passed prop

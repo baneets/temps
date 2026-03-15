@@ -99,6 +99,7 @@ export function ProjectCard({
       },
     }),
     enabled: !!project.id,
+    refetchOnWindowFocus: true,
   })
 
   return (

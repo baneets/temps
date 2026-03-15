@@ -39,7 +39,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { ArrowUpRight, PlusIcon } from 'lucide-react'
+import { ArrowUpRight, PlusIcon, RefreshCw } from 'lucide-react'
 import { EmptyPlaceholder } from '@/components/ui/empty-placeholder'
 
 const ITEMS_PER_PAGE = 10
@@ -74,6 +74,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
       },
     }),
     retry: false,
+    refetchOnWindowFocus: true,
   })
 
   // Auto-refresh when coming from deployment details
@@ -416,7 +417,17 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
   return (
     <>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">Deployments</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">Deployments</h2>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => refetch()}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+          </Button>
+        </div>
         <Button onClick={handleOpenNewDeployment}>
           <PlusIcon className="h-4 w-4 mr-2" />
           New Deployment
