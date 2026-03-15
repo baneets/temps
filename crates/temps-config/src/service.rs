@@ -93,6 +93,7 @@ impl ServerConfig {
         } else {
             let secret = Self::generate_auth_secret();
             fs::write(&auth_secret_path, &secret)?;
+            Self::restrict_file_permissions(&auth_secret_path);
             secret
         };
 
@@ -103,6 +104,7 @@ impl ServerConfig {
         } else {
             let key = Self::generate_encryption_key();
             fs::write(&encryption_key_path, &key)?;
+            Self::restrict_file_permissions(&encryption_key_path);
             key
         };
 
@@ -149,18 +151,28 @@ impl ServerConfig {
 
     /// Generate a 32-byte auth secret (64 hex characters)
     fn generate_auth_secret() -> String {
-        // Generate 32 random bytes and encode as 64 hex characters
-        let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill(&mut bytes);
         hex::encode(bytes)
     }
 
     /// Generate a 32-byte encryption key (64 hex characters)
     fn generate_encryption_key() -> String {
-        // Generate 32 random bytes and encode as 64 hex characters
-        let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill(&mut bytes);
         hex::encode(bytes)
+    }
+
+    /// Set file permissions to owner-only (0o600) for sensitive files.
+    #[cfg(unix)]
+    fn restrict_file_permissions(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_file_permissions(_path: &std::path::Path) {
+        // File permissions are handled differently on non-Unix platforms
     }
 
     /// Get a random available port for console address
@@ -324,8 +336,10 @@ impl ConfigService {
             file.read_to_string(&mut key).await?;
             Ok(key.trim().to_string())
         } else {
-            // Generate new key and save it
-            let key = uuid::Uuid::new_v4().to_string().replace("-", "");
+            // Generate new key using OS CSPRNG
+            let mut bytes = [0u8; 32];
+            rand::rngs::OsRng.fill(&mut bytes);
+            let key = hex::encode(bytes);
 
             // Ensure data directory exists
             tokio_fs::create_dir_all(self.data_dir()).await?;
@@ -334,6 +348,9 @@ impl ConfigService {
             let mut file = tokio_fs::File::create(&key_path).await?;
             file.write_all(key.as_bytes()).await?;
             file.sync_all().await?;
+
+            // Restrict permissions to owner-only
+            ServerConfig::restrict_file_permissions(&key_path);
 
             Ok(key)
         }
@@ -351,9 +368,9 @@ impl ConfigService {
             file.read_to_string(&mut secret).await?;
             Ok(secret.trim().to_string())
         } else {
-            // Generate new secret and save it (32 bytes as 64 hex characters)
-            let mut rng = rand::thread_rng();
-            let bytes: Vec<u8> = (0..32).map(|_| rng.gen::<u8>()).collect();
+            // Generate new secret using OS CSPRNG (32 bytes as 64 hex characters)
+            let mut bytes = [0u8; 32];
+            rand::rngs::OsRng.fill(&mut bytes);
             let secret = hex::encode(bytes);
 
             // Ensure data directory exists
@@ -363,6 +380,9 @@ impl ConfigService {
             let mut file = tokio_fs::File::create(&secret_path).await?;
             file.write_all(secret.as_bytes()).await?;
             file.sync_all().await?;
+
+            // Restrict permissions to owner-only
+            ServerConfig::restrict_file_permissions(&secret_path);
 
             Ok(secret)
         }

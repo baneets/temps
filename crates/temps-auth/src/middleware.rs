@@ -325,6 +325,26 @@ async fn check_demo_mode(
     user_service: &UserService,
     demo_mode_header: bool,
 ) -> Option<AuthContext> {
+    // Always load settings to check if demo mode is enabled
+    let settings_record = temps_entities::settings::Entity::find_by_id(1)
+        .one(auth_state.db.as_ref())
+        .await
+        .ok()
+        .flatten();
+
+    let settings = settings_record
+        .map(|r| AppSettings::from_json(r.data))
+        .unwrap_or_default();
+
+    // Demo mode must be explicitly enabled in settings
+    if !settings.demo_mode.enabled {
+        tracing::debug!(
+            "Demo mode is disabled in settings, rejecting demo request for host: {}",
+            host_without_port
+        );
+        return None;
+    }
+
     // If demo mode header is set by proxy, skip host validation (proxy already validated)
     if demo_mode_header {
         tracing::info!(
@@ -333,17 +353,7 @@ async fn check_demo_mode(
         );
     } else {
         // Validate host against preview_domain
-        let settings_record = temps_entities::settings::Entity::find_by_id(1)
-            .one(auth_state.db.as_ref())
-            .await
-            .ok()
-            .flatten();
-
-        let preview_domain = settings_record
-            .map(|r| AppSettings::from_json(r.data).preview_domain)
-            .unwrap_or_else(|| "localho.st".to_string());
-
-        let preview_domain = preview_domain.trim_start_matches("*.");
+        let preview_domain = settings.preview_domain.trim_start_matches("*.");
         let expected_demo_host = format!("demo.{}", preview_domain);
 
         tracing::debug!(

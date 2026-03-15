@@ -26,6 +26,12 @@ use temps_entities::{backup_schedules::Model as BackupSchedule, s3_sources::Mode
 use temps_providers::ExternalServiceManager;
 use tokio_stream::StreamExt;
 
+/// POSIX-safe shell escaping: wraps value in single quotes, escaping any
+/// embedded single quotes. Safe for use in `sh -c` command strings.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[derive(Error, Debug)]
 pub enum BackupError {
     #[error("Database error: {0}")]
@@ -1190,7 +1196,7 @@ impl BackupService {
         let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
         let pg_dump_shell_cmd = format!(
             "pg_dump --format=plain --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
-            host, port_str, username, database, stderr_path, container_backup_path
+            shell_escape(host), shell_escape(&port_str), shell_escape(username), shell_escape(database), stderr_path, container_backup_path
         );
 
         let exec = docker
@@ -2234,14 +2240,18 @@ impl BackupService {
             // These errors are benign — the actual CREATE TABLE and COPY statements succeed.
             let cmd = format!(
                 "psql --no-password --host={} --port={} --username={} --dbname={} --file={}",
-                host, port_str, username, database, container_restore_path
+                shell_escape(host),
+                shell_escape(&port_str),
+                shell_escape(username),
+                shell_escape(database),
+                container_restore_path
             );
             ("psql", cmd)
         } else {
             // Custom format: use pg_restore
             let cmd = format!(
                 "pg_restore --verbose --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} {}",
-                host, port_str, username, database, container_restore_path
+                shell_escape(host), shell_escape(&port_str), shell_escape(username), shell_escape(database), container_restore_path
             );
             ("pg_restore", cmd)
         };

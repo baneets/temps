@@ -233,25 +233,45 @@ impl AuthService {
     }
 
     fn verify_totp_code(&self, user: &temps_entities::users::Model, code: &str) -> bool {
-        // Implement TOTP verification logic here
-        // You can use the 'totp-rs' crate or similar
         match &user.mfa_secret {
             Some(secret) => {
                 use totp_rs::{Algorithm, TOTP};
 
-                let totp = TOTP::new(
-                    Algorithm::SHA1,
-                    6,
-                    1,
-                    30,
-                    Secret::Raw(
-                        base32::decode(base32::Alphabet::Rfc4648 { padding: true }, secret)
-                            .unwrap(),
-                    )
-                    .to_bytes()
-                    .unwrap(),
-                )
-                .expect("Failed to create TOTP instance");
+                let decoded =
+                    match base32::decode(base32::Alphabet::Rfc4648 { padding: true }, secret) {
+                        Some(bytes) => bytes,
+                        None => {
+                            tracing::error!(
+                                "Failed to base32-decode MFA secret for user {}",
+                                user.id
+                            );
+                            return false;
+                        }
+                    };
+
+                let secret_bytes = match Secret::Raw(decoded).to_bytes() {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to convert MFA secret to bytes for user {}: {:?}",
+                            user.id,
+                            e
+                        );
+                        return false;
+                    }
+                };
+
+                let totp = match TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to create TOTP instance for user {}: {:?}",
+                            user.id,
+                            e
+                        );
+                        return false;
+                    }
+                };
 
                 totp.check_current(code).unwrap_or(false)
             }

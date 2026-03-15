@@ -65,15 +65,15 @@ async fn get_file(
             )
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            error!("File not found: {}", file_path);
+            debug!("File not found: {}", file_path);
             (
                 StatusCode::NOT_FOUND,
                 [(header::CONTENT_TYPE, "text/plain")],
-                format!("File not found: {}", file_path).into_bytes(),
+                b"Not found".to_vec(),
             )
         }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            error!("Access denied: {}", file_path);
+            error!("Access denied for file: {}", file_path);
             (
                 StatusCode::FORBIDDEN,
                 [(header::CONTENT_TYPE, "text/plain")],
@@ -85,7 +85,7 @@ async fn get_file(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain")],
-                format!("Error reading file: {}", e).into_bytes(),
+                b"Internal server error".to_vec(),
             )
         }
     }

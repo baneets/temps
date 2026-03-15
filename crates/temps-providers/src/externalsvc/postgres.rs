@@ -21,6 +21,12 @@ use crate::utils::ensure_network_exists;
 
 use super::{ExternalService, RuntimeEnvVar, ServiceConfig, ServiceType};
 
+/// POSIX-safe shell escaping: wraps value in single quotes, escaping any
+/// embedded single quotes. Safe for use in `sh -c` command strings.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Input configuration for creating a PostgreSQL service
 /// This is what users provide when creating the service
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -2102,7 +2108,7 @@ impl PostgresService {
         let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
         let pg_dump_shell_cmd = format!(
             "pg_dump --format=plain --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
-            db_container_name, port_str, postgres_config.username, postgres_config.database,
+            shell_escape(&db_container_name), shell_escape(&port_str), shell_escape(&postgres_config.username), shell_escape(&postgres_config.database),
             stderr_path, container_backup_path
         );
 

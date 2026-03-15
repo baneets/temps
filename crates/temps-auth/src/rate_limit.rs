@@ -21,6 +21,8 @@ pub struct AuthRateLimitConfig {
     pub max_requests: u32,
     /// Time window for counting requests.
     pub window: Duration,
+    /// Maximum number of tracked IPs before forced eviction of stale entries.
+    pub max_tracked_ips: usize,
 }
 
 impl Default for AuthRateLimitConfig {
@@ -29,6 +31,7 @@ impl Default for AuthRateLimitConfig {
             // 10 auth attempts per minute per IP
             max_requests: 10,
             window: Duration::from_secs(60),
+            max_tracked_ips: 10_000,
         }
     }
 }
@@ -63,6 +66,21 @@ impl AuthRateLimiter {
 
         let mut entries = self.entries.lock().await;
 
+        // Evict stale entries when approaching the cap to bound memory usage.
+        // This runs at 50% capacity to avoid doing it on every request near the limit.
+        if entries.len() >= self.config.max_tracked_ips / 2 {
+            entries.retain(|_, v| v.timestamps.last().is_some_and(|t| *t > window_start));
+        }
+
+        // If at cap after eviction, only allow already-tracked IPs
+        if entries.len() >= self.config.max_tracked_ips && !entries.contains_key(ip) {
+            warn!(
+                "Rate limiter at capacity ({} IPs tracked), rejecting new IP",
+                entries.len()
+            );
+            return Err(());
+        }
+
         let entry = entries.entry(ip.to_string()).or_insert(RateLimitEntry {
             timestamps: Vec::new(),
         });
@@ -75,11 +93,6 @@ impl AuthRateLimiter {
         }
 
         entry.timestamps.push(now);
-
-        // Periodic cleanup: if map is getting large, remove stale entries
-        if entries.len() > 10_000 {
-            entries.retain(|_, v| v.timestamps.last().is_some_and(|t| *t > window_start));
-        }
 
         Ok(())
     }
@@ -104,12 +117,14 @@ pub async fn auth_rate_limit_middleware(
         }
     };
 
-    // Extract client IP from headers (set by reverse proxy)
+    // Extract client IP from headers (set by reverse proxy).
+    // Use the rightmost IP in X-Forwarded-For — it's the one appended by the
+    // closest trusted proxy and is harder for clients to spoof.
     let ip = request
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
+        .and_then(|v| v.rsplit(',').next())
         .map(|s| s.trim().to_string())
         .or_else(|| {
             request
@@ -143,6 +158,7 @@ mod tests {
         let limiter = AuthRateLimiter::new(AuthRateLimitConfig {
             max_requests: 5,
             window: Duration::from_secs(60),
+            ..Default::default()
         });
 
         for _ in 0..5 {
@@ -155,6 +171,7 @@ mod tests {
         let limiter = AuthRateLimiter::new(AuthRateLimitConfig {
             max_requests: 3,
             window: Duration::from_secs(60),
+            ..Default::default()
         });
 
         // First 3 should succeed
@@ -171,6 +188,7 @@ mod tests {
         let limiter = AuthRateLimiter::new(AuthRateLimitConfig {
             max_requests: 2,
             window: Duration::from_secs(60),
+            ..Default::default()
         });
 
         // IP A fills its quota
@@ -189,6 +207,7 @@ mod tests {
         let limiter = AuthRateLimiter::new(AuthRateLimitConfig {
             max_requests: 2,
             window: Duration::from_millis(50), // Very short window for testing
+            ..Default::default()
         });
 
         assert!(limiter.check("1.2.3.4").await.is_ok());
@@ -207,6 +226,7 @@ mod tests {
         let limiter = AuthRateLimiter::new(AuthRateLimitConfig {
             max_requests: 10,
             window: Duration::from_secs(60),
+            ..Default::default()
         });
 
         let attacker_ip = "10.0.0.1";
@@ -230,6 +250,32 @@ mod tests {
         assert!(
             limiter.check("8.8.8.8").await.is_ok(),
             "Different IP should not be rate limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiter_memory_cap() {
+        let limiter = AuthRateLimiter::new(AuthRateLimitConfig {
+            max_requests: 100,
+            window: Duration::from_secs(60),
+            max_tracked_ips: 5,
+        });
+
+        // Fill up to the cap
+        for i in 0..5 {
+            assert!(limiter.check(&format!("10.0.0.{}", i)).await.is_ok());
+        }
+
+        // New IP should be rejected when at capacity
+        assert!(
+            limiter.check("10.0.0.99").await.is_err(),
+            "New IP must be rejected when at capacity"
+        );
+
+        // Existing tracked IP should still work
+        assert!(
+            limiter.check("10.0.0.0").await.is_ok(),
+            "Already-tracked IP should still be allowed"
         );
     }
 }
