@@ -564,23 +564,35 @@ impl LoadBalancer {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="3">
-    <title>Waking Up</title>
+    <title>Starting Up...</title>
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
         .container { text-align: center; max-width: 480px; padding: 40px; }
         .spinner { width: 48px; height: 48px; border: 4px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 24px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         h1 { font-size: 1.5rem; margin-bottom: 12px; color: #f1f5f9; }
-        p { color: #94a3b8; line-height: 1.6; margin: 0; }
+        p { color: #94a3b8; line-height: 1.6; margin: 0 0 8px; }
+        .progress { width: 200px; height: 4px; background: #1e293b; border-radius: 2px; margin: 20px auto 0; overflow: hidden; }
+        .progress-bar { height: 100%; background: #3b82f6; border-radius: 2px; animation: progress 3s ease-in-out infinite; }
+        @keyframes progress { 0% { width: 0%; } 50% { width: 80%; } 100% { width: 100%; } }
+        .status { font-size: 0.8rem; color: #64748b; margin-top: 16px; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="spinner"></div>
-        <h1>Waking Up</h1>
-        <p>This environment is starting up. The page will refresh automatically.</p>
+        <h1>Starting Up</h1>
+        <p>This environment was sleeping to save resources and is now waking up.</p>
+        <div class="progress"><div class="progress-bar"></div></div>
+        <p class="status" id="status">Initializing containers...</p>
     </div>
+    <script>
+        const messages = ["Initializing containers...", "Starting services...", "Almost ready..."];
+        let i = 0;
+        const el = document.getElementById("status");
+        setInterval(() => { if (i < messages.length - 1) el.textContent = messages[++i]; }, 2000);
+        setTimeout(() => location.reload(), 3000);
+    </script>
 </body>
 </html>"#.to_string()
     }
@@ -1968,6 +1980,10 @@ impl ProxyHttp for LoadBalancer {
             ctx.ip_address = Some(client_ip.to_string());
         }
 
+        // SECURITY: Strip client-supplied X-Temps-Demo-Mode header to prevent
+        // bypass of authentication. Only the proxy should set this header.
+        let _ = session.req_header_mut().remove_header("X-Temps-Demo-Mode");
+
         // Detect demo subdomain and add demo mode header
         // This allows the auth middleware to auto-authenticate as demo user
         // Demo mode must be explicitly enabled in settings
@@ -2045,20 +2061,35 @@ impl ProxyHttp for LoadBalancer {
                     }
                 });
 
-                // Serve a "waking up" HTML page with auto-refresh
-                let html = Self::generate_waking_html();
-                let html_bytes = Bytes::from(html);
+                // Content negotiation: JSON for API clients, HTML for browsers
+                let accepts_json = session
+                    .req_header()
+                    .headers
+                    .get("accept")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.contains("application/json"))
+                    .unwrap_or(false);
 
                 let mut response = ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
-                response.insert_header("Content-Type", "text/html; charset=utf-8")?;
                 response.insert_header("Retry-After", "3")?;
                 response.insert_header("Cache-Control", "no-store")?;
                 response.insert_header("X-Request-ID", &ctx.request_id)?;
 
+                let body_bytes = if accepts_json {
+                    response.insert_header("Content-Type", "application/json")?;
+                    Bytes::from(format!(
+                        r#"{{"status":"waking","environment_id":{},"message":"Environment is starting up. Retry after 3 seconds."}}"#,
+                        sleeping_info.environment_id
+                    ))
+                } else {
+                    response.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                    Bytes::from(Self::generate_waking_html())
+                };
+
                 session
                     .write_response_header(Box::new(response), false)
                     .await?;
-                session.write_response_body(Some(html_bytes), true).await?;
+                session.write_response_body(Some(body_bytes), true).await?;
 
                 ctx.routing_status = "sleeping".to_string();
                 return Ok(true);
@@ -3139,6 +3170,9 @@ impl ProxyHttp for LoadBalancer {
         if let Err(e) = header.insert_header(header::CACHE_CONTROL, "private, no-store") {
             error!("Failed to insert CACHE_CONTROL header: {:?}", e);
         }
+        if let Err(e) = header.insert_header("content-type", "text/html; charset=utf-8") {
+            error!("Failed to insert content-type header: {:?}", e);
+        }
 
         if let Err(e) = session.write_response_header(Box::new(header), false).await {
             error!("Failed to write response header: {:?}", e);
@@ -3148,8 +3182,20 @@ impl ProxyHttp for LoadBalancer {
             };
         }
 
+        const SERVICE_UNAVAILABLE_BODY: &str = concat!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Service Unavailable</title>",
+            "<style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:flex;",
+            "justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0a0a0a;",
+            "color:#e5e5e5}div{text-align:center;max-width:480px;padding:2rem}h1{font-size:1.5rem;",
+            "margin:0 0 .5rem}p{color:#a3a3a3;margin:.5rem 0;font-size:.9rem}</style></head>",
+            "<body><div><h1>Service Unavailable</h1>",
+            "<p>This application is temporarily unable to handle requests.</p>",
+            "<p style=\"color:#737373;font-size:.8rem\">If you are the site owner, check that your deployment is running.</p>",
+            "</div></body></html>"
+        );
+
         if let Err(e) = session
-            .write_response_body(Some(Bytes::from("Service Unavailable")), true)
+            .write_response_body(Some(Bytes::from(SERVICE_UNAVAILABLE_BODY)), true)
             .await
         {
             error!("Failed to write response body: {:?}", e);
@@ -3167,7 +3213,7 @@ impl ProxyHttp for LoadBalancer {
                 .and_then(|v| v.parse::<i64>().ok());
 
             // For failed requests, response size is the error message size
-            let response_size = Some("Service Unavailable".len() as i64);
+            let response_size = Some(SERVICE_UNAVAILABLE_BODY.len() as i64);
 
             let proxy_log_request = CreateProxyLogRequest {
                 method: ctx.method.clone(),

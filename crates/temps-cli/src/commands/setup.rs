@@ -347,7 +347,11 @@ async fn create_admin_user(
             .one(conn)
             .await?
             .ok_or_else(|| {
-                anyhow::anyhow!("Admin role not found. Database may not be properly initialized.")
+                anyhow::anyhow!(
+                "Admin role not found. Database may not be properly initialized.\n\
+                 Try running 'temps setup' again, or check that database migrations completed successfully.\n\
+                 You can verify the database connection with: TEMPS_DATABASE_URL=<your-url> temps serve"
+            )
             })?;
 
         // Check if user already has admin role
@@ -400,7 +404,11 @@ async fn create_admin_user(
         .one(conn)
         .await?
         .ok_or_else(|| {
-            anyhow::anyhow!("Admin role not found. Database may not be properly initialized.")
+            anyhow::anyhow!(
+                "Admin role not found. Database may not be properly initialized.\n\
+                 Try running 'temps setup' again, or check that database migrations completed successfully.\n\
+                 You can verify the database connection with: TEMPS_DATABASE_URL=<your-url> temps serve"
+            )
         })?;
 
     // Assign admin role
@@ -569,7 +577,9 @@ async fn verify_cloudflare_token(token: &str) -> anyhow::Result<bool> {
     match provider.test_api_access().await {
         Ok(true) => Ok(true),
         Ok(false) => Err(anyhow::anyhow!(
-            "Cloudflare API token is invalid or does not have required permissions"
+            "Cloudflare API token is invalid or does not have required permissions.\n\
+             Ensure the token has 'Zone:DNS:Edit' permission for your domain.\n\
+             Create one at: https://dash.cloudflare.com/profile/api-tokens"
         )),
         Err(e) => Err(anyhow::anyhow!("Failed to verify Cloudflare token: {}", e)),
     }
@@ -607,7 +617,9 @@ async fn verify_github_token(token: &str) -> anyhow::Result<GitHubUserInfo> {
         Ok(GitHubUserInfo { username })
     } else {
         Err(anyhow::anyhow!(
-            "GitHub token is invalid or does not have required permissions (status: {})",
+            "GitHub token is invalid or does not have required permissions (HTTP {}).\n\
+             Required scopes: 'repo' (full access) and 'read:user'.\n\
+             Create a token at: https://github.com/settings/tokens/new",
             response.status()
         ))
     }
@@ -788,7 +800,7 @@ async fn download_geolite2_database(data_dir: &Path) -> anyhow::Result<()> {
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("   {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}) {msg}")
-                .unwrap()
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
                 .progress_chars("█▓▒░  "),
         );
         pb.set_message("downloading...");
@@ -808,7 +820,7 @@ async fn download_geolite2_database(data_dir: &Path) -> anyhow::Result<()> {
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("   {spinner:.green} [{elapsed_precise}] {bytes} ({bytes_per_sec}) {msg}")
-                .unwrap(),
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
         pb.set_message("downloading...");
         // Enable steady tick for spinner animation

@@ -129,7 +129,7 @@ pub async fn logout(
             error!("Logout error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": e.to_string()})),
+                Json(json!({"error": "Logout failed"})),
             )
                 .into_response()
         }
@@ -169,8 +169,10 @@ pub async fn verify_mfa_challenge(
         })
         .ok_or(
             problem_new(StatusCode::UNAUTHORIZED)
-                .with_title("Failed to decrypt MFA session cookie")
-                .with_detail("MFA session cookie not found"),
+                .with_title("MFA Session Required")
+                .with_detail(
+                    "No MFA session found. Please log in first to start the MFA verification flow.",
+                ),
         )?;
 
     // Decrypt the MFA session cookie
@@ -180,8 +182,8 @@ pub async fn verify_mfa_challenge(
         .map_err(|e| {
             tracing::error!("Failed to decrypt MFA session cookie: {}", e);
             problem_new(StatusCode::UNAUTHORIZED)
-                .with_title("Failed to decrypt MFA session cookie")
-                .with_detail(e.to_string())
+                .with_title("MFA Session Expired")
+                .with_detail("Your MFA session has expired or is invalid. Please log in again.")
         })?;
 
     tracing::debug!("MFA session decrypted successfully");
@@ -211,14 +213,20 @@ pub async fn verify_mfa_challenge(
                 .auth_service
                 .create_session(user.id)
                 .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .map_err(|e| {
+                    error!("Failed to create session after MFA verification: {}", e);
+                    problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                        .with_title("Session Creation Failed")
+                        .with_detail("Could not create session. Please try logging in again.")
+                })?;
 
             let session_token_encrypted = match auth_state.cookie_crypto.encrypt(&session_token) {
                 Ok(enc) => enc,
                 Err(e) => {
+                    error!("Failed to encrypt session token: {}", e);
                     return Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                        .with_title("Encryption Error")
-                        .with_detail(e.to_string()))
+                        .with_title("Session Error")
+                        .with_detail("Could not secure your session. Please try again."));
                 }
             };
 
@@ -241,8 +249,8 @@ pub async fn verify_mfa_challenge(
         Err(e) => {
             error!("MFA verification failed: {}", e);
             Err(problem_new(StatusCode::UNAUTHORIZED)
-                .with_title("MFA verification failed")
-                .with_detail(e.to_string()))
+                .with_title("MFA Verification Failed")
+                .with_detail("The verification code is incorrect or has expired. Please try again with a new code from your authenticator app."))
         }
     }
 }
@@ -533,9 +541,10 @@ pub async fn login(
                         // Encrypt the MFA token
                         let encrypted_token =
                             state.cookie_crypto.encrypt(&mfa_token).map_err(|e| {
+                                error!("Failed to encrypt MFA token: {}", e);
                                 problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                                    .with_title("Encryption Error")
-                                    .with_detail(e.to_string())
+                                    .with_title("Authentication Error")
+                                    .with_detail("Could not process MFA session. Please try again.")
                             })?;
 
                         // Use the pre-calculated secure flag from metadata
@@ -561,9 +570,12 @@ pub async fn login(
                             }),
                         ))
                     }
-                    Err(e) => Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                        .with_title("Failed to create MFA session")
-                        .with_detail(e.to_string())),
+                    Err(e) => {
+                        error!("Failed to create MFA session: {}", e);
+                        Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                            .with_title("Authentication Error")
+                            .with_detail("Could not initiate MFA verification. Please try again."))
+                    }
                 }
             } else {
                 // Create regular session
@@ -572,9 +584,10 @@ pub async fn login(
                         // Encrypt the session token
                         let encrypted_token =
                             state.cookie_crypto.encrypt(&session_token).map_err(|e| {
+                                error!("Failed to encrypt session token: {}", e);
                                 problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                                    .with_title("Encryption Error")
-                                    .with_detail(e.to_string())
+                                    .with_title("Authentication Error")
+                                    .with_detail("Could not secure your session. Please try again.")
                             })?;
 
                         // Use the pre-calculated secure flag from metadata
@@ -624,9 +637,10 @@ pub async fn login(
                         {
                             error!("Failed to create audit log: {}", e);
                         }
+                        error!("Failed to create session: {}", e);
                         Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                            .with_title("Failed to create session")
-                            .with_detail(e.to_string()))
+                            .with_title("Login Failed")
+                            .with_detail("Could not create your session. Please try again."))
                     }
                 }
             }
@@ -743,14 +757,22 @@ pub async fn verify_magic_link(
                         }),
                     ))
                 }
-                Err(e) => Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("Failed to create session")
-                    .with_detail(e.to_string())),
+                Err(e) => {
+                    error!("Failed to create session after magic link: {}", e);
+                    Err(problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                        .with_title("Session Error")
+                        .with_detail("Could not create your session. Please try again."))
+                }
             }
         }
-        Err(e) => Err(problem_new(StatusCode::BAD_REQUEST)
-            .with_title("Invalid Token")
-            .with_detail(e.to_string())),
+        Err(e) => {
+            warn!("Magic link verification failed: {}", e);
+            Err(problem_new(StatusCode::BAD_REQUEST)
+                .with_title("Invalid or Expired Link")
+                .with_detail(
+                    "This magic link is invalid or has expired. Please request a new one.",
+                ))
+        }
     }
 }
 
@@ -968,26 +990,26 @@ impl From<UserServiceError> for Problem {
             UserServiceError::Encryption(msg) => {
                 error!("Encryption error: {}", msg);
                 problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("Encryption error")
-                    .with_detail(msg)
+                    .with_title("Internal Error")
+                    .with_detail("An unexpected error occurred. Please try again.")
             }
             UserServiceError::Io(e) => {
                 error!("IO error: {}", e);
                 problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("IO error")
-                    .with_detail(e.to_string())
+                    .with_title("Internal Error")
+                    .with_detail("An unexpected error occurred. Please try again.")
             }
             UserServiceError::Serialization(e) => {
                 error!("Serialization error: {}", e);
                 problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("Serialization error")
-                    .with_detail(e.to_string())
+                    .with_title("Internal Error")
+                    .with_detail("An unexpected error occurred. Please try again.")
             }
             UserServiceError::Internal(msg) => {
                 error!("Internal error: {}", msg);
                 problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                    .with_title("Internal error")
-                    .with_detail(msg)
+                    .with_title("Internal Error")
+                    .with_detail("An unexpected error occurred. Please try again.")
             }
         }
     }
