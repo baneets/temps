@@ -63,6 +63,7 @@ function getChangeDisplay(change: number | undefined, inverse = false) {
   }
 }
 
+
 export function ProjectOverview({
   project,
   lastDeployment,

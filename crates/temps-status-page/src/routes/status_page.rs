@@ -16,9 +16,9 @@ use utoipa::OpenApi;
 
 use crate::services::{
     CreateIncidentRequest, CreateMonitorRequest, CurrentStatusResponse, IncidentBucketedResponse,
-    IncidentResponse, IncidentUpdateResponse, MonitorResponse, StatusBucketedResponse,
-    StatusPageError, StatusPageOverview, StatusPageService, UpdateIncidentStatusRequest,
-    UptimeHistoryResponse,
+    IncidentResponse, IncidentUpdateResponse, MonitorResponse, ProjectMonitorHealth,
+    StatusBucketedResponse, StatusPageError, StatusPageOverview, StatusPageService,
+    UpdateIncidentStatusRequest, UptimeHistoryResponse,
 };
 
 /// Application state trait for status page routes
@@ -44,6 +44,7 @@ pub trait StatusPageAppState: Send + Sync + 'static {
         update_incident_status,
         get_incident_updates,
         get_bucketed_incidents,
+        get_projects_monitor_health,
     ),
     components(
         schemas(
@@ -58,6 +59,8 @@ pub trait StatusPageAppState: Send + Sync + 'static {
             UpdateIncidentStatusRequest,
             IncidentUpdateResponse,
             IncidentBucketedResponse,
+            ProjectMonitorHealth,
+            ProjectsMonitorHealthResponse,
         )
     ),
     tags(
@@ -656,6 +659,76 @@ where
         .map_err(map_error)
 }
 
+/// Query parameters for batch project health
+#[derive(Deserialize, utoipa::IntoParams)]
+pub struct ProjectsHealthQuery {
+    /// Comma-separated list of project IDs
+    pub project_ids: String,
+}
+
+/// Batch response for projects health
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct ProjectsMonitorHealthResponse {
+    pub projects: std::collections::HashMap<String, ProjectMonitorHealth>,
+}
+
+/// Get monitor-based health summaries for multiple projects in a single query
+#[utoipa::path(
+    get,
+    path = "/monitors-health/projects",
+    params(ProjectsHealthQuery),
+    responses(
+        (status = 200, description = "Health summaries per project", body = ProjectsMonitorHealthResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "Status Page",
+    security(("bearer_auth" = []))
+)]
+pub async fn get_projects_monitor_health<T>(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<T>>,
+    Query(query): Query<ProjectsHealthQuery>,
+) -> Result<impl IntoResponse, Problem>
+where
+    T: StatusPageAppState,
+{
+    permission_guard!(auth, StatusPageRead);
+
+    let project_ids: Vec<i32> = query
+        .project_ids
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    if project_ids.is_empty() {
+        return Err(bad_request()
+            .detail("project_ids must contain at least one valid ID")
+            .build());
+    }
+
+    if project_ids.len() > 100 {
+        return Err(bad_request()
+            .detail("Maximum 100 project IDs allowed")
+            .build());
+    }
+
+    let summaries = app_state
+        .status_page_service()
+        .monitor_service()
+        .get_projects_monitor_health(&project_ids)
+        .await
+        .map_err(map_error)?;
+
+    let projects: std::collections::HashMap<String, ProjectMonitorHealth> = summaries
+        .into_iter()
+        .map(|s| (s.project_id.to_string(), s))
+        .collect();
+
+    Ok(Json(ProjectsMonitorHealthResponse { projects }))
+}
+
 /// Create router for status page endpoints
 pub fn create_router<T>() -> Router<Arc<T>>
 where
@@ -665,6 +738,10 @@ where
         .route("/projects/{project_id}/status", get(get_status_overview))
         .route("/projects/{project_id}/monitors", post(create_monitor))
         .route("/projects/{project_id}/monitors", get(list_monitors))
+        .route(
+            "/monitors-health/projects",
+            get(get_projects_monitor_health),
+        )
         .route("/monitors/{monitor_id}", get(get_monitor))
         .route("/monitors/{monitor_id}", delete(delete_monitor))
         .route(

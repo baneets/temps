@@ -345,8 +345,8 @@ impl EmailProvider {
                         .join(" ");
                     format!(
                         r#"<tr>
-                            <td style="padding: 8px 12px; color: #6b7280; font-size: 13px; white-space: nowrap; vertical-align: top;">{}</td>
-                            <td style="padding: 8px 12px; color: #1f2937; font-size: 13px; word-break: break-all;">{}</td>
+                            <td style="padding: 8px 12px; color: #6b7280; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 13px; white-space: nowrap; vertical-align: top;">{}</td>
+                            <td style="padding: 8px 12px; color: #1f2937; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 13px; word-break: break-all;">{}</td>
                         </tr>"#,
                         label, v
                     )
@@ -356,7 +356,7 @@ impl EmailProvider {
             format!(
                 r#"<tr><td colspan="2" style="padding: 0;">
                     <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 24px; border-top: 1px solid #e5e7eb;">
-                        <tr><td style="padding: 16px 0 8px; color: #374151; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Details</td></tr>
+                        <tr><td style="padding: 16px 0 8px; color: #374151; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Details</td></tr>
                         <tr><td style="padding: 0;">
                             <table width="100%" cellpadding="0" cellspacing="0" style="background: #f9fafb; border-radius: 6px;">
                                 {}
@@ -384,9 +384,9 @@ impl EmailProvider {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title}</title>
 </head>
-<body style="margin: 0; padding: 0; background-color: #f3f4f6; -webkit-font-smoothing: antialiased;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 32px 16px;">
-        <tr><td align="center">
+<body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 32px 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+        <tr><td align="center" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
             <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; width: 100%;">
                 <!-- Header -->
                 <tr><td style="padding: 24px 32px; background: #0f172a; border-radius: 8px 8px 0 0;">
@@ -399,7 +399,7 @@ impl EmailProvider {
                 </td></tr>
 
                 <!-- Priority Badge -->
-                <tr><td style="padding: 24px 32px 0; background: #ffffff;">
+                <tr><td style="padding: 24px 32px 0; background: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
                     <table cellpadding="0" cellspacing="0">
                         <tr><td style="padding: 4px 12px; background: {bg_color}; border: 1px solid {accent_color}22; border-radius: 100px;">
                             <span style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; font-weight: 600; color: {accent_color};">{icon} {label}</span>
@@ -408,12 +408,12 @@ impl EmailProvider {
                 </td></tr>
 
                 <!-- Title -->
-                <tr><td style="padding: 12px 32px 0; background: #ffffff;">
+                <tr><td style="padding: 12px 32px 0; background: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
                     <h1 style="margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 20px; font-weight: 600; color: #111827; line-height: 1.4;">{title}</h1>
                 </td></tr>
 
                 <!-- Message Body -->
-                <tr><td style="padding: 16px 32px 24px; background: #ffffff;">
+                <tr><td style="padding: 16px 32px 24px; background: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
                     <table width="100%" cellpadding="0" cellspacing="0">
                         <tr><td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color: #374151; line-height: 1.7;">
                             {message}
@@ -423,7 +423,7 @@ impl EmailProvider {
                 </td></tr>
 
                 <!-- Footer -->
-                <tr><td style="padding: 16px 32px; background: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
+                <tr><td style="padding: 16px 32px; background: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
                     <table width="100%" cellpadding="0" cellspacing="0">
                         <tr>
                             <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #9ca3af;">Sent by Temps &middot; Self-hosted PaaS</td>

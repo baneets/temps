@@ -231,8 +231,9 @@ impl SmartFilter {
     }
 
     /// Generate SQL condition for JSON path queries (CustomData only)
-    /// Returns SQL fragment like: event_data->'user'->>'plan' = 'premium'
-    pub fn to_json_condition(&self) -> Option<String> {
+    /// Returns a SQL fragment with a `$N` placeholder and the value to bind.
+    /// The caller must push the returned value into the parameterized values vec.
+    pub fn to_json_condition(&self, param_index: &mut usize) -> Option<(String, sea_orm::Value)> {
         match self {
             SmartFilter::CustomData { path, value } => {
                 // Split path by '.' to build JSON path query
@@ -260,9 +261,10 @@ impl SmartFilter {
                     }
                 }
 
-                // Escape single quotes in value
-                let escaped_value = value.replace('\'', "''");
-                Some(format!("{} = '{}'", json_path, escaped_value))
+                // Use parameterized binding instead of string interpolation
+                let idx = *param_index;
+                *param_index += 1;
+                Some((format!("{} = ${}", json_path, idx), value.clone().into()))
             }
             _ => None,
         }
@@ -808,8 +810,11 @@ impl FunnelService {
                                         path: path.to_string(),
                                         value: filter_value.to_string(),
                                     };
-                                    if let Some(json_condition) = smart_filter.to_json_condition() {
+                                    if let Some((json_condition, json_value)) =
+                                        smart_filter.to_json_condition(param_index)
+                                    {
                                         conditions.push(format!("AND {}", json_condition));
+                                        values.push(json_value);
                                     }
                                 }
                             }

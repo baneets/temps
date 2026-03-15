@@ -471,7 +471,11 @@ impl OtelStorage for TimescaleDbStorage {
     }
 
     async fn query_metrics(&self, query: MetricQuery) -> StorageResult<Vec<MetricBucket>> {
-        let interval = query.bucket_interval.as_deref().unwrap_or("1 hour");
+        let interval = query
+            .bucket_interval
+            .as_deref()
+            .unwrap_or("1 hour")
+            .to_string();
         let limit = query.limit.unwrap_or(1000).min(10000);
 
         let mut where_clauses = vec!["project_id = $1".to_string()];
@@ -506,12 +510,17 @@ impl OtelStorage for TimescaleDbStorage {
 
         let where_sql = where_clauses.join(" AND ");
 
+        // Pass interval as parameterized value to prevent SQL injection
+        let interval_param_idx = param_idx;
+        values.push(interval.into());
+        param_idx += 1;
+
         let sql = format!(
             r#"
             SELECT bucket::timestamptz as bucket, avg_value, min_value, max_value, count
             FROM (
                 SELECT
-                    time_bucket('{interval}'::interval, timestamp) as bucket,
+                    time_bucket(${interval_param_idx}::interval, timestamp) as bucket,
                     AVG(value) as avg_value,
                     MIN(value) as min_value,
                     MAX(value) as max_value,

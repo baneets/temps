@@ -81,9 +81,58 @@ pub fn slugify_branch_name(branch: &str) -> String {
         .collect()
 }
 
+/// Validate that a string is a safe PostgreSQL interval literal (e.g. "1 hour", "5 minutes").
+/// Prevents SQL injection when interval values must be interpolated into raw SQL.
+/// Returns true only for strings matching the pattern `<positive integer> <valid unit>`.
+pub fn is_valid_sql_interval(interval: &str) -> bool {
+    const VALID_UNITS: &[&str] = &[
+        "microsecond",
+        "microseconds",
+        "millisecond",
+        "milliseconds",
+        "second",
+        "seconds",
+        "minute",
+        "minutes",
+        "hour",
+        "hours",
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "month",
+        "months",
+        "year",
+        "years",
+    ];
+
+    let parts: Vec<&str> = interval.split_whitespace().collect();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    parts[0].parse::<u32>().is_ok() && VALID_UNITS.contains(&parts[1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_valid_sql_interval() {
+        assert!(is_valid_sql_interval("1 hour"));
+        assert!(is_valid_sql_interval("5 minutes"));
+        assert!(is_valid_sql_interval("30 seconds"));
+        assert!(is_valid_sql_interval("7 days"));
+        assert!(is_valid_sql_interval("1 month"));
+        assert!(!is_valid_sql_interval("1 hour; DROP TABLE events;--"));
+        assert!(!is_valid_sql_interval("abc hours"));
+        assert!(!is_valid_sql_interval("1"));
+        assert!(!is_valid_sql_interval("hour"));
+        assert!(!is_valid_sql_interval(""));
+        assert!(!is_valid_sql_interval("1 hour 2"));
+        assert!(!is_valid_sql_interval("-1 hour"));
+    }
 
     #[test]
     fn test_slugify_branch_name() {

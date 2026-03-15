@@ -10,7 +10,8 @@ use temps_core::{DateTime, UtcDateTime};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::service::proxy_log_service::{
-    ProxyLogResponse, ProxyLogService, StatsFilters, TimeBucketStats, TodayStatsResponse,
+    ProjectHealthSummary, ProxyLogResponse, ProxyLogService, StatsFilters, TimeBucketStats,
+    TodayStatsResponse,
 };
 
 /// Query parameters for listing proxy logs
@@ -428,6 +429,72 @@ async fn get_time_bucket_stats(
     }))
 }
 
+/// Query parameters for batch project health summary
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct ProjectsHealthQuery {
+    /// Comma-separated list of project IDs
+    pub project_ids: String,
+}
+
+/// Batch health summary response
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProjectsHealthResponse {
+    /// Health summaries keyed by project ID
+    pub projects: std::collections::HashMap<String, ProjectHealthSummary>,
+}
+
+/// Get health summaries for multiple projects (last 1 hour)
+#[utoipa::path(
+    get,
+    path = "/proxy-logs/stats/projects-health",
+    params(ProjectsHealthQuery),
+    responses(
+        (status = 200, description = "Health summaries per project", body = ProjectsHealthResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Proxy Logs"
+)]
+async fn get_projects_health(
+    State(service): State<Arc<ProxyLogService>>,
+    Query(query): Query<ProjectsHealthQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let project_ids: Vec<i32> = query
+        .project_ids
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+
+    if project_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "project_ids must contain at least one valid ID".to_string(),
+        ));
+    }
+
+    if project_ids.len() > 100 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Maximum 100 project IDs allowed".to_string(),
+        ));
+    }
+
+    let end_time = chrono::Utc::now();
+    let start_time = end_time - chrono::Duration::hours(1);
+
+    let summaries = service
+        .get_projects_health_summary(&project_ids, start_time, end_time)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let projects: std::collections::HashMap<String, ProjectHealthSummary> = summaries
+        .into_iter()
+        .map(|s| (s.project_id.to_string(), s))
+        .collect();
+
+    Ok(Json(ProjectsHealthResponse { projects }))
+}
+
 /// Create router for proxy log handlers
 pub fn create_routes() -> axum::Router<Arc<ProxyLogService>> {
     use axum::routing::get;
@@ -441,6 +508,10 @@ pub fn create_routes() -> axum::Router<Arc<ProxyLogService>> {
         )
         .route("/proxy-logs/stats/today", get(get_today_stats))
         .route("/proxy-logs/stats/time-buckets", get(get_time_bucket_stats))
+        .route(
+            "/proxy-logs/stats/projects-health",
+            get(get_projects_health),
+        )
 }
 
 /// Get OpenAPI documentation for proxy logs handlers
@@ -455,6 +526,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
             get_proxy_log_by_request_id,
             get_today_stats,
             get_time_bucket_stats,
+            get_projects_health,
         ),
         components(schemas(
             ProxyLogResponse,
@@ -463,6 +535,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
             TimeBucketStatsResponse,
             TimeBucketStats,
             StatsFilters,
+            ProjectHealthSummary,
+            ProjectsHealthResponse,
         ))
     )]
     struct ApiDoc;

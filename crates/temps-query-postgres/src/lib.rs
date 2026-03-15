@@ -14,6 +14,12 @@ use tokio::sync::RwLock;
 use tokio_postgres::{Client, NoTls, Row};
 use tracing::{debug, error};
 
+/// Escape a SQL identifier by doubling any internal double-quote characters.
+/// Prevents identifier injection when used inside `"..."` quoting.
+fn escape_ident(name: &str) -> String {
+    name.replace('"', "\"\"")
+}
+
 /// PostgreSQL data source implementation
 pub struct PostgresSource {
     client: Arc<RwLock<Client>>,
@@ -754,7 +760,8 @@ impl DataSource for PostgresSource {
         // Get row count
         let count_query = format!(
             "SELECT COUNT(*) FROM \"{}\".\"{}\"",
-            schema_name, entity_name
+            escape_ident(schema_name),
+            escape_ident(entity_name)
         );
 
         let row_count = client
@@ -956,7 +963,11 @@ impl Queryable for PostgresSource {
         let start = std::time::Instant::now();
 
         // Build SQL query
-        let mut sql = format!("SELECT * FROM \"{}\".\"{}\"", schema_name, entity_name);
+        let mut sql = format!(
+            "SELECT * FROM \"{}\".\"{}\"",
+            escape_ident(schema_name),
+            escape_ident(entity_name)
+        );
 
         // Add WHERE clause if filters provided
         if let Some(filter_json) = filters {
@@ -985,7 +996,21 @@ impl Queryable for PostgresSource {
 
         debug!("Executing query: {}", sql);
 
-        let rows = client.query(&sql, &[]).await.map_err(|e| {
+        // Use a write lock to create a read-only transaction, preventing writes
+        // even if the denylist-based SQL validation is bypassed
+        drop(client);
+        let mut client = self.client.write().await;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| DataError::QueryFailed(format!("Failed to begin transaction: {}", e)))?;
+        txn.execute("SET TRANSACTION READ ONLY", &[])
+            .await
+            .map_err(|e| {
+                DataError::QueryFailed(format!("Failed to set read-only transaction: {}", e))
+            })?;
+
+        let rows = txn.query(&sql, &[]).await.map_err(|e| {
             error!("PostgreSQL query failed: {}", e);
             error!("Failed SQL: {}", sql);
 
@@ -1061,7 +1086,8 @@ impl Queryable for PostgresSource {
 
         let mut sql = format!(
             "SELECT COUNT(*) FROM \"{}\".\"{}\"",
-            schema_name, entity_name
+            escape_ident(schema_name),
+            escape_ident(entity_name)
         );
 
         // Add WHERE clause if filters provided
@@ -1074,7 +1100,21 @@ impl Queryable for PostgresSource {
             }
         }
 
-        let row = client
+        // Use a write lock to create a read-only transaction, preventing writes
+        // even if the denylist-based SQL validation is bypassed
+        drop(client);
+        let mut client = self.client.write().await;
+        let txn = client
+            .transaction()
+            .await
+            .map_err(|e| DataError::QueryFailed(format!("Failed to begin transaction: {}", e)))?;
+        txn.execute("SET TRANSACTION READ ONLY", &[])
+            .await
+            .map_err(|e| {
+                DataError::QueryFailed(format!("Failed to set read-only transaction: {}", e))
+            })?;
+
+        let row = txn
             .query_one(&sql, &[])
             .await
             .map_err(|e| DataError::QueryFailed(format!("Count query failed: {}", e)))?;

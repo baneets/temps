@@ -760,12 +760,16 @@ impl AnalyticsEventsService {
                 "COALESCE(e.event_name, e.event_type) = ${}",
                 param_idx
             ));
+            param_idx += 1;
         }
+
+        // Pass bucket as a parameterized value ($N::interval) to prevent SQL injection
+        let bucket_param_idx = param_idx;
 
         let sql_query = format!(
             r#"
             SELECT
-                time_bucket('{}', e.timestamp) as bucket,
+                time_bucket(${}::interval, e.timestamp) as bucket,
                 {} as value,
                 COUNT({} e.{}) as count
             FROM {}
@@ -773,7 +777,7 @@ impl AnalyticsEventsService {
             GROUP BY bucket, {}
             ORDER BY bucket ASC, count DESC
             "#,
-            bucket,
+            bucket_param_idx,
             select_column,
             agg_distinct,
             agg_field,
@@ -800,6 +804,8 @@ impl AnalyticsEventsService {
         if let Some(evt_name) = event_name {
             params.push(evt_name.into());
         }
+        let bucket_size_response = bucket.clone();
+        params.push(bucket.into());
 
         let results = TimelineResult::find_by_statement(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
@@ -811,7 +817,7 @@ impl AnalyticsEventsService {
 
         Ok(PropertyTimelineResponse {
             property: group_by_str.to_string(),
-            bucket_size: bucket.clone(),
+            bucket_size: bucket_size_response,
             items: results
                 .into_iter()
                 .map(|r| PropertyTimelineItem {
@@ -1276,17 +1282,23 @@ WHERE project_id = $1
         }
 
         let where_clause = where_conditions.join(" AND ");
+
+        // Pass bucket_size as a parameterized value to prevent SQL injection
+        let bucket_param_index = param_index;
+        values.push(bucket_size.clone().into());
+        param_index += 1;
+
         let sql_query = format!(
             r#"
             SELECT
-                time_bucket_gapfill('{}', timestamp, ${}::timestamptz, ${}::timestamptz) as bucket,
+                time_bucket_gapfill(${}::interval, timestamp, ${}::timestamptz, ${}::timestamptz) as bucket,
                 COALESCE({}, 0) as count
             FROM events
             WHERE {}{}
             GROUP BY bucket
             ORDER BY bucket ASC
             "#,
-            bucket_size,
+            bucket_param_index,
             param_index,
             param_index + 1,
             count_expr,
@@ -1294,7 +1306,7 @@ WHERE project_id = $1
             null_check
         );
 
-        // Add start_date and end_date again for time_bucket_gapfill parameters
+        // Add start_date and end_date for time_bucket_gapfill parameters
         values.push(start_date.into());
         values.push(end_date.into());
 

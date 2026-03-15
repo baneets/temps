@@ -299,6 +299,108 @@ impl MonitorService {
         Ok(responses)
     }
 
+    /// Get production health for multiple projects in one query.
+    /// Checks only monitors linked to the "production" environment.
+    /// Returns a simple status per project: operational, degraded, down, or no_monitors.
+    pub async fn get_projects_monitor_health(
+        &self,
+        project_ids: &[i32],
+    ) -> Result<Vec<super::types::ProjectMonitorHealth>, StatusPageError> {
+        use sea_orm::FromQueryResult;
+
+        if project_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let placeholders: Vec<String> = project_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 1))
+            .collect();
+        let placeholders_str = placeholders.join(", ");
+
+        #[derive(FromQueryResult)]
+        struct ProjectHealth {
+            project_id: i32,
+            monitor_count: i64,
+            operational_count: i64,
+        }
+
+        // Single query: for each project, get latest check status of production monitors.
+        // Inlined subquery (no CTE) so Postgres can push predicates down.
+        // LATERAL + LIMIT 1 uses idx_status_checks_monitor_time for index-only lookups.
+        let sql = format!(
+            r#"
+            SELECT
+                sm.project_id,
+                COUNT(sm.id) as monitor_count,
+                COUNT(lc.status) FILTER (WHERE lc.status = 'operational') as operational_count
+            FROM status_monitors sm
+            JOIN environments e ON e.id = sm.environment_id
+                AND e.name = 'production'
+                AND e.deleted_at IS NULL
+            LEFT JOIN LATERAL (
+                SELECT sc.status
+                FROM status_checks sc
+                WHERE sc.monitor_id = sm.id
+                ORDER BY sc.checked_at DESC
+                LIMIT 1
+            ) lc ON true
+            WHERE sm.project_id IN ({placeholders})
+              AND sm.is_active = true
+            GROUP BY sm.project_id
+            "#,
+            placeholders = placeholders_str
+        );
+
+        let db_backend = sea_orm::DatabaseBackend::Postgres;
+        let values: Vec<sea_orm::Value> = project_ids.iter().map(|&id| id.into()).collect();
+        let stmt = sea_orm::Statement::from_sql_and_values(db_backend, &sql, values);
+
+        let results = status_monitors::Entity::find()
+            .from_raw_sql(stmt)
+            .into_model::<ProjectHealth>()
+            .all(self.db.as_ref())
+            .await?;
+
+        let mut health_map: std::collections::HashMap<i32, super::types::ProjectMonitorHealth> =
+            std::collections::HashMap::new();
+
+        for r in results {
+            let status = if r.monitor_count == 0 {
+                "no_monitors".to_string()
+            } else if r.operational_count == r.monitor_count {
+                "operational".to_string()
+            } else if r.operational_count == 0 {
+                "down".to_string()
+            } else {
+                "degraded".to_string()
+            };
+
+            health_map.insert(
+                r.project_id,
+                super::types::ProjectMonitorHealth {
+                    project_id: r.project_id,
+                    status,
+                },
+            );
+        }
+
+        let result: Vec<super::types::ProjectMonitorHealth> = project_ids
+            .iter()
+            .map(|&id| {
+                health_map
+                    .remove(&id)
+                    .unwrap_or(super::types::ProjectMonitorHealth {
+                        project_id: id,
+                        status: "no_monitors".to_string(),
+                    })
+            })
+            .collect();
+
+        Ok(result)
+    }
+
     /// Update monitor active status
     pub async fn update_monitor_status(
         &self,

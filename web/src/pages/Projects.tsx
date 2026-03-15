@@ -3,6 +3,7 @@ import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useAuth } from '@/contexts/AuthContext'
 import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
+import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
 import { ProjectCardSkeleton } from '@/components/skeletons/ProjectCardSkeleton'
@@ -99,6 +100,8 @@ export function Projects() {
     startDate,
     endDate
   )
+
+  const dashboardHealth = useDashboardHealth(projectIds)
 
   return (
     <div className="sm:p-8 space-y-6">
@@ -224,6 +227,9 @@ export function Projects() {
                 }
                 analyticsLoading={dashboardAnalytics.isLoading}
                 analyticsError={dashboardAnalytics.isError}
+                health={
+                  dashboardHealth.data?.projects?.[String(project.id)]
+                }
               />
             ))}
           </>

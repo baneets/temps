@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { ReloadableImage } from '@/components/utils/ReloadableImage'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import type { ProjectDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
+import type { ProjectMonitorHealth } from '@/hooks/useDashboardHealth'
 import { useQuery } from '@tanstack/react-query'
 import { AlertCircle, TrendingDown, TrendingUp, Minus } from 'lucide-react'
 import { useState } from 'react'
@@ -55,6 +56,24 @@ interface ProjectCardProps {
   analyticsLoading?: boolean
   /** Whether the batch analytics query errored */
   analyticsError?: boolean
+  /** Pre-fetched health data from the batch monitor endpoint */
+  health?: ProjectMonitorHealth
+}
+
+function HealthStatusDot({ status }: { status: string }) {
+  const colors: Record<string, string> = {
+    operational: 'bg-emerald-500',
+    degraded: 'bg-amber-500',
+    down: 'bg-red-500',
+    no_monitors: 'bg-zinc-400',
+    unknown: 'bg-zinc-400',
+  }
+  return (
+    <span
+      className={`inline-block h-2 w-2 rounded-full ${colors[status] || colors.unknown}`}
+      title={status === 'no_monitors' ? 'No monitors' : status.charAt(0).toUpperCase() + status.slice(1)}
+    />
+  )
 }
 
 export function ProjectCard({
@@ -63,6 +82,7 @@ export function ProjectCard({
   analytics,
   analyticsLoading = false,
   analyticsError = false,
+  health,
 }: ProjectCardProps) {
   // State for hover effect
   const [isHovering, setIsHovering] = useState(false)
@@ -108,8 +128,11 @@ export function ProjectCard({
               )}
               <div className="space-y-0.5 flex-1 min-w-0">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:gap-2">
-                  <h2 className="font-semibold leading-none truncate">
+                  <h2 className="font-semibold leading-none truncate flex items-center gap-1.5">
                     {project.slug}
+                    {health && health.status !== 'no_monitors' && (
+                      <HealthStatusDot status={health.status} />
+                    )}
                   </h2>
                   {!project.last_deployment && (
                     <Badge variant="outline" className="mt-1 w-fit sm:mt-0">
@@ -178,6 +201,7 @@ export function ProjectCard({
               />
             </>
           )}
+
         </CardContent>
       </Card>
     </Link>

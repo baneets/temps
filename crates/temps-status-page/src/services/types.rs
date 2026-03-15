@@ -141,6 +141,14 @@ pub struct CurrentStatusResponse {
     pub last_check_at: Option<UtcDateTime>,
 }
 
+/// Health summary for a single project based on its production monitors
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ProjectMonitorHealth {
+    pub project_id: i32,
+    /// Overall status: "operational", "degraded", "down", or "no_monitors"
+    pub status: String,
+}
+
 // Time-bucketed aggregated data
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StatusBucketedResponse {

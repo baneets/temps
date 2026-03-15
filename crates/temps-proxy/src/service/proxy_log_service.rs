@@ -533,7 +533,9 @@ impl ProxyLogService {
             format!("WHERE {}", where_clauses.join(" AND "))
         };
 
-        // Build the TimescaleDB query with time_bucket_gapfill
+        // Pass bucket_interval as a parameterized value to prevent SQL injection
+        let bucket_param_index = param_index;
+
         let sql = format!(
             r#"
             SELECT
@@ -545,7 +547,7 @@ impl ProxyLogService {
                 COALESCE(total_response_bytes, 0) as total_response_bytes
             FROM (
                 SELECT
-                    time_bucket_gapfill('{}', timestamp) AS bucket,
+                    time_bucket_gapfill(${}::interval, timestamp) AS bucket,
                     COUNT(*) as count,
                     AVG(response_time_ms) as avg_response_time,
                     SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count,
@@ -557,7 +559,7 @@ impl ProxyLogService {
             ) sub
             ORDER BY bucket ASC
             "#,
-            bucket_interval, where_clause
+            bucket_param_index, where_clause
         );
 
         // Execute raw SQL query
@@ -570,6 +572,9 @@ impl ProxyLogService {
         if let Some(ref f) = filters {
             Self::add_filter_values(&mut values, f);
         }
+
+        // Add bucket_interval as parameterized value
+        values.push(bucket_interval.into());
 
         let stmt = sea_orm::Statement::from_sql_and_values(db_backend, &sql, values);
 
@@ -600,6 +605,107 @@ impl ProxyLogService {
             .collect();
 
         Ok(stats)
+    }
+
+    /// Get health summaries for multiple projects in a single query
+    pub async fn get_projects_health_summary(
+        &self,
+        project_ids: &[i32],
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+    ) -> Result<Vec<ProjectHealthSummary>, ProxyLogServiceError> {
+        if project_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Build placeholders for project IDs ($3, $4, $5, ...)
+        let placeholders: Vec<String> = project_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 3))
+            .collect();
+        let placeholders_str = placeholders.join(", ");
+
+        let sql = format!(
+            r#"
+            SELECT
+                project_id,
+                COALESCE(COUNT(*), 0) as total_requests,
+                COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) as total_errors,
+                COALESCE(AVG(response_time_ms)::float8, 0) as avg_response_time_ms
+            FROM proxy_logs
+            WHERE timestamp >= $1
+              AND timestamp < $2
+              AND project_id IN ({})
+            GROUP BY project_id
+            "#,
+            placeholders_str
+        );
+
+        let db_backend = sea_orm::DatabaseBackend::Postgres;
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        for &id in project_ids {
+            values.push(id.into());
+        }
+
+        let stmt = sea_orm::Statement::from_sql_and_values(db_backend, &sql, values);
+        let results = self.db.query_all(stmt).await?;
+
+        // Build a map from query results
+        let mut summaries: std::collections::HashMap<i32, ProjectHealthSummary> =
+            std::collections::HashMap::new();
+
+        for row in &results {
+            let project_id: i32 = row.try_get("", "project_id").unwrap_or(0);
+            let total_requests: i64 = row.try_get("", "total_requests").unwrap_or(0);
+            let total_errors: i64 = row.try_get("", "total_errors").unwrap_or(0);
+            let avg_response_time_ms: f64 = row.try_get("", "avg_response_time_ms").unwrap_or(0.0);
+
+            let error_rate = if total_requests > 0 {
+                (total_errors as f64 / total_requests as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let status = if total_requests == 0 {
+                "unknown".to_string()
+            } else if error_rate > 50.0 {
+                "down".to_string()
+            } else if error_rate > 10.0 {
+                "degraded".to_string()
+            } else {
+                "healthy".to_string()
+            };
+
+            summaries.insert(
+                project_id,
+                ProjectHealthSummary {
+                    project_id,
+                    total_requests,
+                    total_errors,
+                    avg_response_time_ms: (avg_response_time_ms * 10.0).round() / 10.0,
+                    error_rate: (error_rate * 10.0).round() / 10.0,
+                    status,
+                },
+            );
+        }
+
+        // Include projects with no data as "unknown"
+        let result: Vec<ProjectHealthSummary> = project_ids
+            .iter()
+            .map(|&id| {
+                summaries.remove(&id).unwrap_or(ProjectHealthSummary {
+                    project_id: id,
+                    total_requests: 0,
+                    total_errors: 0,
+                    avg_response_time_ms: 0.0,
+                    error_rate: 0.0,
+                    status: "unknown".to_string(),
+                })
+            })
+            .collect();
+
+        Ok(result)
     }
 
     // Helper methods for filtering
@@ -850,6 +956,22 @@ pub struct TodayStatsResponse {
     /// Date for which stats are returned
     #[schema(example = "2025-10-23")]
     pub date: String,
+}
+
+/// Health summary for a single project (last 1 hour)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProjectHealthSummary {
+    pub project_id: i32,
+    /// Total requests in the period
+    pub total_requests: i64,
+    /// Total errors (status >= 400) in the period
+    pub total_errors: i64,
+    /// Average response time in ms
+    pub avg_response_time_ms: f64,
+    /// Error rate as a percentage (0-100)
+    pub error_rate: f64,
+    /// Health status: "healthy", "degraded", "down", "unknown"
+    pub status: String,
 }
 
 #[cfg(test)]
