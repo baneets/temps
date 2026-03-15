@@ -207,7 +207,7 @@ pub fn setup_proxy_server(
     route_table: Arc<CachedPeerTable>,
     shutdown_signal: Box<dyn ProxyShutdownSignal>,
     config: Arc<ServerConfig>,
-    container_lifecycle: Option<Arc<dyn crate::on_demand::ContainerLifecycle>>,
+    on_demand_manager: Option<Arc<crate::on_demand::OnDemandManager>>,
 ) -> Result<()> {
     // Setup plugin system (async operation in sync context)
     let context = tokio::runtime::Runtime::new()?
@@ -276,15 +276,10 @@ pub fn setup_proxy_server(
         proxy_config.disable_https_redirect,
     );
 
-    // Wire up on-demand scale-to-zero if container lifecycle is provided
-    if let Some(lifecycle) = container_lifecycle {
-        let on_demand_manager = Arc::new(crate::on_demand::OnDemandManager::new(
-            db.clone(),
-            lifecycle,
-        ));
-
+    // Wire up on-demand scale-to-zero if OnDemandManager was created
+    if let Some(ref on_demand_manager) = on_demand_manager {
         // Register callback so sleeping domains and on-demand configs are populated on every route reload
-        let on_demand_for_callback = Arc::clone(&on_demand_manager);
+        let on_demand_for_callback = Arc::clone(on_demand_manager);
         route_table.set_on_sleeping_callback(Arc::new(move |entries, on_demand_configs| {
             on_demand_for_callback.clear_sleeping_domains();
             for entry in entries {
@@ -306,6 +301,8 @@ pub fn setup_proxy_server(
                     config.wake_timeout_seconds,
                 );
             }
+            // Signal any requests waiting for routes after a wake
+            on_demand_for_callback.notify_route_reloaded();
         }));
 
         // Reload routes so the callback populates on-demand configs.
@@ -325,7 +322,7 @@ pub fn setup_proxy_server(
         // Start background idle sweep (checks every 60 seconds)
         on_demand_manager.start_sweep_task(std::time::Duration::from_secs(60));
 
-        lb = lb.with_on_demand_manager(on_demand_manager);
+        lb = lb.with_on_demand_manager(Arc::clone(on_demand_manager));
         info!("On-demand scale-to-zero enabled");
     }
 

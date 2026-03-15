@@ -95,10 +95,35 @@ pub struct EnvironmentResponse {
     /// When true, the environment's containers are currently stopped due to
     /// inactivity (on-demand mode) and will start on the next request.
     pub sleeping: bool,
+    /// Last proxied request timestamp (epoch millis) for on-demand environments.
+    /// NULL when on-demand is disabled or no traffic has been received yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<i64>,
+    /// Estimated time (epoch millis) when the environment will go to sleep
+    /// based on last activity + idle timeout. NULL when sleeping or on-demand disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_sleep_at: Option<i64>,
 }
 
 impl From<temps_entities::environments::Model> for EnvironmentResponse {
     fn from(env: temps_entities::environments::Model) -> Self {
+        let last_activity_at = env.last_activity_at.map(|t| t.timestamp_millis());
+
+        // Compute estimated sleep time: last_activity + idle_timeout
+        // Only when on-demand is enabled, env is awake, and we have activity data
+        let estimated_sleep_at = if !env.sleeping {
+            env.deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    env.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        };
+
         Self {
             id: env.id,
             project_id: env.project_id,
@@ -113,6 +138,8 @@ impl From<temps_entities::environments::Model> for EnvironmentResponse {
             deployment_config: env.deployment_config,
             protected: env.protected,
             sleeping: env.sleeping,
+            last_activity_at,
+            estimated_sleep_at,
         }
     }
 }

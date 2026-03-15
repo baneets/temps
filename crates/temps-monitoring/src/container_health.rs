@@ -276,6 +276,17 @@ impl ContainerHealthMonitor {
 
         match &info.status {
             temps_deployer::ContainerStatus::Exited | temps_deployer::ContainerStatus::Dead => {
+                // Skip alarm if this is an on-demand environment that was intentionally
+                // put to sleep. The on-demand manager stops containers on idle — that's
+                // expected, not an error.
+                if self.is_on_demand_sleeping(deployment.environment_id).await {
+                    debug!(
+                        "Container {} ({}) is {} but environment {} is on-demand sleeping, skipping alarm",
+                        container.id, container.container_name, status_str, deployment.environment_id
+                    );
+                    return;
+                }
+
                 warn!(
                     "Container {} ({}) is in '{}' state",
                     container.id, container.container_name, status_str
@@ -315,6 +326,20 @@ impl ContainerHealthMonitor {
             _ => {
                 // Container is in a healthy state, nothing to do
             }
+        }
+    }
+
+    /// Check if an environment is currently sleeping (on-demand scale-to-zero).
+    /// When sleeping=true, containers were intentionally stopped — not a crash.
+    async fn is_on_demand_sleeping(&self, environment_id: i32) -> bool {
+        use temps_entities::environments;
+
+        match environments::Entity::find_by_id(environment_id)
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(env)) => env.sleeping,
+            _ => false,
         }
     }
 

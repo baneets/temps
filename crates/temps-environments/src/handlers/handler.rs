@@ -107,9 +107,22 @@ pub async fn get_environments(
             updated_at: env.updated_at.timestamp_millis(),
             branch: env.branch,
             is_preview: env.is_preview,
-            deployment_config: env.deployment_config,
+            deployment_config: env.deployment_config.clone(),
             protected: env.protected,
             sleeping: env.sleeping,
+            last_activity_at: env.last_activity_at.map(|t| t.timestamp_millis()),
+            estimated_sleep_at: if !env.sleeping {
+                env.deployment_config
+                    .as_ref()
+                    .filter(|dc| dc.on_demand)
+                    .and_then(|dc| {
+                        env.last_activity_at.map(|last| {
+                            last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                        })
+                    })
+            } else {
+                None
+            },
         });
     }
 
@@ -160,9 +173,22 @@ pub async fn get_environment(
         updated_at: env.updated_at.timestamp_millis(),
         branch: env.branch,
         is_preview: env.is_preview,
-        deployment_config: env.deployment_config,
+        deployment_config: env.deployment_config.clone(),
         protected: env.protected,
         sleeping: env.sleeping,
+        last_activity_at: env.last_activity_at.map(|t| t.timestamp_millis()),
+        estimated_sleep_at: if !env.sleeping {
+            env.deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    env.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        },
     }))
 }
 
@@ -625,9 +651,25 @@ pub async fn update_environment_settings(
         updated_at: updated_environment.updated_at.timestamp_millis(),
         branch: updated_environment.branch,
         is_preview: updated_environment.is_preview,
-        deployment_config: updated_environment.deployment_config,
+        deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        last_activity_at: updated_environment
+            .last_activity_at
+            .map(|t| t.timestamp_millis()),
+        estimated_sleep_at: if !updated_environment.sleeping {
+            updated_environment
+                .deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    updated_environment.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        },
     })
     .into_response())
 }
@@ -761,9 +803,25 @@ pub async fn wake_environment(
         updated_at: updated_environment.updated_at.timestamp_millis(),
         branch: updated_environment.branch,
         is_preview: updated_environment.is_preview,
-        deployment_config: updated_environment.deployment_config,
+        deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        last_activity_at: updated_environment
+            .last_activity_at
+            .map(|t| t.timestamp_millis()),
+        estimated_sleep_at: if !updated_environment.sleeping {
+            updated_environment
+                .deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    updated_environment.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        },
     })
     .into_response())
 }
@@ -882,9 +940,25 @@ pub async fn sleep_environment(
         updated_at: updated_environment.updated_at.timestamp_millis(),
         branch: updated_environment.branch,
         is_preview: updated_environment.is_preview,
-        deployment_config: updated_environment.deployment_config,
+        deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        last_activity_at: updated_environment
+            .last_activity_at
+            .map(|t| t.timestamp_millis()),
+        estimated_sleep_at: if !updated_environment.sleeping {
+            updated_environment
+                .deployment_config
+                .as_ref()
+                .filter(|dc| dc.on_demand)
+                .and_then(|dc| {
+                    updated_environment.last_activity_at.map(|last| {
+                        last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                    })
+                })
+        } else {
+            None
+        },
     })
     .into_response())
 }
@@ -1027,9 +1101,23 @@ pub async fn create_environment(
             updated_at: environment.updated_at.timestamp_millis(),
             branch: environment.branch,
             is_preview: environment.is_preview,
-            deployment_config: environment.deployment_config,
+            deployment_config: environment.deployment_config.clone(),
             protected: environment.protected,
             sleeping: environment.sleeping,
+            last_activity_at: environment.last_activity_at.map(|t| t.timestamp_millis()),
+            estimated_sleep_at: if !environment.sleeping {
+                environment
+                    .deployment_config
+                    .as_ref()
+                    .filter(|dc| dc.on_demand)
+                    .and_then(|dc| {
+                        environment.last_activity_at.map(|last| {
+                            last.timestamp_millis() + (dc.idle_timeout_seconds as i64 * 1000)
+                        })
+                    })
+            } else {
+                None
+            },
         }),
     )
         .into_response())

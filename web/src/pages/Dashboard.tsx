@@ -17,6 +17,8 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { subDays } from 'date-fns'
 import {
+  Activity,
+  CheckCircle2,
   DollarSign,
   Eye,
   FolderGit2,
@@ -274,6 +276,25 @@ export function Dashboard() {
             </Badge>
           </div>
         </div>
+      </div>
+
+      {/* Platform Health Quick Link */}
+      <div className="mb-6">
+        <Link
+          to="/monitoring"
+          className="flex items-center gap-3 rounded-lg border bg-card p-4 transition-colors hover:bg-accent/50"
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/10">
+            <Activity className="h-5 w-5 text-emerald-500" />
+          </div>
+          <div className="flex-1">
+            <p className="text-sm font-medium">Platform Health</p>
+            <p className="text-xs text-muted-foreground">
+              View metrics, alerts, and notification settings
+            </p>
+          </div>
+          <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+        </Link>
       </div>
 
       {/* Projects Grid */}

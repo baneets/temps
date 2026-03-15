@@ -37,6 +37,9 @@ pub struct Model {
     /// When true, the environment's containers have been stopped due to inactivity
     /// (on-demand mode). They will be started on the next incoming request.
     pub sleeping: bool,
+    /// Last proxied request timestamp for on-demand environments.
+    /// Persisted periodically by the idle sweep, not on every request.
+    pub last_activity_at: Option<DBDateTime>,
 }
 
 impl Model {

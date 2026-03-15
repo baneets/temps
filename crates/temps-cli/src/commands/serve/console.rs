@@ -518,6 +518,7 @@ pub struct ConsoleApiParams {
     pub queue: Arc<dyn temps_core::JobQueue>,
     pub ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
     pub additional_templates: Vec<std::path::PathBuf>,
+    pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
 }
 
 /// Initialize and start the console API server
@@ -531,6 +532,7 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         queue,
         ready_signal,
         additional_templates,
+        on_demand_waker,
     } = params;
     // PRE-VALIDATE all plugin dependencies BEFORE initializing plugin manager
     // This ensures clear error messages if any critical resources are missing
@@ -631,6 +633,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     }
 
     service_context.register_service(template_service);
+
+    // Register OnDemandWaker so environment wake/sleep endpoints can manage containers
+    if let Some(waker) = on_demand_waker {
+        service_context.register_service(waker as Arc<dyn temps_core::OnDemandWaker>);
+        debug!("Registered OnDemandWaker for environment wake/sleep endpoints");
+    }
 
     // Register plugins in dependency order:
     // 1. ConfigPlugin - provides configuration services

@@ -555,48 +555,6 @@ impl LoadBalancer {
         }
     }
 
-    /// Generate HTML for the "waking up" interstitial page.
-    /// Displayed when a request hits a sleeping on-demand environment.
-    /// Auto-refreshes every 3 seconds until the environment is awake.
-    fn generate_waking_html() -> String {
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Starting Up...</title>
-    <style>
-        body { font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
-        .container { text-align: center; max-width: 480px; padding: 40px; }
-        .spinner { width: 48px; height: 48px; border: 4px solid #334155; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 24px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        h1 { font-size: 1.5rem; margin-bottom: 12px; color: #f1f5f9; }
-        p { color: #94a3b8; line-height: 1.6; margin: 0 0 8px; }
-        .progress { width: 200px; height: 4px; background: #1e293b; border-radius: 2px; margin: 20px auto 0; overflow: hidden; }
-        .progress-bar { height: 100%; background: #3b82f6; border-radius: 2px; animation: progress 3s ease-in-out infinite; }
-        @keyframes progress { 0% { width: 0%; } 50% { width: 80%; } 100% { width: 100%; } }
-        .status { font-size: 0.8rem; color: #64748b; margin-top: 16px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="spinner"></div>
-        <h1>Starting Up</h1>
-        <p>This environment was sleeping to save resources and is now waking up.</p>
-        <div class="progress"><div class="progress-bar"></div></div>
-        <p class="status" id="status">Initializing containers...</p>
-    </div>
-    <script>
-        const messages = ["Initializing containers...", "Starting services...", "Almost ready..."];
-        let i = 0;
-        const el = document.getElementById("status");
-        setInterval(() => { if (i < messages.length - 1) el.textContent = messages[++i]; }, 2000);
-        setTimeout(() => location.reload(), 3000);
-    </script>
-</body>
-</html>"#.to_string()
-    }
-
     /// Generate HTML for CAPTCHA challenge page
     fn generate_challenge_html(
         project_name: &str,
@@ -2031,68 +1989,64 @@ impl ProxyHttp for LoadBalancer {
 
         // On-demand: check if this host maps to a sleeping environment.
         // Sleeping environments are excluded from the route table, so we must
-        // check before project context resolution. Serve a "waking up" page and
-        // trigger an async wake.
+        // check before project context resolution. Wake the environment inline
+        // and hold the request until the container is ready and routes are reloaded.
         if let Some(ref on_demand) = self.on_demand_manager {
             let host_without_port = ctx.host.split(':').next().unwrap_or(&ctx.host);
             if let Some(sleeping_info) = on_demand.get_sleeping_environment(host_without_port) {
                 info!(
                     environment_id = sleeping_info.environment_id,
                     host = %ctx.host,
-                    "Request hit sleeping environment, serving wake page"
+                    "Request hit sleeping environment, waking inline"
                 );
 
-                // Trigger async wake (doesn't block the response)
-                let on_demand_clone = Arc::clone(on_demand);
                 let env_id = sleeping_info.environment_id;
                 let wake_timeout = sleeping_info.wake_timeout_seconds;
-                tokio::spawn(async move {
-                    match on_demand_clone.wake_environment(env_id, wake_timeout).await {
-                        Ok(()) => {
-                            info!(environment_id = env_id, "Environment woke up successfully");
-                        }
-                        Err(e) => {
-                            error!(
-                                environment_id = env_id,
-                                error = %e,
-                                "Failed to wake environment"
-                            );
-                        }
+
+                // Block until the environment is fully awake (containers healthy)
+                match on_demand.wake_environment(env_id, wake_timeout).await {
+                    Ok(()) => {
+                        info!(
+                            environment_id = env_id,
+                            "Environment woke up, waiting for route reload"
+                        );
+
+                        // Wait for the route table to reload so resolve_context works
+                        let reload_timeout = std::time::Duration::from_secs(10);
+                        let _ = on_demand.wait_for_route_reload(reload_timeout).await;
+
+                        // Fall through to normal request handling — don't return Ok(true)
                     }
-                });
+                    Err(e) => {
+                        error!(
+                            environment_id = env_id,
+                            error = %e,
+                            "Failed to wake environment"
+                        );
 
-                // Content negotiation: JSON for API clients, HTML for browsers
-                let accepts_json = session
-                    .req_header()
-                    .headers
-                    .get("accept")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.contains("application/json"))
-                    .unwrap_or(false);
+                        // Wake failed — return 503 with Retry-After
+                        let mut response =
+                            ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
+                        response.insert_header("Retry-After", "5")?;
+                        response.insert_header("Cache-Control", "no-store")?;
+                        response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        response.insert_header("Content-Type", "application/json")?;
 
-                let mut response = ResponseHeader::build(StatusCode::SERVICE_UNAVAILABLE, None)?;
-                response.insert_header("Retry-After", "3")?;
-                response.insert_header("Cache-Control", "no-store")?;
-                response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        let body_bytes = Bytes::from(format!(
+                            r#"{{"status":"wake_failed","environment_id":{},"message":"Failed to start environment: {}"}}"#,
+                            env_id,
+                            e.to_string().replace('"', "\\\"")
+                        ));
 
-                let body_bytes = if accepts_json {
-                    response.insert_header("Content-Type", "application/json")?;
-                    Bytes::from(format!(
-                        r#"{{"status":"waking","environment_id":{},"message":"Environment is starting up. Retry after 3 seconds."}}"#,
-                        sleeping_info.environment_id
-                    ))
-                } else {
-                    response.insert_header("Content-Type", "text/html; charset=utf-8")?;
-                    Bytes::from(Self::generate_waking_html())
-                };
+                        session
+                            .write_response_header(Box::new(response), false)
+                            .await?;
+                        session.write_response_body(Some(body_bytes), true).await?;
 
-                session
-                    .write_response_header(Box::new(response), false)
-                    .await?;
-                session.write_response_body(Some(body_bytes), true).await?;
-
-                ctx.routing_status = "sleeping".to_string();
-                return Ok(true);
+                        ctx.routing_status = "wake_failed".to_string();
+                        return Ok(true);
+                    }
+                }
             }
         }
 

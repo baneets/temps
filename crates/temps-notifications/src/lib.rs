@@ -14,4 +14,4 @@ pub use services::{
 };
 pub use vulnerability_notifications::VulnerabilityNotificationHandler;
 mod handlers;
-mod types;
+pub mod types;

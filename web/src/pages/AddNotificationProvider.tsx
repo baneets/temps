@@ -91,7 +91,7 @@ export function AddNotificationProvider() {
   useEffect(() => {
     setBreadcrumbs([
       { label: 'Monitoring & Alerts', href: '/monitoring' },
-      { label: 'Providers', href: '/settings/notifications' },
+      { label: 'Providers', href: '/monitoring/notifications' },
       { label: 'Add Provider' },
     ])
   }, [setBreadcrumbs])
@@ -135,7 +135,7 @@ export function AddNotificationProvider() {
       setCurrentStep('complete')
       toast.success('Email provider added successfully')
       setTimeout(() => {
-        navigate('/settings/notifications')
+        navigate('/monitoring/notifications')
       }, 2000)
     },
   })
@@ -149,7 +149,7 @@ export function AddNotificationProvider() {
       setCurrentStep('complete')
       toast.success('Slack provider added successfully')
       setTimeout(() => {
-        navigate('/settings/notifications')
+        navigate('/monitoring/notifications')
       }, 2000)
     },
   })
@@ -163,7 +163,7 @@ export function AddNotificationProvider() {
       setCurrentStep('complete')
       toast.success('Webhook provider added successfully')
       setTimeout(() => {
-        navigate('/settings/notifications')
+        navigate('/monitoring/notifications')
       }, 2000)
     },
   })
@@ -326,7 +326,7 @@ export function AddNotificationProvider() {
               <div className="mt-6 flex justify-between">
                 <Button
                   variant="outline"
-                  onClick={() => navigate('/settings/notifications')}
+                  onClick={() => navigate('/monitoring/notifications')}
                 >
                   <ArrowLeft className="h-4 w-4 mr-2" />
                   Cancel
@@ -387,7 +387,7 @@ export function AddNotificationProvider() {
               </div>
             </CardHeader>
             <CardContent className="flex justify-center">
-              <Button onClick={() => navigate('/settings/notifications')}>
+              <Button onClick={() => navigate('/monitoring/notifications')}>
                 <Bell className="h-4 w-4 mr-2" />
                 View Providers
               </Button>

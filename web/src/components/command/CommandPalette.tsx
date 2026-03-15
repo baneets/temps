@@ -163,7 +163,7 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Notifications',
-    url: '/settings/notifications',
+    url: '/monitoring/notifications',
     icon: Bell,
     keywords: ['alerts', 'notifications', 'messages'],
   },
@@ -354,10 +354,10 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['errors', 'exceptions', 'bugs', 'tracking'],
   },
   {
-    title: 'Monitors',
+    title: 'Uptime',
     url: 'monitors',
     icon: Activity,
-    keywords: ['monitoring', 'uptime', 'health'],
+    keywords: ['monitoring', 'uptime', 'health', 'monitors'],
   },
   {
     title: 'Traces',

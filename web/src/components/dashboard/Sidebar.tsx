@@ -18,17 +18,11 @@ import {
   Activity,
   BadgeCheck,
   ChevronsUpDown,
-  Cloud,
-  Database,
   Folder,
-  GitBranch,
-  Globe,
   LogOut,
-  Mail,
   MoreHorizontal,
   ScrollText,
   Settings,
-  Sparkles,
   SquareTerminal,
 } from 'lucide-react'
 
@@ -71,39 +65,9 @@ const navMainAll = [
     icon: Folder,
   },
   {
-    title: 'Storage',
-    url: '/storage',
-    icon: Database,
-  },
-  {
-    title: 'Domains',
-    url: '/domains',
-    icon: Globe,
-  },
-  {
     title: 'Monitoring',
     url: '/monitoring',
     icon: Activity,
-  },
-  {
-    title: 'AI Gateway',
-    url: '/ai-gateway',
-    icon: Sparkles,
-  },
-  {
-    title: 'Email',
-    url: '/email',
-    icon: Mail,
-  },
-  {
-    title: 'Git Providers',
-    url: '/git-providers',
-    icon: GitBranch,
-  },
-  {
-    title: 'DNS Providers',
-    url: '/dns-providers',
-    icon: Cloud,
   },
 ]
 
@@ -412,7 +376,7 @@ export default function AppSidebar() {
   // Auto-collapse sidebar when on project detail pages
   useEffect(() => {
     const isProjectDetailPage = location.pathname.match(
-      /^\/projects\/[^/]+\/(project|deployments|analytics|storage|runtime|settings|speed|errors|logs|webhooks)/
+      /^\/projects\/[^/]+\/(project|deployments|analytics|storage|runtime|settings|speed|errors|logs|webhooks|monitors|monitoring|traces|ai-activity|services|environments|security)/
     )
 
     if (isProjectDetailPage && !isMobile) {

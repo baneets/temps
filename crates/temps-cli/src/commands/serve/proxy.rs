@@ -5,15 +5,21 @@ use temps_config::ServerConfig;
 use temps_core::CookieCrypto;
 use temps_database::DbConnection;
 use temps_deployer::ContainerDeployer;
-use temps_proxy::on_demand::{ContainerLifecycle, OnDemandError};
+use temps_proxy::on_demand::{ContainerLifecycle, OnDemandError, OnDemandManager};
 use temps_proxy::ProxyShutdownSignal;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::shutdown::CtrlCShutdownSignal;
 
 /// Adapter bridging `temps_deployer::ContainerDeployer` to `temps_proxy::on_demand::ContainerLifecycle`.
-struct ContainerLifecycleAdapter {
+pub(crate) struct ContainerLifecycleAdapter {
     deployer: Arc<dyn ContainerDeployer>,
+}
+
+impl ContainerLifecycleAdapter {
+    pub fn new(deployer: Arc<dyn ContainerDeployer>) -> Self {
+        Self { deployer }
+    }
 }
 
 #[async_trait]
@@ -61,6 +67,7 @@ pub fn start_proxy_server(
     route_table: Arc<temps_proxy::CachedPeerTable>,
     config: Arc<ServerConfig>,
     disable_https_redirect: bool,
+    on_demand_manager: Option<Arc<OnDemandManager>>,
 ) -> anyhow::Result<()> {
     let console_address = config.console_address.clone();
     // Create tokio runtime to fetch preview_domain from config service
@@ -107,46 +114,11 @@ pub fn start_proxy_server(
         warn!("HTTPS redirect is disabled - HTTP requests will NOT be redirected to HTTPS");
     }
 
-    // Note: Route table is now created and listener is started in serve/mod.rs
-    // The same instance is shared between console API and proxy server
-
     let shutdown_signal = Box::new(CtrlCShutdownSignal::new(
         Duration::from_secs(30),
         db.clone(),
         config.data_dir.clone(),
     )) as Box<dyn ProxyShutdownSignal>;
-
-    // Create container lifecycle adapter for on-demand scale-to-zero.
-    // Uses a local Docker runtime — remote node containers are handled via
-    // the deployer's agent protocol during the full wake flow.
-    let container_lifecycle: Option<Arc<dyn ContainerLifecycle>> = {
-        let docker_rt = tokio::runtime::Runtime::new()?;
-        match docker_rt.block_on(async {
-            let docker = bollard::Docker::connect_with_defaults()
-                .map_err(|e| anyhow::anyhow!("Docker connect failed: {}", e))?;
-            docker
-                .ping()
-                .await
-                .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
-            Ok::<_, anyhow::Error>(docker)
-        }) {
-            Ok(docker) => {
-                let docker_runtime = temps_deployer::docker::DockerRuntime::new(
-                    Arc::new(docker),
-                    true,
-                    "temps".to_string(),
-                );
-                let adapter = ContainerLifecycleAdapter {
-                    deployer: Arc::new(docker_runtime) as Arc<dyn ContainerDeployer>,
-                };
-                Some(Arc::new(adapter) as Arc<dyn ContainerLifecycle>)
-            }
-            Err(e) => {
-                warn!("Docker not available for on-demand scale-to-zero: {}", e);
-                None
-            }
-        }
-    };
 
     match temps_proxy::setup_proxy_server(
         db,
@@ -156,14 +128,14 @@ pub fn start_proxy_server(
         route_table,
         shutdown_signal,
         config.clone(),
-        container_lifecycle,
+        on_demand_manager,
     ) {
         Ok(_) => {
             info!("Proxy server exited");
             Ok(())
         }
         Err(e) => {
-            error!("Failed to start proxy server: {}", e);
+            tracing::error!("Failed to start proxy server: {}", e);
             Err(anyhow::anyhow!("Failed to start proxy server: {}", e))
         }
     }

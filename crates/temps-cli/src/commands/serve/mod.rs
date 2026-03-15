@@ -5,7 +5,7 @@ mod shutdown;
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub use console::start_console_api;
 pub use proxy::start_proxy_server;
@@ -185,6 +185,40 @@ impl ServeCommand {
             }
         });
 
+        // Create OnDemandManager early so it can be shared with both console API
+        // (for wake/sleep REST endpoints) and the proxy (for wake-on-request).
+        let on_demand_manager: Option<Arc<temps_proxy::on_demand::OnDemandManager>> = {
+            let docker_rt = tokio::runtime::Runtime::new()?;
+            match docker_rt.block_on(async {
+                let docker = bollard::Docker::connect_with_defaults()
+                    .map_err(|e| anyhow::anyhow!("Docker connect failed: {}", e))?;
+                docker
+                    .ping()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
+                Ok::<_, anyhow::Error>(docker)
+            }) {
+                Ok(docker) => {
+                    let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                        Arc::new(docker),
+                        true,
+                        "temps".to_string(),
+                    );
+                    let adapter = proxy::ContainerLifecycleAdapter::new(
+                        Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
+                    );
+                    Some(Arc::new(temps_proxy::on_demand::OnDemandManager::new(
+                        db.clone(),
+                        Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
+                    )))
+                }
+                Err(e) => {
+                    warn!("Docker not available for on-demand scale-to-zero: {}", e);
+                    None
+                }
+            }
+        };
+
         // Start console API server in background (non-blocking).
         // The proxy does NOT wait for the console to be ready. This ensures that
         // deployed applications remain reachable even if console initialization
@@ -202,6 +236,9 @@ impl ServeCommand {
             queue: queue.clone(),
             ready_signal: Some(ready_tx),
             additional_templates: self.additional_templates.clone(),
+            on_demand_waker: on_demand_manager
+                .clone()
+                .map(|m| m as Arc<dyn temps_core::OnDemandWaker>),
         };
         rt.spawn(async move {
             match start_console_api(params).await {
@@ -254,6 +291,7 @@ impl ServeCommand {
             route_table,
             serve_config.clone(),
             self.disable_https_redirect,
+            on_demand_manager,
         )
     }
 }

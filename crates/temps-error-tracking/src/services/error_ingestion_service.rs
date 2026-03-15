@@ -219,6 +219,19 @@ impl ErrorIngestionService {
             .to_string()
     }
 
+    /// Public wrapper for checking if a fingerprint already exists.
+    /// Returns the group_id if found.
+    pub async fn find_group_by_fingerprint_public(
+        &self,
+        fingerprint: &str,
+        project_id: i32,
+    ) -> Option<i32> {
+        self.find_group_by_fingerprint(fingerprint, project_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// Find existing group by fingerprint hash within the same project
     async fn find_group_by_fingerprint(
         &self,

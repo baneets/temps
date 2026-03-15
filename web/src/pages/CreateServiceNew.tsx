@@ -258,15 +258,39 @@ export function CreateService() {
   )
 
   const [serviceName, setServiceName] = useState(defaultName)
-  const supportsCluster =
-    serviceType !== null &&
-    CLUSTER_SERVICE_TYPES.includes(serviceType as ServiceTypeRoute)
+  const supportsCluster = useMemo(
+    () =>
+      serviceType !== null &&
+      CLUSTER_SERVICE_TYPES.includes(serviceType as ServiceTypeRoute),
+    [serviceType]
+  )
   const [topology, setTopology] = useState<'standalone' | 'cluster'>(
     'standalone'
   )
   const [clusterMembers, setClusterMembers] = useState<ClusterMemberRequest[]>(
     []
   )
+
+  // Fetch available nodes to determine if cluster topology can be offered
+  const { data: nodesResponse } = useQuery({
+    ...adminListNodesOptions(),
+    enabled: supportsCluster,
+  })
+  const nodes = useMemo(
+    () =>
+      (nodesResponse?.nodes ?? []).filter(
+        (n: NodeInfoResponse) => n.status === 'active'
+      ),
+    [nodesResponse]
+  )
+  const hasWorkerNodes = useMemo(() => nodes.length > 0, [nodes])
+
+  // Reset to standalone if no worker nodes are available
+  useEffect(() => {
+    if (!hasWorkerNodes && topology === 'cluster') {
+      setTopology('standalone')
+    }
+  }, [hasWorkerNodes, topology])
 
   // When switching to cluster topology, pre-populate default members
   useEffect(() => {
@@ -289,19 +313,6 @@ export function CreateService() {
       { label: 'Create Service', href: '/storage/create' },
     ])
   }, [setBreadcrumbs])
-
-  // Fetch available nodes for cluster member assignment
-  const { data: nodesResponse } = useQuery({
-    ...adminListNodesOptions(),
-    enabled: supportsCluster && topology === 'cluster',
-  })
-  const nodes = useMemo(
-    () =>
-      (nodesResponse?.nodes ?? []).filter(
-        (n: NodeInfoResponse) => n.status === 'active'
-      ),
-    [nodesResponse]
-  )
 
   // Fetch provider metadata for display
   const { data: providerMetadata } = useQuery({
@@ -477,8 +488,8 @@ export function CreateService() {
           </p>
         </div>
 
-        {/* Topology Selector (only for service types that support clustering) */}
-        {supportsCluster && (
+        {/* Topology Selector (only for service types that support clustering AND when worker nodes exist) */}
+        {supportsCluster && hasWorkerNodes && (
           <div className="space-y-4">
             <div className="space-y-2">
               <Label>Topology</Label>

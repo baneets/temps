@@ -264,55 +264,10 @@ impl NotificationProvider for EmailProvider {
             NotificationPriority::Critical => "[CRITICAL] ",
         };
 
-        let color = match notification.notification_type {
-            NotificationType::Info => "#0088cc",
-            NotificationType::Warning => "#ffa500",
-            NotificationType::Error => "#ff0000",
-            NotificationType::Alert => "#ff0000",
-        };
-
         let from = Mailbox::new(self.from_name.clone(), self.from_address.parse()?);
 
         // Create the HTML body once since it's the same for all recipients
-        let email_body = format!(
-            r#"
-            <div style="font-family: Arial, sans-serif;">
-                <div style="border-left: 4px solid {}; padding-left: 15px;">
-                    <h2 style="color: {};">{}</h2>
-                    <p style="white-space: pre-wrap;">{}</p>
-                    <div style="color: #666; font-size: 0.9em;">
-                        <p>Type: {:?}</p>
-                        <p>Priority: {:?}</p>
-                        <p>Time: {}</p>
-                    </div>
-                    {}
-                </div>
-            </div>
-            "#,
-            color,
-            color,
-            notification.title,
-            notification.message,
-            notification.notification_type,
-            notification.priority,
-            notification.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-            if notification.metadata.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    r#"<div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #eee;">
-                        <h3>Additional Information</h3>
-                        {}
-                    </div>"#,
-                    notification
-                        .metadata
-                        .iter()
-                        .map(|(k, v)| format!("<p><strong>{}:</strong> {}</p>", k, v))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
-            }
-        );
+        let email_body = Self::render_notification_email(notification);
 
         // Combine configured addresses and admin emails into a single list
         let mut all_recipients = self.to_addresses.clone();
@@ -354,6 +309,146 @@ impl NotificationProvider for EmailProvider {
     }
 
     async fn health_check(&self) -> Result<bool> {
+        EmailProvider::email_health_check(self).await
+    }
+}
+
+impl EmailProvider {
+    fn render_notification_email(notification: &Notification) -> String {
+        let (accent_color, bg_color, icon, label) = match notification.priority {
+            NotificationPriority::Low => ("#6b7280", "#f9fafb", "&#8505;", "Info"),
+            NotificationPriority::Normal => ("#2563eb", "#eff6ff", "&#9432;", "Notice"),
+            NotificationPriority::High => ("#d97706", "#fffbeb", "&#9888;", "Warning"),
+            NotificationPriority::Critical => ("#dc2626", "#fef2f2", "&#128680;", "Critical"),
+        };
+
+        let metadata_html = if notification.metadata.is_empty() {
+            String::new()
+        } else {
+            let rows: String = notification
+                .metadata
+                .iter()
+                .map(|(k, v)| {
+                    // Format key: replace underscores with spaces and title-case
+                    let label = k
+                        .split('_')
+                        .map(|w| {
+                            let mut c = w.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => {
+                                    f.to_uppercase().collect::<String>() + c.as_str()
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        r#"<tr>
+                            <td style="padding: 8px 12px; color: #6b7280; font-size: 13px; white-space: nowrap; vertical-align: top;">{}</td>
+                            <td style="padding: 8px 12px; color: #1f2937; font-size: 13px; word-break: break-all;">{}</td>
+                        </tr>"#,
+                        label, v
+                    )
+                })
+                .collect();
+
+            format!(
+                r#"<tr><td colspan="2" style="padding: 0;">
+                    <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 24px; border-top: 1px solid #e5e7eb;">
+                        <tr><td style="padding: 16px 0 8px; color: #374151; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Details</td></tr>
+                        <tr><td style="padding: 0;">
+                            <table width="100%" cellpadding="0" cellspacing="0" style="background: #f9fafb; border-radius: 6px;">
+                                {}
+                            </table>
+                        </td></tr>
+                    </table>
+                </td></tr>"#,
+                rows
+            )
+        };
+
+        // Escape HTML in message, preserve newlines
+        let message_html = notification
+            .message
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('\n', "<br>");
+
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f3f4f6; -webkit-font-smoothing: antialiased;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 32px 16px;">
+        <tr><td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; width: 100%;">
+                <!-- Header -->
+                <tr><td style="padding: 24px 32px; background: #0f172a; border-radius: 8px 8px 0 0;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                            <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 18px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Temps</td>
+                            <td align="right" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #94a3b8;">{timestamp}</td>
+                        </tr>
+                    </table>
+                </td></tr>
+
+                <!-- Priority Badge -->
+                <tr><td style="padding: 24px 32px 0; background: #ffffff;">
+                    <table cellpadding="0" cellspacing="0">
+                        <tr><td style="padding: 4px 12px; background: {bg_color}; border: 1px solid {accent_color}22; border-radius: 100px;">
+                            <span style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; font-weight: 600; color: {accent_color};">{icon} {label}</span>
+                        </td></tr>
+                    </table>
+                </td></tr>
+
+                <!-- Title -->
+                <tr><td style="padding: 12px 32px 0; background: #ffffff;">
+                    <h1 style="margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 20px; font-weight: 600; color: #111827; line-height: 1.4;">{title}</h1>
+                </td></tr>
+
+                <!-- Message Body -->
+                <tr><td style="padding: 16px 32px 24px; background: #ffffff;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr><td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color: #374151; line-height: 1.7;">
+                            {message}
+                        </td></tr>
+                        {metadata}
+                    </table>
+                </td></tr>
+
+                <!-- Footer -->
+                <tr><td style="padding: 16px 32px; background: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                            <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #9ca3af;">Sent by Temps &middot; Self-hosted PaaS</td>
+                            <td align="right" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #9ca3af;">{priority} priority</td>
+                        </tr>
+                    </table>
+                </td></tr>
+            </table>
+        </td></tr>
+    </table>
+</body>
+</html>"#,
+            title = notification.title,
+            timestamp = notification.timestamp.format("%b %d, %Y at %H:%M UTC"),
+            accent_color = accent_color,
+            bg_color = bg_color,
+            icon = icon,
+            label = label,
+            message = message_html,
+            metadata = metadata_html,
+            priority = notification.priority,
+        )
+    }
+
+    async fn email_health_check(&self) -> Result<bool> {
         if let Some(mailer) = &self.mailer {
             let test_email = Message::builder()
                 .from(

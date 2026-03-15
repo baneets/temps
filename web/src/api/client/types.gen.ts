@@ -239,6 +239,21 @@ export type AggregatedBucketsResponse = {
 
 export type AggregationLevel = 'events' | 'sessions' | 'visitors';
 
+export type AlertRuleResponse = {
+    cooldown_minutes: number;
+    created_at: string;
+    enabled: boolean;
+    environment_filter?: number | null;
+    error_level_filter?: string | null;
+    id: number;
+    name: string;
+    notification_priority: string;
+    project_id: number;
+    trigger_config: unknown;
+    trigger_type: string;
+    updated_at: string;
+};
+
 export type AnalyticsMetrics = {
     average_visit_duration: number;
     bounce_rate: number;
@@ -1110,6 +1125,35 @@ export type CopyBlobRequest = {
      * Destination pathname
      */
     toPathname: string;
+};
+
+export type CreateAlertRuleRequest = {
+    /**
+     * Minimum minutes between notifications for same rule+group
+     */
+    cooldown_minutes?: number;
+    enabled?: boolean;
+    /**
+     * Optional environment ID to filter alerts
+     */
+    environment_filter?: number | null;
+    /**
+     * Optional error type/level filter
+     */
+    error_level_filter?: string | null;
+    name: string;
+    /**
+     * Notification priority: Low, Normal, High, Critical
+     */
+    notification_priority?: string;
+    /**
+     * Trigger-specific configuration (e.g., {"count": 100, "window_minutes": 60} for frequency)
+     */
+    trigger_config?: unknown;
+    /**
+     * Trigger type: new_issue, regression, frequency, new_user, user_count, status_change
+     */
+    trigger_type: string;
 };
 
 export type CreateApiKeyRequest = {
@@ -3088,12 +3132,22 @@ export type EnvironmentResponse = {
     created_at: number;
     current_deployment_id?: number | null;
     deployment_config?: null | DeploymentConfig;
+    /**
+     * Estimated time (epoch millis) when the environment will go to sleep
+     * based on last activity + idle timeout. NULL when sleeping or on-demand disabled.
+     */
+    estimated_sleep_at?: number | null;
     id: number;
     /**
      * Indicates if this is a preview environment (auto-created per branch)
      * For preview environments, 'branch' contains the feature branch name
      */
     is_preview: boolean;
+    /**
+     * Last proxied request timestamp (epoch millis) for on-demand environments.
+     * NULL when on-demand is disabled or no traffic has been received yet.
+     */
+    last_activity_at?: number | null;
     main_url: string;
     name: string;
     project_id: number;
@@ -3752,6 +3806,10 @@ export type ExternalServiceDetails = {
 export type ExternalServiceInfo = {
     connection_info?: string | null;
     created_at: string;
+    /**
+     * Error message from failed initialization.
+     */
+    error_message?: string | null;
     id: number;
     /**
      * Cluster members (empty for standalone services).
@@ -7754,6 +7812,18 @@ export type ResourceLimitsResponse = {
 };
 
 /**
+ * Request body for retrying a failed cluster initialization.
+ */
+export type RetryClusterRequest = {
+    /**
+     * Cluster member specifications (same format as create).
+     * If omitted, the original member configuration is reconstructed from
+     * the preserved service_members records.
+     */
+    members?: Array<ClusterMemberRequest>;
+};
+
+/**
  * Risk level for a migration step
  */
 export type RiskLevel = 'none' | 'low' | 'medium' | 'high' | 'critical';
@@ -9493,6 +9563,17 @@ export type UnsupportedFeature = {
      * Why it can't be migrated
      */
     reason: string;
+};
+
+export type UpdateAlertRuleRequest = {
+    cooldown_minutes?: number | null;
+    enabled?: boolean | null;
+    environment_filter?: number | null;
+    error_level_filter?: string | null;
+    name?: string | null;
+    notification_priority?: string | null;
+    trigger_config?: unknown;
+    trigger_type?: string | null;
 };
 
 export type UpdateApiKeyRequest = {
@@ -16542,6 +16623,39 @@ export type GetServiceEnvironmentVariableResponses = {
 };
 
 export type GetServiceEnvironmentVariableResponse = GetServiceEnvironmentVariableResponses[keyof GetServiceEnvironmentVariableResponses];
+
+export type RetryClusterData = {
+    body: RetryClusterRequest;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/retry';
+};
+
+export type RetryClusterErrors = {
+    /**
+     * Service is not a failed cluster
+     */
+    400: unknown;
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RetryClusterResponses = {
+    /**
+     * Cluster retry initiated
+     */
+    200: ExternalServiceInfo;
+};
+
+export type RetryClusterResponse = RetryClusterResponses[keyof RetryClusterResponses];
 
 export type StartServiceData = {
     body?: never;
@@ -24149,6 +24263,178 @@ export type DeployFromStaticResponses = {
 };
 
 export type DeployFromStaticResponse = DeployFromStaticResponses[keyof DeployFromStaticResponses];
+
+export type ListAlertRulesData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules';
+};
+
+export type ListAlertRulesErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListAlertRulesResponses = {
+    /**
+     * List of alert rules
+     */
+    200: Array<AlertRuleResponse>;
+};
+
+export type ListAlertRulesResponse = ListAlertRulesResponses[keyof ListAlertRulesResponses];
+
+export type CreateAlertRuleData = {
+    body: CreateAlertRuleRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules';
+};
+
+export type CreateAlertRuleErrors = {
+    /**
+     * Validation error
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateAlertRuleResponses = {
+    /**
+     * Alert rule created
+     */
+    201: AlertRuleResponse;
+};
+
+export type CreateAlertRuleResponse = CreateAlertRuleResponses[keyof CreateAlertRuleResponses];
+
+export type DeleteAlertRuleData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alert rule ID
+         */
+        rule_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules/{rule_id}';
+};
+
+export type DeleteAlertRuleErrors = {
+    /**
+     * Alert rule not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type DeleteAlertRuleResponses = {
+    /**
+     * Alert rule deleted
+     */
+    204: void;
+};
+
+export type DeleteAlertRuleResponse = DeleteAlertRuleResponses[keyof DeleteAlertRuleResponses];
+
+export type GetAlertRuleData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alert rule ID
+         */
+        rule_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules/{rule_id}';
+};
+
+export type GetAlertRuleErrors = {
+    /**
+     * Alert rule not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetAlertRuleResponses = {
+    /**
+     * Alert rule details
+     */
+    200: AlertRuleResponse;
+};
+
+export type GetAlertRuleResponse = GetAlertRuleResponses[keyof GetAlertRuleResponses];
+
+export type UpdateAlertRuleData = {
+    body: UpdateAlertRuleRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alert rule ID
+         */
+        rule_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/error-alert-rules/{rule_id}';
+};
+
+export type UpdateAlertRuleErrors = {
+    /**
+     * Validation error
+     */
+    400: unknown;
+    /**
+     * Alert rule not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateAlertRuleResponses = {
+    /**
+     * Alert rule updated
+     */
+    200: AlertRuleResponse;
+};
+
+export type UpdateAlertRuleResponse = UpdateAlertRuleResponses[keyof UpdateAlertRuleResponses];
 
 export type GetErrorDashboardStatsData = {
     body?: never;

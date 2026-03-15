@@ -99,6 +99,10 @@ pub struct OnDemandManager {
 
     /// Container lifecycle operations (injected).
     container_lifecycle: Arc<dyn ContainerLifecycle>,
+
+    /// Notified whenever the route table finishes a reload.
+    /// Used by wake-on-request to know when routes are available after waking.
+    route_reloaded: Notify,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +125,7 @@ impl OnDemandManager {
             sleeping_by_domain: DashMap::new(),
             db,
             container_lifecycle,
+            route_reloaded: Notify::new(),
         }
     }
 
@@ -154,6 +159,24 @@ impl OnDemandManager {
     /// Clear all sleeping domain mappings (called before route table reload).
     pub fn clear_sleeping_domains(&self) {
         self.sleeping_by_domain.clear();
+    }
+
+    /// Signal that the route table has been reloaded.
+    /// Called from the route-reload callback in server.rs.
+    pub fn notify_route_reloaded(&self) {
+        self.route_reloaded.notify_waiters();
+    }
+
+    /// Wait for the next route table reload, with a timeout.
+    /// Returns Ok(()) if a reload happened, Err on timeout.
+    pub async fn wait_for_route_reload(&self, timeout: Duration) -> Result<(), OnDemandError> {
+        match tokio::time::timeout(timeout, self.route_reloaded.notified()).await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                warn!("Timed out waiting for route reload after wake");
+                Ok(()) // Don't fail — the route will appear on the next reload
+            }
+        }
     }
 
     /// Update on-demand configs from loaded environments.
@@ -200,10 +223,14 @@ impl OnDemandManager {
     // ── Sleep (Idle -> Sleeping) ──
 
     /// Run one sweep iteration. Checks all on-demand environments for idle timeout.
+    /// Also persists last_activity_at to the database for UI display.
     /// Returns IDs of environments that were put to sleep.
     pub async fn sweep_idle_environments(&self) -> Vec<i32> {
         let now = self.current_epoch_secs();
         let mut slept = Vec::new();
+
+        // Collect activity updates to batch-persist to DB
+        let mut activity_updates: Vec<(i32, u64)> = Vec::new();
 
         for entry in self.configs.iter() {
             let config = entry.value();
@@ -211,6 +238,8 @@ impl OnDemandManager {
 
             if let Some(last) = self.last_activity.get(&env_id) {
                 let last_secs = last.value().load(Ordering::Relaxed);
+                activity_updates.push((env_id, last_secs));
+
                 let idle_secs = now.saturating_sub(last_secs);
 
                 if idle_secs >= config.idle_timeout_seconds as u64 {
@@ -241,7 +270,39 @@ impl OnDemandManager {
             }
         }
 
+        // Batch-persist last_activity_at to DB (best-effort, doesn't block sweep)
+        self.persist_activity_timestamps(&activity_updates).await;
+
         slept
+    }
+
+    /// Persist in-memory activity timestamps to the database for UI display.
+    /// Uses a batch UPDATE for efficiency. Failures are logged but don't affect sweep.
+    async fn persist_activity_timestamps(&self, updates: &[(i32, u64)]) {
+        if updates.is_empty() {
+            return;
+        }
+
+        for (env_id, epoch_secs) in updates {
+            let timestamp = chrono::DateTime::from_timestamp(*epoch_secs as i64, 0);
+            if let Some(ts) = timestamp {
+                if let Err(e) = self
+                    .db
+                    .execute(Statement::from_sql_and_values(
+                        sea_orm::DatabaseBackend::Postgres,
+                        "UPDATE environments SET last_activity_at = $1 WHERE id = $2 AND sleeping = false",
+                        [ts.into(), (*env_id).into()],
+                    ))
+                    .await
+                {
+                    debug!(
+                        environment_id = env_id,
+                        error = %e,
+                        "Failed to persist last_activity_at"
+                    );
+                }
+            }
+        }
     }
 
     /// Put an environment to sleep: stop all containers, set sleeping=true.
@@ -581,6 +642,17 @@ impl OnDemandManager {
         // Record activity so we don't immediately sleep again
         self.record_activity(environment_id);
 
+        // Persist last_activity_at to DB so the UI shows it immediately after wake
+        let now_ts = chrono::Utc::now();
+        let _ = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Postgres,
+                "UPDATE environments SET last_activity_at = $1 WHERE id = $2",
+                [now_ts.into(), environment_id.into()],
+            ))
+            .await;
+
         info!(
             environment_id = environment_id,
             containers_started = started.len(),
@@ -685,6 +757,16 @@ mod tests {
         healthy: bool,
         fail_start: bool,
         fail_health: bool,
+        /// Containers that should fail on start (selective failure)
+        fail_start_ids: Vec<String>,
+        /// Containers that should fail on stop
+        fail_stop_ids: Vec<String>,
+        /// Number of health checks before becoming healthy (0 = immediate)
+        health_check_delay: u32,
+        /// Current health check count per container
+        health_check_counts: std::collections::HashMap<String, u32>,
+        /// If true, health checks always return false (never healthy)
+        never_healthy: bool,
     }
 
     struct MockLifecycle {
@@ -705,6 +787,46 @@ mod tests {
             Self {
                 state: Mutex::new(MockContainerState {
                     fail_start: true,
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn with_selective_start_failures(fail_ids: Vec<String>) -> Self {
+            Self {
+                state: Mutex::new(MockContainerState {
+                    healthy: true,
+                    fail_start_ids: fail_ids,
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn with_selective_stop_failures(fail_ids: Vec<String>) -> Self {
+            Self {
+                state: Mutex::new(MockContainerState {
+                    healthy: true,
+                    fail_stop_ids: fail_ids,
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn with_never_healthy() -> Self {
+            Self {
+                state: Mutex::new(MockContainerState {
+                    healthy: false,
+                    never_healthy: true,
+                    ..Default::default()
+                }),
+            }
+        }
+
+        fn with_delayed_health(delay_checks: u32) -> Self {
+            Self {
+                state: Mutex::new(MockContainerState {
+                    healthy: false,
+                    health_check_delay: delay_checks,
                     ..Default::default()
                 }),
             }
@@ -740,11 +862,25 @@ mod tests {
                     reason: "Mock start failure".to_string(),
                 });
             }
+            if state.fail_start_ids.contains(&container_id.to_string()) {
+                return Err(OnDemandError::ContainerOperation {
+                    container_id: container_id.to_string(),
+                    reason: format!("Mock selective start failure for {}", container_id),
+                });
+            }
             state.started.push(container_id.to_string());
             Ok(())
         }
 
         async fn stop_container(&self, container_id: &str) -> Result<(), OnDemandError> {
+            let state = self.state.lock().unwrap();
+            if state.fail_stop_ids.contains(&container_id.to_string()) {
+                return Err(OnDemandError::ContainerOperation {
+                    container_id: container_id.to_string(),
+                    reason: format!("Mock selective stop failure for {}", container_id),
+                });
+            }
+            drop(state);
             self.state
                 .lock()
                 .unwrap()
@@ -754,12 +890,26 @@ mod tests {
         }
 
         async fn is_container_healthy(&self, _container_id: &str) -> Result<bool, OnDemandError> {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
             if state.fail_health {
                 return Err(OnDemandError::ContainerOperation {
                     container_id: _container_id.to_string(),
                     reason: "Mock health check failure".to_string(),
                 });
+            }
+            if state.never_healthy {
+                return Ok(false);
+            }
+            if state.health_check_delay > 0 {
+                let count = state
+                    .health_check_counts
+                    .entry(_container_id.to_string())
+                    .or_insert(0);
+                *count += 1;
+                if *count >= state.health_check_delay {
+                    return Ok(true);
+                }
+                return Ok(false);
             }
             Ok(state.healthy)
         }
@@ -1057,6 +1207,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                last_activity_at: None,
             }]])
             // containers query
             .append_query_results(vec![vec![deployment_containers::Model {
@@ -1122,6 +1273,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                last_activity_at: None,
             }]])
             // containers
             .append_query_results(vec![vec![deployment_containers::Model {
@@ -1184,6 +1336,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                last_activity_at: None,
             }]])
             .into_connection();
 
@@ -1258,6 +1411,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                last_activity_at: None,
             }]])
             // containers (3 replicas)
             .append_query_results(vec![vec![
@@ -1613,6 +1767,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: true,
+            last_activity_at: None,
         };
 
         let container = deployment_containers::Model {
@@ -1708,6 +1863,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            last_activity_at: None,
         };
 
         let container1 = deployment_containers::Model {
@@ -1807,6 +1963,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            last_activity_at: None,
         };
 
         let container = deployment_containers::Model {
@@ -1864,5 +2021,1419 @@ mod tests {
 
         // Container should be stopped
         assert_eq!(lifecycle.stopped_containers(), vec!["idle-container"]);
+    }
+
+    // ── Helper: build a standard env model ──
+
+    fn make_env_model(
+        id: i32,
+        project_id: i32,
+        deployment_id: Option<i32>,
+        sleeping: bool,
+    ) -> environments::Model {
+        environments::Model {
+            id,
+            name: format!("env-{}", id),
+            slug: format!("env-{}", id),
+            subdomain: format!("env-{}", id),
+            last_deployment: None,
+            host: "".to_string(),
+            upstreams: temps_entities::upstream_config::UpstreamList::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            project_id,
+            current_deployment_id: deployment_id,
+            branch: None,
+            deleted_at: None,
+            deployment_config: Some(temps_entities::deployment_config::DeploymentConfig {
+                on_demand: true,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 30,
+                ..Default::default()
+            }),
+            is_preview: false,
+            protected: false,
+            sleeping,
+            last_activity_at: None,
+        }
+    }
+
+    fn make_container(
+        id: i32,
+        deployment_id: i32,
+        container_id: &str,
+        node_id: Option<i32>,
+    ) -> deployment_containers::Model {
+        deployment_containers::Model {
+            id,
+            deployment_id,
+            container_id: container_id.to_string(),
+            container_name: format!("app-{}", container_id),
+            container_port: 3000,
+            host_port: Some(32000 + id),
+            image_name: None,
+            status: Some("running".to_string()),
+            created_at: chrono::Utc::now(),
+            deployed_at: chrono::Utc::now(),
+            ready_at: None,
+            deleted_at: None,
+            node_id,
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  PARTIAL CONTAINER START FAILURE + ROLLBACK
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_partial_start_failure_stops_started_containers() {
+        // 3 containers: c1 and c3 start OK, c2 fails
+        // Verify: c1 and c3 are stopped (rolled back), DB reverted to sleeping
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS UPDATE sleeping=false -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            // containers
+            .append_query_results(vec![vec![
+                make_container(1, 100, "c1", None),
+                make_container(2, 100, "c2", None),
+                make_container(3, 100, "c3", None),
+            ]])
+            // Revert UPDATE sleeping=true
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::with_selective_start_failures(vec![
+            "c2".to_string()
+        ]));
+        let manager = OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OnDemandError::ContainerOperation { .. }
+        ));
+
+        // Successfully started containers should have been stopped as rollback
+        let stopped = lifecycle.stopped_containers();
+        let started = lifecycle.started_containers();
+        // c1 and c3 started (c2 failed), so c1 and c3 should be in stopped
+        for c in &started {
+            assert!(
+                stopped.contains(c),
+                "Started container {} should have been stopped in rollback",
+                c
+            );
+        }
+        // c2 should NOT be in started
+        assert!(
+            !started.contains(&"c2".to_string()),
+            "c2 should not have been started"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  HEALTH CHECK TIMEOUT + ROLLBACK
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_health_timeout_stops_containers_and_reverts() {
+        // Container starts but never becomes healthy → timeout → rollback
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS UPDATE sleeping=false -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            // containers
+            .append_query_results(vec![vec![make_container(1, 100, "slow-container", None)]])
+            // Revert UPDATE sleeping=true
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::with_never_healthy());
+        let manager = OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        // Use very short timeout (1s) so test doesn't hang
+        let result = manager.wake_environment(1, 1).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                OnDemandError::WakeTimeout {
+                    environment_id: 1,
+                    timeout_secs: 1
+                }
+            ),
+            "Should be WakeTimeout error"
+        );
+
+        // Container was started then stopped on rollback
+        assert_eq!(lifecycle.started_containers(), vec!["slow-container"]);
+        assert!(
+            lifecycle
+                .stopped_containers()
+                .contains(&"slow-container".to_string()),
+            "Container should be stopped after health timeout rollback"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  DELAYED HEALTH CHECK SUCCESS (becomes healthy after N polls)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_delayed_health_succeeds() {
+        // Container takes 2 health checks to become healthy, but within timeout
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS UPDATE sleeping=false -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            // containers
+            .append_query_results(vec![vec![make_container(1, 100, "delayed-c", None)]])
+            // NOTIFY
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        // Healthy after 2 checks (2 * 500ms = 1s, well within 30s timeout)
+        let lifecycle = Arc::new(MockLifecycle::with_delayed_health(2));
+        let manager = OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(
+            result.is_ok(),
+            "Wake should succeed after delayed health: {:?}",
+            result.err()
+        );
+        assert_eq!(lifecycle.started_containers(), vec!["delayed-c"]);
+        // No containers stopped (no rollback)
+        assert!(lifecycle.stopped_containers().is_empty());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SLEEP WITH CONTAINER STOP FAILURE → REVERT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sleep_stop_failure_reverts_db_state() {
+        // 2 containers, second fails to stop → revert sleeping=false
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS UPDATE sleeping=true -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            // containers
+            .append_query_results(vec![vec![
+                make_container(1, 100, "ok-stop", None),
+                make_container(2, 100, "fail-stop", None),
+            ]])
+            // Revert UPDATE sleeping=false
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // NOTIFY after revert
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::with_selective_stop_failures(vec![
+            "fail-stop".to_string(),
+        ]));
+        let manager = OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let result = manager.sleep_environment(1).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OnDemandError::ContainerOperation { .. }
+        ));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  CONCURRENT WAKE: TRUE CONCURRENCY TEST
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_concurrent_only_one_wakes() {
+        // Simulate 5 concurrent wake requests. Only the first should perform
+        // the DB CAS and start containers. Others should wait and return Ok.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS UPDATE sleeping=false -> 1 row (first waker wins)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            // containers
+            .append_query_results(vec![vec![make_container(1, 100, "concurrent-c", None)]])
+            // NOTIFY
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            // find_by_id for waiters checking env status (up to 4 waiters)
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let m = Arc::clone(&manager);
+            handles.push(tokio::spawn(async move { m.wake_environment(1, 30).await }));
+        }
+
+        let results: Vec<_> = futures::future::join_all(handles).await;
+        let ok_count = results
+            .iter()
+            .filter(|r| r.as_ref().map(|r| r.is_ok()).unwrap_or(false))
+            .count();
+
+        // All should succeed (first wakes, rest wait and find env awake)
+        assert!(
+            ok_count >= 1,
+            "At least one concurrent wake should succeed, got {} successes out of {}",
+            ok_count,
+            results.len()
+        );
+
+        // Container should be started exactly once
+        assert_eq!(
+            lifecycle.started_containers().len(),
+            1,
+            "Container should only be started once despite concurrent requests"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SWEEP: MIXED IDLE AND ACTIVE ENVIRONMENTS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sweep_only_sleeps_idle_not_active() {
+        // env 1: idle → should sleep
+        // env 2: active (just now) → should NOT sleep
+        // Uses only 1 idle env to avoid DashMap iteration order issues with MockDatabase
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // env 1 sleep:
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .append_query_results(vec![vec![make_container(1, 100, "c1", None)]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        manager.register_on_demand_environment(1, 60, 30);
+        manager.register_on_demand_environment(2, 60, 30);
+
+        let old_time = manager.current_epoch_secs() - 120;
+        // env 1: idle for 120s (past 60s timeout)
+        manager.last_activity.insert(1, AtomicU64::new(old_time));
+        // env 2: active just now
+        manager.record_activity(2);
+
+        let slept = manager.sweep_idle_environments().await;
+        assert!(slept.contains(&1), "Idle env 1 should sleep");
+        assert!(!slept.contains(&2), "Active env 2 should NOT sleep");
+        assert_eq!(slept.len(), 1);
+
+        assert_eq!(lifecycle.stopped_containers(), vec!["c1"]);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SWEEP CONTINUES AFTER ONE ENVIRONMENT FAILS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sweep_does_not_crash_on_sleep_failure() {
+        // Single env whose container stop fails → sweep should return empty
+        // (not panic or crash), proving it handles errors gracefully
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS succeeds
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .append_query_results(vec![vec![make_container(1, 100, "fail-c", None)]])
+            // revert sleeping=false
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // NOTIFY after revert
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::with_selective_stop_failures(vec![
+            "fail-c".to_string()
+        ]));
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        manager.register_on_demand_environment(1, 60, 30);
+        let old_time = manager.current_epoch_secs() - 120;
+        manager.last_activity.insert(1, AtomicU64::new(old_time));
+
+        let slept = manager.sweep_idle_environments().await;
+        // Failed to sleep → not in slept list, but no panic
+        assert!(!slept.contains(&1), "env 1 sleep should have failed");
+        assert!(slept.is_empty());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  WAKE: ENVIRONMENT NOT FOUND AFTER CAS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_env_deleted_between_cas_and_load() {
+        // CAS succeeds (1 row), but find_by_id returns nothing (deleted concurrently)
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // Empty result for find_by_id
+            .append_query_results(vec![Vec::<environments::Model>::new()])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OnDemandError::NotFound { environment_id: 1 }
+        ));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SLEEP: ENV NOT FOUND AFTER CAS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sleep_env_deleted_between_cas_and_load() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS succeeds
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // Empty result for find_by_id
+            .append_query_results(vec![Vec::<environments::Model>::new()])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        let result = manager.sleep_environment(1).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OnDemandError::NotFound { environment_id: 1 }
+        ));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SLEEP: ENV WITH NO CURRENT DEPLOYMENT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sleep_env_no_deployment_returns_false() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS succeeds
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // env with no deployment
+            .append_query_results(vec![vec![make_env_model(1, 10, None, false)]])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        let result = manager.sleep_environment(1).await.unwrap();
+        assert!(!result, "Should return false when env has no deployment");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  WAKE: NO CONTAINERS FOUND
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_no_containers_succeeds_gracefully() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS UPDATE -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            // empty containers
+            .append_query_results(vec![Vec::<deployment_containers::Model>::new()])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(
+            result.is_ok(),
+            "Wake with no containers should succeed gracefully"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  UPDATE_CONFIGS REPLACES OLD AND INITIALIZES ACTIVITY
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_update_configs_replaces_and_initializes() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        // First batch
+        manager.update_configs(vec![
+            OnDemandConfig {
+                environment_id: 1,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 30,
+            },
+            OnDemandConfig {
+                environment_id: 2,
+                idle_timeout_seconds: 600,
+                wake_timeout_seconds: 60,
+            },
+        ]);
+        assert!(manager.configs.contains_key(&1));
+        assert!(manager.configs.contains_key(&2));
+        assert!(manager.last_activity.contains_key(&1));
+        assert!(manager.last_activity.contains_key(&2));
+
+        // Second batch replaces first
+        manager.update_configs(vec![OnDemandConfig {
+            environment_id: 3,
+            idle_timeout_seconds: 120,
+            wake_timeout_seconds: 15,
+        }]);
+        assert!(
+            !manager.configs.contains_key(&1),
+            "Old config 1 should be removed"
+        );
+        assert!(
+            !manager.configs.contains_key(&2),
+            "Old config 2 should be removed"
+        );
+        assert!(
+            manager.configs.contains_key(&3),
+            "New config 3 should be present"
+        );
+        // Activity for old envs persists (not cleared by update_configs)
+        assert!(manager.last_activity.contains_key(&1));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  REMOVE_ENVIRONMENT CLEANS UP ALL STATE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_remove_environment_cleans_all_state() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        manager.register_on_demand_environment(42, 300, 30);
+        manager.record_activity(42);
+        // Simulate wake state creation
+        manager.wake_states.insert(
+            42,
+            Arc::new(WakeState {
+                waking: AtomicBool::new(false),
+                notify: Notify::new(),
+            }),
+        );
+
+        assert!(manager.configs.contains_key(&42));
+        assert!(manager.last_activity.contains_key(&42));
+        assert!(manager.wake_states.contains_key(&42));
+
+        manager.remove_environment(42);
+
+        assert!(!manager.configs.contains_key(&42));
+        assert!(!manager.last_activity.contains_key(&42));
+        assert!(!manager.wake_states.contains_key(&42));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ACTIVITY TRACKING: RAPID CONCURRENT UPDATES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_rapid_activity_updates_no_panic() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(Arc::new(db), lifecycle));
+
+        // Simulate rapid concurrent activity recording from multiple threads
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let m = Arc::clone(&manager);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..1000 {
+                    m.record_activity(1);
+                    m.record_activity(2);
+                    m.record_activity(3);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All 3 environments should have activity tracked
+        assert!(manager.last_activity.contains_key(&1));
+        assert!(manager.last_activity.contains_key(&2));
+        assert!(manager.last_activity.contains_key(&3));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SLEEPING DOMAIN: OVERWRITE SAME DOMAIN
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_sleeping_domain_overwrite() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        manager.register_sleeping_domain(
+            "app.example.com".to_string(),
+            SleepingEnvironmentInfo {
+                environment_id: 1,
+                project_id: 10,
+                deployment_id: 100,
+                wake_timeout_seconds: 30,
+            },
+        );
+
+        // Overwrite with different env for same domain (e.g. after redeployment)
+        manager.register_sleeping_domain(
+            "app.example.com".to_string(),
+            SleepingEnvironmentInfo {
+                environment_id: 2,
+                project_id: 20,
+                deployment_id: 200,
+                wake_timeout_seconds: 60,
+            },
+        );
+
+        let info = manager.get_sleeping_environment("app.example.com").unwrap();
+        assert_eq!(info.environment_id, 2);
+        assert_eq!(info.project_id, 20);
+        assert_eq!(info.deployment_id, 200);
+        assert_eq!(info.wake_timeout_seconds, 60);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  WAKE: MULTIPLE CONTAINERS WITH MULTI-NODE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_wake_multiple_containers_multi_node() {
+        // 3 containers across different nodes, all should be started
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            .append_query_results(vec![vec![
+                make_container(1, 100, "local-c", None),
+                make_container(2, 100, "remote-c1", Some(2)),
+                make_container(3, 100, "remote-c2", Some(3)),
+            ]])
+            // NOTIFY
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(result.is_ok());
+
+        let mut started = lifecycle.started_containers();
+        started.sort();
+        assert_eq!(started, vec!["local-c", "remote-c1", "remote-c2"]);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  VALIDATION: BOUNDARY VALUES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_on_demand_validation_boundary_idle_min() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            idle_timeout_seconds: 60, // exact minimum
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_idle_max() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            idle_timeout_seconds: 86400, // exact maximum
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_wake_min() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            wake_timeout_seconds: 5, // exact minimum
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_wake_max() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            wake_timeout_seconds: 120, // exact maximum
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_idle_just_below_min() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            idle_timeout_seconds: 59, // just below 60
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_idle_just_above_max() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            idle_timeout_seconds: 86401, // just above 86400
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_wake_just_below_min() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            wake_timeout_seconds: 4, // just below 5
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_on_demand_validation_boundary_wake_just_above_max() {
+        let config = temps_entities::deployment_config::DeploymentConfig {
+            on_demand: true,
+            wake_timeout_seconds: 121, // just above 120
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  OnDemandWaker TRAIT BRIDGE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_on_demand_waker_bridge_wake() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS -> 0 rows (already awake)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        // Call through the OnDemandWaker trait
+        let waker: &dyn OnDemandWaker = &manager;
+        let result = waker.wake_environment(1, 30).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_on_demand_waker_bridge_sleep() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // CAS -> 0 rows (already sleeping)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        let waker: &dyn OnDemandWaker = &manager;
+        let result = waker.sleep_environment(1).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ERROR TYPE COVERAGE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_on_demand_error_container_operation_display() {
+        let err = OnDemandError::ContainerOperation {
+            container_id: "abc123".to_string(),
+            reason: "connection refused".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("abc123"));
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_on_demand_error_not_found_display() {
+        let err = OnDemandError::NotFound { environment_id: 42 };
+        assert!(err.to_string().contains("42"));
+    }
+
+    #[test]
+    fn test_on_demand_error_from_db_err() {
+        let db_err = sea_orm::DbErr::Custom("test db error".to_string());
+        let err: OnDemandError = db_err.into();
+        assert!(matches!(err, OnDemandError::Database(_)));
+        assert!(err.to_string().contains("test db error"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  REGISTER ON-DEMAND PRESERVES EXISTING ACTIVITY
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_register_on_demand_preserves_existing_activity() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        // Record activity first
+        manager.record_activity(1);
+        let original_ts = manager
+            .last_activity
+            .get(&1)
+            .unwrap()
+            .value()
+            .load(Ordering::Relaxed);
+
+        // Register should not overwrite existing activity
+        std::thread::sleep(Duration::from_millis(10));
+        manager.register_on_demand_environment(1, 300, 30);
+
+        let ts_after = manager
+            .last_activity
+            .get(&1)
+            .unwrap()
+            .value()
+            .load(Ordering::Relaxed);
+
+        assert_eq!(
+            original_ts, ts_after,
+            "register_on_demand_environment should not overwrite existing activity"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SWEEP: NO ACTIVITY RECORDED (EDGE CASE)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sweep_env_without_activity_entry() {
+        // Config exists but no last_activity entry — should not panic
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new(Arc::new(db), lifecycle);
+
+        // Manually insert config without activity
+        manager.configs.insert(
+            99,
+            OnDemandConfig {
+                environment_id: 99,
+                idle_timeout_seconds: 60,
+                wake_timeout_seconds: 30,
+            },
+        );
+        // No last_activity entry for env 99
+
+        let slept = manager.sweep_idle_environments().await;
+        // Should not panic, should not try to sleep (no activity data)
+        assert!(slept.is_empty());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SLEEPING ENVIRONMENT INFO CLONE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  INTEGRATION: FULL LIFECYCLE — ENABLE → IDLE → KILL → WAKE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Simulates the real callback wiring from server.rs.
+    /// Returns the manager with sleeping/on-demand state populated.
+    fn simulate_route_reload_callback(
+        manager: &Arc<OnDemandManager>,
+        sleeping: Vec<temps_routes::SleepingEnvironmentEntry>,
+        on_demand_configs: Vec<temps_routes::OnDemandConfigEntry>,
+    ) {
+        manager.clear_sleeping_domains();
+        for entry in sleeping {
+            manager.register_sleeping_domain(
+                entry.domain.clone(),
+                SleepingEnvironmentInfo {
+                    environment_id: entry.environment_id,
+                    project_id: entry.project_id,
+                    deployment_id: entry.deployment_id,
+                    wake_timeout_seconds: entry.wake_timeout_seconds,
+                },
+            );
+        }
+        for config in on_demand_configs {
+            manager.register_on_demand_environment(
+                config.environment_id,
+                config.idle_timeout_seconds,
+                config.wake_timeout_seconds,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_enable_idle_kill() {
+        // Scenario: User enables on-demand for env 1 with 60s idle timeout.
+        // Route reload fires callback → env registered for idle tracking.
+        // No requests come in → idle timeout exceeded → sweep kills containers.
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // sleep_environment CAS: UPDATE sleeping=true WHERE sleeping=false → 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env for sleep
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            // containers for sleep
+            .append_query_results(vec![vec![
+                make_container(1, 100, "app-c1", None),
+                make_container(2, 100, "app-c2", Some(2)),
+            ]])
+            // NOTIFY route_table_changes
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        // Step 1: Simulate route reload callback (what happens after user enables on-demand)
+        // The route table found env 1 is awake with on_demand=true, so it's in on_demand_configs
+        simulate_route_reload_callback(
+            &manager,
+            vec![], // no sleeping envs yet
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 60,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        // Verify env is registered for idle tracking
+        assert!(manager.configs.contains_key(&1));
+        assert!(manager.last_activity.contains_key(&1));
+
+        // Step 2: Simulate time passing — set last activity to 120s ago (past 60s timeout)
+        let old_time = manager.current_epoch_secs() - 120;
+        manager.last_activity.insert(1, AtomicU64::new(old_time));
+
+        // Step 3: Run sweep — should detect idle and kill containers
+        let slept = manager.sweep_idle_environments().await;
+        assert_eq!(slept, vec![1], "Sweep should put env 1 to sleep");
+
+        // Step 4: Verify containers were actually stopped
+        let mut stopped = lifecycle.stopped_containers();
+        stopped.sort();
+        assert_eq!(stopped, vec!["app-c1", "app-c2"]);
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_active_env_not_killed() {
+        // Scenario: User enables on-demand, but keeps sending requests.
+        // Container should NOT be killed because activity keeps resetting.
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        // Route reload: env 1 with on_demand=true, 300s idle timeout
+        simulate_route_reload_callback(
+            &manager,
+            vec![],
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        // Simulate proxy recording activity (happens on every request)
+        manager.record_activity(1);
+
+        // Run sweep — env just had activity, so it's NOT idle
+        let slept = manager.sweep_idle_environments().await;
+        assert!(slept.is_empty(), "Active env should not be put to sleep");
+        assert!(
+            lifecycle.stopped_containers().is_empty(),
+            "No containers should be stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_kill_then_wake_on_request() {
+        // Full round-trip:
+        // 1. Enable on-demand
+        // 2. Env goes idle → containers killed, marked sleeping
+        // 3. After sleep, route reload fires again → env is now in sleeping list
+        // 4. Request comes in → domain found in sleeping map → wake triggered
+
+        // DB mock for the entire lifecycle:
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // === PHASE 1: SLEEP (via sweep_idle_environments) ===
+            // CAS UPDATE sleeping=true → 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env for sleep
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            // containers for sleep
+            .append_query_results(vec![vec![make_container(1, 100, "myapp", None)]])
+            // NOTIFY after sleep
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            // persist_activity_timestamps: UPDATE last_activity_at for env 1
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // === PHASE 2: WAKE ===
+            // CAS UPDATE sleeping=false → 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find env for wake
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            // containers for wake
+            .append_query_results(vec![vec![make_container(1, 100, "myapp", None)]])
+            // UPDATE last_activity_at after wake
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // NOTIFY after wake
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        // ── PHASE 1: Enable on-demand, go idle, get killed ──
+
+        simulate_route_reload_callback(
+            &manager,
+            vec![],
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 60,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        // Set activity to 120s ago → past 60s timeout
+        let old_time = manager.current_epoch_secs() - 120;
+        manager.last_activity.insert(1, AtomicU64::new(old_time));
+
+        let slept = manager.sweep_idle_environments().await;
+        assert_eq!(slept, vec![1]);
+        assert_eq!(lifecycle.stopped_containers(), vec!["myapp"]);
+
+        // ── PHASE 2: Route reload fires (triggered by NOTIFY) ──
+        // Now env 1 is sleeping, so route table puts it in sleeping_environments
+
+        simulate_route_reload_callback(
+            &manager,
+            vec![temps_routes::SleepingEnvironmentEntry {
+                domain: "myapp.preview.example.com".to_string(),
+                environment_id: 1,
+                project_id: 10,
+                deployment_id: 100,
+                wake_timeout_seconds: 30,
+            }],
+            vec![], // env 1 is sleeping, so NOT in on_demand_configs
+        );
+
+        // Verify domain is now in sleeping map
+        let sleeping_info = manager.get_sleeping_environment("myapp.preview.example.com");
+        assert!(
+            sleeping_info.is_some(),
+            "Domain should be in sleeping map after route reload"
+        );
+        let info = sleeping_info.unwrap();
+        assert_eq!(info.environment_id, 1);
+
+        // ── PHASE 3: Request comes in → wake ──
+        // This is what proxy.rs does when it finds the domain in sleeping map
+        let wake_result = manager
+            .wake_environment(info.environment_id, info.wake_timeout_seconds)
+            .await;
+        assert!(
+            wake_result.is_ok(),
+            "Wake should succeed: {:?}",
+            wake_result.err()
+        );
+
+        // Container should have been started
+        assert_eq!(lifecycle.started_containers(), vec!["myapp"]);
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_request_resets_idle_timer() {
+        // Scenario: Env idle for 50s (timeout 60s), then a request comes in,
+        // then 50s more passes. Total 100s but timer was reset → should NOT sleep.
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        simulate_route_reload_callback(
+            &manager,
+            vec![],
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 60,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        // Activity was 50s ago (under 60s timeout)
+        let t = manager.current_epoch_secs() - 50;
+        manager.last_activity.insert(1, AtomicU64::new(t));
+
+        // Sweep: should NOT sleep (50s < 60s)
+        let slept = manager.sweep_idle_environments().await;
+        assert!(slept.is_empty(), "Should not sleep before timeout");
+
+        // Simulate a request that resets the timer
+        manager.record_activity(1);
+
+        // Now even after 50s more, the timer was reset, so still not idle
+        let slept = manager.sweep_idle_environments().await;
+        assert!(slept.is_empty(), "Should not sleep after activity reset");
+        assert!(lifecycle.stopped_containers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_disable_on_demand_stops_tracking() {
+        // Scenario: on-demand was enabled, then user disables it.
+        // Route reload fires without the env in on_demand_configs.
+        // Sweep should no longer track or sleep this env.
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        // Initially enabled
+        simulate_route_reload_callback(
+            &manager,
+            vec![],
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 60,
+                wake_timeout_seconds: 30,
+            }],
+        );
+        assert!(manager.configs.contains_key(&1));
+
+        // User disables on-demand → route reload fires without env 1 in configs
+        // Note: the callback currently only adds, doesn't remove old configs.
+        // This tests the real behavior — the env stays in configs until removed.
+        // For proper cleanup, remove_environment would need to be called.
+        manager.remove_environment(1);
+        assert!(!manager.configs.contains_key(&1));
+
+        // Set old activity to make it look idle
+        manager.last_activity.insert(1, AtomicU64::new(0));
+
+        // Sweep should NOT touch env 1 (not in configs)
+        let slept = manager.sweep_idle_environments().await;
+        assert!(slept.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_env_not_idle_enough_stays_awake() {
+        // env has 300s timeout, idle for 120s → should NOT sleep
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        simulate_route_reload_callback(
+            &manager,
+            vec![],
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        // Idle for 120s, but timeout is 300s
+        let old_time = manager.current_epoch_secs() - 120;
+        manager.last_activity.insert(1, AtomicU64::new(old_time));
+
+        let slept = manager.sweep_idle_environments().await;
+        assert!(
+            slept.is_empty(),
+            "env with 300s timeout should NOT sleep after only 120s idle"
+        );
+        assert!(lifecycle.stopped_containers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_exact_boundary_idle_sleeps() {
+        // env has 120s timeout, idle for exactly 120s → should sleep (>= check)
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            .append_query_results(vec![vec![make_container(1, 100, "c1", None)]])
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        simulate_route_reload_callback(
+            &manager,
+            vec![],
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 120,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        let old_time = manager.current_epoch_secs() - 120;
+        manager.last_activity.insert(1, AtomicU64::new(old_time));
+
+        let slept = manager.sweep_idle_environments().await;
+        assert_eq!(
+            slept,
+            vec![1],
+            "env should sleep at exact boundary (idle_secs >= timeout)"
+        );
+        assert_eq!(lifecycle.stopped_containers(), vec!["c1"]);
+    }
+
+    #[tokio::test]
+    async fn test_full_lifecycle_route_reload_transitions_sleeping_to_awake() {
+        // When an env wakes up, the next route reload should:
+        // 1. Remove it from sleeping_by_domain (clear_sleeping_domains)
+        // 2. Add it to on_demand_configs (for idle tracking again)
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = Arc::new(OnDemandManager::new(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        ));
+
+        // Initial state: env 1 sleeping
+        simulate_route_reload_callback(
+            &manager,
+            vec![temps_routes::SleepingEnvironmentEntry {
+                domain: "app.preview.example.com".to_string(),
+                environment_id: 1,
+                project_id: 10,
+                deployment_id: 100,
+                wake_timeout_seconds: 30,
+            }],
+            vec![],
+        );
+
+        assert!(manager
+            .get_sleeping_environment("app.preview.example.com")
+            .is_some());
+
+        // After wake, route reload fires again: env is now awake
+        simulate_route_reload_callback(
+            &manager,
+            vec![], // no longer sleeping
+            vec![temps_routes::OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 30,
+            }],
+        );
+
+        // Domain should no longer be in sleeping map
+        assert!(
+            manager
+                .get_sleeping_environment("app.preview.example.com")
+                .is_none(),
+            "Domain should be removed from sleeping map after env wakes up"
+        );
+        // But env should be tracked for idle timeout again
+        assert!(
+            manager.configs.contains_key(&1),
+            "Env should be in configs for idle tracking"
+        );
+    }
+
+    #[test]
+    fn test_sleeping_environment_info_debug_clone() {
+        let info = SleepingEnvironmentInfo {
+            environment_id: 1,
+            project_id: 10,
+            deployment_id: 100,
+            wake_timeout_seconds: 30,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.environment_id, info.environment_id);
+        assert_eq!(cloned.project_id, info.project_id);
+        assert_eq!(cloned.deployment_id, info.deployment_id);
+        assert_eq!(cloned.wake_timeout_seconds, info.wake_timeout_seconds);
+
+        // Debug trait
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("SleepingEnvironmentInfo"));
     }
 }

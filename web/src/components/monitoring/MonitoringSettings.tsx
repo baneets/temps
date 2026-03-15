@@ -42,6 +42,7 @@ import {
   type RouteAlertsFormData,
   type WeeklyDigestFormData,
 } from './schemas'
+import { AlertRulesManagement } from './AlertRulesManagement'
 import { ResourceMonitoring } from './ResourceMonitoring'
 
 interface AlertComponentProps<T> {
@@ -863,7 +864,7 @@ function WeeklyDigest({
 export function MonitoringSettings() {
   const navigate = useNavigate()
   const { section } = useParams()
-  const currentSection = section || 'project'
+  const currentSection = section || 'resources'
 
   const { data: preferences, isLoading } = useQuery({
     queryKey: ['preferences'],
@@ -878,13 +879,9 @@ export function MonitoringSettings() {
   }
 
   const settingsSections = [
-    { id: 'resources', label: 'Resources' },
-    { id: 'project', label: 'Project Health' },
-    { id: 'domains', label: 'Domains' },
-    { id: 'backups', label: 'Backups' },
-    { id: 'routes', label: 'Routes' },
+    { id: 'resources', label: 'Health' },
+    { id: 'alerts', label: 'Alerts' },
     { id: 'notifications', label: 'Notifications' },
-    { id: 'digest', label: 'Weekly Digest' },
   ] as const
 
   const handleProjectSave = async (data: ProjectAlertsFormData) => {
@@ -1045,7 +1042,7 @@ export function MonitoringSettings() {
   }
 
   const renderContent = () => {
-    // Resources tab doesn't depend on preferences
+    // Health tab doesn't depend on preferences
     if (currentSection === 'resources') {
       return <ResourceMonitoring />
     }
@@ -1128,44 +1125,51 @@ export function MonitoringSettings() {
     }
 
     switch (currentSection) {
-      case 'project':
+      case 'resources':
+        return <ResourceMonitoring /> // handled by early return above, kept for switch exhaustiveness
+      case 'alerts':
         return (
-          <ProjectAlerts
-            onSave={handleProjectSave}
-            defaultValues={projectDefaults}
-          />
-        )
-      case 'domains':
-        return (
-          <DomainAlerts
-            onSave={handleDomainSave}
-            defaultValues={domainDefaults}
-          />
-        )
-      case 'backups':
-        return (
-          <BackupAlerts
-            onSave={handleBackupSave}
-            defaultValues={backupDefaults}
-          />
-        )
-      case 'routes':
-        return (
-          <RouteAlerts onSave={handleRouteSave} defaultValues={routeDefaults} />
+          <div className="space-y-8">
+            <Card className="p-6">
+              <ProjectAlerts
+                onSave={handleProjectSave}
+                defaultValues={projectDefaults}
+              />
+            </Card>
+            <Card className="p-6">
+              <DomainAlerts
+                onSave={handleDomainSave}
+                defaultValues={domainDefaults}
+              />
+            </Card>
+            <Card className="p-6">
+              <BackupAlerts
+                onSave={handleBackupSave}
+                defaultValues={backupDefaults}
+              />
+            </Card>
+            <Card className="p-6">
+              <RouteAlerts onSave={handleRouteSave} defaultValues={routeDefaults} />
+            </Card>
+            <AlertRulesManagement />
+          </div>
         )
       case 'notifications':
         return (
-          <NotificationSettings
-            onSave={handleNotificationSave}
-            defaultValues={notificationDefaults}
-          />
-        )
-      case 'digest':
-        return (
-          <WeeklyDigest
-            onSave={handleDigestSave}
-            defaultValues={digestDefaults}
-          />
+          <div className="space-y-8">
+            <Card className="p-6">
+              <NotificationSettings
+                onSave={handleNotificationSave}
+                defaultValues={notificationDefaults}
+              />
+            </Card>
+            <Card className="p-6">
+              <WeeklyDigest
+                onSave={handleDigestSave}
+                defaultValues={digestDefaults}
+              />
+            </Card>
+          </div>
         )
       default:
         return null
@@ -1218,11 +1222,7 @@ export function MonitoringSettings() {
       </div>
 
       {/* Content - Shared between mobile and desktop */}
-      {currentSection === 'resources' ? (
-        renderContent()
-      ) : (
-        <Card className="p-6">{renderContent()}</Card>
-      )}
+      {renderContent()}
     </div>
   )
 }

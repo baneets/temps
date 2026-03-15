@@ -13,8 +13,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Box, Loader2, Moon, Play, Settings } from 'lucide-react'
-import { useCallback } from 'react'
+import { Box, Clock, Loader2, Moon, Play, Settings } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 interface EnvironmentSidebarProps {
@@ -40,6 +40,36 @@ export function EnvironmentSidebar({
 }: EnvironmentSidebarProps) {
   const queryClient = useQueryClient()
   const isOnDemand = environment.deployment_config?.onDemand ?? false
+
+  // Countdown to sleep
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!isOnDemand || environment.sleeping || !environment.estimated_sleep_at) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [isOnDemand, environment.sleeping, environment.estimated_sleep_at])
+
+  const sleepCountdown = useMemo(() => {
+    if (!environment.estimated_sleep_at || environment.sleeping) return null
+    const remaining = Math.max(0, Math.floor((environment.estimated_sleep_at - now) / 1000))
+    if (remaining <= 0) return 'any moment'
+    const minutes = Math.floor(remaining / 60)
+    const seconds = remaining % 60
+    if (minutes > 0) return `${minutes}m ${seconds}s`
+    return `${seconds}s`
+  }, [environment.estimated_sleep_at, environment.sleeping, now])
+
+  const lastActivityLabel = useMemo(() => {
+    if (!environment.last_activity_at) return null
+    const ago = Math.floor((now - environment.last_activity_at) / 1000)
+    if (ago < 5) return 'just now'
+    if (ago < 60) return `${ago}s ago`
+    const minutes = Math.floor(ago / 60)
+    if (minutes < 60) return `${minutes}m ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours}h ago`
+    return `${Math.floor(hours / 24)}d ago`
+  }, [environment.last_activity_at, now])
 
   const wakeMutation = useMutation({
     ...wakeEnvironmentMutation(),
@@ -130,7 +160,7 @@ export function EnvironmentSidebar({
               </p>
             )}
             {isOnDemand && (
-              <div className="pt-1">
+              <div className="pt-1 space-y-1.5">
                 {environment.sleeping ? (
                   <Button
                     variant="outline"
@@ -175,6 +205,22 @@ export function EnvironmentSidebar({
                     )}
                     Sleep
                   </Button>
+                )}
+                {!environment.sleeping && (lastActivityLabel || sleepCountdown) && (
+                  <div className="text-[10px] text-muted-foreground space-y-0.5 px-1">
+                    {lastActivityLabel && (
+                      <div className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        <span>Last active: {lastActivityLabel}</span>
+                      </div>
+                    )}
+                    {sleepCountdown && (
+                      <div className="flex items-center gap-1">
+                        <Moon className="h-3 w-3" />
+                        <span>Sleeps in: {sleepCountdown}</span>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             )}

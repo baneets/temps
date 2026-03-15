@@ -30,6 +30,7 @@ import { SecurityOverview } from './security/SecurityOverview'
 import { ScanDetail } from './security/ScanDetail'
 import { VulnerabilityDetailPage } from './security/VulnerabilityDetailPage'
 
+import { AlertRulesManagement } from '@/components/monitoring/AlertRulesManagement'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useAuth } from '@/contexts/AuthContext'
@@ -389,6 +390,10 @@ export function ProjectDetail() {
               <Route
                 path="errors"
                 element={<ErrorTracking project={project} />}
+              />
+              <Route
+                path="errors/alert-rules"
+                element={<AlertRulesManagement projectId={project.id} />}
               />
               <Route
                 path="errors/:errorGroupId"

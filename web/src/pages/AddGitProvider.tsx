@@ -16,7 +16,7 @@ export function AddGitProvider() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Git Sources', href: '/git-providers' },
+      { label: 'Git Providers', href: '/git-providers' },
       { label: 'Add Provider' },
     ])
   }, [setBreadcrumbs])

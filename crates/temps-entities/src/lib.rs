@@ -71,6 +71,8 @@ pub mod settings;
 pub mod visitor;
 
 // Error tracking entities
+pub mod error_alert_fires;
+pub mod error_alert_rules;
 pub mod error_events;
 pub mod error_groups;
 pub mod project_dsns;

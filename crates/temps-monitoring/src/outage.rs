@@ -1055,6 +1055,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            last_activity_at: None,
         }
     }
 

@@ -642,6 +642,28 @@ impl EnvironmentService {
             .await
             .map_err(|e| EnvironmentError::DatabaseConnectionError(e.to_string()))?;
 
+        // When on-demand settings change, notify the proxy to reload routes so it
+        // picks up sleeping-domain registrations and on-demand configs immediately.
+        let on_demand_changed = settings.on_demand.is_some()
+            || settings.idle_timeout_seconds.is_some()
+            || settings.wake_timeout_seconds.is_some();
+        if on_demand_changed {
+            if let Err(e) = self
+                .db
+                .execute(sea_orm::Statement::from_string(
+                    sea_orm::DatabaseBackend::Postgres,
+                    "NOTIFY route_table_changes".to_string(),
+                ))
+                .await
+            {
+                tracing::error!(
+                    error = %e,
+                    environment_id = env_id,
+                    "Failed to send route_table_changes NOTIFY after on-demand settings update"
+                );
+            }
+        }
+
         Ok(updated_environment)
     }
 
@@ -972,6 +994,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            last_activity_at: None,
         };
 
         // Query sequence:
@@ -1054,6 +1077,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping,
+            last_activity_at: None,
         }
     }
 

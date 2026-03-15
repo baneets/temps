@@ -1335,6 +1335,103 @@ impl ExternalServiceManager {
         }
     }
 
+    /// Build runtime environment variables for a cluster service.
+    ///
+    /// For cluster topology, the standard `ExternalService::get_runtime_env_vars()` returns
+    /// empty because the cluster service doesn't have access to the database to look up
+    /// member addresses. This method queries `service_members` and builds the multi-host
+    /// connection string with `target_session_attrs=read-write` for automatic failover.
+    ///
+    /// Returns `None` if the service is not a cluster (caller should fall through to
+    /// the standard `get_runtime_env_vars` path).
+    async fn build_cluster_env_vars(
+        &self,
+        service: &external_services::Model,
+        parameters: &HashMap<String, serde_json::Value>,
+    ) -> Result<Option<HashMap<String, String>>, ExternalServiceError> {
+        if service.topology != "cluster" {
+            return Ok(None);
+        }
+
+        let members = self.get_service_members(service.id).await?;
+        let params_str = Self::params_to_strings(parameters);
+
+        // Extract credentials from parameters
+        let username = params_str
+            .get("username")
+            .cloned()
+            .unwrap_or_else(|| "postgres".to_string());
+        let password = params_str.get("password").cloned().unwrap_or_default();
+        let database = params_str
+            .get("database")
+            .cloned()
+            .unwrap_or_else(|| "postgres".to_string());
+
+        // Build multi-host connection string from running data nodes (not monitor)
+        let data_nodes: Vec<&ServiceMemberInfo> = members
+            .iter()
+            .filter(|m| m.role != "monitor" && m.status == "running")
+            .collect();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("POSTGRES_USER".to_string(), username.clone());
+        env_vars.insert("POSTGRES_PASSWORD".to_string(), password.clone());
+        env_vars.insert("POSTGRES_DB".to_string(), database.clone());
+
+        if data_nodes.is_empty() {
+            // No running data nodes — still return credentials but no URL
+            warn!(
+                "Cluster service {} has no running data nodes, POSTGRES_URL will be empty",
+                service.id
+            );
+            return Ok(Some(env_vars));
+        }
+
+        let hosts: Vec<String> = data_nodes
+            .iter()
+            .map(|n| {
+                let host = n
+                    .hostname
+                    .clone()
+                    .unwrap_or_else(|| n.container_name.clone());
+                let port = n.port.unwrap_or(5432);
+                format!("{}:{}", host, port)
+            })
+            .collect();
+
+        let encoded_password = urlencoding::encode(&password);
+
+        let postgres_url = format!(
+            "postgresql://{}:{}@{}/{}?target_session_attrs=read-write",
+            urlencoding::encode(&username),
+            encoded_password,
+            hosts.join(","),
+            database,
+        );
+
+        let host_list = data_nodes
+            .iter()
+            .map(|n| {
+                n.hostname
+                    .clone()
+                    .unwrap_or_else(|| n.container_name.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let port = data_nodes
+            .first()
+            .and_then(|n| n.port)
+            .unwrap_or(5432)
+            .to_string();
+
+        env_vars.insert("POSTGRES_URL".to_string(), postgres_url);
+        env_vars.insert("POSTGRES_HOST".to_string(), host_list);
+        env_vars.insert("POSTGRES_PORT".to_string(), port);
+
+        Ok(Some(env_vars))
+    }
+
     async fn get_service_parameters(
         &self,
         service_id_val: i32,
@@ -2606,6 +2703,11 @@ impl ExternalServiceManager {
         })?;
         let parameters = self.get_service_parameters(service_id_val).await?;
 
+        // Cluster services: use multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
         let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         // Convert parameters to strings for the service
@@ -2651,14 +2753,20 @@ impl ExternalServiceManager {
             });
         }
 
-        // Create service instance
-        let service_instance = self.create_service_instance(service.name.clone(), service_type);
         let parameters = self.get_service_parameters(service_id_val).await?;
+
+        // Cluster services: build multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
+        // Standalone: delegate to the service instance's get_runtime_env_vars
+        let service_instance = self.create_service_instance(service.name.clone(), service_type);
         let service_config = ServiceConfig {
             name: service.name.clone(),
             service_type,
             version: service.version,
-            parameters: serde_json::to_value(parameters).map_err(|e| {
+            parameters: serde_json::to_value(&parameters).map_err(|e| {
                 ExternalServiceError::InternalError {
                     reason: format!("Failed to serialize parameters: {}", e),
                 }
@@ -2861,6 +2969,12 @@ impl ExternalServiceManager {
         }
 
         let parameters = self.get_service_parameters(service_id_val).await?;
+
+        // Cluster services: use multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars);
+        }
+
         let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         // Convert parameters to strings for the service
@@ -3216,9 +3330,16 @@ impl ExternalServiceManager {
 
         let mut all_vars = HashMap::new();
 
-        // Get basic environment variables
-        if !options.include_runtime {
-            // Basic localhost env vars
+        // Cluster services: use multi-host env vars from service_members
+        let is_cluster = service.topology == "cluster";
+        if is_cluster {
+            if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+                all_vars.extend(cluster_vars);
+            }
+        }
+
+        // Get basic environment variables (standalone only)
+        if !is_cluster && !options.include_runtime {
             let basic_vars = service_instance
                 .get_environment_variables(&params_str)
                 .map_err(|e| ExternalServiceError::InternalError {
@@ -3227,8 +3348,8 @@ impl ExternalServiceManager {
             all_vars.extend(basic_vars);
         }
 
-        // Get Docker-specific variables if requested
-        if options.include_docker {
+        // Get Docker-specific variables if requested (standalone only)
+        if !is_cluster && options.include_docker {
             if let (Some(proj_id), Some(_env_id)) = (project_id, environment_id) {
                 // Verify service is linked to project
                 let link_exists = project_services::Entity::find()
@@ -3256,8 +3377,8 @@ impl ExternalServiceManager {
             }
         }
 
-        // Get runtime variables if requested
-        if options.include_runtime {
+        // Get runtime variables if requested (standalone only — clusters already populated above)
+        if !is_cluster && options.include_runtime {
             if let (Some(proj_id), Some(env_id)) = (project_id, environment_id) {
                 // Verify service is linked to project
                 let link_exists = project_services::Entity::find()
@@ -3368,6 +3489,11 @@ impl ExternalServiceManager {
         })?;
         let parameters = self.get_service_parameters(service_id_val).await?;
 
+        // Cluster services: use multi-host env vars from service_members
+        if let Some(cluster_vars) = self.build_cluster_env_vars(&service, &parameters).await? {
+            return Ok(cluster_vars.keys().cloned().collect());
+        }
+
         let service_instance = self.create_service_instance(service.name.clone(), service_type);
 
         // Convert parameters to strings for the service
@@ -3396,16 +3522,20 @@ impl ExternalServiceManager {
         })?;
         let parameters = self.get_service_parameters(service_id_val).await?;
 
-        let service_instance = self.create_service_instance(service.name.clone(), service_type);
-
-        // Convert parameters to strings for the service
-        let params_str = Self::params_to_strings(&parameters);
-
-        let env_vars = service_instance
-            .get_environment_variables(&params_str)
-            .map_err(|e| ExternalServiceError::InternalError {
-                reason: format!("Failed to get environment variables: {}", e),
-            })?;
+        // Cluster services: use multi-host env vars from service_members
+        let env_vars = if let Some(cluster_vars) =
+            self.build_cluster_env_vars(&service, &parameters).await?
+        {
+            cluster_vars
+        } else {
+            let service_instance = self.create_service_instance(service.name.clone(), service_type);
+            let params_str = Self::params_to_strings(&parameters);
+            service_instance
+                .get_environment_variables(&params_str)
+                .map_err(|e| ExternalServiceError::InternalError {
+                    reason: format!("Failed to get environment variables: {}", e),
+                })?
+        };
 
         // Mask sensitive values based on variable names
         let masked_vars = env_vars
