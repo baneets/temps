@@ -39,7 +39,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { ArrowUpRight, PlusIcon, RefreshCw } from 'lucide-react'
+import { ArrowUpRight, Loader2, PlusIcon, RefreshCw } from 'lucide-react'
 import { EmptyPlaceholder } from '@/components/ui/empty-placeholder'
 
 const ITEMS_PER_PAGE = 10
@@ -63,6 +63,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
   const {
     data: deploymentsData,
     isLoading,
+    isFetching,
     error,
     refetch,
   } = useQuery({
@@ -424,8 +425,9 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
             size="icon"
             className="h-7 w-7"
             onClick={() => refetch()}
+            disabled={isFetching}
           >
-            <RefreshCw className="h-3.5 w-3.5" />
+            {isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
         <Button onClick={handleOpenNewDeployment}>

@@ -9,7 +9,7 @@ use temps_query_postgres::PostgresSource;
 use temps_query_redis::RedisSource;
 use temps_query_s3::S3Source;
 use tokio::sync::RwLock;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 use crate::externalsvc::mongodb::MongodbInputConfig;
 use crate::externalsvc::postgres::PostgresInputConfig;
@@ -33,6 +33,95 @@ impl QueryService {
             external_service_manager,
             connections: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// The read-only user name used for explorer/query connections.
+    const EXPLORER_USER: &'static str = "temps_explorer";
+
+    /// Ensure a read-only `temps_explorer` user exists on the PostgreSQL instance
+    /// and has SELECT-only access to the target database schemas.
+    /// Connects as the admin user, creates the role if missing, and grants permissions.
+    /// Returns the password for the explorer user.
+    async fn ensure_readonly_user(
+        host: &str,
+        port: u16,
+        admin_user: &str,
+        admin_password: &str,
+        database: &str,
+    ) -> std::result::Result<String, DataError> {
+        // Deterministic password derived from admin password so it's stable across calls
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        format!("temps_explorer_{}_{}", host, admin_password).hash(&mut hasher);
+        let explorer_password = format!("te_{:x}", hasher.finish());
+
+        // Connect as admin to the target database
+        let pg_source = PostgresSource::connect(host, port, admin_user, admin_password, database)
+            .await
+            .map_err(|e| {
+                DataError::ConnectionFailed(format!(
+                    "Failed to connect as admin to provision read-only user: {}",
+                    e
+                ))
+            })?;
+
+        // Create the role if it doesn't exist (role is cluster-wide)
+        let create_role_sql = format!(
+            "DO $$ BEGIN \
+               IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{}') THEN \
+                 CREATE ROLE {} LOGIN PASSWORD '{}'; \
+               ELSE \
+                 ALTER ROLE {} PASSWORD '{}'; \
+               END IF; \
+             END $$",
+            Self::EXPLORER_USER,
+            Self::EXPLORER_USER,
+            explorer_password.replace('\'', "''"),
+            Self::EXPLORER_USER,
+            explorer_password.replace('\'', "''"),
+        );
+
+        pg_source.execute_raw(&create_role_sql).await.map_err(|e| {
+            DataError::QueryFailed(format!("Failed to create read-only role: {}", e))
+        })?;
+
+        // Grant CONNECT on the database
+        let grant_connect = format!(
+            "GRANT CONNECT ON DATABASE \"{}\" TO {}",
+            database.replace('"', "\"\""),
+            Self::EXPLORER_USER,
+        );
+        pg_source
+            .execute_raw(&grant_connect)
+            .await
+            .map_err(|e| DataError::QueryFailed(format!("Failed to grant CONNECT: {}", e)))?;
+
+        // Grant USAGE on all schemas and SELECT on all tables
+        let grant_sql = format!(
+            "DO $$ DECLARE s record; BEGIN \
+               FOR s IN SELECT schema_name FROM information_schema.schemata \
+                 WHERE schema_name NOT IN ('information_schema') LOOP \
+                 EXECUTE format('GRANT USAGE ON SCHEMA %I TO {}', s.schema_name); \
+                 EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA %I TO {}', s.schema_name); \
+                 EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT ON TABLES TO {}', s.schema_name); \
+               END LOOP; \
+             END $$",
+            Self::EXPLORER_USER,
+            Self::EXPLORER_USER,
+            Self::EXPLORER_USER,
+        );
+        pg_source.execute_raw(&grant_sql).await.map_err(|e| {
+            DataError::QueryFailed(format!("Failed to grant SELECT privileges: {}", e))
+        })?;
+
+        info!(
+            "Read-only explorer user '{}' provisioned for database '{}'",
+            Self::EXPLORER_USER,
+            database
+        );
+
+        Ok(explorer_password)
     }
 
     /// Get or create a connection to a specific database
@@ -118,13 +207,37 @@ impl QueryService {
                     }
                 };
 
-                // Connect to the specified database (not the configured one)
-                let pg_source = PostgresSource::connect(
+                let admin_password = config.password.unwrap_or_default();
+
+                // Ensure a read-only explorer user exists, then connect with it.
+                // Falls back to admin user if provisioning fails (e.g. managed DB
+                // without CREATE ROLE permission).
+                let (connect_user, connect_password) = match Self::ensure_readonly_user(
                     &host,
                     port,
                     &config.username,
-                    &config.password.unwrap_or_default(),
-                    database, // Use the requested database, not config.database
+                    &admin_password,
+                    database,
+                )
+                .await
+                {
+                    Ok(explorer_password) => (Self::EXPLORER_USER.to_string(), explorer_password),
+                    Err(e) => {
+                        warn!(
+                            "Could not provision read-only user for service {}: {}. Falling back to admin user.",
+                            service_id, e
+                        );
+                        (config.username.clone(), admin_password)
+                    }
+                };
+
+                // Connect to the specified database with the explorer (or fallback admin) user
+                let pg_source = PostgresSource::connect(
+                    &host,
+                    port,
+                    &connect_user,
+                    &connect_password,
+                    database,
                 )
                 .await
                 .map_err(|e| {

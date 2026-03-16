@@ -1319,11 +1319,28 @@ impl ExternalServiceManager {
             .find(|m| m.role == "primary" && m.status == "running");
 
         if let Some(primary) = primary {
-            let host = primary
-                .hostname
-                .clone()
-                .unwrap_or_else(|| primary.container_name.clone());
             let port = primary.port.unwrap_or(5432) as u16;
+
+            // For local members (no node_id), the hostname is a Docker-internal IP
+            // (e.g. 192.168.1.x) which is unreachable from the host. Since the
+            // container port is mapped to the same host port, use localhost instead.
+            // For remote members, use the node's private address.
+            let host = if let Some(node_id) = primary.node_id {
+                // Remote node — resolve via node's private address
+                let node = nodes::Entity::find_by_id(node_id)
+                    .one(self.db.as_ref())
+                    .await?;
+                node.map(|n| n.private_address).unwrap_or_else(|| {
+                    primary
+                        .hostname
+                        .clone()
+                        .unwrap_or_else(|| primary.container_name.clone())
+                })
+            } else {
+                // Local node — use localhost since Docker maps host_port:container_port
+                "localhost".to_string()
+            };
+
             Ok(Some((host, port)))
         } else {
             Err(ExternalServiceError::InternalError {
