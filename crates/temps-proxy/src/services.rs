@@ -144,9 +144,10 @@ impl UpstreamResolver for UpstreamResolverImpl {
         }
 
         // No route found - route to console address as default
-        debug!(
-            "No route found in table for host: {}, routing to console",
-            host
+        warn!(
+            "No route found in table for host: {}, routing to console (route_count={})",
+            host,
+            self.route_table.len()
         );
         let peer = Box::new(HttpPeer::new(
             self.server_config.console_address.clone(),

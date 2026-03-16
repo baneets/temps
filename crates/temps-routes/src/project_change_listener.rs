@@ -10,7 +10,7 @@
 use crate::route_table::CachedPeerTable;
 use anyhow::Result;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 /// Listens for project route changes and updates the route cache
 pub struct ProjectChangeListener {
@@ -51,35 +51,70 @@ impl ProjectChangeListener {
         let queue = self.queue.clone();
 
         let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            // Don't pile up missed ticks if a reload takes longer than 10s
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the first immediate tick (routes already loaded by RouteTableListener)
+            interval.tick().await;
+
             loop {
-                match pg_listener.recv().await {
-                    Ok(notification) => {
-                        Self::handle_project_change_static(
-                            &peer_table,
-                            &queue,
-                            notification.payload(),
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        error!("Error receiving project change notification: {}", e);
-
-                        // Attempt to reconnect after error
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-                        match PgListener::connect_with(&pool).await {
-                            Ok(mut new_listener) => {
-                                if let Err(e) = new_listener.listen("project_route_change").await {
-                                    error!("Failed to re-subscribe to project_route_change: {}", e);
-                                } else {
-                                    pg_listener = new_listener;
-                                    info!("Reconnected to project_route_change listener");
-                                }
+                tokio::select! {
+                    notification = pg_listener.recv() => {
+                        match notification {
+                            Ok(n) => {
+                                // Handle the specific change payload for logging
+                                Self::handle_project_change_static(
+                                    &peer_table,
+                                    &queue,
+                                    n.payload(),
+                                )
+                                .await;
+                                // handle_project_change_static already calls load_routes + sends event
+                                continue;
                             }
                             Err(e) => {
-                                error!("Failed to reconnect project_route_change listener: {}", e);
+                                error!("Error receiving project change notification: {}", e);
+
+                                // Attempt to reconnect after error
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                                match PgListener::connect_with(&pool).await {
+                                    Ok(mut new_listener) => {
+                                        if let Err(e) = new_listener.listen("project_route_change").await {
+                                            error!("Failed to re-subscribe to project_route_change: {}", e);
+                                        } else {
+                                            pg_listener = new_listener;
+                                            info!("Reconnected to project_route_change listener");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to reconnect project_route_change listener: {}", e);
+                                    }
+                                }
+                                // Fall through to periodic reload below
                             }
                         }
+                    }
+                    _ = interval.tick() => {
+                        debug!("Periodic project route sync triggered");
+                    }
+                }
+
+                // Periodic self-healing reload (timer tick or error recovery)
+                if let Err(e) = peer_table.load_routes().await {
+                    error!("Failed to reload routes during periodic sync: {}", e);
+                } else {
+                    let route_count = peer_table.len();
+                    debug!("Project route table synchronized ({} entries)", route_count);
+
+                    let event =
+                        temps_core::Job::RouteTableUpdated(temps_core::RouteTableUpdatedJob {
+                            environment_id: None,
+                            deployment_id: None,
+                            route_count,
+                        });
+                    if let Err(e) = queue.send(event).await {
+                        error!("Failed to send RouteTableUpdated event: {}", e);
                     }
                 }
             }

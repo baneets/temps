@@ -809,12 +809,46 @@ impl MarkDeploymentCompleteJob {
                         }
                     }
                 }
+                Ok(Ok(Job::RouteTableUpdated(ref update))) if update.environment_id.is_none() => {
+                    // Periodic sync or generic route reload — environment_id is None.
+                    // Still worth checking if our route is now live.
+                    debug!(
+                        "Generic RouteTableUpdated event ({} routes) — checking DB for environment {} deployment {}",
+                        update.route_count, environment_id, deployment_id
+                    );
+                    match Self::verify_environment_deployment(db, environment_id, deployment_id)
+                        .await
+                    {
+                        Ok(true) => {
+                            info!(
+                                "Route confirmed via periodic sync for environment {} deployment {}",
+                                environment_id, deployment_id
+                            );
+                            return Ok(());
+                        }
+                        Ok(false) => {
+                            // Not yet — keep waiting
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!("DB verification failed after generic event: {} — continuing to wait", e);
+                            continue;
+                        }
+                    }
+                }
                 Ok(Ok(_)) => {
-                    // Different job or different environment — keep waiting
+                    // Different job type — keep waiting
                     continue;
                 }
                 Ok(Err(e)) => {
-                    return Err(format!("Queue receive error: {}", e));
+                    // Broadcast receiver lagged — messages were dropped but the channel
+                    // is still alive. Log and continue; the periodic reload or fallback
+                    // NOTIFY will produce a fresh event we can catch.
+                    warn!(
+                        "Queue receiver lagged while waiting for route confirmation (environment={}, deployment={}): {}",
+                        environment_id, deployment_id, e
+                    );
+                    continue;
                 }
                 Err(_) => {
                     // timeout_at expired — loop back to check deadline and request reload

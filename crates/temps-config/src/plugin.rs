@@ -56,10 +56,15 @@ impl TempsPlugin for ConfigPlugin {
         let config_service = context.require_service::<ConfigService>();
         let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
 
+        // Get the route table refresher if available (it's registered by the proxy subsystem)
+        let route_table_refresher =
+            context.get_service::<dyn temps_core::route_table::RouteTableRefresher>();
+
         // Create SettingsState
         let settings_state = Arc::new(SettingsState {
             config_service,
             audit_service,
+            route_table_refresher,
         });
 
         // Configure routes with the state

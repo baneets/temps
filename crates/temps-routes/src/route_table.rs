@@ -1093,7 +1093,7 @@ impl CachedPeerTable {
             );
         }
 
-        debug!(
+        info!(
             "Route table loaded with {} total entries ({} HTTP exact, {} TLS exact, {} HTTP wildcards, {} TLS wildcards)",
             route_count, http_routes_count, tls_routes_count, http_wildcards_count, tls_wildcards_count
         );
@@ -1159,6 +1159,15 @@ impl CachedPeerTable {
     }
 }
 
+#[temps_core::async_trait::async_trait]
+impl temps_core::route_table::RouteTableRefresher for CachedPeerTable {
+    async fn refresh_routes(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        self.load_routes().await?;
+        let count = self.len() + self.http_routes.read().len() + self.tls_routes.read().len();
+        Ok(count)
+    }
+}
+
 /// Listens for PostgreSQL notifications and automatically reloads the route table
 pub struct RouteTableListener {
     peer_table: Arc<CachedPeerTable>,
@@ -1201,62 +1210,75 @@ impl RouteTableListener {
             "Started listening for route table changes on PostgreSQL channel 'route_table_changes'"
         );
 
-        // Spawn background task to handle notifications
+        // Spawn background task that combines:
+        // 1. PG NOTIFY events for immediate reloads (low latency)
+        // 2. Periodic sync every 10 seconds as self-healing fallback
+        //
+        // This ensures the route table stays in sync even if NOTIFY events
+        // are lost (connection drops, reconnect windows, parse failures).
         let peer_table = self.peer_table.clone();
         let queue = self.queue.clone();
         let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(10));
+            // Don't pile up missed ticks if a reload takes longer than 10s
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the first immediate tick (we already loaded above)
+            interval.tick().await;
+
             loop {
-                match listener.recv().await {
-                    Ok(notification) => {
-                        debug!(
-                            "Received route table change notification: {}",
-                            notification.payload()
-                        );
+                tokio::select! {
+                    notification = listener.recv() => {
+                        match notification {
+                            Ok(n) => {
+                                debug!(
+                                    "Received route table change notification: {}",
+                                    n.payload()
+                                );
+                            }
+                            Err(e) => {
+                                error!("Listener error: {}", e);
 
-                        debug!("Route table synchronizing...");
+                                // Attempt to reconnect after error
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-                        if let Err(e) = peer_table.load_routes().await {
-                            error!("Failed to reload routes: {}", e);
-                        } else {
-                            let route_count = peer_table.len();
-                            debug!("Route table synchronized ({} entries)", route_count);
-
-                            // Notify via queue that routes have been reloaded.
-                            // This channel handles generic route_table_changes
-                            // (domains, custom_routes, etc.) so we don't have
-                            // environment/deployment context — those fields are None.
-                            let event = temps_core::Job::RouteTableUpdated(
-                                temps_core::RouteTableUpdatedJob {
-                                    environment_id: None,
-                                    deployment_id: None,
-                                    route_count,
-                                },
-                            );
-                            if let Err(e) = queue.send(event).await {
-                                error!("Failed to send RouteTableUpdated event: {}", e);
+                                match PgListener::connect_with(&pool).await {
+                                    Ok(mut new_listener) => {
+                                        if let Err(e) = new_listener.listen("route_table_changes").await {
+                                            error!("Failed to re-subscribe to notifications: {}", e);
+                                        } else {
+                                            listener = new_listener;
+                                            info!("Reconnected to route table notification listener");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to reconnect listener: {}", e);
+                                        warn!("Route table updates will not be received until reconnection succeeds");
+                                    }
+                                }
+                                // Still fall through to reload routes below
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("Listener error: {}", e);
+                    _ = interval.tick() => {
+                        debug!("Periodic route table sync triggered");
+                    }
+                }
 
-                        // Attempt to reconnect after error
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                // Reload routes regardless of whether triggered by NOTIFY or timer
+                if let Err(e) = peer_table.load_routes().await {
+                    error!("Failed to reload routes: {}", e);
+                } else {
+                    let route_count = peer_table.len();
+                    debug!("Route table synchronized ({} entries)", route_count);
 
-                        match PgListener::connect_with(&pool).await {
-                            Ok(mut new_listener) => {
-                                if let Err(e) = new_listener.listen("route_table_changes").await {
-                                    error!("Failed to re-subscribe to notifications: {}", e);
-                                } else {
-                                    listener = new_listener;
-                                    info!("Reconnected to route table notification listener");
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to reconnect listener: {}", e);
-                                warn!("Route table updates will not be received until reconnection succeeds");
-                            }
-                        }
+                    let event =
+                        temps_core::Job::RouteTableUpdated(temps_core::RouteTableUpdatedJob {
+                            environment_id: None,
+                            deployment_id: None,
+                            route_count,
+                        });
+                    if let Err(e) = queue.send(event).await {
+                        error!("Failed to send RouteTableUpdated event: {}", e);
                     }
                 }
             }
