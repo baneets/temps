@@ -430,10 +430,21 @@ async fn serve_static_file(req: Request) -> Response {
                 .first_or_octet_stream()
                 .to_string();
 
+            // Hashed assets (JS/CSS bundles from Rsbuild) get aggressive caching.
+            // index.html and other non-hashed files must revalidate every time so
+            // deploying a new Temps version immediately picks up new bundle references.
+            let cache_control = if path == "index.html" || path == "/" {
+                "no-cache, no-store, must-revalidate"
+            } else if path.starts_with("static/") || path.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "public, max-age=0, must-revalidate"
+            };
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime_type)
-                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .header(header::CACHE_CONTROL, cache_control)
                 .body(Body::from(file.contents()))
                 .unwrap()
         }
