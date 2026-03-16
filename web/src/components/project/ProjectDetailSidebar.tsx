@@ -107,6 +107,10 @@ const baseNavItems: NavItem[] = [
     icon: Eye,
     subItems: [
       { title: 'Analytics', url: 'analytics' },
+      { title: 'Visitors', url: 'analytics/visitors' },
+      { title: 'Pages', url: 'analytics/pages' },
+      { title: 'Funnels', url: 'analytics/funnels' },
+      { title: 'Session Replays', url: 'analytics/replays' },
       { title: 'Uptime', url: 'monitors' },
       { title: 'Metrics', url: 'monitoring' },
       { title: 'Traces', url: 'traces' },
