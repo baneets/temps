@@ -20,16 +20,17 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ProjectConfigurator } from '@/components/project/ProjectConfigurator'
 import { RepositoryList } from '@/components/repositories/RepositoryList'
 import { TemplateList, TemplateConfigurator } from '@/components/templates'
 import { ManualProjectConfigurator } from '@/components/project/ManualProjectConfigurator'
 import type { RepositoryResponse, TemplateResponse } from '@/api/client/types.gen'
-import { GitBranch, ChevronLeft, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container } from 'lucide-react'
+import { GitBranch, ChevronLeft, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container, FolderGit2 } from 'lucide-react'
 import Github from '@/icons/Github'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
+
+type ProjectSource = 'templates' | 'browse' | 'git-url' | 'manual'
 
 /** Parsed git URL info for public repositories */
 interface ParsedGitUrl {
@@ -98,13 +99,13 @@ export function GitImportClone({
   mode = 'navigation',
   onProjectCreated,
 }: GitImportCloneProps) {
+  const [selectedSource, setSelectedSource] = useState<ProjectSource | null>(null)
   const [selectedConnection, setSelectedConnection] = useState<
     string | undefined
   >()
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateResponse | null>(null)
-  const [showManualDeploy, setShowManualDeploy] = useState(false)
   const [gitUrl, setGitUrl] = useState('')
   const [useGitUrl, setUseGitUrl] = useState(false)
   const [parsedPublicRepo, setParsedPublicRepo] = useState<ParsedGitUrl | null>(null)
@@ -234,10 +235,13 @@ export function GitImportClone({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setSelectedTemplate(null)}
+            onClick={() => {
+              setSelectedTemplate(null)
+              setSelectedSource(null)
+            }}
           >
             <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to Templates
+            Back to Create Project
           </Button>
         </div>
 
@@ -245,28 +249,6 @@ export function GitImportClone({
           template={selectedTemplate}
           onCancel={() => setSelectedTemplate(null)}
           onSuccess={onProjectCreated}
-        />
-      </div>
-    )
-  }
-
-  // Show ManualProjectConfigurator when manual deploy mode is selected
-  if (showManualDeploy) {
-    return (
-      <div className="space-y-6">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowManualDeploy(false)}
-          >
-            <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to Create Project
-          </Button>
-        </div>
-
-        <ManualProjectConfigurator
-          onCancel={() => setShowManualDeploy(false)}
         />
       </div>
     )
@@ -288,10 +270,11 @@ export function GitImportClone({
             onClick={() => {
               setSelectedRepository(null)
               setUseGitUrl(false)
+              setSelectedSource(null)
             }}
           >
             <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to {useGitUrl ? 'Git URL' : 'Repositories'}
+            Back to Create Project
           </Button>
         </div>
 
@@ -418,90 +401,192 @@ export function GitImportClone({
     }
   }
 
+  // Source selection step
+  if (!selectedSource) {
+    return (
+      <Card className="flex-1">
+        <CardHeader className="flex items-center gap-2 pb-3">
+          <GitBranch className="h-5 w-5 text-foreground" />
+          <CardTitle className="text-xl font-bold">
+            Create New Project
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-6">
+            Choose how you want to set up your project
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <button
+              onClick={() => setSelectedSource('browse')}
+              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
+                  <FolderGit2 className="h-5 w-5 text-primary" />
+                </div>
+                <div>
+                  <p className="font-semibold">Import Repository</p>
+                  <p className="text-xs text-muted-foreground">Browse your private and public repos</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
+                Select a repository from your connected Git accounts. Auto-detects framework, build settings, and sets up webhooks for automatic deploys on push.
+              </p>
+              {connections && connections.connections.length > 0 && (
+                <div className="flex items-center gap-2 pl-[52px] flex-wrap">
+                  {connections.connections.map((conn) => (
+                    <div key={conn.id} className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1">
+                      <Github className="h-3 w-3" />
+                      <span>{conn.account_name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(!connections || connections.connections.length === 0) && (
+                <p className="text-xs text-amber-500 pl-[52px]">
+                  No Git connections yet — you can add one after selecting this option.
+                </p>
+              )}
+            </button>
+
+            <button
+              onClick={() => setSelectedSource('templates')}
+              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
+                  <LayoutTemplate className="h-5 w-5 text-primary" />
+                </div>
+                <div>
+                  <p className="font-semibold">Template</p>
+                  <p className="text-xs text-muted-foreground">Start from a pre-configured starter kit</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
+                Pick from curated templates like Next.js, SaaS starters, and documentation sites. Includes build settings, environment variables, and recommended services.
+              </p>
+            </button>
+
+            <button
+              onClick={() => setSelectedSource('git-url')}
+              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
+                  <LinkIcon className="h-5 w-5 text-primary" />
+                </div>
+                <div>
+                  <p className="font-semibold">Git URL</p>
+                  <p className="text-xs text-muted-foreground">Clone from a public repository URL</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
+                Paste a public GitHub or GitLab URL to import any open-source repository. No account connection required — great for trying out open-source projects.
+              </p>
+            </button>
+
+            <button
+              onClick={() => setSelectedSource('manual')}
+              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
+            >
+              <div className="flex items-center gap-3">
+                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
+                  <Container className="h-5 w-5 text-primary" />
+                </div>
+                <div>
+                  <p className="font-semibold">Manual Deploy</p>
+                  <p className="text-xs text-muted-foreground">No Git repository needed</p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
+                Deploy a pre-built Docker image from any registry (DockerHub, GHCR, etc.) or upload a static files bundle. Ideal for CI/CD pipelines or pre-built artifacts.
+              </p>
+            </button>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  // Selected source content
   return (
     <Card className="flex-1">
       <CardHeader className="flex items-center gap-2 pb-3">
-        <GitBranch className="h-5 w-5 text-foreground" />
-        <CardTitle className="text-xl font-bold">
-          Create New Project
-        </CardTitle>
+        <div className="flex items-center gap-2 w-full">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSelectedSource(null)}
+          >
+            <ChevronLeft className="h-4 w-4 mr-1" />
+            Back
+          </Button>
+          <CardTitle className="text-xl font-bold">
+            {selectedSource === 'templates' && 'Choose a Template'}
+            {selectedSource === 'browse' && 'Import Repository'}
+            {selectedSource === 'git-url' && 'Import from Git URL'}
+            {selectedSource === 'manual' && 'Manual Deployment'}
+          </CardTitle>
+        </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <Tabs defaultValue="templates" className="w-full">
-          <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="templates">
-              <LayoutTemplate className="h-4 w-4 mr-2" />
-              Templates
-            </TabsTrigger>
-            <TabsTrigger value="browse">Browse Repositories</TabsTrigger>
-            <TabsTrigger value="git-url">
-              <LinkIcon className="h-4 w-4 mr-2" />
-              Git URL
-            </TabsTrigger>
-            <TabsTrigger value="manual">
-              <Container className="h-4 w-4 mr-2" />
-              Manual
-            </TabsTrigger>
-          </TabsList>
+        {selectedSource === 'templates' && (
+          <TemplateList
+            onTemplateSelect={setSelectedTemplate}
+            selectedTemplate={selectedTemplate}
+            showFeaturedFirst={true}
+          />
+        )}
 
-          <TabsContent value="templates" className="space-y-4 mt-4">
-            <TemplateList
-              onTemplateSelect={setSelectedTemplate}
-              selectedTemplate={selectedTemplate}
-              showFeaturedFirst={true}
-            />
-          </TabsContent>
-
-          <TabsContent value="browse" className="space-y-3 mt-4">
-            <div className="flex flex-col gap-2">
-              <Select
-                value={selectedConnection}
-                onValueChange={setSelectedConnection}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select Connection">
-                    {selectedConnection &&
-                      connections &&
-                      (() => {
-                        const selectedConn = connections.connections.find(
-                          (c) => c.id.toString() === selectedConnection
-                        )
-                        return selectedConn ? (
-                          <div className="flex items-center gap-2">
-                            <Github className="h-4 w-4" />
-                            <span className="font-medium">
-                              {selectedConn.account_name}
-                            </span>
-                            <span className="text-xs text-muted-foreground">
-                              ({selectedConn.account_type})
-                            </span>
-                          </div>
-                        ) : (
-                          'Select Connection'
-                        )
-                      })()}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {connections?.connections?.map((connection) => (
-                    <SelectItem
-                      key={connection.id}
-                      value={connection.id.toString()}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Github className="h-4 w-4" />
-                        <span className="font-medium">
-                          {connection.account_name}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          ({connection.account_type})
-                        </span>
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+        {selectedSource === 'browse' && (
+          <div className="space-y-3">
+            <Select
+              value={selectedConnection}
+              onValueChange={setSelectedConnection}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select Connection">
+                  {selectedConnection &&
+                    connections &&
+                    (() => {
+                      const selectedConn = connections.connections.find(
+                        (c) => c.id.toString() === selectedConnection
+                      )
+                      return selectedConn ? (
+                        <div className="flex items-center gap-2">
+                          <Github className="h-4 w-4" />
+                          <span className="font-medium">
+                            {selectedConn.account_name}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            ({selectedConn.account_type})
+                          </span>
+                        </div>
+                      ) : (
+                        'Select Connection'
+                      )
+                    })()}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {connections?.connections?.map((connection) => (
+                  <SelectItem
+                    key={connection.id}
+                    value={connection.id.toString()}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Github className="h-4 w-4" />
+                      <span className="font-medium">
+                        {connection.account_name}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        ({connection.account_type})
+                      </span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
             {selectedConnection && (
               <RepositoryList
@@ -513,9 +598,11 @@ export function GitImportClone({
                 compactMode={false}
               />
             )}
-          </TabsContent>
+          </div>
+        )}
 
-          <TabsContent value="git-url" className="space-y-4 mt-4">
+        {selectedSource === 'git-url' && (
+          <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="git-url">Public Repository URL</Label>
               <Input
@@ -583,52 +670,16 @@ export function GitImportClone({
               }
               return null
             })()}
-          </TabsContent>
+          </div>
+        )}
 
-          <TabsContent value="manual" className="space-y-4 mt-4">
-            <div className="space-y-4">
-              <div className="text-center py-6">
-                <Container className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                <h3 className="text-lg font-semibold mb-2">Manual Deployment</h3>
-                <p className="text-sm text-muted-foreground max-w-md mx-auto mb-4">
-                  Deploy a pre-built Docker image or static files bundle without connecting to a Git repository.
-                </p>
-                <div className="flex flex-col sm:flex-row gap-3 justify-center">
-                  <Button
-                    onClick={() => setShowManualDeploy(true)}
-                    className="gap-2"
-                  >
-                    <Container className="h-4 w-4" />
-                    Configure Manual Deployment
-                  </Button>
-                </div>
-              </div>
-              <div className="border-t pt-4">
-                <h4 className="text-sm font-medium mb-3">Supported deployment methods:</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="flex items-start gap-3 p-3 rounded-lg border bg-card">
-                    <Container className="h-5 w-5 text-primary mt-0.5" />
-                    <div>
-                      <p className="font-medium text-sm">Docker Image</p>
-                      <p className="text-xs text-muted-foreground">
-                        Deploy from DockerHub, GHCR, or any container registry
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-3 p-3 rounded-lg border bg-card">
-                    <LayoutTemplate className="h-5 w-5 text-primary mt-0.5" />
-                    <div>
-                      <p className="font-medium text-sm">Static Files</p>
-                      <p className="text-xs text-muted-foreground">
-                        Upload pre-built static files as tar.gz or zip
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </TabsContent>
-        </Tabs>
+        {selectedSource === 'manual' && (
+          <div className="space-y-4">
+            <ManualProjectConfigurator
+              onCancel={() => setSelectedSource(null)}
+            />
+          </div>
+        )}
       </CardContent>
     </Card>
   )
