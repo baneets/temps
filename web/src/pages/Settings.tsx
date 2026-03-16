@@ -24,15 +24,17 @@ import {
   useUpdateSettings,
   type PlatformSettings,
 } from '@/hooks/useSettings'
+import { client } from '@/api/client/client.gen'
 import {
   AlertCircle,
   Globe,
   Image,
   Link,
   Loader2,
+  RefreshCw,
   Save,
 } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
 import { toast } from 'sonner'
 
@@ -45,6 +47,7 @@ export function Settings() {
   const { setBreadcrumbs } = useBreadcrumbs()
   const { data: settings, isLoading, error } = useSettings()
   const updateSettings = useUpdateSettings()
+  const [isRefreshingRoutes, setIsRefreshingRoutes] = useState(false)
 
   const {
     register,
@@ -247,6 +250,57 @@ export function Settings() {
               )}
             </>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <RefreshCw className="h-5 w-5" />
+            Route Table
+          </CardTitle>
+          <CardDescription>
+            Manually refresh the proxy route table from the database. Use this if
+            routes appear out of sync after deployments or configuration changes.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={isRefreshingRoutes}
+            onClick={async () => {
+              setIsRefreshingRoutes(true)
+              try {
+                const response = await client.post({
+                  url: '/settings/routes/refresh',
+                  security: [{ scheme: 'bearer', type: 'http' }],
+                })
+                const data = response.data as
+                  | { route_count: number; message: string }
+                  | undefined
+                toast.success(
+                  data?.message || 'Route table refreshed successfully'
+                )
+              } catch {
+                toast.error('Failed to refresh route table')
+              } finally {
+                setIsRefreshingRoutes(false)
+              }
+            }}
+          >
+            {isRefreshingRoutes ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Refreshing...
+              </>
+            ) : (
+              <>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh Routes
+              </>
+            )}
+          </Button>
         </CardContent>
       </Card>
 

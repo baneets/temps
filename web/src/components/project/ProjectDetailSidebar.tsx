@@ -278,10 +278,6 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
       return routeParts[0] === 'environments'
     }
 
-    // For analytics, use prefix matching (analytics/visitors, analytics/replays, etc. are drill-downs)
-    if (url === 'analytics') {
-      return routeParts[0] === 'analytics'
-    }
 
     // For exact matching
     if (routeParts.length !== urlParts.length) return false
@@ -289,11 +285,9 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
   }
 
   const isParentActive = (item: NavItem) => {
-    // Parent is only active if we're on the first sub-item (default route)
     if (!item.subItems || item.subItems.length === 0) return false
-    const path = location.pathname
-    // Check if we're on the parent route exactly (e.g., /projects/slug/analytics)
-    return path.endsWith(`/${item.url}`) && !path.includes(`/${item.url}/`)
+    // Parent is active if any of its sub-items is active
+    return item.subItems.some((subItem) => isActive(subItem.url))
   }
 
   const toggleExpanded = useCallback(

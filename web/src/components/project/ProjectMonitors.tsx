@@ -6,7 +6,7 @@ import {
   getEnvironmentsOptions,
   getCurrentMonitorStatusOptions,
 } from '@/api/client/@tanstack/react-query.gen'
-import { ProjectResponse, MonitorResponse } from '@/api/client'
+import { ProjectResponse, MonitorResponse, EnvironmentResponse } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -15,6 +15,7 @@ import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  Moon,
   Plus,
   Trash2,
   ExternalLink,
@@ -91,9 +92,11 @@ interface MonitorCardProps {
   monitor: MonitorResponse
   projectSlug: string
   onDelete: () => void
+  environment?: EnvironmentResponse
 }
 
-function MonitorCard({ monitor, projectSlug, onDelete }: MonitorCardProps) {
+function MonitorCard({ monitor, projectSlug, onDelete, environment }: MonitorCardProps) {
+  const isOnDemand = environment?.deployment_config?.onDemand === true
   const { startDate, endDate } = useMemo(() => {
     const now = new Date()
     return {
@@ -177,42 +180,63 @@ function MonitorCard({ monitor, projectSlug, onDelete }: MonitorCardProps) {
         <div className="flex items-center gap-4 shrink-0">
           {/* Status Timeline */}
           <div className="flex flex-col items-end gap-2">
-            <div className="flex items-center gap-2">
-              <div className="text-lg font-semibold">
-                {uptimePercentage?.toFixed(0) ?? 'N/A'}%
-              </div>
-              <div className="text-xs text-green-500 flex items-center gap-1">
-                <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500"></span>
-                Healthy
-              </div>
-            </div>
-            {/* Mini Status Timeline */}
-            <div className="flex gap-0.5 h-6 w-48">
-              {statusData?.buckets && statusData.buckets.length > 0
-                ? statusData.buckets
-                    .slice(-48)
-                    .map((bucket, idx) => (
-                      <div
-                        key={idx}
-                        className={`flex-1 rounded-sm ${
-                          bucket.status === 'operational'
-                            ? 'bg-green-500'
-                            : bucket.status === 'major_outage'
-                              ? 'bg-red-500'
-                              : bucket.status === 'degraded'
-                                ? 'bg-yellow-500'
-                                : 'bg-gray-300'
-                        }`}
-                        title={`${new Date(bucket.bucket_start).toLocaleString()}\nStatus: ${bucket.status}\nAvg: ${bucket.avg_response_time_ms?.toFixed(0) ?? 'N/A'}ms`}
-                      />
-                    ))
-                : Array.from({ length: 48 }).map((_, idx) => (
+            {isOnDemand ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <div className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Moon className="h-3.5 w-3.5" />
+                    On-demand {environment?.sleeping ? '· Sleeping' : '· Awake'}
+                  </div>
+                </div>
+                <div className="flex gap-0.5 h-6 w-48">
+                  {Array.from({ length: 48 }).map((_, idx) => (
                     <div
                       key={idx}
-                      className="flex-1 rounded-sm bg-gray-200 dark:bg-gray-700"
+                      className="flex-1 rounded-sm bg-muted"
                     />
                   ))}
-            </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <div className="text-lg font-semibold">
+                    {uptimePercentage?.toFixed(0) ?? 'N/A'}%
+                  </div>
+                  <div className="text-xs text-green-500 flex items-center gap-1">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500"></span>
+                    Healthy
+                  </div>
+                </div>
+                {/* Mini Status Timeline */}
+                <div className="flex gap-0.5 h-6 w-48">
+                  {statusData?.buckets && statusData.buckets.length > 0
+                    ? statusData.buckets
+                        .slice(-48)
+                        .map((bucket, idx) => (
+                          <div
+                            key={idx}
+                            className={`flex-1 rounded-sm ${
+                              bucket.status === 'operational'
+                                ? 'bg-green-500'
+                                : bucket.status === 'major_outage'
+                                  ? 'bg-red-500'
+                                  : bucket.status === 'degraded'
+                                    ? 'bg-yellow-500'
+                                    : 'bg-gray-300'
+                            }`}
+                            title={`${new Date(bucket.bucket_start).toLocaleString()}\nStatus: ${bucket.status}\nAvg: ${bucket.avg_response_time_ms?.toFixed(0) ?? 'N/A'}ms`}
+                          />
+                        ))
+                    : Array.from({ length: 48 }).map((_, idx) => (
+                        <div
+                          key={idx}
+                          className="flex-1 rounded-sm bg-gray-200 dark:bg-gray-700"
+                        />
+                      ))}
+                </div>
+              </>
+            )}
           </div>
 
           <DropdownMenu>
@@ -517,6 +541,7 @@ export function ProjectMonitors({ project }: ProjectMonitorsProps) {
               monitor={monitor}
               projectSlug={project.slug}
               onDelete={() => setMonitorToDelete(monitor.id)}
+              environment={environments?.find((env) => env.id === monitor.environment_id)}
             />
           ))}
         </div>

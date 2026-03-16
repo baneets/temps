@@ -621,6 +621,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     // This is used by analytics-events and other plugins that need to resolve hosts
     // Note: Route table listener is started in serve/mod.rs to avoid duplicate listeners
     service_context.register_service(route_table.clone());
+    service_context.register_service(
+        route_table.clone() as Arc<dyn temps_core::route_table::RouteTableRefresher>
+    );
 
     // Register TemplateService - provides project templates from YAML configuration
     // Bundled templates are loaded automatically; external file in data_dir can override them
