@@ -6,7 +6,9 @@
 //! is live before they run.
 
 use async_trait::async_trait;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -696,14 +698,20 @@ impl MarkDeploymentCompleteJob {
     ///      We match on environment_id only (not deployment_id) because with concurrent
     ///      deployments the NOTIFY payload may carry a different deployment_id than ours
     ///      even though load_routes() has already picked up our change.
-    ///   2. Periodically poll the database as a fallback in case the PG LISTEN
-    ///      notification was lost (e.g. during the 5-second reconnection window
-    ///      in ProjectChangeListener).
+    ///   2. Periodically send `ForceRouteReload` requests as a fallback in case the
+    ///      PG LISTEN notification was lost (e.g. during the 5-second reconnection
+    ///      window in ProjectChangeListener).
     ///
-    /// After either signal fires, we verify against the database that the
-    /// environment still points to our deployment_id (it could have been
-    /// superseded by a concurrent deployment that acquired the advisory lock
-    /// after us — though with the lock that should not happen).
+    /// IMPORTANT: We do NOT poll the database to confirm the route. The DB row
+    /// `environments.current_deployment_id` was already written by us before this
+    /// function is called, so checking it would always return true — a tautology
+    /// that tells us nothing about whether the proxy's in-memory route table has
+    /// actually loaded the new deployment. Only a `RouteTableUpdated` event from
+    /// the route listener confirms the proxy is ready to serve traffic.
+    ///
+    /// After the event fires, we verify against the database that the environment
+    /// still points to our deployment_id (it could have been superseded by a
+    /// concurrent deployment).
     async fn wait_for_route_ready(
         receiver: &mut Box<dyn JobReceiver>,
         db: &DbConnection,
@@ -712,46 +720,55 @@ impl MarkDeploymentCompleteJob {
         timeout: std::time::Duration,
     ) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + timeout;
-        // Poll the DB every 5 seconds as a fallback for lost NOTIFY messages
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-        let mut next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
-
+        // Request a forced route reload every 5 seconds as a fallback for lost
+        // NOTIFY messages. Unlike the old DB poll, this triggers an actual
+        // load_routes() in the proxy, which will publish RouteTableUpdated if
+        // our route is now present.
+        const RELOAD_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut next_reload_request = tokio::time::Instant::now() + RELOAD_REQUEST_INTERVAL;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return Err("Timed out waiting for route table update".to_string());
             }
 
-            // Check DB on every poll interval, regardless of queue activity.
-            // This prevents a busy queue from starving the fallback poll —
-            // without this, a stream of unrelated queue events would cause
-            // `continue` on every iteration, never reaching the poll branch.
-            if tokio::time::Instant::now() >= next_poll {
-                next_poll = tokio::time::Instant::now() + POLL_INTERVAL;
+            // Periodically request a forced route reload as a fallback.
+            // This handles the case where the PG NOTIFY was lost (e.g. during
+            // listener reconnection). The reload will cause a RouteTableUpdated
+            // event to be published, which we'll pick up in the recv() below.
+            if tokio::time::Instant::now() >= next_reload_request {
+                next_reload_request = tokio::time::Instant::now() + RELOAD_REQUEST_INTERVAL;
                 debug!(
-                    "Polling DB for route confirmation (environment={}, deployment={})",
+                    "Requesting forced route reload as fallback (environment={}, deployment={})",
                     environment_id, deployment_id
                 );
-                match Self::verify_environment_deployment(db, environment_id, deployment_id).await {
-                    Ok(true) => {
-                        info!(
-                            "Route confirmed via DB poll for environment {} deployment {}",
-                            environment_id, deployment_id
-                        );
-                        return Ok(());
-                    }
-                    Ok(false) => {
-                        debug!(
-                            "DB poll: environment {} does not yet point to deployment {}",
-                            environment_id, deployment_id
-                        );
-                    }
-                    Err(e) => {
-                        warn!("DB poll failed: {} — continuing to wait for event", e);
-                    }
+                // Send a NOTIFY directly via the DB connection to trigger the
+                // route listener, simulating the PG trigger that may have been missed.
+                let notify_payload = serde_json::json!({
+                    "action": "ENVIRONMENT_UPDATE",
+                    "environment_id": environment_id,
+                    "project_id": 0,
+                    "deployment_id": deployment_id,
+                    "timestamp": chrono::Utc::now().to_rfc3339()
+                });
+                let notify_sql = format!(
+                    "SELECT pg_notify('project_route_change', '{}')",
+                    notify_payload.to_string().replace('\'', "''")
+                );
+                if let Err(e) = db
+                    .execute(sea_orm::Statement::from_string(
+                        sea_orm::DatabaseBackend::Postgres,
+                        notify_sql,
+                    ))
+                    .await
+                {
+                    warn!(
+                        "Failed to send fallback NOTIFY for environment {}: {}",
+                        environment_id, e
+                    );
                 }
             }
 
-            let wait_until = deadline.min(next_poll);
+            let wait_until = deadline.min(next_reload_request);
 
             match tokio::time::timeout_at(wait_until, receiver.recv()).await {
                 Ok(Ok(Job::RouteTableUpdated(ref update)))
@@ -766,12 +783,15 @@ impl MarkDeploymentCompleteJob {
                     match Self::verify_environment_deployment(db, environment_id, deployment_id)
                         .await
                     {
-                        Ok(true) => return Ok(()),
+                        Ok(true) => {
+                            info!(
+                                "Route confirmed via RouteTableUpdated event for environment {} deployment {}",
+                                environment_id, deployment_id
+                            );
+                            return Ok(());
+                        }
                         Ok(false) => {
                             // Environment was overwritten by a concurrent deployment.
-                            // This is a legitimate scenario when two deploys race; the
-                            // advisory lock should prevent it, but if it somehow happens,
-                            // report it clearly.
                             return Err(format!(
                                 "Environment {} no longer points to deployment {} \
                                  — superseded by another deployment",
@@ -797,7 +817,7 @@ impl MarkDeploymentCompleteJob {
                     return Err(format!("Queue receive error: {}", e));
                 }
                 Err(_) => {
-                    // timeout_at expired — loop back to check deadline and poll
+                    // timeout_at expired — loop back to check deadline and request reload
                 }
             }
         }

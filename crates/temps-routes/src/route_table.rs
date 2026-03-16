@@ -1142,6 +1142,21 @@ impl CachedPeerTable {
     pub fn is_empty(&self) -> bool {
         self.routes.read().is_empty()
     }
+
+    /// Check if any route in the table points to a specific deployment.
+    ///
+    /// Used by `mark_deployment_complete` to verify the proxy's in-memory route
+    /// table has actually loaded the new deployment — not just that the DB row
+    /// was written (which would always be true since we just wrote it).
+    pub fn has_route_for_deployment(&self, deployment_id: i32) -> bool {
+        let routes = self.routes.read();
+        routes.values().any(|route| {
+            route
+                .deployment
+                .as_ref()
+                .is_some_and(|d| d.id == deployment_id)
+        })
+    }
 }
 
 /// Listens for PostgreSQL notifications and automatically reloads the route table

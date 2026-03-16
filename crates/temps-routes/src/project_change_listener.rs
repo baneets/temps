@@ -175,20 +175,33 @@ impl Drop for ProjectChangeListener {
 }
 
 /// Unified payload structure for route changes (project or environment)
+///
+/// IMPORTANT: `Environment` must be listed before `Project` because with
+/// `#[serde(untagged)]`, serde tries variants in order. `EnvironmentChangePayload`
+/// has a required `environment_id` field that acts as a discriminator.
+/// `ProjectChangePayload` uses `#[serde(default)]` on most fields, so it would
+/// greedily match environment payloads too if listed first.
 #[derive(Debug, serde::Deserialize)]
 #[serde(untagged)]
 enum RouteChangePayload {
-    Project(ProjectChangePayload),
     Environment(EnvironmentChangePayload),
+    Project(ProjectChangePayload),
 }
 
 /// Payload from project triggers
+///
+/// Fields are optional with defaults because the INSERT/DELETE trigger sends a
+/// minimal payload (`action`, `project_id`, `field`) that lacks `is_deleted`,
+/// `slug`, and `timestamp`. Only UPDATEEs send the full payload.
 #[derive(Debug, serde::Deserialize)]
 struct ProjectChangePayload {
     action: String, // INSERT, UPDATE, or DELETE
     project_id: i32,
+    #[serde(default)]
     is_deleted: bool,
+    #[serde(default)]
     slug: String,
+    #[serde(default)]
     #[allow(dead_code)]
     timestamp: String, // Included for debugging/auditing
 }
@@ -260,6 +273,37 @@ mod tests {
                 assert_eq!(env.deployment_id, None);
             }
             _ => panic!("Expected Environment payload"),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_insert_payload_minimal() {
+        // INSERT/DELETE triggers send minimal payloads without is_deleted, slug, timestamp.
+        // These must parse successfully with defaults — this was a bug that caused
+        // route reloads to be silently skipped for new project deployments.
+        let payload = r#"{"action":"INSERT","project_id":42,"field":"project"}"#;
+        let change: RouteChangePayload = serde_json::from_str(payload).unwrap();
+        match change {
+            RouteChangePayload::Project(project) => {
+                assert_eq!(project.project_id, 42);
+                assert_eq!(project.action, "INSERT");
+                assert!(!project.is_deleted); // default
+                assert_eq!(project.slug, ""); // default
+            }
+            _ => panic!("Expected Project payload, got {:?}", change),
+        }
+    }
+
+    #[test]
+    fn test_parse_project_delete_payload_minimal() {
+        let payload = r#"{"action":"DELETE","project_id":7,"field":"project"}"#;
+        let change: RouteChangePayload = serde_json::from_str(payload).unwrap();
+        match change {
+            RouteChangePayload::Project(project) => {
+                assert_eq!(project.project_id, 7);
+                assert_eq!(project.action, "DELETE");
+            }
+            _ => panic!("Expected Project payload, got {:?}", change),
         }
     }
 
