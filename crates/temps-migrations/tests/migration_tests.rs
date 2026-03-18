@@ -403,7 +403,6 @@ async fn verify_tables_exist(db: &DatabaseConnection) -> anyhow::Result<()> {
         "error_groups",
         "error_events",
         "project_dsns",
-        "error_sessions",
         "error_attachments",
         "error_user_feedback",
     ];
@@ -433,7 +432,6 @@ async fn verify_tables_dropped(db: &DatabaseConnection) -> anyhow::Result<()> {
     let tables = vec![
         "error_user_feedback",
         "error_attachments",
-        "error_sessions",
         "project_dsns",
         "error_events",
         "error_groups",
@@ -478,7 +476,6 @@ async fn verify_foreign_keys(db: &DatabaseConnection) -> anyhow::Result<()> {
         ("error_events", "fk_error_events_project_id"),
         ("error_groups", "fk_error_groups_project_id"),
         ("project_dsns", "fk_project_dsns_project"),
-        ("projects", "fk_projects_user_id"),
     ];
 
     for (table, constraint) in fk_constraints {
@@ -510,7 +507,6 @@ async fn verify_indexes(db: &DatabaseConnection) -> anyhow::Result<()> {
         "idx_error_events_timestamp",
         "idx_error_groups_project_id",
         "idx_project_dsns_public_key",
-        "idx_error_sessions_project_id",
     ];
 
     for index in indexes {

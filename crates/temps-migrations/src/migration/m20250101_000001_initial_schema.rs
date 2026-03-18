@@ -4941,6 +4941,15 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // Drop materialized views that depend on status_checks before the table itself
+        manager
+            .get_connection()
+            .execute_unprepared(
+                "DROP MATERIALIZED VIEW IF EXISTS status_checks_hourly CASCADE; \
+                 DROP MATERIALIZED VIEW IF EXISTS status_checks_5min CASCADE;",
+            )
+            .await?;
+
         manager
             .drop_table(Table::drop().table(Alias::new("status_checks")).to_owned())
             .await?;
