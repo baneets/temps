@@ -78,9 +78,9 @@ pub struct SetupCommand {
     #[arg(long, env = "TEMPS_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
-    /// Admin user email address (required)
+    /// Admin user email address (required unless --auto is used)
     #[arg(long)]
-    pub admin_email: String,
+    pub admin_email: Option<String>,
 
     /// Admin user display name (default: "Admin")
     #[arg(long, default_value = "Admin")]
@@ -92,8 +92,9 @@ pub struct SetupCommand {
     pub admin_password: Option<String>,
 
     /// Wildcard domain pattern for SSL certificate (e.g., "*.app.example.com")
+    /// Auto-generated from public IP via sslip.io when --auto is used
     #[arg(long)]
-    pub wildcard_domain: String,
+    pub wildcard_domain: Option<String>,
 
     /// DNS provider type (required for certificate provisioning via Let's Encrypt)
     /// Optional when using --wildcard-domain-cert with --skip-dns-records
@@ -217,6 +218,12 @@ pub struct SetupCommand {
     /// By default, the database is downloaded automatically if not present
     #[arg(long, default_value = "false")]
     pub skip_geolite2_download: bool,
+
+    /// Fully automatic setup: auto-detect public IP, use sslip.io for instant DNS,
+    /// skip SSL/DNS, generate admin credentials. Zero prompts required.
+    /// Use this for quick setup without a custom domain — add a real domain later.
+    #[arg(long, default_value = "false")]
+    pub auto: bool,
 }
 
 fn generate_secure_password() -> String {
@@ -660,6 +667,16 @@ async fn detect_public_ip() -> anyhow::Result<String> {
     Err(anyhow::anyhow!(
         "Unable to auto-detect public IP. Please provide --server-ip manually."
     ))
+}
+
+/// Detect the primary private/LAN IP address as a fallback when public IP detection fails.
+fn detect_private_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    // Connect to a public address (doesn't actually send data) to determine the local IP
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
 }
 
 fn print_header() {
@@ -1209,10 +1226,73 @@ fn extract_preview_domain(wildcard_domain: &str) -> String {
 }
 
 impl SetupCommand {
-    pub fn execute(self) -> anyhow::Result<()> {
+    pub fn execute(mut self) -> anyhow::Result<()> {
         print_header();
 
         debug!("Starting Temps setup");
+
+        // --auto mode: resolve all defaults before proceeding
+        if self.auto {
+            print_section("Auto Mode");
+            print_success("Auto mode enabled - detecting configuration...");
+
+            // Auto implies non-interactive, skip-ssl, skip-dns-records, skip-git
+            self.non_interactive = true;
+            self.skip_ssl = true;
+            self.skip_dns_records = true;
+            self.skip_git = true;
+
+            // Auto-detect public IP and generate sslip.io domain
+            if self.wildcard_domain.is_none() {
+                let rt_tmp = tokio::runtime::Runtime::new()?;
+                let ip = match rt_tmp.block_on(detect_public_ip()) {
+                    Ok(ip) => {
+                        print_success(&format!("Detected public IP: {}", ip.bright_cyan()));
+                        ip
+                    }
+                    Err(_) => {
+                        // Fallback to private IP or localhost
+                        let ip = detect_private_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+                        print_success(&format!(
+                            "Using IP: {} (public IP detection failed)",
+                            ip.bright_cyan()
+                        ));
+                        ip
+                    }
+                };
+                let sslip_domain = format!("{}.sslip.io", ip);
+                print_success(&format!(
+                    "Using sslip.io domain: {}",
+                    format!("*.{}", sslip_domain).bright_cyan()
+                ));
+                self.wildcard_domain = Some(format!("*.{}", sslip_domain));
+                self.server_ip = Some(ip.clone());
+
+                // Set external URL for HTTP access
+                if self.external_url.is_none() {
+                    self.external_url = Some(format!("http://{}", sslip_domain));
+                }
+            }
+
+            // Default admin email
+            if self.admin_email.is_none() {
+                self.admin_email = Some("admin@localhost".to_string());
+            }
+
+            println!();
+        }
+
+        // Validate required fields (after auto-resolution)
+        let admin_email = self.admin_email.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--admin-email is required. Use --auto for automatic setup with defaults."
+            )
+        })?;
+        let wildcard_domain = self.wildcard_domain.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--wildcard-domain is required. Use --auto to auto-generate from public IP via sslip.io."
+            )
+        })?;
 
         // Get data directory
         let data_dir = get_data_dir(&self.data_dir)?;
@@ -1334,7 +1414,7 @@ impl SetupCommand {
         print_section("Admin User Setup");
         let (user, password) = match rt.block_on(create_admin_user(
             db.as_ref(),
-            &self.admin_email,
+            &admin_email,
             &self.admin_name,
             self.admin_password.as_deref(),
         ))? {
@@ -1523,7 +1603,7 @@ impl SetupCommand {
         print_section("Wildcard Domain Setup");
 
         // Validate domain format
-        if !self.wildcard_domain.starts_with("*.") {
+        if !wildcard_domain.starts_with("*.") {
             return Err(anyhow::anyhow!(
                 "Domain must be a wildcard domain (e.g., *.app.example.com)"
             ));
@@ -1544,7 +1624,7 @@ impl SetupCommand {
             println!(
                 "   {} Importing external certificate for: {}",
                 "🔐".bright_yellow(),
-                self.wildcard_domain.bright_cyan().bold()
+                wildcard_domain.bright_cyan().bold()
             );
             println!();
 
@@ -1573,7 +1653,7 @@ impl SetupCommand {
 
             // Validate certificate format and extract expiration
             let expiration_time =
-                validate_and_parse_certificate(&certificate_pem, &self.wildcard_domain)?;
+                validate_and_parse_certificate(&certificate_pem, &wildcard_domain)?;
 
             // Validate private key format
             validate_private_key(&private_key_pem)?;
@@ -1583,7 +1663,7 @@ impl SetupCommand {
             rt.block_on(import_external_certificate(
                 db.as_ref(),
                 &encryption_service,
-                &self.wildcard_domain,
+                &wildcard_domain,
                 &certificate_pem,
                 &private_key_pem,
                 expiration_time,
@@ -1615,8 +1695,7 @@ impl SetupCommand {
                 };
 
                 // Extract base domain from wildcard
-                let base_domain = self
-                    .wildcard_domain
+                let base_domain = wildcard_domain
                     .trim_start_matches("*.")
                     .split('.')
                     .rev()
@@ -1628,7 +1707,7 @@ impl SetupCommand {
                     .join(".");
 
                 let subdomain_prefix = {
-                    let without_wildcard = self.wildcard_domain.trim_start_matches("*.");
+                    let without_wildcard = wildcard_domain.trim_start_matches("*.");
                     let parts: Vec<&str> = without_wildcard.split('.').collect();
                     if parts.len() > 2 {
                         parts[..parts.len() - 2].join(".")
@@ -1689,7 +1768,7 @@ impl SetupCommand {
 
             // Update application settings with preview domain and external URL
             print_section("Application Settings");
-            let preview_domain = extract_preview_domain(&self.wildcard_domain);
+            let preview_domain = extract_preview_domain(&wildcard_domain);
             rt.block_on(update_app_settings(
                 db.as_ref(),
                 &preview_domain,
@@ -1707,7 +1786,7 @@ impl SetupCommand {
             return finish_setup(
                 &user,
                 &password,
-                &self.wildcard_domain,
+                &wildcard_domain,
                 self.non_interactive,
                 self.admin_password.is_some(),
                 &self.output_format,
@@ -1741,8 +1820,7 @@ impl SetupCommand {
                 };
 
                 // Extract base domain from wildcard
-                let base_domain = self
-                    .wildcard_domain
+                let base_domain = wildcard_domain
                     .trim_start_matches("*.")
                     .split('.')
                     .rev()
@@ -1754,7 +1832,7 @@ impl SetupCommand {
                     .join(".");
 
                 let subdomain_prefix = {
-                    let without_wildcard = self.wildcard_domain.trim_start_matches("*.");
+                    let without_wildcard = wildcard_domain.trim_start_matches("*.");
                     let parts: Vec<&str> = without_wildcard.split('.').collect();
                     if parts.len() > 2 {
                         parts[..parts.len() - 2].join(".")
@@ -1815,7 +1893,7 @@ impl SetupCommand {
 
             // Update application settings with preview domain and external URL
             print_section("Application Settings");
-            let preview_domain = extract_preview_domain(&self.wildcard_domain);
+            let preview_domain = extract_preview_domain(&wildcard_domain);
             rt.block_on(update_app_settings(
                 db.as_ref(),
                 &preview_domain,
@@ -1833,7 +1911,7 @@ impl SetupCommand {
             return finish_setup(
                 &user,
                 &password,
-                &self.wildcard_domain,
+                &wildcard_domain,
                 self.non_interactive,
                 self.admin_password.is_some(),
                 &self.output_format,
@@ -1845,7 +1923,7 @@ impl SetupCommand {
         println!(
             "   {} Provisioning wildcard SSL certificate for: {}",
             "🔐".bright_yellow(),
-            self.wildcard_domain.bright_cyan().bold()
+            wildcard_domain.bright_cyan().bold()
         );
         println!();
 
@@ -1859,8 +1937,7 @@ impl SetupCommand {
                 })?);
 
         // Extract base domain from wildcard (e.g., "*.app.example.com" -> "example.com")
-        let base_domain = self
-            .wildcard_domain
+        let base_domain = wildcard_domain
             .trim_start_matches("*.")
             .split('.')
             .rev()
@@ -1873,7 +1950,7 @@ impl SetupCommand {
 
         // Extract the subdomain prefix (e.g., "*.app.example.com" -> "app", "*.example.com" -> "")
         let subdomain_prefix = {
-            let without_wildcard = self.wildcard_domain.trim_start_matches("*.");
+            let without_wildcard = wildcard_domain.trim_start_matches("*.");
             let parts: Vec<&str> = without_wildcard.split('.').collect();
             if parts.len() > 2 {
                 // Has subdomain prefix: app.example.com -> "app"
@@ -1986,36 +2063,35 @@ impl SetupCommand {
 
         // Step 3: Create or get existing domain
         print_step(3, 8, "Creating domain record");
-        let domain =
-            match rt.block_on(domain_service.create_domain(&self.wildcard_domain, "dns-01")) {
-                Ok(d) => {
+        let domain = match rt.block_on(domain_service.create_domain(&wildcard_domain, "dns-01")) {
+            Ok(d) => {
+                print_substep(&format!(
+                    "{} Domain '{}' registered",
+                    "✓".bright_green(),
+                    wildcard_domain
+                ));
+                d
+            }
+            Err(e) => {
+                // Domain might already exist
+                if e.to_string().contains("already exists") {
                     print_substep(&format!(
-                        "{} Domain '{}' registered",
-                        "✓".bright_green(),
-                        self.wildcard_domain
+                        "{} Domain already exists, using existing record",
+                        "ℹ".bright_blue()
                     ));
-                    d
+                    rt.block_on(async {
+                        domains::Entity::find()
+                            .filter(domains::Column::Domain.eq(&wildcard_domain))
+                            .one(db.as_ref())
+                            .await
+                    })?
+                    .ok_or_else(|| anyhow::anyhow!("Domain not found after creation error"))?
+                } else {
+                    println!();
+                    return Err(anyhow::anyhow!("Failed to create domain: {}", e));
                 }
-                Err(e) => {
-                    // Domain might already exist
-                    if e.to_string().contains("already exists") {
-                        print_substep(&format!(
-                            "{} Domain already exists, using existing record",
-                            "ℹ".bright_blue()
-                        ));
-                        rt.block_on(async {
-                            domains::Entity::find()
-                                .filter(domains::Column::Domain.eq(&self.wildcard_domain))
-                                .one(db.as_ref())
-                                .await
-                        })?
-                        .ok_or_else(|| anyhow::anyhow!("Domain not found after creation error"))?
-                    } else {
-                        println!();
-                        return Err(anyhow::anyhow!("Failed to create domain: {}", e));
-                    }
-                }
-            };
+            }
+        };
         println!();
 
         // Check if domain already has a valid certificate
@@ -2023,13 +2099,13 @@ impl SetupCommand {
             println!(
                 "   {} Domain '{}' already has a valid certificate!",
                 "🎉".bright_green(),
-                self.wildcard_domain.bright_cyan()
+                wildcard_domain.bright_cyan()
             );
             println!();
 
             // Update application settings with preview domain and external URL
             print_section("Application Settings");
-            let preview_domain = extract_preview_domain(&self.wildcard_domain);
+            let preview_domain = extract_preview_domain(&wildcard_domain);
             rt.block_on(update_app_settings(
                 db.as_ref(),
                 &preview_domain,
@@ -2047,7 +2123,7 @@ impl SetupCommand {
             return finish_setup(
                 &user,
                 &password,
-                &self.wildcard_domain,
+                &wildcard_domain,
                 self.non_interactive,
                 self.admin_password.is_some(),
                 &self.output_format,
@@ -2057,8 +2133,8 @@ impl SetupCommand {
         // Step 4: Request DNS-01 challenge from Let's Encrypt
         print_step(4, 8, "Requesting Let's Encrypt DNS-01 challenge");
         print_spinner_step("Contacting Let's Encrypt ACME server");
-        let challenge_data = rt
-            .block_on(domain_service.request_challenge(&self.wildcard_domain, &self.admin_email))?;
+        let challenge_data =
+            rt.block_on(domain_service.request_challenge(&wildcard_domain, &admin_email))?;
         print_spinner_done();
 
         if challenge_data.status == "completed" {
@@ -2070,7 +2146,7 @@ impl SetupCommand {
 
             // Update application settings with preview domain and external URL
             print_section("Application Settings");
-            let preview_domain = extract_preview_domain(&self.wildcard_domain);
+            let preview_domain = extract_preview_domain(&wildcard_domain);
             rt.block_on(update_app_settings(
                 db.as_ref(),
                 &preview_domain,
@@ -2088,7 +2164,7 @@ impl SetupCommand {
             return finish_setup(
                 &user,
                 &password,
-                &self.wildcard_domain,
+                &wildcard_domain,
                 self.non_interactive,
                 self.admin_password.is_some(),
                 &self.output_format,
@@ -2163,7 +2239,7 @@ impl SetupCommand {
         let txt_record_name = if let Some(first_txt) = challenge_data.txt_records.first() {
             first_txt.name.clone()
         } else {
-            format!("_acme-challenge.{}", self.wildcard_domain)
+            format!("_acme-challenge.{}", wildcard_domain)
         };
 
         print_substep(&format!(
@@ -2259,14 +2335,13 @@ impl SetupCommand {
                 // CRITICAL: On retry, we need to cancel the old order and create a new one
                 // ACME orders move to 'invalid' state after validation failure and cannot be reused
                 print_substep("Canceling previous order and requesting fresh challenge...");
-                if let Err(e) = rt.block_on(domain_service.cancel_order(&self.wildcard_domain)) {
+                if let Err(e) = rt.block_on(domain_service.cancel_order(&wildcard_domain)) {
                     warn!("Failed to cancel previous order (may not exist): {}", e);
                 }
 
                 // Request a new challenge (this creates a new ACME order)
-                match rt.block_on(
-                    domain_service.request_challenge(&self.wildcard_domain, &self.admin_email),
-                ) {
+                match rt.block_on(domain_service.request_challenge(&wildcard_domain, &admin_email))
+                {
                     Ok(new_challenge) => {
                         if new_challenge.status == "completed" {
                             // Certificate was issued immediately (unlikely but possible)
@@ -2325,7 +2400,7 @@ impl SetupCommand {
                     .txt_records
                     .first()
                     .map(|r| r.name.clone())
-                    .unwrap_or_else(|| format!("_acme-challenge.{}", self.wildcard_domain));
+                    .unwrap_or_else(|| format!("_acme-challenge.{}", wildcard_domain));
 
                 let retry_result = rt.block_on(propagation_checker.wait_for_propagation(
                     &retry_txt_name,
@@ -2365,9 +2440,7 @@ impl SetupCommand {
                 "Requesting certificate issuance (attempt {}/{})",
                 attempt, max_retries
             ));
-            match rt.block_on(
-                domain_service.complete_challenge(&self.wildcard_domain, &self.admin_email),
-            ) {
+            match rt.block_on(domain_service.complete_challenge(&wildcard_domain, &admin_email)) {
                 Ok(completed_domain) => {
                     print_spinner_done();
                     if completed_domain.status == "active" && completed_domain.certificate.is_some()
@@ -2514,7 +2587,7 @@ impl SetupCommand {
 
         // Update application settings with preview domain and external URL
         print_section("Application Settings");
-        let preview_domain = extract_preview_domain(&self.wildcard_domain);
+        let preview_domain = extract_preview_domain(&wildcard_domain);
         rt.block_on(update_app_settings(
             db.as_ref(),
             &preview_domain,
@@ -2532,7 +2605,7 @@ impl SetupCommand {
         finish_setup(
             &user,
             &password,
-            &self.wildcard_domain,
+            &wildcard_domain,
             self.non_interactive,
             self.admin_password.is_some(),
             &self.output_format,
