@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.6] - 2026-03-14
+## [0.0.6] - 2026-03-19
 
 ### Added
 - Multi-node cluster support: distribute deployments across a control plane and multiple worker nodes connected via WireGuard private networking
