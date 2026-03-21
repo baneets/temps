@@ -23,6 +23,7 @@ use temps_audit::AuditPlugin;
 use temps_auth::{ApiKeyPlugin, AuthPlugin};
 use temps_backup::BackupPlugin;
 use temps_blob::BlobPlugin;
+use temps_compose::ComposePlugin;
 use temps_config::ConfigPlugin;
 use temps_config::ServerConfig;
 use temps_core::plugin::PluginManager;
@@ -847,6 +848,11 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering BackupPlugin");
     let backup_plugin = Box::new(BackupPlugin::new());
     plugin_manager.register_plugin(backup_plugin);
+
+    // ComposePlugin - provides Docker Compose stack management (depends on database and audit services)
+    debug!("Registering ComposePlugin");
+    let compose_plugin = Box::new(ComposePlugin::new());
+    plugin_manager.register_plugin(compose_plugin);
 
     // AI Gateway Plugin - provides AI provider key management and OpenAI-compatible API
     debug!("Registering AiGatewayPlugin");

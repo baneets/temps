@@ -180,6 +180,9 @@ const AiGateway = lazy(() =>
     default: m.AiGatewayPage,
   }))
 )
+const Stacks = lazy(() =>
+  import('./pages/Stacks').then((m) => ({ default: m.Stacks }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -287,6 +290,8 @@ const FullAppRoutes = () => {
                   <Route path="providers/edit/:id" element={<EditNotificationProvider />} />
                   <Route path=":section" element={<MonitoringSettings />} />
                 </Route>
+                {/* Stacks - Docker Compose management */}
+                <Route path="/stacks" element={<Stacks />} />
                 {/* AI Gateway - top-level platform feature */}
                 <Route path="/ai-gateway" element={<AiGateway />} />
                 {/* Email - top-level platform feature */}
