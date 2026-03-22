@@ -253,7 +253,6 @@ impl DownloadRepoJob {
             // Checkout the specific commit
             let checkout_output = tokio::process::Command::new("git")
                 .arg("checkout")
-                .arg("--")
                 .arg(commit_sha)
                 .current_dir(repo_dir)
                 .output()
