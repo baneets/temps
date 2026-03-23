@@ -320,6 +320,13 @@ export function GitImportClone({
                   environment_variables: data.environmentVariables?.map(
                     (env) => [env.key, env.value] as [string, string]
                   ),
+                  preset_config:
+                    data.preset === 'dockerfile' && data.dockerfilePath
+                      ? { preset: 'dockerfile', dockerfilePath: data.dockerfilePath }
+                      : data.preset === 'docker-compose'
+                        ? { preset: 'docker-compose', composePath: (data as any).composePath || 'docker-compose.yml' }
+                        : undefined,
+                  exposed_port: data.preset === 'docker-compose' ? undefined : data.port,
                 },
               })
             } catch (error) {
