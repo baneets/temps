@@ -5,6 +5,7 @@
 pub mod build_image;
 pub mod capture_source_maps;
 pub mod configure_crons;
+pub mod deploy_compose;
 pub mod deploy_image;
 pub mod deploy_static;
 pub mod deploy_static_bundle;
@@ -20,6 +21,7 @@ pub mod verify_local_image;
 pub use build_image::*;
 pub use capture_source_maps::*;
 pub use configure_crons::*;
+pub use deploy_compose::*;
 pub use deploy_image::*;
 pub use deploy_static::*;
 pub use deploy_static_bundle::*;

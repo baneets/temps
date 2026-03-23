@@ -287,26 +287,54 @@ impl MarkDeploymentCompleteJob {
                 .flatten()
                 .unwrap_or(8080);
 
+            // Compose-specific: per-container data arrays (set by DeployComposeJob)
+            let service_names: Option<Vec<String>> = context
+                .get_output("deploy_container", "service_names")
+                .ok()
+                .flatten();
+            let container_names_list: Option<Vec<String>> = context
+                .get_output("deploy_container", "container_names")
+                .ok()
+                .flatten();
+            let container_ports_list: Option<Vec<i32>> = context
+                .get_output("deploy_container", "container_ports")
+                .ok()
+                .flatten();
+            let image_names_list: Option<Vec<String>> = context
+                .get_output("deploy_container", "image_names")
+                .ok()
+                .flatten();
+
             // Create a deployment_container record for each container
             for (index, container_id) in container_ids.iter().enumerate() {
-                let container_name = if container_ids.len() > 1 {
-                    // Multi-replica: append index to name
-                    context
-                        .get_output::<String>("deploy_container", "container_name")
-                        .ok()
-                        .flatten()
-                        .map(|name| format!("{}-{}", name, index + 1))
-                        .unwrap_or_else(|| {
-                            format!("container-{}-{}", self.deployment_id, index + 1)
-                        })
-                } else {
-                    // Single replica: use original name
-                    context
-                        .get_output::<String>("deploy_container", "container_name")
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| format!("container-{}", self.deployment_id))
-                };
+                // Use per-container name if available (compose), otherwise generate
+                let container_name = container_names_list
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned())
+                    .unwrap_or_else(|| {
+                        if container_ids.len() > 1 {
+                            context
+                                .get_output::<String>("deploy_container", "container_name")
+                                .ok()
+                                .flatten()
+                                .map(|name| format!("{}-{}", name, index + 1))
+                                .unwrap_or_else(|| {
+                                    format!("container-{}-{}", self.deployment_id, index + 1)
+                                })
+                        } else {
+                            context
+                                .get_output::<String>("deploy_container", "container_name")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_else(|| format!("container-{}", self.deployment_id))
+                        }
+                    });
+
+                // Use per-container port if available (compose), otherwise use shared port
+                let effective_port = container_ports_list
+                    .as_ref()
+                    .and_then(|ports| ports.get(index).copied())
+                    .unwrap_or(container_port);
 
                 let host_port = host_ports
                     .as_ref()
@@ -322,19 +350,31 @@ impl MarkDeploymentCompleteJob {
                     .and_then(|ids| ids.get(index).cloned())
                     .flatten();
 
+                // Get service_name for compose containers
+                let service_name = service_names
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned());
+
+                // Get per-container image name (compose) or fall back to deployment image
+                let image_name = image_names_list
+                    .as_ref()
+                    .and_then(|names| names.get(index).cloned())
+                    .or_else(|| match &active_deployment.image_name {
+                        sea_orm::ActiveValue::Set(v) => v.clone(),
+                        sea_orm::ActiveValue::Unchanged(v) => v.clone(),
+                        _ => None,
+                    });
+
                 // Create deployment_container record
                 let deployment_container = deployment_containers::ActiveModel {
                     deployment_id: Set(self.deployment_id),
                     container_id: Set(container_id.clone()),
                     container_name: Set(container_name.clone()),
-                    container_port: Set(container_port),
+                    container_port: Set(effective_port),
                     host_port: Set(host_port),
-                    image_name: Set(match &active_deployment.image_name {
-                        sea_orm::ActiveValue::Set(v) => v.clone(),
-                        sea_orm::ActiveValue::Unchanged(v) => v.clone(),
-                        _ => None,
-                    }),
+                    image_name: Set(image_name),
                     status: Set(Some("running".to_string())),
+                    service_name: Set(service_name),
                     created_at: Set(now),
                     deployed_at: Set(now),
                     ready_at: Set(Some(now)),

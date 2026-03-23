@@ -69,6 +69,7 @@ pub struct ComposePortBinding {
 }
 
 /// Docker Compose deployment executor.
+#[derive(Debug)]
 pub struct ComposeExecutor {
     docker: Arc<Docker>,
     /// Base directory for compose work dirs

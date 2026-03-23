@@ -802,6 +802,13 @@ impl WorkflowPlanner {
             debug!("📦 Built remote environment variables for cross-node deployments");
         }
 
+        // Docker Compose preset uses its own deployment path
+        if project.preset == temps_entities::preset::Preset::DockerCompose {
+            return self
+                .plan_compose_deployment(project, environment, deployment, env_vars)
+                .await;
+        }
+
         // Route to appropriate job planning based on effective source type
         match effective_source_type {
             SourceType::DockerImage => {
@@ -1245,6 +1252,105 @@ impl WorkflowPlanner {
             jobs.len(),
             project.name
         );
+        Ok(jobs)
+    }
+
+    /// Plan jobs for Docker Compose deployment
+    /// DownloadRepoJob (if git) -> DeployComposeJob -> MarkDeploymentCompleteJob
+    async fn plan_compose_deployment(
+        &self,
+        project: &projects::Model,
+        environment: &environments::Model,
+        deployment: &deployments::Model,
+        env_vars: std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<Vec<JobDefinition>> {
+        let mut jobs = Vec::new();
+
+        // Check if git info is available
+        let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
+
+        // Job 1: Download repository (only if git-backed)
+        if has_git_info {
+            let branch_or_commit = deployment
+                .branch_ref
+                .as_ref()
+                .or(deployment.commit_sha.as_ref())
+                .unwrap_or(&project.main_branch);
+
+            jobs.push(JobDefinition {
+                job_id: "download_repo".to_string(),
+                job_type: "DownloadRepoJob".to_string(),
+                name: "Download Repository".to_string(),
+                description: Some("Download source code from git repository".to_string()),
+                dependencies: vec![],
+                job_config: Some(serde_json::json!({
+                    "branch_ref": branch_or_commit,
+                    "tag_ref": deployment.tag_ref,
+                    "commit_sha": deployment.commit_sha,
+                    "repo_owner": project.repo_owner,
+                    "repo_name": project.repo_name,
+                    "git_provider_connection_id": project.git_provider_connection_id,
+                    "git_url": project.git_url,
+                    "is_public_repo": project.is_public_repo,
+                    "directory": project.directory
+                })),
+                required_for_completion: true,
+            });
+        }
+
+        // Get compose path from preset config
+        let compose_path = project
+            .preset_config
+            .as_ref()
+            .and_then(|pc| {
+                if let temps_entities::preset::PresetConfig::DockerCompose(cfg) = pc {
+                    cfg.compose_path.clone()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "docker-compose.yml".to_string());
+
+        // Job 2: Deploy Compose Stack (no build step)
+        let deploy_dependencies = if has_git_info {
+            vec!["download_repo".to_string()]
+        } else {
+            vec![]
+        };
+
+        jobs.push(JobDefinition {
+            job_id: "deploy_compose".to_string(),
+            job_type: "DeployComposeJob".to_string(),
+            name: "Deploy Compose Stack".to_string(),
+            description: Some("Pull images and start Docker Compose services".to_string()),
+            dependencies: deploy_dependencies,
+            job_config: Some(serde_json::json!({
+                "compose_path": compose_path,
+                "environment_vars": env_vars,
+                "project_id": project.id,
+                "environment_id": environment.id,
+                "directory": project.directory,
+            })),
+            required_for_completion: true,
+        });
+
+        // Job 3: Mark deployment complete
+        jobs.push(JobDefinition {
+            job_id: "mark_complete".to_string(),
+            job_type: "MarkDeploymentCompleteJob".to_string(),
+            name: "Finalize Deployment".to_string(),
+            description: Some("Register containers and update routes".to_string()),
+            dependencies: vec!["deploy_compose".to_string()],
+            job_config: None,
+            required_for_completion: true,
+        });
+
+        debug!(
+            "Planned {} jobs for compose deployment of project '{}'",
+            jobs.len(),
+            project.name
+        );
+
         Ok(jobs)
     }
 
