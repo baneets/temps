@@ -2,6 +2,7 @@ use std::{fmt, path::Path};
 use async_trait::async_trait;
 
 mod docker;
+mod docker_compose;
 mod docusaurus;
 mod nextjs;
 mod nixpacks_preset;
@@ -267,6 +268,7 @@ pub fn all_presets() -> Vec<Box<dyn Preset>> {
         Box::new(PythonPreset::new()),
         Box::new(JavaPreset::new()),
         // Generic presets
+        Box::new(docker_compose::DockerComposePreset),
         Box::new(DockerfilePreset),
         Box::new(docker_custom::DockerCustomPreset),
         // Nixpacks auto-detect
@@ -294,7 +296,16 @@ pub fn get_preset_by_slug(slug: &str) -> Option<Box<dyn Preset>> {
 }
 
 pub fn detect_preset_from_files(files: &[String]) -> Option<Box<dyn Preset>> {
-    // Check for Dockerfile first
+    // Check for Docker Compose files first
+    if files.iter().any(|path| {
+        docker_compose::COMPOSE_FILE_NAMES
+            .iter()
+            .any(|name| path.ends_with(name))
+    }) {
+        return Some(Box::new(docker_compose::DockerComposePreset));
+    }
+
+    // Check for Dockerfile
     if files.iter().any(|path| path.ends_with("Dockerfile")) {
         return Some(Box::new(DockerfilePreset));
     }

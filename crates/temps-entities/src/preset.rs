@@ -115,6 +115,11 @@ pub enum Preset {
     #[sea_orm(string_value = "static")]
     Static,
 
+    // Docker Compose
+    #[serde(rename = "docker-compose")]
+    #[sea_orm(string_value = "docker-compose")]
+    DockerCompose,
+
     // Node.js runtime (for custom node apps)
     #[serde(rename = "nodejs")]
     #[sea_orm(string_value = "nodejs")]
@@ -147,6 +152,7 @@ impl Preset {
             Preset::Java => "java",
             Preset::Laravel => "laravel",
             Preset::Dockerfile => "dockerfile",
+            Preset::DockerCompose => "docker-compose",
             Preset::Nixpacks => "nixpacks",
             Preset::Static => "static",
             Preset::NodeJs => "nodejs",
@@ -178,6 +184,7 @@ impl Preset {
             Preset::Java => "Java",
             Preset::Laravel => "Laravel",
             Preset::Dockerfile => "Dockerfile",
+            Preset::DockerCompose => "Docker Compose",
             Preset::Nixpacks => "Nixpacks",
             Preset::Static => "Static Site",
             Preset::NodeJs => "Node.js",
@@ -206,7 +213,9 @@ impl Preset {
             Preset::Rust => "rust",
             Preset::Java => "java",
             Preset::Laravel => "php",
-            Preset::Dockerfile | Preset::Nixpacks | Preset::Static => "generic",
+            Preset::Dockerfile | Preset::DockerCompose | Preset::Nixpacks | Preset::Static => {
+                "generic"
+            }
         }
     }
 
@@ -276,9 +285,10 @@ impl Preset {
             Preset::Laravel => Some(8000), // Laravel artisan serve default
 
             // Generic/static presets - no default port
-            Preset::Dockerfile => None, // User-defined
-            Preset::Nixpacks => None,   // Auto-detected
-            Preset::Static => None,     // No server
+            Preset::Dockerfile => None,    // User-defined
+            Preset::DockerCompose => None, // Multiple services, user-configured
+            Preset::Nixpacks => None,      // Auto-detected
+            Preset::Static => None,        // No server
         }
     }
 
@@ -323,6 +333,7 @@ impl Preset {
 
             // Generic presets
             Preset::Dockerfile => Some("https://cdn.simpleicons.org/docker/2496ED"),
+            Preset::DockerCompose => Some("https://cdn.simpleicons.org/docker/2496ED"),
             Preset::Nixpacks => None, // No specific icon
             Preset::Static => Some("https://cdn.simpleicons.org/html5/E34F26"),
         }
@@ -351,7 +362,7 @@ impl Preset {
             Preset::Python | Preset::Go | Preset::Rust | Preset::Java | Preset::NodeJs => "runtime",
 
             // Generic presets
-            Preset::Dockerfile | Preset::Nixpacks => "container",
+            Preset::Dockerfile | Preset::DockerCompose | Preset::Nixpacks => "container",
             Preset::Static => "static",
         }
     }
@@ -381,6 +392,7 @@ impl Preset {
             Preset::Java,
             Preset::Laravel,
             Preset::Dockerfile,
+            Preset::DockerCompose,
             Preset::Nixpacks,
             Preset::Static,
             Preset::NodeJs,
@@ -421,6 +433,7 @@ impl std::str::FromStr for Preset {
             "java" => Ok(Preset::Java),
             "laravel" => Ok(Preset::Laravel),
             "dockerfile" => Ok(Preset::Dockerfile),
+            "docker-compose" | "dockercompose" | "compose" => Ok(Preset::DockerCompose),
             "nixpacks" => Ok(Preset::Nixpacks),
             "static" => Ok(Preset::Static),
             "nodejs" | "node" => Ok(Preset::NodeJs),
@@ -817,6 +830,15 @@ pub struct DockerfileConfig {
     pub target: Option<String>,
 }
 
+/// Docker Compose preset configuration
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerComposeConfig {
+    /// Path to compose file relative to project directory (default: "docker-compose.yml")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_path: Option<String>,
+}
+
 /// Nixpacks preset configuration
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
 #[serde(rename_all = "camelCase")]
@@ -887,6 +909,8 @@ pub enum PresetConfig {
     Java(JavaConfig),
     Laravel(LaravelConfig),
     Dockerfile(DockerfileConfig),
+    #[serde(rename = "docker-compose")]
+    DockerCompose(DockerComposeConfig),
     Nixpacks(NixpacksConfig),
     Static(StaticConfig),
     #[serde(rename = "nodejs")]
@@ -919,6 +943,7 @@ impl PresetConfig {
             Preset::Java => PresetConfig::Java(JavaConfig::default()),
             Preset::Laravel => PresetConfig::Laravel(LaravelConfig::default()),
             Preset::Dockerfile => PresetConfig::Dockerfile(DockerfileConfig::default()),
+            Preset::DockerCompose => PresetConfig::DockerCompose(DockerComposeConfig::default()),
             Preset::Nixpacks => PresetConfig::Nixpacks(NixpacksConfig::default()),
             Preset::Static => PresetConfig::Static(StaticConfig::default()),
             Preset::NodeJs => PresetConfig::NodeJs(NodeJsConfig::default()),
@@ -979,6 +1004,7 @@ impl PresetConfig {
             PresetConfig::Java(_) => Preset::Java,
             PresetConfig::Laravel(_) => Preset::Laravel,
             PresetConfig::Dockerfile(_) => Preset::Dockerfile,
+            PresetConfig::DockerCompose(_) => Preset::DockerCompose,
             PresetConfig::Nixpacks(_) => Preset::Nixpacks,
             PresetConfig::Static(_) => Preset::Static,
             PresetConfig::NodeJs(_) => Preset::NodeJs,

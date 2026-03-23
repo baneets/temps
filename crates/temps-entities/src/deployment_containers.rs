@@ -16,6 +16,9 @@ pub struct Model {
     pub host_port: Option<i32>,
     pub image_name: Option<String>,
     pub status: Option<String>,
+    /// Compose service name (e.g., "web", "redis"). NULL for single-container deployments.
+    #[sea_orm(column_type = "String(StringLen::N(255))", nullable)]
+    pub service_name: Option<String>,
     pub created_at: DBDateTime,
     pub deployed_at: DBDateTime,
     pub ready_at: Option<DBDateTime>,

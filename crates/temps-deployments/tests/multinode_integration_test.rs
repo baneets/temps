@@ -55,6 +55,7 @@ fn make_container(
         host_port: Some(30000 + id),
         image_name: Some("myapp:latest".to_string()),
         status: Some("running".to_string()),
+        service_name: None,
         created_at: chrono::Utc::now(),
         deployed_at: chrono::Utc::now(),
         ready_at: Some(chrono::Utc::now()),

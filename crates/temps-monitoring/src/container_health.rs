@@ -640,6 +640,7 @@ mod tests {
             host_port: Some(8080),
             image_name: Some("test-image:latest".to_string()),
             status: Some("running".to_string()),
+            service_name: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
