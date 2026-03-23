@@ -11,6 +11,7 @@ export interface Stack {
   repo_url: string | null
   repo_branch: string | null
   repo_compose_path: string | null
+  port_overrides: Record<string, number> | null
   last_synced_at: string | null
   created_at: string
   updated_at: string
@@ -151,6 +152,19 @@ export async function discoverComposeFiles(body: DiscoverComposeRequest) {
     await client.post<DiscoverComposeResponse>({
       url: '/stacks/discover',
       body,
+    })
+  )
+}
+
+export async function updatePortOverrides(
+  id: number,
+  port_overrides: Record<string, number> | null
+) {
+  return throwIfError(
+    await client.put<Stack>({
+      url: '/stacks/{id}/port-overrides',
+      path: { id },
+      body: { port_overrides },
     })
   )
 }

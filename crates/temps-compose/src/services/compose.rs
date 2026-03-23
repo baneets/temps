@@ -226,14 +226,16 @@ impl ComposeService {
     pub async fn deploy(&self, id: i32) -> Result<compose_stacks::Model, ComposeError> {
         let stack = self.get(id).await?;
 
+        // Apply port overrides if present
+        let effective_compose = self.apply_overrides(&stack)?;
+
         // Validate ports before deploying
-        self.validate_compose_ports(id, &stack.compose_content)
-            .await?;
+        self.validate_compose_ports(id, &effective_compose).await?;
 
         // Write files and run docker compose up
         match self
             .executor
-            .up(id, &stack.compose_content, stack.env_content.as_deref())
+            .up(id, &effective_compose, stack.env_content.as_deref())
             .await
         {
             Ok(_) => {
@@ -278,12 +280,13 @@ impl ComposeService {
             });
         }
 
+        let effective_compose = self.apply_overrides(&stack)?;
+
         // Validate ports (config may have changed since last deploy)
-        self.validate_compose_ports(id, &stack.compose_content)
-            .await?;
+        self.validate_compose_ports(id, &effective_compose).await?;
 
         self.executor
-            .restart(id, &stack.compose_content, stack.env_content.as_deref())
+            .restart(id, &effective_compose, stack.env_content.as_deref())
             .await?;
 
         let model = self.set_state(id, "running").await?;
@@ -325,6 +328,73 @@ impl ComposeService {
         self.get(id).await?;
         let metrics = self.executor.stats(id).await?;
         Ok(metrics)
+    }
+
+    // --- Port overrides ---
+
+    /// Apply port overrides from the stack's `port_overrides` JSON field.
+    fn apply_overrides(&self, stack: &compose_stacks::Model) -> Result<String, ComposeError> {
+        let overrides_map = self.parse_port_overrides(stack.port_overrides.as_ref())?;
+        if overrides_map.is_empty() {
+            return Ok(stack.compose_content.clone());
+        }
+
+        port_validator::apply_port_overrides(&stack.compose_content, &overrides_map).map_err(|e| {
+            ComposeError::Validation {
+                message: format!("Failed to apply port overrides: {}", e),
+            }
+        })
+    }
+
+    fn parse_port_overrides(
+        &self,
+        value: Option<&serde_json::Value>,
+    ) -> Result<std::collections::HashMap<String, u16>, ComposeError> {
+        let val = match value {
+            Some(v) if !v.is_null() => v,
+            _ => return Ok(std::collections::HashMap::new()),
+        };
+
+        let obj = val.as_object().ok_or(ComposeError::Validation {
+            message: "port_overrides must be a JSON object".into(),
+        })?;
+
+        let mut map = std::collections::HashMap::new();
+        for (key, val) in obj {
+            let port = val.as_u64().and_then(|p| u16::try_from(p).ok()).ok_or(
+                ComposeError::Validation {
+                    message: format!(
+                        "Invalid port override value for '{}': must be a number 1-65535",
+                        key
+                    ),
+                },
+            )?;
+            map.insert(key.clone(), port);
+        }
+        Ok(map)
+    }
+
+    pub async fn update_port_overrides(
+        &self,
+        id: i32,
+        port_overrides: Option<serde_json::Value>,
+    ) -> Result<compose_stacks::Model, ComposeError> {
+        let stack = self.get(id).await?;
+
+        // Validate the overrides before saving
+        if let Some(ref overrides) = port_overrides {
+            if !overrides.is_null() {
+                self.parse_port_overrides(Some(overrides))?;
+            }
+        }
+
+        let mut active: compose_stacks::ActiveModel = stack.into();
+        active.port_overrides = Set(port_overrides);
+        active.updated_at = Set(Utc::now());
+
+        let model = active.update(self.db.as_ref()).await?;
+        debug!(stack_id = id, name = %model.name, "Updated port overrides");
+        Ok(model)
     }
 
     // --- Port validation ---
@@ -685,6 +755,7 @@ mod tests {
             repo_branch: None,
             repo_compose_path: None,
             repo_access_token: None,
+            port_overrides: None,
             last_synced_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

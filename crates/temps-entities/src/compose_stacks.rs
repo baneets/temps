@@ -23,6 +23,9 @@ pub struct Model {
     pub repo_compose_path: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub repo_access_token: Option<String>,
+    /// JSON mapping of original_port -> new_port for port remapping
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub port_overrides: Option<serde_json::Value>,
     pub last_synced_at: Option<DBDateTime>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,

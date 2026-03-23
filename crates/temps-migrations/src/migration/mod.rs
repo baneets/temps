@@ -50,6 +50,7 @@ mod m20260315_000002_create_error_alert_rules;
 mod m20260321_000001_create_compose_stacks;
 mod m20260323_000001_create_compose_stack_routes;
 mod m20260323_000002_add_compose_stack_repo_source;
+mod m20260323_000003_add_compose_stack_port_overrides;
 
 pub struct Migrator;
 
@@ -107,6 +108,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260321_000001_create_compose_stacks::Migration),
             Box::new(m20260323_000001_create_compose_stack_routes::Migration),
             Box::new(m20260323_000002_add_compose_stack_repo_source::Migration),
+            Box::new(m20260323_000003_add_compose_stack_port_overrides::Migration),
         ]
     }
 }

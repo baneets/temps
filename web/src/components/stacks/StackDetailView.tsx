@@ -13,6 +13,7 @@ import {
   pullStack,
   syncStack,
   toggleStackRoute,
+  updatePortOverrides,
   type ComposeContainer,
   type ContainerStats,
   type Stack,
@@ -552,9 +553,141 @@ function LogsTab({ stackId, stack }: { stackId: number; stack: Stack }) {
   )
 }
 
+function PortOverridesCard({ stack }: { stack: Stack }) {
+  const queryClient = useQueryClient()
+  const servicePorts = parseServicePorts(stack.compose_content)
+  const [overrides, setOverrides] = useState<Record<string, string>>({})
+  const [initialized, setInitialized] = useState(false)
+
+  // Seed form from stack's saved overrides (once)
+  if (!initialized && servicePorts.length > 0) {
+    const initial: Record<string, string> = {}
+    for (const sp of servicePorts) {
+      const key = sp.published.toString()
+      const saved = stack.port_overrides?.[key]
+      initial[key] = saved != null ? saved.toString() : ''
+    }
+    setOverrides(initial)
+    setInitialized(true)
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: () => {
+      const cleaned: Record<string, number> = {}
+      for (const [origPort, newPort] of Object.entries(overrides)) {
+        const parsed = parseInt(newPort)
+        if (newPort.trim() !== '' && !isNaN(parsed) && parsed > 0 && parsed <= 65535) {
+          if (parsed.toString() !== origPort) {
+            cleaned[origPort] = parsed
+          }
+        }
+      }
+      return updatePortOverrides(
+        stack.id,
+        Object.keys(cleaned).length > 0 ? cleaned : null
+      )
+    },
+    meta: { errorTitle: 'Failed to save port overrides' },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stacks', stack.id] })
+      toast.success('Port overrides saved')
+    },
+  })
+
+  if (servicePorts.length === 0) return null
+
+  const hasChanges = servicePorts.some((sp) => {
+    const key = sp.published.toString()
+    const saved = stack.port_overrides?.[key]
+    const current = overrides[key]?.trim()
+    if (!current && !saved) return false
+    if (!current && saved) return true
+    if (current && !saved) return current !== key
+    return current !== saved?.toString()
+  })
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <p className="text-sm font-medium">Port Mapping</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Remap host ports to avoid conflicts with other stacks. Changes apply on next deploy.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!hasChanges || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+            className="h-7 text-xs"
+          >
+            {saveMutation.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin mr-1" />
+            ) : null}
+            Save
+          </Button>
+        </div>
+
+        <div className="space-y-2">
+          {servicePorts.map((sp) => {
+            const key = sp.published.toString()
+            const value = overrides[key] ?? ''
+            const isRemapped = value.trim() !== '' && value.trim() !== key
+            return (
+              <div key={`${sp.service}-${sp.published}`} className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5 min-w-[140px]">
+                  <Badge variant="outline" className="text-[10px] h-5 font-normal">
+                    {sp.service}
+                  </Badge>
+                  <span className="text-xs font-mono text-muted-foreground">:{sp.published}</span>
+                  <span className="text-xs text-muted-foreground">→ :{sp.target}</span>
+                </div>
+                <span className="text-xs text-muted-foreground">→</span>
+                <Input
+                  type="number"
+                  min={1}
+                  max={65535}
+                  placeholder={key}
+                  value={value}
+                  onChange={(e) => setOverrides((prev) => ({ ...prev, [key]: e.target.value }))}
+                  className={`h-7 w-[100px] text-xs font-mono ${isRemapped ? 'border-primary' : ''}`}
+                />
+                {isRemapped && (
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setOverrides((prev) => ({ ...prev, [key]: '' }))}
+                  >
+                    reset
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+
+        {stack.port_overrides && Object.keys(stack.port_overrides).length > 0 && (
+          <div className="mt-3 pt-3 border-t">
+            <p className="text-[11px] text-muted-foreground">
+              Active overrides:{' '}
+              {Object.entries(stack.port_overrides).map(([from, to]) => (
+                <span key={from} className="font-mono">
+                  {from}→{to}{' '}
+                </span>
+              ))}
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 function ConfigTab({ stack }: { stack: Stack }) {
   return (
     <div className="space-y-4">
+      <PortOverridesCard stack={stack} />
       <Card>
         <CardContent className="pt-4">
           <p className="text-sm font-medium mb-2">docker-compose.yml</p>

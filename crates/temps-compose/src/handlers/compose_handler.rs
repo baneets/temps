@@ -71,6 +71,7 @@ impl From<ComposeError> for Problem {
         get_stack_stats,
         sync_stack,
         discover_compose_files,
+        update_port_overrides,
         list_stack_routes,
         create_stack_route,
         delete_stack_route,
@@ -90,6 +91,7 @@ impl From<ComposeError> for Problem {
             ToggleStackRouteRequest,
             DiscoverComposeRequest,
             DiscoverComposeResponse,
+            UpdatePortOverridesRequest,
         )
     ),
     info(
@@ -127,6 +129,15 @@ pub struct UpdateStackRequest {
     pub description: Option<Option<String>>,
     pub compose_content: Option<String>,
     pub env_content: Option<Option<String>>,
+    /// Port overrides: JSON mapping of original_port -> new_port (e.g. {"8080": 9090})
+    pub port_overrides: Option<Option<serde_json::Value>>,
+}
+
+#[derive(Deserialize, ToSchema, Clone)]
+pub struct UpdatePortOverridesRequest {
+    /// Port overrides: JSON mapping of original_port -> new_port (e.g. {"8080": 9090}).
+    /// Pass null to clear.
+    pub port_overrides: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -141,6 +152,8 @@ pub struct StackResponse {
     pub repo_url: Option<String>,
     pub repo_branch: Option<String>,
     pub repo_compose_path: Option<String>,
+    /// JSON mapping of original_port -> new_port for port remapping
+    pub port_overrides: Option<serde_json::Value>,
     pub last_synced_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -159,6 +172,7 @@ impl From<temps_entities::compose_stacks::Model> for StackResponse {
             repo_url: model.repo_url,
             repo_branch: model.repo_branch,
             repo_compose_path: model.repo_compose_path,
+            port_overrides: model.port_overrides,
             last_synced_at: model.last_synced_at.map(|dt| dt.to_string()),
             created_at: model.created_at.to_string(),
             updated_at: model.updated_at.to_string(),
@@ -338,6 +352,14 @@ async fn update_stack(
     Json(request): Json<UpdateStackRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, StacksWrite);
+
+    // Handle port_overrides if provided in the update
+    if let Some(overrides) = request.port_overrides {
+        app_state
+            .compose_service
+            .update_port_overrides(id, overrides)
+            .await?;
+    }
 
     let stack = app_state
         .compose_service
@@ -787,6 +809,55 @@ async fn discover_compose_files(
     Ok(Json(DiscoverComposeResponse { files }))
 }
 
+/// Update port overrides for a compose stack
+#[utoipa::path(
+    tag = "Stacks",
+    put,
+    path = "/stacks/{id}/port-overrides",
+    params(
+        ("id" = i32, Path, description = "Stack ID")
+    ),
+    request_body = UpdatePortOverridesRequest,
+    responses(
+        (status = 200, description = "Port overrides updated", body = StackResponse),
+        (status = 400, description = "Validation error", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Stack not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn update_port_overrides(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<ComposeAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path(id): Path<i32>,
+    Json(request): Json<UpdatePortOverridesRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, StacksWrite);
+
+    let stack = app_state
+        .compose_service
+        .update_port_overrides(id, request.port_overrides)
+        .await?;
+
+    let audit = StackUpdatedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        stack_id: stack.id,
+        name: stack.name.clone(),
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log: {}", e);
+    }
+
+    Ok(Json(StackResponse::from(stack)))
+}
+
 // --- Stack route types and handlers ---
 
 #[derive(Serialize, ToSchema)]
@@ -978,6 +1049,10 @@ pub fn configure_routes() -> Router<Arc<ComposeAppState>> {
         .route("/stacks/{id}/restart", post(restart_stack))
         .route("/stacks/{id}/pull", post(pull_stack))
         .route("/stacks/{id}/sync", post(sync_stack))
+        .route(
+            "/stacks/{id}/port-overrides",
+            axum::routing::put(update_port_overrides),
+        )
         .route("/stacks/{id}/containers", get(get_stack_containers))
         .route("/stacks/{id}/logs", get(get_stack_logs))
         .route("/stacks/{id}/stats", get(get_stack_stats))
