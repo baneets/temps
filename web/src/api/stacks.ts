@@ -8,6 +8,10 @@ export interface Stack {
   env_content: string | null
   node_id: number | null
   state: string
+  repo_url: string | null
+  repo_branch: string | null
+  repo_compose_path: string | null
+  last_synced_at: string | null
   created_at: string
   updated_at: string
 }
@@ -20,9 +24,13 @@ export interface PaginatedStacks {
 export interface CreateStackRequest {
   name: string
   description?: string | null
-  compose_content: string
+  compose_content?: string
   env_content?: string | null
   node_id?: number | null
+  repo_url?: string
+  repo_branch?: string
+  repo_compose_path?: string
+  repo_access_token?: string
 }
 
 export interface UpdateStackRequest {
@@ -93,6 +101,30 @@ export async function pullStack(id: number) {
   return client.post<Stack>({
     url: '/stacks/{id}/pull',
     path: { id },
+  })
+}
+
+export async function syncStack(id: number) {
+  return client.post<Stack>({
+    url: '/stacks/{id}/sync',
+    path: { id },
+  })
+}
+
+export interface DiscoverComposeRequest {
+  repo_url: string
+  repo_branch?: string
+  repo_access_token?: string
+}
+
+export interface DiscoverComposeResponse {
+  files: string[]
+}
+
+export async function discoverComposeFiles(body: DiscoverComposeRequest) {
+  return client.post<DiscoverComposeResponse>({
+    url: '/stacks/discover',
+    body,
   })
 }
 

@@ -66,6 +66,7 @@ impl From<ComposeError> for Problem {
         get_stack_logs,
         get_stack_stats,
         sync_stack,
+        discover_compose_files,
         list_stack_routes,
         create_stack_route,
         delete_stack_route,
@@ -83,6 +84,8 @@ impl From<ComposeError> for Problem {
             StackRouteResponse,
             CreateStackRouteRequest,
             ToggleStackRouteRequest,
+            DiscoverComposeRequest,
+            DiscoverComposeResponse,
         )
     ),
     info(
@@ -724,6 +727,62 @@ async fn sync_stack(
     Ok(Json(StackResponse::from(stack)))
 }
 
+// --- Repo discovery ---
+
+#[derive(Deserialize, ToSchema, Clone)]
+pub struct DiscoverComposeRequest {
+    pub repo_url: String,
+    pub repo_branch: Option<String>,
+    pub repo_access_token: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DiscoverComposeResponse {
+    pub files: Vec<String>,
+}
+
+/// Discover compose files in a git repository
+#[utoipa::path(
+    tag = "Stacks",
+    post,
+    path = "/stacks/discover",
+    request_body = DiscoverComposeRequest,
+    responses(
+        (status = 200, description = "Compose files found", body = DiscoverComposeResponse),
+        (status = 400, description = "Validation error", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 502, description = "Repository clone failed", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn discover_compose_files(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<ComposeAppState>>,
+    Json(request): Json<DiscoverComposeRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, StacksRead);
+
+    if request.repo_url.is_empty() {
+        return Err(ComposeError::Validation {
+            message: "Repository URL cannot be empty".into(),
+        }
+        .into());
+    }
+
+    let files = app_state
+        .compose_service
+        .discover_compose_files(
+            &request.repo_url,
+            request.repo_branch.as_deref(),
+            request.repo_access_token.as_deref(),
+        )
+        .await?;
+
+    Ok(Json(DiscoverComposeResponse { files }))
+}
+
 // --- Stack route types and handlers ---
 
 #[derive(Serialize, ToSchema)]
@@ -905,6 +964,7 @@ async fn toggle_stack_route(
 pub fn configure_routes() -> Router<Arc<ComposeAppState>> {
     Router::new()
         .route("/stacks", get(list_stacks).post(create_stack))
+        .route("/stacks/discover", post(discover_compose_files))
         .route(
             "/stacks/{id}",
             get(get_stack).patch(update_stack).delete(delete_stack),

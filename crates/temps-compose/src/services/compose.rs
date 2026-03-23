@@ -431,6 +431,19 @@ impl ComposeService {
         Ok(model)
     }
 
+    pub async fn discover_compose_files(
+        &self,
+        repo_url: &str,
+        repo_branch: Option<&str>,
+        repo_access_token: Option<&str>,
+    ) -> Result<Vec<String>, ComposeError> {
+        let work_dir = repo_sync::repo_sync_work_dir(&self.data_dir);
+        let files =
+            repo_sync::discover_compose_files(repo_url, repo_branch, repo_access_token, &work_dir)
+                .await?;
+        Ok(files)
+    }
+
     // --- Stack route management ---
 
     pub async fn list_routes(

@@ -143,6 +143,101 @@ fn clone_repo(
         })
 }
 
+/// Discover all compose files in a git repository.
+///
+/// Clones the repo, walks the tree, and returns relative paths of all
+/// files matching common compose file names.
+pub async fn discover_compose_files(
+    repo_url: &str,
+    branch: Option<&str>,
+    access_token: Option<&str>,
+    work_dir: &Path,
+) -> Result<Vec<String>, RepoSyncError> {
+    let repo_url = repo_url.to_string();
+    let branch = branch.map(|s| s.to_string());
+    let access_token = access_token.map(|s| s.to_string());
+    let work_dir = work_dir.to_path_buf();
+
+    tokio::task::spawn_blocking(move || {
+        discover_blocking(
+            &repo_url,
+            branch.as_deref(),
+            access_token.as_deref(),
+            &work_dir,
+        )
+    })
+    .await
+    .map_err(|e| RepoSyncError::CloneFailed {
+        url: "unknown".into(),
+        reason: format!("Task join error: {}", e),
+    })?
+}
+
+const COMPOSE_FILE_NAMES: &[&str] = &[
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
+];
+
+fn discover_blocking(
+    repo_url: &str,
+    branch: Option<&str>,
+    access_token: Option<&str>,
+    work_dir: &Path,
+) -> Result<Vec<String>, RepoSyncError> {
+    let clone_dir = work_dir.join(format!("repo-discover-{}", std::process::id()));
+    if clone_dir.exists() {
+        std::fs::remove_dir_all(&clone_dir).ok();
+    }
+    std::fs::create_dir_all(&clone_dir).map_err(|e| RepoSyncError::ReadFailed {
+        path: clone_dir.display().to_string(),
+        reason: e.to_string(),
+    })?;
+
+    debug!(url = %repo_url, branch = ?branch, "Cloning repository to discover compose files");
+
+    let _repo = clone_repo(repo_url, &clone_dir, branch, access_token)?;
+
+    let mut compose_files = Vec::new();
+    walk_for_compose_files(&clone_dir, &clone_dir, &mut compose_files);
+
+    compose_files.sort();
+
+    info!(url = %repo_url, count = compose_files.len(), "Discovered compose files in repository");
+
+    std::fs::remove_dir_all(&clone_dir).ok();
+
+    Ok(compose_files)
+}
+
+fn walk_for_compose_files(root: &Path, current: &Path, results: &mut Vec<String>) {
+    let entries = match std::fs::read_dir(current) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // Skip hidden dirs (.git, etc.)
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
+            }
+            walk_for_compose_files(root, &path, results);
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if COMPOSE_FILE_NAMES.contains(&name) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    results.push(rel.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+}
+
 /// Get the default temp directory for repo sync operations
 pub fn repo_sync_work_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("repo-sync")

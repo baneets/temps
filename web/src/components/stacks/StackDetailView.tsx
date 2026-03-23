@@ -10,6 +10,7 @@ import {
   restartStack,
   stopStack,
   pullStack,
+  syncStack,
   toggleStackRoute,
   type ComposeContainer,
   type ContainerStats,
@@ -46,6 +47,7 @@ import {
   Circle,
   Cpu,
   Download,
+  GitBranch,
   Globe,
   HardDrive,
   Loader2,
@@ -559,6 +561,36 @@ function ConfigTab({ stack }: { stack: Stack }) {
           </CardContent>
         </Card>
       )}
+      {stack.repo_url && (
+        <Card>
+          <CardContent className="pt-4">
+            <p className="text-sm font-medium mb-2 flex items-center gap-2">
+              <GitBranch className="h-4 w-4" />
+              Repository Source
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+              <div>
+                <p className="text-xs text-muted-foreground">URL</p>
+                <p className="font-mono text-xs truncate">{stack.repo_url}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Branch</p>
+                <p className="font-mono text-xs">{stack.repo_branch ?? 'default'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Compose Path</p>
+                <p className="font-mono text-xs">{stack.repo_compose_path ?? 'docker-compose.yml'}</p>
+              </div>
+              {stack.last_synced_at && (
+                <div>
+                  <p className="text-xs text-muted-foreground">Last Synced</p>
+                  <p className="text-xs">{new Date(stack.last_synced_at).toLocaleString()}</p>
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <Card>
           <CardContent className="pt-3 pb-3 px-4">
@@ -954,6 +986,15 @@ export function StackDetailView({ stackId }: { stackId: number }) {
     },
   })
 
+  const syncMutation = useMutation({
+    mutationFn: () => syncStack(stackId),
+    meta: { errorTitle: 'Failed to sync from repository' },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stacks'] })
+      toast.success('Stack synced from repository')
+    },
+  })
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -979,7 +1020,8 @@ export function StackDetailView({ stackId }: { stackId: number }) {
     deployMutation.isPending ||
     stopMutation.isPending ||
     restartMutation.isPending ||
-    pullMutation.isPending
+    pullMutation.isPending ||
+    syncMutation.isPending
 
   return (
     <div className="space-y-6">
@@ -997,6 +1039,12 @@ export function StackDetailView({ stackId }: { stackId: number }) {
               <Badge variant={stateVariant(stack.state)} className="text-xs">
                 {stack.state}
               </Badge>
+              {stack.repo_url && (
+                <Badge variant="outline" className="text-xs">
+                  <GitBranch className="h-3 w-3 mr-1" />
+                  {stack.repo_branch ?? 'default'}
+                </Badge>
+              )}
             </div>
             {stack.description && (
               <p className="text-sm text-muted-foreground mt-0.5">{stack.description}</p>
@@ -1004,6 +1052,21 @@ export function StackDetailView({ stackId }: { stackId: number }) {
           </div>
         </div>
         <div className="flex items-center gap-2 ml-11 sm:ml-0">
+          {stack.repo_url && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => syncMutation.mutate()}
+              disabled={isActing}
+            >
+              {syncMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+              ) : (
+                <GitBranch className="h-3.5 w-3.5 mr-1.5" />
+              )}
+              <span className="hidden sm:inline">Sync</span>
+            </Button>
+          )}
           {stack.state !== 'running' ? (
             <Button size="sm" onClick={() => deployMutation.mutate()} disabled={isActing}>
               {deployMutation.isPending ? (
