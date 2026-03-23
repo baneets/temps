@@ -1189,6 +1189,102 @@ impl WorkflowExecutionService {
                 ))
             }
 
+            "DeployComposeJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let compose_path = config
+                    .get("compose_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let env_vars: HashMap<String, String> = config
+                    .get("environment_vars")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let directory = config
+                    .get("directory")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("./")
+                    .to_string();
+
+                // Read compose content from the downloaded repo
+                // The DownloadRepoJob outputs "repo_path" — the local checkout path
+                let compose_content = {
+                    let compose_file = compose_path.as_deref().unwrap_or("docker-compose.yml");
+                    // Try to read from the repo checkout path
+                    // The download_repo job saves files to data_dir/deployments/{deployment_id}/repo
+                    let repo_dir = self
+                        .config_service
+                        .data_dir()
+                        .join("deployments")
+                        .join(deployment.id.to_string())
+                        .join("repo");
+                    let compose_file_path = repo_dir.join(&directory).join(compose_file);
+
+                    if compose_file_path.exists() {
+                        std::fs::read_to_string(&compose_file_path).map_err(|e| {
+                            WorkflowExecutionError::InvalidJobConfig(format!(
+                                "Failed to read compose file at {}: {}",
+                                compose_file_path.display(),
+                                e
+                            ))
+                        })?
+                    } else {
+                        // Fall back to compose content from job config (inline compose)
+                        config
+                            .get("compose_content")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                WorkflowExecutionError::InvalidJobConfig(format!(
+                                    "Compose file not found at {} and no inline content provided",
+                                    compose_file_path.display()
+                                ))
+                            })?
+                            .to_string()
+                    }
+                };
+
+                // Read .env from repo if it exists
+                let env_content = {
+                    let repo_dir = self
+                        .config_service
+                        .data_dir()
+                        .join("deployments")
+                        .join(deployment.id.to_string())
+                        .join("repo");
+                    let env_path = repo_dir.join(&directory).join(".env");
+                    if env_path.exists() {
+                        std::fs::read_to_string(&env_path).ok()
+                    } else {
+                        None
+                    }
+                };
+
+                let compose_executor = Arc::new(temps_deployer::compose::ComposeExecutor::new(
+                    self.docker.clone(),
+                    self.config_service.data_dir().to_path_buf(),
+                ));
+
+                let job = crate::jobs::DeployComposeJobBuilder::new()
+                    .job_id(db_job.job_id.clone())
+                    .deployment_id(deployment.id)
+                    .project_id(project.id)
+                    .environment_id(environment.id)
+                    .compose_executor(compose_executor)
+                    .compose_content(compose_content)
+                    .compose_path(compose_path)
+                    .env_content(env_content)
+                    .environment_vars(env_vars)
+                    .log_id(Some(db_job.log_id.clone()))
+                    .log_service(self.log_service.clone())
+                    .build()?;
+
+                Ok(Arc::new(job))
+            }
+
             _ => {
                 warn!("Unknown job type: {}", db_job.job_type);
                 Err(WorkflowExecutionError::UnsupportedJobType(
