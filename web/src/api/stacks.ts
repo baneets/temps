@@ -44,6 +44,7 @@ export async function listStacks(page = 1, pageSize = 20) {
   return client.get<PaginatedStacks>({
     url: '/stacks',
     query: { page, page_size: pageSize },
+    throwOnError: true,
   })
 }
 
@@ -51,6 +52,7 @@ export async function getStack(id: number) {
   return client.get<Stack>({
     url: '/stacks/{id}',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -58,6 +60,7 @@ export async function createStack(body: CreateStackRequest) {
   return client.post<Stack>({
     url: '/stacks',
     body,
+    throwOnError: true,
   })
 }
 
@@ -66,6 +69,7 @@ export async function updateStack(id: number, body: UpdateStackRequest) {
     url: '/stacks/{id}',
     path: { id },
     body,
+    throwOnError: true,
   })
 }
 
@@ -73,6 +77,7 @@ export async function deleteStack(id: number) {
   return client.delete<void>({
     url: '/stacks/{id}',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -80,6 +85,7 @@ export async function deployStack(id: number) {
   return client.post<Stack>({
     url: '/stacks/{id}/deploy',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -87,6 +93,7 @@ export async function stopStack(id: number) {
   return client.post<Stack>({
     url: '/stacks/{id}/stop',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -94,6 +101,7 @@ export async function restartStack(id: number) {
   return client.post<Stack>({
     url: '/stacks/{id}/restart',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -101,6 +109,7 @@ export async function pullStack(id: number) {
   return client.post<Stack>({
     url: '/stacks/{id}/pull',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -108,6 +117,7 @@ export async function syncStack(id: number) {
   return client.post<Stack>({
     url: '/stacks/{id}/sync',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -125,6 +135,7 @@ export async function discoverComposeFiles(body: DiscoverComposeRequest) {
   return client.post<DiscoverComposeResponse>({
     url: '/stacks/discover',
     body,
+    throwOnError: true,
   })
 }
 
@@ -151,6 +162,7 @@ export async function getStackContainers(id: number) {
   return client.get<StackContainersResponse>({
     url: '/stacks/{id}/containers',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -163,6 +175,7 @@ export async function getStackLogs(
     url: '/stacks/{id}/logs',
     path: { id },
     query: { service, tail },
+    throwOnError: true,
   })
 }
 
@@ -186,6 +199,7 @@ export async function getStackStats(id: number) {
   return client.get<StackStatsResponse>({
     url: '/stacks/{id}/stats',
     path: { id },
+    throwOnError: true,
   })
 }
 
@@ -210,6 +224,7 @@ export async function listStackRoutes(stackId: number) {
   return client.get<StackRoute[]>({
     url: '/stacks/{id}/routes',
     path: { id: stackId },
+    throwOnError: true,
   })
 }
 
@@ -221,6 +236,7 @@ export async function createStackRoute(
     url: '/stacks/{id}/routes',
     path: { id: stackId },
     body,
+    throwOnError: true,
   })
 }
 
@@ -228,6 +244,7 @@ export async function deleteStackRoute(stackId: number, routeId: number) {
   return client.delete<void>({
     url: '/stacks/{stack_id}/routes/{route_id}',
     path: { stack_id: stackId, route_id: routeId },
+    throwOnError: true,
   })
 }
 
@@ -240,5 +257,6 @@ export async function toggleStackRoute(
     url: '/stacks/{stack_id}/routes/{route_id}',
     path: { stack_id: stackId, route_id: routeId },
     body: { enabled },
+    throwOnError: true,
   })
 }
