@@ -73,7 +73,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 function stateVariant(state: string) {
@@ -783,13 +783,13 @@ function parseServicePorts(composeContent: string): ServicePort[] {
   let portsIndent = -1
 
   for (const line of lines) {
-    const trimmed = line.trimEnd()
+    const trimmed = line.trim()
     if (trimmed === '') continue
 
     const indent = line.search(/\S/)
 
     // Detect "services:" top-level key
-    if (/^\s*services\s*:/.test(line)) {
+    if (indent >= 0 && trimmed === 'services:' || trimmed.startsWith('services:')) {
       inServices = true
       servicesIndent = indent
       continue
@@ -801,7 +801,7 @@ function parseServicePorts(composeContent: string): ServicePort[] {
     if (
       indent > servicesIndent &&
       (serviceIndent === -1 || indent <= serviceIndent) &&
-      /^\s*[\w][\w.-]*\s*:\s*$/.test(line) &&
+      /^[\w][\w.-]*:$/.test(trimmed) &&
       !trimmed.startsWith('-') &&
       !trimmed.startsWith('#')
     ) {
@@ -821,7 +821,7 @@ function parseServicePorts(composeContent: string): ServicePort[] {
     }
 
     // Detect "ports:" under a service
-    if (currentService && indent > serviceIndent && /^\s*ports\s*:/.test(line)) {
+    if (currentService && indent > serviceIndent && trimmed === 'ports:') {
       inPorts = true
       portsIndent = indent
       continue
@@ -1102,9 +1102,16 @@ function RoutesTab({ stackId, stack }: { stackId: number; stack: Stack }) {
   )
 }
 
+const VALID_TABS = ['containers', 'logs', 'routes', 'config'] as const
+
 export function StackDetailView({ stackId }: { stackId: number }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const activeTab = VALID_TABS.includes(tabParam as typeof VALID_TABS[number])
+    ? tabParam!
+    : 'containers'
 
   const { data: stack, isLoading, error } = useQuery({
     queryKey: ['stacks', stackId],
@@ -1328,7 +1335,10 @@ export function StackDetailView({ stackId }: { stackId: number }) {
       </div>
 
       {/* Tabs */}
-      <Tabs defaultValue="containers">
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => setSearchParams({ tab: v }, { replace: true })}
+      >
         <TabsList>
           <TabsTrigger value="containers">Containers</TabsTrigger>
           <TabsTrigger value="logs">Logs</TabsTrigger>
