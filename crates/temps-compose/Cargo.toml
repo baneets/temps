@@ -26,6 +26,7 @@ async-trait = { workspace = true }
 bollard = { workspace = true }
 futures-util = { workspace = true }
 git2 = "0.20.4"
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 sea-orm = { workspace = true, features = ["mock"] }

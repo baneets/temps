@@ -10,6 +10,7 @@ use thiserror::Error;
 use tracing::{debug, error};
 
 use super::executor::{ComposeExecutor, ContainerMetrics, ExecutorError};
+use super::port_validator;
 use super::repo_sync::{self, RepoSyncError};
 
 #[derive(Error, Debug)]
@@ -35,6 +36,9 @@ pub enum ComposeError {
 
     #[error("Repository sync failed for stack {stack_id}: {reason}")]
     RepoSync { stack_id: i32, reason: String },
+
+    #[error("Port conflict: {message}")]
+    PortConflict { message: String },
 }
 
 impl From<ExecutorError> for ComposeError {
@@ -237,6 +241,10 @@ impl ComposeService {
     pub async fn deploy(&self, id: i32) -> Result<compose_stacks::Model, ComposeError> {
         let stack = self.get(id).await?;
 
+        // Validate ports before deploying
+        self.validate_compose_ports(id, &stack.compose_content)
+            .await?;
+
         // Write files and run docker compose up
         match self
             .executor
@@ -285,6 +293,10 @@ impl ComposeService {
             });
         }
 
+        // Validate ports (config may have changed since last deploy)
+        self.validate_compose_ports(id, &stack.compose_content)
+            .await?;
+
         self.executor
             .restart(id, &stack.compose_content, stack.env_content.as_deref())
             .await?;
@@ -328,6 +340,99 @@ impl ComposeService {
         self.get(id).await?;
         let metrics = self.executor.stats(id).await?;
         Ok(metrics)
+    }
+
+    // --- Port validation ---
+
+    async fn validate_compose_ports(
+        &self,
+        stack_id: i32,
+        compose_content: &str,
+    ) -> Result<(), ComposeError> {
+        let bindings = port_validator::extract_ports(compose_content).map_err(|e| {
+            ComposeError::Validation {
+                message: format!("Failed to parse compose file for port validation: {}", e),
+            }
+        })?;
+
+        if bindings.is_empty() {
+            return Ok(());
+        }
+
+        // Check against Docker containers and system ports
+        let mut conflicts = port_validator::validate_ports(&bindings, stack_id).await;
+
+        // Check against routes from other stacks targeting the same ports
+        let route_conflicts = self.check_route_port_conflicts(stack_id, &bindings).await?;
+        conflicts.extend(route_conflicts);
+
+        if !conflicts.is_empty() {
+            return Err(ComposeError::PortConflict {
+                message: port_validator::format_conflicts(&conflicts),
+            });
+        }
+
+        debug!(
+            stack_id,
+            port_count = bindings.len(),
+            "Port validation passed"
+        );
+        Ok(())
+    }
+
+    /// Check if any requested host ports conflict with routes from other stacks.
+    async fn check_route_port_conflicts(
+        &self,
+        stack_id: i32,
+        bindings: &[port_validator::PortBinding],
+    ) -> Result<Vec<port_validator::PortConflict>, ComposeError> {
+        let wanted_ports: Vec<i32> = bindings.iter().map(|b| b.host_port as i32).collect();
+
+        // Find routes from OTHER stacks that target any of these ports
+        let conflicting_routes = compose_stack_routes::Entity::find()
+            .filter(compose_stack_routes::Column::TargetPort.is_in(wanted_ports))
+            .filter(compose_stack_routes::Column::StackId.ne(stack_id))
+            .filter(compose_stack_routes::Column::Enabled.eq(true))
+            .all(self.db.as_ref())
+            .await?;
+
+        if conflicting_routes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fetch stack names for the conflicting routes
+        let stack_ids: Vec<i32> = conflicting_routes.iter().map(|r| r.stack_id).collect();
+        let stacks: Vec<compose_stacks::Model> = compose_stacks::Entity::find()
+            .filter(compose_stacks::Column::Id.is_in(stack_ids))
+            .all(self.db.as_ref())
+            .await?;
+        let stack_names: std::collections::HashMap<i32, String> =
+            stacks.into_iter().map(|s| (s.id, s.name)).collect();
+
+        let mut conflicts = Vec::new();
+        for route in &conflicting_routes {
+            let port = route.target_port as u16;
+            // Find which binding requested this port
+            for binding in bindings {
+                if binding.host_port == port {
+                    conflicts.push(port_validator::PortConflict {
+                        host_port: port,
+                        protocol: binding.protocol.clone(),
+                        requesting_service: binding.service.clone(),
+                        owner: port_validator::PortOwner::Route {
+                            stack_id: route.stack_id,
+                            stack_name: stack_names
+                                .get(&route.stack_id)
+                                .cloned()
+                                .unwrap_or_else(|| format!("stack-{}", route.stack_id)),
+                            domain: route.domain.clone(),
+                        },
+                    });
+                }
+            }
+        }
+
+        Ok(conflicts)
     }
 
     // --- Repository sync ---
@@ -477,6 +582,28 @@ impl ComposeService {
         if target_port <= 0 || target_port > 65535 {
             return Err(ComposeError::Validation {
                 message: format!("Invalid port {}: must be between 1 and 65535", target_port),
+            });
+        }
+
+        // Check if another stack already has a route to this port
+        let existing = compose_stack_routes::Entity::find()
+            .filter(compose_stack_routes::Column::TargetPort.eq(target_port))
+            .filter(compose_stack_routes::Column::StackId.ne(stack_id))
+            .filter(compose_stack_routes::Column::Enabled.eq(true))
+            .one(self.db.as_ref())
+            .await?;
+
+        if let Some(route) = existing {
+            let owner_stack = self.get(route.stack_id).await.ok();
+            let owner_name = owner_stack
+                .map(|s| s.name)
+                .unwrap_or_else(|| format!("stack-{}", route.stack_id));
+            return Err(ComposeError::PortConflict {
+                message: format!(
+                    "Port {} is already routed to stack '{}' (id: {}) via domain '{}'. \
+                     Each port can only be routed to one stack.",
+                    target_port, owner_name, route.stack_id, route.domain
+                ),
             });
         }
 

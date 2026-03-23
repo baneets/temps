@@ -10777,6 +10777,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "temps-auth",
  "temps-config",

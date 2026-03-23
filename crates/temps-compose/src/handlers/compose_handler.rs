@@ -46,6 +46,10 @@ impl From<ComposeError> for Problem {
             ComposeError::RepoSync { .. } => problemdetails::new(StatusCode::BAD_GATEWAY)
                 .with_title("Repository Sync Failed")
                 .with_detail(error.to_string()),
+
+            ComposeError::PortConflict { .. } => problemdetails::new(StatusCode::CONFLICT)
+                .with_title("Port Conflict")
+                .with_detail(error.to_string()),
         }
     }
 }
