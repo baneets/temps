@@ -3896,24 +3896,23 @@ impl GitProviderManagerTrait for GitProviderManager {
         // Checkout specific ref if provided
         if let Some(ref_name) = branch_or_ref {
             if ref_name != repo.default_branch {
-                let output = tokio::process::Command::new("git")
-                    .arg("checkout")
-                    .arg("--")
-                    .arg(ref_name)
-                    .current_dir(target_dir)
-                    .output()
-                    .await
-                    .map_err(|e| {
-                        TraitError::CloneError(format!("Failed to run git checkout: {}", e))
+                let target_dir_owned = target_dir.to_path_buf();
+                let ref_name_owned = ref_name.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let repo = git2::Repository::open(&target_dir_owned).map_err(|e| {
+                        TraitError::CloneError(format!("Failed to open repository: {}", e))
                     })?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(TraitError::CloneError(format!(
-                        "Failed to checkout ref {}: {}",
-                        ref_name, stderr
-                    )));
-                }
+                    super::git_ops::checkout_ref(&repo, &ref_name_owned).map_err(|e| {
+                        TraitError::CloneError(format!(
+                            "Failed to checkout ref {}: {}",
+                            ref_name_owned, e
+                        ))
+                    })
+                })
+                .await
+                .map_err(|e| {
+                    TraitError::CloneError(format!("Git checkout task failed: {}", e))
+                })??;
             }
         }
 

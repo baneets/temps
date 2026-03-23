@@ -230,45 +230,38 @@ impl DownloadRepoJob {
             self.log(context, format!("Cloning for commit SHA: {}", commit_sha))
                 .await?;
 
-            // Clone full history to ensure we have the commit
-            let clone_output = tokio::process::Command::new("git")
-                .arg("clone")
-                .arg("--")
-                .arg(git_url)
-                .arg(repo_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    WorkflowError::JobExecutionFailed(format!("Failed to run git clone: {}", e))
-                })?;
-
-            if !clone_output.status.success() {
-                let stderr = String::from_utf8_lossy(&clone_output.stderr);
-                return Err(WorkflowError::JobExecutionFailed(format!(
+            // Clone full history (no branch filter) so we can checkout any commit
+            let git_url_owned = git_url.to_string();
+            let repo_dir_owned = repo_dir.to_path_buf();
+            let repo = tokio::task::spawn_blocking(move || {
+                temps_git::services::git_ops::clone_repo(&git_url_owned, &repo_dir_owned, None)
+            })
+            .await
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!("Git clone task failed: {}", e))
+            })?
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!(
                     "Failed to clone public repository: {}",
-                    stderr
-                )));
-            }
+                    e
+                ))
+            })?;
 
             // Checkout the specific commit
-            let checkout_output = tokio::process::Command::new("git")
-                .arg("checkout")
-                .arg("--")
-                .arg(commit_sha)
-                .current_dir(repo_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    WorkflowError::JobExecutionFailed(format!("Failed to run git checkout: {}", e))
-                })?;
-
-            if !checkout_output.status.success() {
-                let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                return Err(WorkflowError::JobExecutionFailed(format!(
+            let commit_sha_owned = commit_sha.clone();
+            tokio::task::spawn_blocking(move || {
+                temps_git::services::git_ops::checkout_ref(&repo, &commit_sha_owned)
+            })
+            .await
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!("Git checkout task failed: {}", e))
+            })?
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!(
                     "Failed to checkout commit {}: {}",
-                    commit_sha, stderr
-                )));
-            }
+                    commit_sha, e
+                ))
+            })?;
 
             self.log(
                 context,
@@ -276,8 +269,7 @@ impl DownloadRepoJob {
             )
             .await?;
         } else {
-            // For tags and branches, use --branch with shallow clone
-            // Priority: tag_ref > branch_ref > default branch
+            // For tags and branches, use shallow clone with branch filter
             let branch_arg = self
                 .tag_ref
                 .as_ref()
@@ -285,30 +277,29 @@ impl DownloadRepoJob {
                 .cloned()
                 .unwrap_or_else(|| "master".to_string());
 
-            self.log(context, format!("Cloning with --branch {}", branch_arg))
+            self.log(context, format!("Cloning with branch: {}", branch_arg))
                 .await?;
 
-            let output = tokio::process::Command::new("git")
-                .arg("clone")
-                .arg("--depth=1")
-                .arg("--branch")
-                .arg(&branch_arg)
-                .arg("--")
-                .arg(git_url)
-                .arg(repo_dir)
-                .output()
-                .await
-                .map_err(|e| {
-                    WorkflowError::JobExecutionFailed(format!("Failed to run git clone: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(WorkflowError::JobExecutionFailed(format!(
+            let git_url_owned = git_url.to_string();
+            let repo_dir_owned = repo_dir.to_path_buf();
+            let branch_arg_clone = branch_arg.clone();
+            tokio::task::spawn_blocking(move || {
+                temps_git::services::git_ops::clone_repo(
+                    &git_url_owned,
+                    &repo_dir_owned,
+                    Some(&branch_arg_clone),
+                )
+            })
+            .await
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!("Git clone task failed: {}", e))
+            })?
+            .map_err(|e| {
+                WorkflowError::JobExecutionFailed(format!(
                     "Failed to clone public repository: {}",
-                    stderr
-                )));
-            }
+                    e
+                ))
+            })?;
 
             self.log(
                 context,

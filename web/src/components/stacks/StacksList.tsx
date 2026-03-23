@@ -57,6 +57,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
 function stateVariant(state: string) {
@@ -304,6 +305,7 @@ function EditStackDialog({
 
 export function StacksList() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [isCreateOpen, setIsCreateOpen] = useState(false)
   const [editStack, setEditStack] = useState<Stack | null>(null)
 
@@ -410,7 +412,11 @@ export function StacksList() {
                 </TableHeader>
                 <TableBody>
                   {stacks.map((stack) => (
-                    <TableRow key={stack.id}>
+                    <TableRow
+                      key={stack.id}
+                      className="cursor-pointer"
+                      onClick={() => navigate(`/stacks/${stack.id}`)}
+                    >
                       <TableCell className="font-medium">
                         {stack.name}
                       </TableCell>
@@ -428,7 +434,11 @@ export function StacksList() {
                       <TableCell>
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => e.stopPropagation()}
+                            >
                               <MoreHorizontal className="h-4 w-4" />
                             </Button>
                           </DropdownMenuTrigger>

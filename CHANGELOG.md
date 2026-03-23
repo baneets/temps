@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Compose stack domain routing: map custom domains to specific container ports via `compose_stack_routes` table with full CRUD API, route toggle, and Pingora proxy integration
+- Compose stack UI routes tab with auto-detection of service:port mappings from compose YAML and manual fallback mode
+- Repository-backed compose stacks: create stacks from a git repository URL with optional branch, compose path, and access token; sync on demand to pull latest changes
+- `sync_stack` API endpoint (`POST /stacks/{id}/sync`) to re-fetch compose content from linked repository
+- `repo_url`, `repo_branch`, `repo_compose_path`, `last_synced_at` fields on stack API responses
+- Auto-scroll to bottom in stack log viewers
+- `git_ops` module publicly exported from `temps-git` for cross-crate reuse
+
+### Fixed
+- CPU stats always showing 0.0% in container metrics: switched Docker stats API from `one_shot: true` to `stream: true` for valid `precpu_stats` delta calculation
+- Compose stack restart now uses `docker compose up -d --force-recreate` instead of `docker compose restart`, ensuring config and env variable changes are applied to running containers
+
+### Changed
+- Replaced all `Command::new("git")` CLI calls with `git2` (libgit2) across `temps-deployments`, `temps-git` (GitHub provider, GitLab provider, provider manager), and integration tests; git CLI is no longer a runtime dependency
+
 ## [0.0.6] - 2026-03-19
 
 ### Added

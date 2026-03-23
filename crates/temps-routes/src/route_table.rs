@@ -1070,6 +1070,49 @@ impl CachedPeerTable {
         debug!("Loaded all active deployments. Final cache: {} projects, {} environments, {} deployments",
             projects_cache.len(), environments_cache.len(), deployments_cache.len());
 
+        // 6. Load compose stack domain routes
+        // Maps domain -> stack container port on localhost (compose stacks use host-mapped ports)
+        {
+            use temps_entities::compose_stack_routes;
+
+            let stack_routes = compose_stack_routes::Entity::find()
+                .filter(compose_stack_routes::Column::Enabled.eq(true))
+                .all(self.db.as_ref())
+                .await
+                .unwrap_or_default();
+
+            debug!(
+                "Section 6: Loading {} compose stack routes",
+                stack_routes.len()
+            );
+
+            for route in stack_routes {
+                let backend_addr = format!("127.0.0.1:{}", route.target_port);
+                routes.insert(
+                    route.domain.clone(),
+                    RouteInfo {
+                        backend: BackendType::Upstream {
+                            backends: vec![BackendEntry {
+                                address: backend_addr.clone(),
+                                container_id: None,
+                                container_name: None,
+                            }],
+                            round_robin_counter: Arc::new(AtomicUsize::new(0)),
+                        },
+                        redirect_to: None,
+                        status_code: None,
+                        project: None,
+                        environment: None,
+                        deployment: None,
+                    },
+                );
+                debug!(
+                    "Loaded compose stack route: {} -> {} (stack_id={}, service={:?})",
+                    route.domain, backend_addr, route.stack_id, route.service_name
+                );
+            }
+        }
+
         // Atomically replace all route tables
         let route_count = routes.len();
         let http_routes_count = http_routes_map.len();

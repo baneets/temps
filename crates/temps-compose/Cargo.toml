@@ -9,6 +9,7 @@ homepage.workspace = true
 
 [dependencies]
 temps-auth = { path = "../temps-auth" }
+temps-config = { path = "../temps-config" }
 temps-core = { path = "../temps-core" }
 temps-entities = { path = "../temps-entities" }
 sea-orm = { workspace = true }
@@ -22,7 +23,11 @@ tokio = { workspace = true }
 utoipa = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
+bollard = { workspace = true }
+futures-util = { workspace = true }
+git2 = "0.20.4"
 
 [dev-dependencies]
 sea-orm = { workspace = true, features = ["mock"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

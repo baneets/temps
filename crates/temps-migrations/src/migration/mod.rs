@@ -48,6 +48,8 @@ mod m20260314_000001_update_environment_route_trigger;
 mod m20260315_000001_add_last_activity_at_to_environments;
 mod m20260315_000002_create_error_alert_rules;
 mod m20260321_000001_create_compose_stacks;
+mod m20260323_000001_create_compose_stack_routes;
+mod m20260323_000002_add_compose_stack_repo_source;
 
 pub struct Migrator;
 
@@ -103,6 +105,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260315_000001_add_last_activity_at_to_environments::Migration),
             Box::new(m20260315_000002_create_error_alert_rules::Migration),
             Box::new(m20260321_000001_create_compose_stacks::Migration),
+            Box::new(m20260323_000001_create_compose_stack_routes::Migration),
+            Box::new(m20260323_000002_add_compose_stack_repo_source::Migration),
         ]
     }
 }

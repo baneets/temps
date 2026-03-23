@@ -53,26 +53,22 @@ mod public_repo_tests {
                 GitProviderManagerError::CloneError(format!("Failed to create directory: {}", e))
             })?;
 
-            // Use git command to clone
-            let output = std::process::Command::new("git")
-                .arg("clone")
-                .arg("--depth=1")
-                .arg("--branch")
-                .arg(branch)
-                .arg(&clone_url)
-                .arg(target_dir)
-                .output()
-                .map_err(|e| {
-                    GitProviderManagerError::CloneError(format!("Git clone failed: {}", e))
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(GitProviderManagerError::CloneError(format!(
-                    "Git clone failed: {}",
-                    stderr
-                )));
-            }
+            // Use git2 (libgit2) to clone
+            let clone_url_owned = clone_url.clone();
+            let target_dir_owned = target_dir.to_path_buf();
+            let branch_owned = branch.to_string();
+            tokio::task::spawn_blocking(move || {
+                temps_git::services::git_ops::clone_repo(
+                    &clone_url_owned,
+                    &target_dir_owned,
+                    Some(&branch_owned),
+                )
+            })
+            .await
+            .map_err(|e| {
+                GitProviderManagerError::CloneError(format!("Git clone task failed: {}", e))
+            })?
+            .map_err(|e| GitProviderManagerError::CloneError(format!("Git clone failed: {}", e)))?;
 
             println!("  ✓ Repository cloned successfully");
             Ok(())
@@ -331,16 +327,6 @@ mod public_repo_tests {
 
         if docker.ping().await.is_err() {
             println!("⚠️  Docker daemon not responding, skipping test");
-            return Ok(());
-        }
-
-        // Check if git is available
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            println!("⚠️  Git not available, skipping test");
             return Ok(());
         }
 

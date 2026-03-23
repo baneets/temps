@@ -1122,40 +1122,21 @@ impl GitProviderService for GitHubProvider {
         target_dir: &str,
         access_token: Option<&str>,
     ) -> Result<(), GitProviderError> {
-        use std::process::Command;
+        let clone_url = clone_url.to_string();
+        let target_dir = std::path::PathBuf::from(target_dir);
+        let access_token = access_token.map(|s| s.to_string());
 
-        let mut cmd = Command::new("git");
-        cmd.arg("clone");
-
-        // Use -- separator to prevent user-controlled URLs from being
-        // interpreted as git options (e.g., --upload-pack=malicious)
-        cmd.arg("--");
-
-        if let Some(token) = access_token {
-            // For GitHub, insert token in URL for HTTPS clones
-            let authenticated_url = if clone_url.starts_with("https://github.com/") {
-                clone_url.replace("https://", &format!("https://{}@", token))
+        tokio::task::spawn_blocking(move || {
+            let target = target_dir.as_path();
+            if let Some(token) = &access_token {
+                super::git_ops::clone_repo_with_token(&clone_url, target, token, None)
             } else {
-                clone_url.to_string()
-            };
-            cmd.arg(authenticated_url);
-        } else {
-            cmd.arg(clone_url);
-        }
-
-        cmd.arg(target_dir);
-
-        let output = cmd
-            .output()
-            .map_err(|e| GitProviderError::Other(format!("Failed to execute git clone: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitProviderError::Other(format!(
-                "Git clone failed: {}",
-                stderr
-            )));
-        }
+                super::git_ops::clone_repo(&clone_url, target, None)
+            }
+        })
+        .await
+        .map_err(|e| GitProviderError::Other(format!("Git clone task failed: {}", e)))?
+        .map_err(|e| GitProviderError::Other(format!("Git clone failed: {}", e)))?;
 
         Ok(())
     }

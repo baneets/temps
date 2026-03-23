@@ -11,7 +11,7 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::{
     handlers::{self, create_compose_app_state, ComposeAppState},
-    services::ComposeService,
+    services::{ComposeExecutor, ComposeService},
 };
 
 pub struct ComposePlugin;
@@ -39,8 +39,12 @@ impl TempsPlugin for ComposePlugin {
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
         Box::pin(async move {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
+            let config_service = context.require_service::<temps_config::ConfigService>();
+            let data_dir = config_service.data_dir();
 
-            let compose_service = Arc::new(ComposeService::new(db.clone()));
+            let executor = ComposeExecutor::new(&data_dir);
+            let compose_service =
+                Arc::new(ComposeService::new(db.clone(), executor, data_dir.clone()));
             context.register_service(compose_service.clone());
 
             let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
