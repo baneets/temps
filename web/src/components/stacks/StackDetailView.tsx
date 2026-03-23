@@ -1,5 +1,6 @@
 import {
   createStackRoute,
+  deleteStack,
   deleteStackRoute,
   deployStack,
   getStack,
@@ -18,6 +19,17 @@ import {
 } from '@/api/stacks'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import {
   Card,
   CardContent,
@@ -60,7 +72,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 
 function stateVariant(state: string) {
@@ -941,6 +953,7 @@ function RoutesTab({ stackId, stack }: { stackId: number; stack: Stack }) {
 
 export function StackDetailView({ stackId }: { stackId: number }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const { data: stack, isLoading, error } = useQuery({
     queryKey: ['stacks', stackId],
@@ -995,6 +1008,16 @@ export function StackDetailView({ stackId }: { stackId: number }) {
     },
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteStack(stackId),
+    meta: { errorTitle: 'Failed to delete stack' },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['stacks'] })
+      toast.success('Stack deleted')
+      navigate('/stacks')
+    },
+  })
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -1021,7 +1044,8 @@ export function StackDetailView({ stackId }: { stackId: number }) {
     stopMutation.isPending ||
     restartMutation.isPending ||
     pullMutation.isPending ||
-    syncMutation.isPending
+    syncMutation.isPending ||
+    deleteMutation.isPending
 
   return (
     <div className="space-y-6">
@@ -1119,6 +1143,36 @@ export function StackDetailView({ stackId }: { stackId: number }) {
               </Button>
             </>
           )}
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="ghost" size="sm" disabled={isActing}>
+                {deleteMutation.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                ) : (
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                )}
+                <span className="hidden sm:inline">Delete</span>
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete stack "{stack.name}"?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will stop all containers, remove volumes, and delete the
+                  stack configuration. This action cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => deleteMutation.mutate()}
+                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                >
+                  Delete
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       </div>
 

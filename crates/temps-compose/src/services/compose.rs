@@ -207,22 +207,7 @@ impl ComposeService {
     }
 
     pub async fn delete(&self, id: i32) -> Result<(), ComposeError> {
-        let stack = self.get(id).await?;
-
-        if stack.state == "running" {
-            return Err(ComposeError::InvalidState {
-                name: stack.name,
-                state: stack.state,
-                operation: "delete".to_string(),
-            });
-        }
-
-        compose_stacks::Entity::delete_by_id(id)
-            .exec(self.db.as_ref())
-            .await?;
-
-        debug!("Deleted compose stack id {}", id);
-        Ok(())
+        self.destroy(id).await
     }
 
     pub async fn set_state(
@@ -765,25 +750,6 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             ComposeError::Validation { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn test_delete_running_stack_fails() {
-        let running_stack = compose_stacks::Model {
-            state: "running".to_string(),
-            ..mock_stack()
-        };
-
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results(vec![vec![running_stack]])
-            .into_connection();
-
-        let service = test_service(db);
-        let result = service.delete(1).await;
-        assert!(matches!(
-            result.unwrap_err(),
-            ComposeError::InvalidState { .. }
         ));
     }
 
