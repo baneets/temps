@@ -772,29 +772,32 @@ export function ProjectConfigurator({
         />
       )}
 
-      <FormField
-        control={form.control}
-        name="port"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Application Port</FormLabel>
-            <FormControl>
-              <Input
-                {...field}
-                type="number"
-                min="1"
-                max="65535"
-                placeholder="3000"
-                value={field.value || 3000}
-              />
-            </FormControl>
-            <p className="text-xs text-muted-foreground">
-              Port your application will listen on (e.g., 3000, 8080)
-            </p>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
+      {/* Application Port - hide for docker-compose (multiple services have their own ports) */}
+      {form.watch('preset')?.toLowerCase() !== 'docker-compose' && (
+        <FormField
+          control={form.control}
+          name="port"
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>Application Port</FormLabel>
+              <FormControl>
+                <Input
+                  {...field}
+                  type="number"
+                  min="1"
+                  max="65535"
+                  placeholder="3000"
+                  value={field.value || 3000}
+                />
+              </FormControl>
+              <p className="text-xs text-muted-foreground">
+                Port your application will listen on (e.g., 3000, 8080)
+              </p>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+      )}
     </div>
   )
 
