@@ -141,7 +141,7 @@ const formSchema = z.object({
   storageServices: z.array(z.number()),
   dockerfilePath: z.string().optional(),
   composePath: z.string().optional(),
-  port: z.coerce.number().min(1).max(65535).optional(),
+  port: z.union([z.coerce.number().min(1).max(65535), z.nan()]).optional(),
 })
 
 export type ProjectFormValues = z.infer<typeof formSchema>
