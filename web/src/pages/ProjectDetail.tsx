@@ -289,7 +289,12 @@ export function ProjectDetail() {
           <ProjectDetailHeader
             project={project}
             activeVisitorsCount={activeVisitorsCount}
-            repositoryCloneUrl={repository?.clone_url}
+            repositoryCloneUrl={
+              repository?.clone_url ||
+              (project?.repo_owner && project?.repo_name
+                ? `https://github.com/${project.repo_owner}/${project.repo_name}`
+                : undefined)
+            }
             lastDeploymentUrl={lastDeployment?.url}
             isLoadingLastDeployment={isLoadingLastDeployment}
           />
