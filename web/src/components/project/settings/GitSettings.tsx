@@ -137,6 +137,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
           (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
         composePath:
           (project?.preset_config as any)?.composePath || 'docker-compose.yml',
+        composeOverride:
+          (project?.preset_config as any)?.composeOverride || '',
       })
     }
   }, [project, form])
@@ -278,8 +280,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
     enabled: !!repositoryData?.id,
   })
 
-  // Get preset detection for public repos (fallback when no git connection)
-  const isPublicRepo = (project as any)?.is_public_repo && !project?.git_provider_connection_id
+  // Get preset detection for public repos (no git connection = public)
+  const isPublicRepo = !project?.git_provider_connection_id
   const publicPresetQuery = useQuery({
     ...detectPublicPresetsOptions({
       path: {
@@ -288,29 +290,39 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         repo: project?.repo_name || '',
       },
     }),
-    enabled: !!isPublicRepo && !!project?.repo_owner && !!project?.repo_name,
+    enabled: isPublicRepo && !!project?.repo_owner && !!project?.repo_name,
   })
 
+  // Transform public preset data to match FrameworkSelector format (camelCase)
+  const publicPresetData = useMemo(() => {
+    if (!publicPresetQuery.data?.presets?.length) return null
+    return {
+      presets: publicPresetQuery.data.presets.map((p: any) => ({
+        preset: p.preset,
+        presetLabel: p.preset_label,
+        exposedPort: p.exposed_port,
+        iconUrl: p.icon_url,
+        projectType: p.project_type,
+        path: p.path,
+        composeFiles: p.compose_files,
+      })),
+    }
+  }, [publicPresetQuery.data])
+
+  // Combined preset data: authenticated or public
+  const effectivePresetData = presetQuery.data || publicPresetData
+  const effectivePresetLoading = presetQuery.isLoading || publicPresetQuery.isLoading
+
   const presets = useMemo(() => {
-    // Try authenticated preset detection first
-    if (presetQuery.data?.presets && presetQuery.data.presets.length > 0) {
-      return presetQuery.data.presets.map((preset: any) => ({
+    if (effectivePresetData?.presets && effectivePresetData.presets.length > 0) {
+      return effectivePresetData.presets.map((preset: any) => ({
         value: preset.preset,
-        label: preset.preset_label || preset.preset,
+        label: preset.presetLabel || preset.preset_label || preset.preset,
         directory: preset.path || './',
       }))
     }
 
-    // Try public repo preset detection
-    if (publicPresetQuery.data?.presets && publicPresetQuery.data.presets.length > 0) {
-      return (publicPresetQuery.data as any).presets.map((preset: any) => ({
-        value: preset.preset,
-        label: preset.preset_label || preset.preset,
-        directory: preset.path || './',
-      }))
-    }
-
-    // Fallback to all available presets if no live data
+    // Fallback to all available presets if no detection data
     return [
       { value: 'docker-compose', label: 'Docker Compose', directory: './' },
       { value: 'dockerfile', label: 'Dockerfile', directory: './' },
@@ -326,7 +338,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       { value: 'nodejs', label: 'Node.js', directory: './' },
       { value: 'static', label: 'Static', directory: './' },
     ]
-  }, [presetQuery.data, publicPresetQuery.data])
+  }, [effectivePresetData])
 
   // Unified handler for all git settings
   const handleUpdateSettings = async (values: GitSettingsFormValues) => {
@@ -594,7 +606,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                     )}
                   </div>
 
-                  {/* Git Connection Info */}
+                  {/* Git Connection Info — hide for public repos */}
+                  {!!project?.git_provider_connection_id && (
                   <div className="space-y-2">
                     <Label>Git Provider Connection</Label>
                     {currentConnection ? (
@@ -633,6 +646,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                       The git provider connection used for this project.
                     </p>
                   </div>
+                  )}
 
                   {isEditingSettings ? (
                     <>
@@ -811,8 +825,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             <FormItem>
                               <FormControl>
                                 <FrameworkSelector
-                                  presetData={presetQuery.data}
-                                  isLoading={presetQuery.isLoading}
+                                  presetData={effectivePresetData as any}
+                                  isLoading={effectivePresetLoading}
                                   error={presetQuery.error}
                                   selectedPreset={selectValue}
                                   onSelectPreset={(value) => {
@@ -1301,8 +1315,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                           <FormItem>
                             <FormControl>
                               <FrameworkSelector
-                                presetData={presetQuery.data}
-                                isLoading={presetQuery.isLoading}
+                                presetData={effectivePresetData as any}
+                                isLoading={effectivePresetLoading}
                                 error={presetQuery.error}
                                 selectedPreset={selectValue}
                                 onSelectPreset={(value) => {

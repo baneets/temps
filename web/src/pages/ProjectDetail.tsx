@@ -127,7 +127,7 @@ export function ProjectDetail() {
         name: project?.repo_name || '',
       },
     }),
-    enabled: !!project?.repo_owner && !!project?.repo_name,
+    enabled: !!project?.repo_owner && !!project?.repo_name && !!project?.git_provider_connection_id,
   })
 
   // Mutation to disable attack mode
