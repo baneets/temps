@@ -141,7 +141,10 @@ const formSchema = z.object({
   storageServices: z.array(z.number()),
   dockerfilePath: z.string().optional(),
   composePath: z.string().optional(),
-  port: z.coerce.number().min(1).max(65535).optional(),
+  port: z.preprocess(
+    (val) => (val === '' || val === undefined || val === null ? undefined : Number(val)),
+    z.number().min(1).max(65535).optional()
+  ),
 })
 
 export type ProjectFormValues = z.infer<typeof formSchema>
