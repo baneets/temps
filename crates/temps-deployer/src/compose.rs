@@ -98,16 +98,13 @@ impl ComposeExecutor {
         let project_name = request.project_name.clone();
         let has_build = self.has_build_directives(&request.compose_content);
 
-        // When compose has build: directives, use the repo checkout as working dir
-        // so Docker can access Dockerfiles and source code
-        let effective_dir = if has_build {
-            request
-                .repo_dir
-                .clone()
-                .unwrap_or_else(|| project_dir.clone())
-        } else {
-            project_dir.clone()
-        };
+        // Always use the repo checkout directory when available.
+        // Compose files often reference local paths (bind mounts, configs,
+        // build contexts) that only exist in the repo, not in the temps data dir.
+        let effective_dir = request
+            .repo_dir
+            .clone()
+            .unwrap_or_else(|| project_dir.clone());
 
         // 1. Write compose files + env overrides to disk
         self.write_compose_files(&effective_dir, &request).await?;
