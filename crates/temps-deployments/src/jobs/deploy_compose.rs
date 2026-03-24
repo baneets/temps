@@ -248,13 +248,20 @@ impl WorkflowTask for DeployComposeJob {
                     .await;
             }
 
-            std::fs::read_to_string(&compose_file_path).map_err(|e| {
-                WorkflowError::JobExecutionFailed(format!(
-                    "Failed to read compose file at {}: {}",
-                    compose_file_path.display(),
-                    e
-                ))
-            })?
+            match std::fs::read_to_string(&compose_file_path) {
+                Ok(content) => content,
+                Err(e) => {
+                    let error_msg = format!(
+                        "Failed to read compose file at {}: {}",
+                        compose_file_path.display(),
+                        e
+                    );
+                    if let Some(ref log_id) = self.log_id {
+                        let _ = self.log_service.log_error(log_id, &error_msg).await;
+                    }
+                    return Err(WorkflowError::JobExecutionFailed(error_msg));
+                }
+            }
         };
 
         // Read .env from repo if it exists
@@ -312,14 +319,23 @@ impl WorkflowTask for DeployComposeJob {
         };
 
         // Deploy
-        let services = self.compose_executor.deploy(request).await.map_err(|e| {
-            WorkflowError::JobExecutionFailed(format!("Compose deploy failed: {}", e))
-        })?;
+        let services = match self.compose_executor.deploy(request).await {
+            Ok(s) => s,
+            Err(e) => {
+                let error_msg = format!("Compose deploy failed: {}", e);
+                if let Some(ref log_id) = self.log_id {
+                    let _ = self.log_service.log_error(log_id, &error_msg).await;
+                }
+                return Err(WorkflowError::JobExecutionFailed(error_msg));
+            }
+        };
 
         if services.is_empty() {
-            return Err(WorkflowError::JobExecutionFailed(
-                "No containers found after docker compose up".to_string(),
-            ));
+            let error_msg = "No containers found after docker compose up".to_string();
+            if let Some(ref log_id) = self.log_id {
+                let _ = self.log_service.log_error(log_id, &error_msg).await;
+            }
+            return Err(WorkflowError::JobExecutionFailed(error_msg));
         }
 
         // Log discovered services

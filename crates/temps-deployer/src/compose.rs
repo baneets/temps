@@ -128,7 +128,11 @@ impl ComposeExecutor {
             .await?;
         }
 
-        // 3. Run docker compose up (pulls pre-built images, starts built + pulled)
+        // 3. Remove any containers with hardcoded names that would conflict
+        self.remove_conflicting_containers(&request.compose_content)
+            .await;
+
+        // 4. Run docker compose up (pulls pre-built images, starts built + pulled)
         self.compose_up(
             &effective_dir,
             &project_name,
@@ -394,6 +398,46 @@ impl ComposeExecutor {
         Ok(())
     }
 
+    /// Remove containers that would conflict with compose services.
+    /// This handles the case where a container with a hardcoded `container_name:`
+    /// already exists from a previous deployment (e.g., old stacks system).
+    async fn remove_conflicting_containers(&self, compose_content: &str) {
+        // Parse container_name: values from compose YAML
+        let mut next_is_container_name = false;
+        for line in compose_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("container_name:") {
+                let name = trimmed
+                    .trim_start_matches("container_name:")
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if !name.is_empty() {
+                    // Try to stop and remove this container if it exists
+                    debug!(container = %name, "Removing conflicting container");
+                    let _ = self.docker.stop_container(name, None).await;
+                    let _ = self
+                        .docker
+                        .remove_container(
+                            name,
+                            Some(bollard::query_parameters::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await;
+                }
+            }
+            // Handle multi-line container_name (unlikely but safe)
+            if next_is_container_name {
+                next_is_container_name = false;
+            }
+            if trimmed == "container_name:" {
+                next_is_container_name = true;
+            }
+        }
+    }
+
     async fn compose_up(
         &self,
         project_dir: &Path,
@@ -411,8 +455,15 @@ impl ComposeExecutor {
             cmd.args(["-f", "docker-compose.override.yml"]);
         }
 
-        cmd.args(["up", "-d", "--pull", "always", "--remove-orphans"])
-            .current_dir(project_dir);
+        cmd.args([
+            "up",
+            "-d",
+            "--pull",
+            "always",
+            "--remove-orphans",
+            "--force-recreate",
+        ])
+        .current_dir(project_dir);
 
         // Pass environment variables for compose YAML substitution
         for (key, value) in env_vars {
