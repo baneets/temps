@@ -455,6 +455,18 @@ impl ComposeExecutor {
             cmd.args(["-f", "docker-compose.override.yml"]);
         }
 
+        // Load .env.temps for YAML variable substitution (${VAR} in compose file)
+        let temps_env_path = project_dir.join(".env.temps");
+        if temps_env_path.exists() {
+            cmd.args(["--env-file", ".env.temps"]);
+        }
+
+        // Also load repo .env if it exists
+        let repo_env_path = project_dir.join(".env");
+        if repo_env_path.exists() {
+            cmd.args(["--env-file", ".env"]);
+        }
+
         cmd.args([
             "up",
             "-d",
@@ -465,7 +477,7 @@ impl ComposeExecutor {
         ])
         .current_dir(project_dir);
 
-        // Pass environment variables for compose YAML substitution
+        // Pass environment variables for compose YAML substitution (process env)
         for (key, value) in env_vars {
             cmd.env(key, value);
         }

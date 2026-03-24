@@ -323,8 +323,11 @@ impl WorkflowTask for DeployComposeJob {
             Ok(s) => s,
             Err(e) => {
                 let error_msg = format!("Compose deploy failed: {}", e);
+                tracing::error!(error = %error_msg, "Docker Compose deployment failed");
                 if let Some(ref log_id) = self.log_id {
-                    let _ = self.log_service.log_error(log_id, &error_msg).await;
+                    if let Err(log_err) = self.log_service.log_error(log_id, &error_msg).await {
+                        tracing::error!("Failed to write error to log stream: {}", log_err);
+                    }
                 }
                 return Err(WorkflowError::JobExecutionFailed(error_msg));
             }
@@ -332,8 +335,11 @@ impl WorkflowTask for DeployComposeJob {
 
         if services.is_empty() {
             let error_msg = "No containers found after docker compose up".to_string();
+            tracing::error!(error = %error_msg, "Docker Compose deployment produced no containers");
             if let Some(ref log_id) = self.log_id {
-                let _ = self.log_service.log_error(log_id, &error_msg).await;
+                if let Err(log_err) = self.log_service.log_error(log_id, &error_msg).await {
+                    tracing::error!("Failed to write error to log stream: {}", log_err);
+                }
             }
             return Err(WorkflowError::JobExecutionFailed(error_msg));
         }
