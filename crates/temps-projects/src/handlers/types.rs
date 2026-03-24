@@ -369,6 +369,11 @@ impl ProjectResponse {
                     .clone()
                     .map(|c| c.wake_timeout_seconds)
                     .unwrap_or(30),
+                container_exec_enabled: project
+                    .deployment_config
+                    .clone()
+                    .map(|c| c.container_exec_enabled)
+                    .unwrap_or(false),
             },
         }
     }

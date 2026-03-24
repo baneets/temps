@@ -215,6 +215,9 @@ pub enum Permission {
     AiGatewayWrite,
     AiGatewayExecute,
 
+    // Container Exec permissions
+    ContainersExec,
+
     // Compose Stacks permissions
     StacksRead,
     StacksWrite,
@@ -356,6 +359,7 @@ impl fmt::Display for Permission {
             Permission::AiGatewayRead => "ai_gateway:read",
             Permission::AiGatewayWrite => "ai_gateway:write",
             Permission::AiGatewayExecute => "ai_gateway:execute",
+            Permission::ContainersExec => "containers:exec",
             Permission::StacksRead => "stacks:read",
             Permission::StacksWrite => "stacks:write",
             Permission::StacksDelete => "stacks:delete",
@@ -500,6 +504,7 @@ impl Permission {
             "ai_gateway:read" => Some(Permission::AiGatewayRead),
             "ai_gateway:write" => Some(Permission::AiGatewayWrite),
             "ai_gateway:execute" => Some(Permission::AiGatewayExecute),
+            "containers:exec" => Some(Permission::ContainersExec),
             "stacks:read" => Some(Permission::StacksRead),
             "stacks:write" => Some(Permission::StacksWrite),
             "stacks:delete" => Some(Permission::StacksDelete),
@@ -837,6 +842,7 @@ impl Role {
                 Permission::AiGatewayRead,
                 Permission::AiGatewayWrite,
                 Permission::AiGatewayExecute,
+                Permission::ContainersExec,
                 Permission::StacksRead,
                 Permission::StacksWrite,
                 Permission::StacksDelete,

@@ -185,6 +185,15 @@ pub fn configure_routes() -> Router<Arc<super::types::AppState>> {
             "/projects/{project_id}/environments/{environment_id}/containers/{container_id}/metrics/stream",
             get(stream_container_metrics),
         )
+        // Container exec and terminal
+        .route(
+            "/projects/{project_id}/environments/{environment_id}/containers/{container_id}/exec",
+            post(super::container_exec::exec_command),
+        )
+        .route(
+            "/projects/{project_id}/environments/{environment_id}/containers/{container_id}/terminal",
+            get(super::container_exec::container_terminal),
+        )
 }
 
 impl From<crate::services::services::DeploymentError> for Problem {
@@ -2819,6 +2828,10 @@ mod tests {
             node_service: Arc::new(crate::services::NodeService::new(db.clone())),
             encryption_service: Arc::new(
                 temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
+            ),
+            docker: Arc::new(
+                bollard::Docker::connect_with_local_defaults()
+                    .unwrap_or_else(|_| bollard::Docker::connect_with_defaults().unwrap()),
             ),
         })
     }

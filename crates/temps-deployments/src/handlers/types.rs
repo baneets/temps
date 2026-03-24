@@ -33,6 +33,8 @@ pub struct AppState {
     pub node_service: Arc<NodeService>,
     /// Encryption service for decrypting node tokens (used by drain to stop remote containers)
     pub encryption_service: Arc<temps_core::EncryptionService>,
+    /// Docker client for container exec/terminal
+    pub docker: Arc<bollard::Docker>,
 }
 
 use crate::services::types::Deployment;

@@ -127,12 +127,11 @@ impl TempsPlugin for DeploymentsPlugin {
             let static_deployer =
                 context.require_service::<dyn temps_deployer::static_deployer::StaticDeployer>();
 
-            // Create Docker client for external image pulls
+            // Create Docker client for container operations
             let docker = Arc::new(
                 bollard::Docker::connect_with_local_defaults()
                     .expect("Failed to connect to Docker"),
             );
-
             // Create WorkflowExecutionService
             let workflow_execution_service = Arc::new(WorkflowExecutionService::new(
                 db.clone(),
@@ -304,6 +303,12 @@ impl TempsPlugin for DeploymentsPlugin {
             .get_service::<temps_core::EncryptionService>()
             .expect("EncryptionService must be registered before configuring routes");
 
+        // Docker client for container exec/terminal
+        let docker_for_exec = Arc::new(
+            bollard::Docker::connect_with_local_defaults()
+                .expect("Failed to connect to Docker for container exec"),
+        );
+
         let app_state = Arc::new(handlers::types::AppState {
             deployment_service,
             log_service,
@@ -320,6 +325,7 @@ impl TempsPlugin for DeploymentsPlugin {
             audit_service,
             node_service,
             encryption_service,
+            docker: docker_for_exec,
         });
 
         let deployments_routes = handlers::deployments::configure_routes();

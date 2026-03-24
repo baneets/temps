@@ -277,6 +277,10 @@ pub struct DeploymentConfig {
     #[serde(default)]
     pub session_recording_enabled: bool,
 
+    /// Enable container exec/shell access (disabled by default for security)
+    #[serde(default)]
+    pub container_exec_enabled: bool,
+
     /// Number of replicas/instances to run
     /// Defaults to 1 replica
     #[serde(default = "default_replicas")]
@@ -378,6 +382,10 @@ pub struct DeploymentConfigSnapshot {
     #[serde(default)]
     pub session_recording_enabled: bool,
 
+    /// Enable container exec/shell access
+    #[serde(default)]
+    pub container_exec_enabled: bool,
+
     /// Number of replicas
     #[serde(default = "default_replicas")]
     pub replicas: i32,
@@ -410,6 +418,7 @@ impl Default for DeploymentConfig {
             automatic_deploy: false,
             performance_metrics_enabled: false,
             session_recording_enabled: false,
+            container_exec_enabled: false,
             replicas: 1,
             security: None,
             target_nodes: None,
@@ -434,6 +443,7 @@ impl Default for DeploymentConfigSnapshot {
             automatic_deploy: false,
             performance_metrics_enabled: false,
             session_recording_enabled: false,
+            container_exec_enabled: false,
             replicas: 1,
         }
     }
@@ -461,6 +471,7 @@ impl DeploymentConfig {
                 || self.performance_metrics_enabled,
             session_recording_enabled: other.session_recording_enabled
                 || self.session_recording_enabled,
+            container_exec_enabled: other.container_exec_enabled || self.container_exec_enabled,
             // Use other's replicas if > 0, otherwise use self's replicas
             replicas: if other.replicas > 0 {
                 other.replicas
@@ -566,6 +577,7 @@ impl DeploymentConfigSnapshot {
             automatic_deploy: config.automatic_deploy,
             performance_metrics_enabled: config.performance_metrics_enabled,
             session_recording_enabled: config.session_recording_enabled,
+            container_exec_enabled: config.container_exec_enabled,
             replicas: config.replicas,
         }
     }
