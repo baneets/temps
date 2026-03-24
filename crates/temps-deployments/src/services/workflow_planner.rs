@@ -1341,7 +1341,9 @@ impl WorkflowPlanner {
             name: "Finalize Deployment".to_string(),
             description: Some("Register containers and update routes".to_string()),
             dependencies: vec!["deploy_compose".to_string()],
-            job_config: None,
+            job_config: Some(serde_json::json!({
+                "deployment_id": deployment.id
+            })),
             required_for_completion: true,
         });
 

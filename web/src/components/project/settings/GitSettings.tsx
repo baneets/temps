@@ -75,6 +75,7 @@ const gitSettingsSchema = z.object({
   preset: z.string().optional(),
   directory: z.string().optional(),
   dockerfilePath: z.string().optional(),
+  composePath: z.string().optional(),
 })
 
 type GitSettingsFormValues = z.infer<typeof gitSettingsSchema>
@@ -116,6 +117,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       directory: project?.directory || '',
       dockerfilePath:
         (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
+      composePath:
+        (project?.preset_config as any)?.composePath || 'docker-compose.yml',
     },
   })
 
@@ -128,6 +131,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         directory: project.directory || '',
         dockerfilePath:
           (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
+        composePath:
+          (project?.preset_config as any)?.composePath || 'docker-compose.yml',
       })
     }
   }, [project, form])
@@ -295,11 +300,13 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       // Extract just the preset name from "preset::path" format for backend
       const [presetName] = values.preset?.split('::') || ['']
 
-      // Build preset_config for presets that support it (e.g., Dockerfile)
+      // Build preset_config for presets that support it
       const presetConfig =
         presetName === 'dockerfile' && values.dockerfilePath
-          ? { dockerfilePath: values.dockerfilePath }
-          : undefined
+          ? { preset: 'dockerfile', dockerfilePath: values.dockerfilePath }
+          : presetName === 'docker-compose'
+            ? { preset: 'docker-compose', composePath: values.composePath || 'docker-compose.yml' }
+            : undefined
 
       await updateGithubRepo.mutateAsync({
         body: {
@@ -920,6 +927,30 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                           )}
                         />
                       )}
+
+                      {/* Compose path - only shown when Docker Compose preset is selected */}
+                      {currentPreset?.split('::')[0] === 'docker-compose' && (
+                        <FormField
+                          control={form.control}
+                          name="composePath"
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel>Compose File Path</FormLabel>
+                              <FormControl>
+                                <Input
+                                  {...field}
+                                  placeholder="docker-compose.yml"
+                                />
+                              </FormControl>
+                              <FormDescription>
+                                Path to your Docker Compose file relative to the
+                                root directory
+                              </FormDescription>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      )}
                     </>
                   ) : (
                     <>
@@ -967,6 +998,19 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                               <span className="font-mono text-sm">
                                 {(project.preset_config as any)
                                   ?.dockerfilePath || 'Dockerfile'}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {project.preset === 'docker-compose' && (
+                          <div className="space-y-2">
+                            <Label>Compose File Path</Label>
+                            <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
+                              <FileIcon className="h-4 w-4 text-muted-foreground" />
+                              <span className="font-mono text-sm">
+                                {(project.preset_config as any)
+                                  ?.composePath || 'docker-compose.yml'}
                               </span>
                             </div>
                           </div>
