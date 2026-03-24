@@ -141,7 +141,7 @@ const formSchema = z.object({
   storageServices: z.array(z.number()),
   dockerfilePath: z.string().optional(),
   composePath: z.string().optional(),
-  port: z.union([z.coerce.number().min(1).max(65535), z.nan()]).optional(),
+  port: z.coerce.number().min(1).max(65535).optional(),
 })
 
 export type ProjectFormValues = z.infer<typeof formSchema>
@@ -407,11 +407,12 @@ export function ProjectConfigurator({
     if (
       matchingPreset &&
       matchingPreset.default_port !== null &&
-      matchingPreset.default_port !== undefined
+      matchingPreset.default_port !== undefined &&
+      matchingPreset.default_port > 0
     ) {
       form.setValue('port', matchingPreset.default_port, {
         shouldValidate: true,
-        shouldDirty: false, // Don't mark as dirty when auto-setting
+        shouldDirty: false,
       })
     }
   }, [selectedPreset, allPresetsData, form])
