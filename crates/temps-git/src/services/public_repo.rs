@@ -234,18 +234,6 @@ impl PublicRepoProvider for GitHubPublicProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<PublicBranch>, PublicRepoError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/branches?per_page=100",
-            owner, repo
-        );
-
-        let response = self.send_with_retry(|| self.client.get(&url)).await?;
-
-        Self::check_response_status(
-            response.status(),
-            &format!("Branches for {}/{}", owner, repo),
-        )?;
-
         #[derive(Deserialize)]
         struct GitHubBranch {
             name: String,
@@ -258,19 +246,42 @@ impl PublicRepoProvider for GitHubPublicProvider {
             sha: String,
         }
 
-        let branches: Vec<GitHubBranch> = response
-            .json()
-            .await
-            .map_err(|e| PublicRepoError::ApiError(format!("Failed to parse branches: {}", e)))?;
+        let mut all_branches = Vec::new();
+        let mut page = 1u32;
+        let per_page = 100;
 
-        Ok(branches
-            .into_iter()
-            .map(|b| PublicBranch {
+        loop {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/branches?per_page={}&page={}",
+                owner, repo, per_page, page
+            );
+
+            let response = self.send_with_retry(|| self.client.get(&url)).await?;
+
+            Self::check_response_status(
+                response.status(),
+                &format!("Branches for {}/{}", owner, repo),
+            )?;
+
+            let branches: Vec<GitHubBranch> = response.json().await.map_err(|e| {
+                PublicRepoError::ApiError(format!("Failed to parse branches: {}", e))
+            })?;
+
+            let count = branches.len();
+            all_branches.extend(branches.into_iter().map(|b| PublicBranch {
                 name: b.name,
                 commit_sha: b.commit.sha,
                 protected: b.protected,
-            })
-            .collect())
+            }));
+
+            // Last page if fewer results than requested, or safety cap at 1000
+            if count < per_page || all_branches.len() >= 1000 {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_branches)
     }
 
     async fn get_file_tree(
@@ -468,19 +479,6 @@ impl PublicRepoProvider for GitLabPublicProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<PublicBranch>, PublicRepoError> {
-        let encoded_path = Self::encode_project_path(owner, repo);
-        let url = format!(
-            "{}/api/v4/projects/{}/repository/branches",
-            self.base_url, encoded_path
-        );
-
-        let response = self.send_with_retry(|| self.client.get(&url)).await?;
-
-        Self::check_response_status(
-            response.status(),
-            &format!("Branches for {}/{}", owner, repo),
-        )?;
-
         #[derive(Deserialize)]
         struct GitLabBranch {
             name: String,
@@ -493,19 +491,42 @@ impl PublicRepoProvider for GitLabPublicProvider {
             id: String,
         }
 
-        let branches: Vec<GitLabBranch> = response
-            .json()
-            .await
-            .map_err(|e| PublicRepoError::ApiError(format!("Failed to parse branches: {}", e)))?;
+        let encoded_path = Self::encode_project_path(owner, repo);
+        let mut all_branches = Vec::new();
+        let mut page = 1u32;
+        let per_page = 100;
 
-        Ok(branches
-            .into_iter()
-            .map(|b| PublicBranch {
+        loop {
+            let url = format!(
+                "{}/api/v4/projects/{}/repository/branches?per_page={}&page={}",
+                self.base_url, encoded_path, per_page, page
+            );
+
+            let response = self.send_with_retry(|| self.client.get(&url)).await?;
+
+            Self::check_response_status(
+                response.status(),
+                &format!("Branches for {}/{}", owner, repo),
+            )?;
+
+            let branches: Vec<GitLabBranch> = response.json().await.map_err(|e| {
+                PublicRepoError::ApiError(format!("Failed to parse branches: {}", e))
+            })?;
+
+            let count = branches.len();
+            all_branches.extend(branches.into_iter().map(|b| PublicBranch {
                 name: b.name,
                 commit_sha: b.commit.id,
                 protected: b.protected,
-            })
-            .collect())
+            }));
+
+            if count < per_page || all_branches.len() >= 1000 {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_branches)
     }
 
     async fn get_file_tree(
