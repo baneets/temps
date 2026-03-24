@@ -253,11 +253,13 @@ impl DeploymentService {
 
     /// List all containers for a specific environment.
     /// Returns container info paired with the optional node_id each container runs on.
+    /// Returns (ContainerInfo, node_id, service_name) for each container
     pub async fn list_environment_containers(
         &self,
         project_id: i32,
         environment_id: i32,
-    ) -> Result<Vec<(temps_deployer::ContainerInfo, Option<i32>)>, DeploymentError> {
+    ) -> Result<Vec<(temps_deployer::ContainerInfo, Option<i32>, Option<String>)>, DeploymentError>
+    {
         use temps_entities::{deployment_containers, projects};
 
         // Verify project exists and is a server-type project
@@ -299,12 +301,13 @@ impl DeploymentService {
         let mut container_infos = Vec::new();
         for db_container in db_containers {
             let node_id = db_container.node_id;
+            let service_name = db_container.service_name.clone();
             match self
                 .deployer
                 .get_container_info(&db_container.container_id)
                 .await
             {
-                Ok(info) => container_infos.push((info, node_id)),
+                Ok(info) => container_infos.push((info, node_id, service_name)),
                 Err(e) => {
                     warn!(
                         "Failed to get info for container {}: {}",

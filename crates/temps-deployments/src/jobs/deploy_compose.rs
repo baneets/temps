@@ -271,20 +271,34 @@ impl WorkflowTask for DeployComposeJob {
             None
         };
 
-        // Tear down previous compose stack before deploying new one
+        // Tear down previous containers (preserve volumes for data persistence)
         if let Some(ref log_id) = self.log_id {
             let _ = self
                 .log_service
-                .log_info(log_id, "Stopping previous compose stack (if running)")
+                .log_info(
+                    log_id,
+                    "Stopping previous compose stack (preserving volumes)",
+                )
                 .await;
         }
-        if let Err(e) = self.compose_executor.destroy(&project_name).await {
+        if let Err(e) = self
+            .compose_executor
+            .teardown_for_redeploy(&project_name)
+            .await
+        {
             debug!(
                 project = %project_name,
                 error = %e,
                 "Previous compose stack teardown failed (may not exist)"
             );
         }
+
+        // Get repo dir for build: directive support
+        let repo_dir: Option<String> = context
+            .get_output(&self.download_job_id, "repo_dir")
+            .ok()
+            .flatten();
+        let repo_path = repo_dir.map(|d| PathBuf::from(d).join(&self.directory));
 
         let request = ComposeDeployRequest {
             project_name: project_name.clone(),
@@ -294,6 +308,7 @@ impl WorkflowTask for DeployComposeJob {
             compose_path: self.compose_path.clone(),
             environment_vars: self.environment_vars.clone(),
             labels,
+            repo_dir: repo_path,
         };
 
         // Deploy

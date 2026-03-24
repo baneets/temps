@@ -47,6 +47,8 @@ pub struct ComposeDeployRequest {
     pub environment_vars: HashMap<String, String>,
     /// Temps labels to apply to all containers
     pub labels: HashMap<String, String>,
+    /// Source repo directory (needed for compose files with build: directives)
+    pub repo_dir: Option<PathBuf>,
 }
 
 /// Result for a single compose service after deployment.
@@ -94,27 +96,50 @@ impl ComposeExecutor {
     ) -> Result<Vec<ComposeServiceResult>, ComposeError> {
         let project_dir = self.project_dir(&request.project_name);
         let project_name = request.project_name.clone();
+        let has_build = self.has_build_directives(&request.compose_content);
 
-        // 1. Write compose files to disk
-        self.write_compose_files(&project_dir, &request).await?;
+        // When compose has build: directives, use the repo checkout as working dir
+        // so Docker can access Dockerfiles and source code
+        let effective_dir = if has_build {
+            request
+                .repo_dir
+                .clone()
+                .unwrap_or_else(|| project_dir.clone())
+        } else {
+            project_dir.clone()
+        };
 
-        // 2. Run docker compose up
+        // 1. Write compose files + env overrides to disk
+        self.write_compose_files(&effective_dir, &request).await?;
+
         let compose_file = request
             .compose_path
             .as_deref()
             .unwrap_or("docker-compose.yml");
 
+        // 2. Build images if compose file has build: directives
+        if has_build {
+            self.compose_build(
+                &effective_dir,
+                &project_name,
+                compose_file,
+                &request.environment_vars,
+            )
+            .await?;
+        }
+
+        // 3. Run docker compose up (pulls pre-built images, starts built + pulled)
         self.compose_up(
-            &project_dir,
+            &effective_dir,
             &project_name,
             compose_file,
             &request.environment_vars,
         )
         .await?;
 
-        // 3. Discover running containers
+        // 4. Discover running containers
         let containers = self
-            .discover_containers(&project_dir, &project_name, compose_file)
+            .discover_containers(&effective_dir, &project_name, compose_file)
             .await?;
 
         // 4. Apply Temps labels to each container
@@ -145,7 +170,38 @@ impl ComposeExecutor {
         Ok(containers)
     }
 
-    /// Stop and remove a compose stack.
+    /// Tear down containers before a redeploy. Preserves volumes (database data,
+    /// uploads, etc.) so they survive between deployments.
+    pub async fn teardown_for_redeploy(&self, project_name: &str) -> Result<(), ComposeError> {
+        let project_dir = self.project_dir(project_name);
+
+        if !project_dir.exists() {
+            debug!(project = %project_name, "Project directory does not exist, nothing to tear down");
+            return Ok(());
+        }
+
+        let compose_file = self.find_compose_file(&project_dir);
+
+        // down WITHOUT --volumes: removes containers and networks, keeps volumes
+        let output = tokio::process::Command::new("docker")
+            .args(["compose", "-p", project_name])
+            .args(["-f", &compose_file])
+            .args(["down", "--remove-orphans"])
+            .current_dir(&project_dir)
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(project = %project_name, stderr = %stderr, "docker compose down failed (best-effort)");
+        }
+
+        info!(project = %project_name, "Compose stack torn down (volumes preserved)");
+        Ok(())
+    }
+
+    /// Fully destroy a compose stack including all volumes and data.
+    /// Used when deleting a project/environment permanently.
     pub async fn destroy(&self, project_name: &str) -> Result<(), ComposeError> {
         let project_dir = self.project_dir(project_name);
 
@@ -154,9 +210,9 @@ impl ComposeExecutor {
             return Ok(());
         }
 
-        // Find compose file
         let compose_file = self.find_compose_file(&project_dir);
 
+        // down WITH --volumes: removes everything including persistent data
         let output = tokio::process::Command::new("docker")
             .args(["compose", "-p", project_name])
             .args(["-f", &compose_file])
@@ -168,7 +224,6 @@ impl ComposeExecutor {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!(project = %project_name, stderr = %stderr, "docker compose down failed");
-            // Don't return error — best effort cleanup
         }
 
         // Clean up work directory
@@ -176,7 +231,7 @@ impl ComposeExecutor {
             warn!(project = %project_name, error = %e, "Failed to clean up project directory");
         }
 
-        info!(project = %project_name, "Compose stack destroyed");
+        info!(project = %project_name, "Compose stack destroyed (volumes removed)");
         Ok(())
     }
 
@@ -291,6 +346,51 @@ impl ComposeExecutor {
             "Wrote compose files"
         );
 
+        Ok(())
+    }
+
+    /// Check if a compose file contains build: directives (services that need building)
+    fn has_build_directives(&self, compose_content: &str) -> bool {
+        for line in compose_content.lines() {
+            let trimmed = line.trim();
+            if trimmed == "build:" || trimmed.starts_with("build:") {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Run docker compose build for services with build: directives
+    async fn compose_build(
+        &self,
+        project_dir: &Path,
+        project_name: &str,
+        compose_file: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> Result<(), ComposeError> {
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.args(["compose", "-p", project_name])
+            .args(["-f", compose_file])
+            .args(["build", "--pull"])
+            .current_dir(project_dir);
+
+        for (key, value) in env_vars {
+            cmd.env(key, value);
+        }
+
+        debug!(project = %project_name, "Running docker compose build");
+
+        let output = cmd.output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ComposeError::CommandFailed {
+                project: project_name.to_string(),
+                reason: format!("docker compose build failed: {}", stderr),
+            });
+        }
+
+        info!(project = %project_name, "docker compose build completed");
         Ok(())
     }
 
@@ -644,6 +744,26 @@ services:
         assert!(override_yaml.contains(".env.temps"));
         // Each service should have env_file
         assert_eq!(override_yaml.matches("env_file:").count(), 3);
+    }
+
+    #[test]
+    fn test_has_build_directives() {
+        let docker = Docker::connect_with_defaults();
+        if docker.is_err() {
+            return;
+        }
+        let executor = ComposeExecutor::new(Arc::new(docker.unwrap()), PathBuf::from("/tmp/test"));
+
+        // No build
+        assert!(!executor.has_build_directives("services:\n  web:\n    image: nginx\n"));
+
+        // build: with context
+        assert!(executor.has_build_directives("services:\n  web:\n    build: .\n"));
+
+        // build: block
+        assert!(executor.has_build_directives(
+            "services:\n  web:\n    build:\n      context: .\n      dockerfile: Dockerfile\n"
+        ));
     }
 
     #[test]

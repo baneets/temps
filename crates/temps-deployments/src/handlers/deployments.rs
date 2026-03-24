@@ -755,7 +755,7 @@ pub async fn list_containers(
     // Collect unique node_ids to resolve names in a single batch
     let node_ids: Vec<i32> = containers
         .iter()
-        .filter_map(|(_, node_id)| *node_id)
+        .filter_map(|(_, node_id, _)| *node_id)
         .collect::<std::collections::HashSet<i32>>()
         .into_iter()
         .collect();
@@ -774,9 +774,9 @@ pub async fn list_containers(
 
     let container_responses: Vec<ContainerInfoResponse> = containers
         .into_iter()
-        .map(|(info, node_id)| {
+        .map(|(info, node_id, service_name)| {
             let node_name = node_id.and_then(|id| node_names.get(&id).cloned());
-            ContainerInfoResponse::from_info(info, node_name)
+            ContainerInfoResponse::from_info(info, node_name, service_name)
         })
         .collect();
 
