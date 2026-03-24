@@ -241,17 +241,47 @@ impl ComposeExecutor {
                 reason: e.to_string(),
             })?;
 
-        // Write .env file with merged env vars
-        let mut env_content = request.env_content.clone().unwrap_or_default();
-        for (key, value) in &request.environment_vars {
-            env_content.push_str(&format!("\n{}={}", key, value));
+        // Write .env file (repo's original .env content if any)
+        if let Some(ref env_content) = request.env_content {
+            if !env_content.trim().is_empty() {
+                let env_path = project_dir.join(".env");
+                tokio::fs::write(&env_path, env_content.trim())
+                    .await
+                    .map_err(|e| ComposeError::FileWriteFailed {
+                        path: env_path.display().to_string(),
+                        reason: e.to_string(),
+                    })?;
+            }
         }
-        if !env_content.trim().is_empty() {
-            let env_path = project_dir.join(".env");
-            tokio::fs::write(&env_path, env_content.trim())
+
+        // Write Temps system env vars to .env.temps
+        // These include SENTRY_DSN, TEMPS_API_URL, TEMPS_API_TOKEN, OTEL vars, etc.
+        if !request.environment_vars.is_empty() {
+            let temps_env: String = request
+                .environment_vars
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let temps_env_path = project_dir.join(".env.temps");
+            tokio::fs::write(&temps_env_path, &temps_env)
                 .await
                 .map_err(|e| ComposeError::FileWriteFailed {
-                    path: env_path.display().to_string(),
+                    path: temps_env_path.display().to_string(),
+                    reason: e.to_string(),
+                })?;
+
+            // Write compose override that injects .env.temps into every service.
+            // Docker Compose automatically merges docker-compose.override.yml.
+            // This ensures all Temps system env vars (SENTRY_DSN, TEMPS_API_URL, etc.)
+            // are available inside every container without modifying the original compose file.
+            let override_path = project_dir.join("docker-compose.override.yml");
+            let override_content =
+                self.generate_env_override(&request.compose_content, ".env.temps");
+            tokio::fs::write(&override_path, &override_content)
+                .await
+                .map_err(|e| ComposeError::FileWriteFailed {
+                    path: override_path.display().to_string(),
                     reason: e.to_string(),
                 })?;
         }
@@ -273,11 +303,18 @@ impl ComposeExecutor {
     ) -> Result<(), ComposeError> {
         let mut cmd = tokio::process::Command::new("docker");
         cmd.args(["compose", "-p", project_name])
-            .args(["-f", compose_file])
-            .args(["up", "-d", "--pull", "always", "--remove-orphans"])
+            .args(["-f", compose_file]);
+
+        // Include override file for env var injection (if it exists)
+        let override_path = project_dir.join("docker-compose.override.yml");
+        if override_path.exists() {
+            cmd.args(["-f", "docker-compose.override.yml"]);
+        }
+
+        cmd.args(["up", "-d", "--pull", "always", "--remove-orphans"])
             .current_dir(project_dir);
 
-        // Pass environment variables
+        // Pass environment variables for compose YAML substitution
         for (key, value) in env_vars {
             cmd.env(key, value);
         }
@@ -419,6 +456,72 @@ impl ComposeExecutor {
         Ok(())
     }
 
+    /// Generate a docker-compose.override.yml that adds env_file to every service.
+    /// This injects Temps system env vars into all containers without modifying
+    /// the original compose file.
+    fn generate_env_override(&self, compose_content: &str, env_file: &str) -> String {
+        // Parse service names from compose content (simple YAML parsing)
+        let mut services = Vec::new();
+        let mut in_services = false;
+        let mut services_indent: usize = 0;
+        let mut service_indent: Option<usize> = None; // indent of first service found
+
+        for line in compose_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let indent = line.len() - line.trim_start().len();
+
+            if trimmed == "services:" || trimmed.starts_with("services:") {
+                in_services = true;
+                services_indent = indent;
+                service_indent = None;
+                continue;
+            }
+
+            if in_services {
+                // If we go back to root level, stop
+                if indent <= services_indent {
+                    in_services = false;
+                    continue;
+                }
+
+                // Service names are keys at the first level after services:
+                if trimmed.ends_with(':') && !trimmed.contains(' ') && !trimmed.starts_with('-') {
+                    match service_indent {
+                        None => {
+                            // First service found — set the indent level
+                            service_indent = Some(indent);
+                            services.push(trimmed.trim_end_matches(':').to_string());
+                        }
+                        Some(si) if indent == si => {
+                            // Same indent as first service — it's a service
+                            services.push(trimmed.trim_end_matches(':').to_string());
+                        }
+                        _ => {
+                            // Deeper indent — it's a property (image:, ports:, etc.), skip
+                        }
+                    }
+                }
+            }
+        }
+
+        if services.is_empty() {
+            return String::new();
+        }
+
+        let mut override_yaml = String::from("services:\n");
+        for service in &services {
+            override_yaml.push_str(&format!("  {}:\n", service));
+            override_yaml.push_str("    env_file:\n");
+            override_yaml.push_str(&format!("      - {}\n", env_file));
+        }
+
+        override_yaml
+    }
+
     fn find_compose_file(&self, project_dir: &Path) -> String {
         for name in &[
             "docker-compose.yml",
@@ -512,5 +615,47 @@ mod tests {
         assert_eq!(ports.len(), 1); // Only the published port
         assert_eq!(ports[0].host_port, 8080);
         assert_eq!(ports[0].container_port, 80);
+    }
+
+    #[test]
+    fn test_generate_env_override() {
+        let docker = Docker::connect_with_defaults();
+        if docker.is_err() {
+            return;
+        }
+        let executor = ComposeExecutor::new(Arc::new(docker.unwrap()), PathBuf::from("/tmp/test"));
+
+        let compose = r#"
+services:
+  web:
+    image: nginx
+    ports:
+      - "8080:80"
+  redis:
+    image: redis:7
+  postgres:
+    image: postgres:17
+"#;
+
+        let override_yaml = executor.generate_env_override(compose, ".env.temps");
+        assert!(override_yaml.contains("web:"));
+        assert!(override_yaml.contains("redis:"));
+        assert!(override_yaml.contains("postgres:"));
+        assert!(override_yaml.contains(".env.temps"));
+        // Each service should have env_file
+        assert_eq!(override_yaml.matches("env_file:").count(), 3);
+    }
+
+    #[test]
+    fn test_generate_env_override_empty() {
+        let docker = Docker::connect_with_defaults();
+        if docker.is_err() {
+            return;
+        }
+        let executor = ComposeExecutor::new(Arc::new(docker.unwrap()), PathBuf::from("/tmp/test"));
+
+        let compose = "version: '3'\n";
+        let override_yaml = executor.generate_env_override(compose, ".env.temps");
+        assert!(override_yaml.is_empty());
     }
 }
