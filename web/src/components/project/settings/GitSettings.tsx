@@ -5,6 +5,7 @@ import {
   listRepositoriesByConnection,
 } from '@/api/client'
 import {
+  detectPublicPresetsOptions,
   getRepositoryPresetLiveOptions,
   listConnectionsOptions,
   listGitProvidersOptions,
@@ -269,7 +270,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       !!project?.git_provider_connection_id,
   })
 
-  // Get live preset detection for the repository
+  // Get live preset detection for authenticated repos
   const presetQuery = useQuery({
     ...getRepositoryPresetLiveOptions({
       path: { repository_id: repositoryData?.id || 0 },
@@ -277,16 +278,36 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
     enabled: !!repositoryData?.id,
   })
 
+  // Get preset detection for public repos (fallback when no git connection)
+  const isPublicRepo = (project as any)?.is_public_repo && !project?.git_provider_connection_id
+  const publicPresetQuery = useQuery({
+    ...detectPublicPresetsOptions({
+      path: {
+        provider: 'github',
+        owner: project?.repo_owner || '',
+        repo: project?.repo_name || '',
+      },
+    }),
+    enabled: !!isPublicRepo && !!project?.repo_owner && !!project?.repo_name,
+  })
+
   const presets = useMemo(() => {
+    // Try authenticated preset detection first
     if (presetQuery.data?.presets && presetQuery.data.presets.length > 0) {
-      // Map live preset data from presets array (new schema)
-      const projectPresets = presetQuery.data.presets.map((preset: any) => ({
+      return presetQuery.data.presets.map((preset: any) => ({
         value: preset.preset,
         label: preset.preset_label || preset.preset,
         directory: preset.path || './',
       }))
+    }
 
-      return projectPresets
+    // Try public repo preset detection
+    if (publicPresetQuery.data?.presets && publicPresetQuery.data.presets.length > 0) {
+      return (publicPresetQuery.data as any).presets.map((preset: any) => ({
+        value: preset.preset,
+        label: preset.preset_label || preset.preset,
+        directory: preset.path || './',
+      }))
     }
 
     // Fallback to default presets if no live data
@@ -295,7 +316,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       { value: 'vite', label: 'Vite', directory: './' },
       { value: 'rsbuild', label: 'RSBuild', directory: './' },
     ]
-  }, [presetQuery.data])
+  }, [presetQuery.data, publicPresetQuery.data])
 
   // Unified handler for all git settings
   const handleUpdateSettings = async (values: GitSettingsFormValues) => {
