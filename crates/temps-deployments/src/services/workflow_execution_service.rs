@@ -1210,62 +1210,27 @@ impl WorkflowExecutionService {
                     .unwrap_or("./")
                     .to_string();
 
-                // Read compose content from the downloaded repo
-                // The DownloadRepoJob outputs "repo_path" — the local checkout path
-                let compose_content = {
-                    let compose_file = compose_path.as_deref().unwrap_or("docker-compose.yml");
-                    // Try to read from the repo checkout path
-                    // The download_repo job saves files to data_dir/deployments/{deployment_id}/repo
-                    let repo_dir = self
-                        .config_service
-                        .data_dir()
-                        .join("deployments")
-                        .join(deployment.id.to_string())
-                        .join("repo");
-                    let compose_file_path = repo_dir.join(&directory).join(compose_file);
+                // Get dependencies to find the download job ID
+                let dependencies: Vec<String> = db_job
+                    .dependencies
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
 
-                    if compose_file_path.exists() {
-                        std::fs::read_to_string(&compose_file_path).map_err(|e| {
-                            WorkflowExecutionError::InvalidJobConfig(format!(
-                                "Failed to read compose file at {}: {}",
-                                compose_file_path.display(),
-                                e
-                            ))
-                        })?
-                    } else {
-                        // Fall back to compose content from job config (inline compose)
-                        config
-                            .get("compose_content")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| {
-                                WorkflowExecutionError::InvalidJobConfig(format!(
-                                    "Compose file not found at {} and no inline content provided",
-                                    compose_file_path.display()
-                                ))
-                            })?
-                            .to_string()
-                    }
-                };
+                let download_job_id = dependencies
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "download_repo".to_string());
 
-                // Read .env from repo if it exists
-                let env_content = {
-                    let repo_dir = self
-                        .config_service
-                        .data_dir()
-                        .join("deployments")
-                        .join(deployment.id.to_string())
-                        .join("repo");
-                    let env_path = repo_dir.join(&directory).join(".env");
-                    if env_path.exists() {
-                        std::fs::read_to_string(&env_path).ok()
-                    } else {
-                        None
-                    }
-                };
+                // Inline compose content (for manual projects without git repo)
+                let compose_content = config
+                    .get("compose_content")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
                 let compose_executor = Arc::new(temps_deployer::compose::ComposeExecutor::new(
                     self.docker.clone(),
-                    self.config_service.data_dir().to_path_buf(),
+                    self.config_service.data_dir(),
                 ));
 
                 let job = crate::jobs::DeployComposeJobBuilder::new()
@@ -1274,9 +1239,10 @@ impl WorkflowExecutionService {
                     .project_id(project.id)
                     .environment_id(environment.id)
                     .compose_executor(compose_executor)
-                    .compose_content(compose_content)
                     .compose_path(compose_path)
-                    .env_content(env_content)
+                    .directory(directory)
+                    .compose_content(compose_content)
+                    .download_job_id(download_job_id)
                     .environment_vars(env_vars)
                     .log_id(Some(db_job.log_id.clone()))
                     .log_service(self.log_service.clone())
