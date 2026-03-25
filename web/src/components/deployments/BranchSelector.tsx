@@ -1,4 +1,4 @@
-import { getRepositoryBranchesOptions } from '@/api/client/@tanstack/react-query.gen'
+import { getRepositoryBranchesOptions, getPublicBranchesOptions } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -16,6 +16,13 @@ import { useMemo, useState, useEffect } from 'react'
 import { isExpiredTokenError } from '@/utils/errorHandling'
 import { Link } from 'react-router-dom'
 
+/** Detect git provider from a git URL */
+function detectProviderFromUrl(gitUrl: string): 'github' | 'gitlab' | null {
+  if (gitUrl.includes('github.com') || gitUrl.includes('github')) return 'github'
+  if (gitUrl.includes('gitlab.com') || gitUrl.includes('gitlab')) return 'gitlab'
+  return null
+}
+
 interface BranchSelectorProps {
   repoOwner: string
   repoName: string
@@ -28,6 +35,8 @@ interface BranchSelectorProps {
   disabled?: boolean
   /** Pre-loaded branches (for public repos or when already fetched) */
   branches?: Array<{ name: string; is_default?: boolean }>
+  /** Git URL for public repos without a provider connection */
+  gitUrl?: string | null
 }
 
 export function BranchSelector({
@@ -41,11 +50,21 @@ export function BranchSelector({
   onBranchesLoaded,
   disabled = false,
   branches: providedBranches,
+  gitUrl,
 }: BranchSelectorProps) {
   const [isCustomBranch, setIsCustomBranch] = useState(false)
   const queryClient = useQueryClient()
 
-  // Fetch branches from repository (only if not provided and connectionId exists)
+  // Detect if this is a public repo (no connection but has gitUrl)
+  const publicProvider = useMemo(() => {
+    if (connectionId) return null
+    if (gitUrl) return detectProviderFromUrl(gitUrl)
+    // Default to github if we have owner/name but no connection
+    if (repoOwner && repoName) return 'github' as const
+    return null
+  }, [connectionId, gitUrl, repoOwner, repoName])
+
+  // Fetch branches from authenticated API (when connectionId exists)
   const branchesQuery = useQuery({
     ...getRepositoryBranchesOptions({
       path: {
@@ -61,38 +80,63 @@ export function BranchSelector({
     retry: false,
   })
 
+  // Fetch branches from public API (when no connectionId but public repo)
+  const publicBranchesQuery = useQuery({
+    ...getPublicBranchesOptions({
+      path: {
+        provider: publicProvider || 'github',
+        owner: repoOwner,
+        repo: repoName,
+      },
+    }),
+    enabled: !providedBranches && !!repoOwner && !!repoName && !connectionId && !!publicProvider,
+    retry: false,
+  })
+
+  // Merge the two queries
+  const effectiveQuery = connectionId ? branchesQuery : publicBranchesQuery
+
   const handleRefresh = async () => {
-    // Only refresh when connectionId is available
-    if (!connectionId) return
+    if (connectionId) {
+      // Refresh authenticated branches
+      const freshData = await queryClient.fetchQuery({
+        ...getRepositoryBranchesOptions({
+          path: {
+            owner: repoOwner,
+            repo: repoName,
+          },
+          query: {
+            connection_id: connectionId,
+            fresh: true,
+          },
+        }),
+      })
 
-    // Fetch fresh data and update the cache
-    const freshData = await queryClient.fetchQuery({
-      ...getRepositoryBranchesOptions({
-        path: {
-          owner: repoOwner,
-          repo: repoName,
-        },
-        query: {
-          connection_id: connectionId,
-          fresh: true,
-        },
-      }),
-    })
-
-    // Update the cached query with fresh data
-    queryClient.setQueryData(
-      getRepositoryBranchesOptions({
-        path: {
-          owner: repoOwner,
-          repo: repoName,
-        },
-        query: {
-          connection_id: connectionId,
-          fresh: false,
-        },
-      }).queryKey,
-      freshData
-    )
+      queryClient.setQueryData(
+        getRepositoryBranchesOptions({
+          path: {
+            owner: repoOwner,
+            repo: repoName,
+          },
+          query: {
+            connection_id: connectionId,
+            fresh: false,
+          },
+        }).queryKey,
+        freshData
+      )
+    } else if (publicProvider) {
+      // Refresh public branches
+      await queryClient.invalidateQueries({
+        queryKey: getPublicBranchesOptions({
+          path: {
+            provider: publicProvider,
+            owner: repoOwner,
+            repo: repoName,
+          },
+        }).queryKey,
+      })
+    }
   }
 
   // Check if branches query has expired token error
@@ -103,7 +147,7 @@ export function BranchSelector({
 
   // Sort branches: default branch first, then alphabetically
   const sortedBranches = useMemo(() => {
-    const branchList = providedBranches || branchesQuery.data?.branches
+    const branchList = providedBranches || effectiveQuery.data?.branches
     if (!branchList) return []
 
     return [...branchList].sort((a, b) => {
@@ -122,7 +166,7 @@ export function BranchSelector({
       // Then alphabetically
       return a.name.localeCompare(b.name)
     })
-  }, [providedBranches, branchesQuery.data, defaultBranch])
+  }, [providedBranches, effectiveQuery.data, defaultBranch])
 
   const effectiveBranch = value !== undefined ? value : (defaultBranch ?? '')
 
@@ -154,18 +198,18 @@ export function BranchSelector({
     )
   }
 
-  if (branchesQuery.isLoading) {
+  if (effectiveQuery.isLoading) {
     return <Skeleton className="h-10 w-full" />
   }
 
-  if (branchesQuery.error) {
+  if (effectiveQuery.error) {
     return (
       <Alert variant="destructive">
         <AlertTriangle className="h-4 w-4" />
         <AlertTitle>Error Loading Branches</AlertTitle>
         <AlertDescription>
-          {branchesQuery.error instanceof Error
-            ? branchesQuery.error.message
+          {effectiveQuery.error instanceof Error
+            ? effectiveQuery.error.message
             : 'Failed to load branches from repository'}
         </AlertDescription>
       </Alert>
@@ -206,10 +250,10 @@ export function BranchSelector({
           variant="outline"
           size="icon"
           onClick={handleRefresh}
-          disabled={branchesQuery.isFetching || disabled}
+          disabled={effectiveQuery.isFetching || disabled}
         >
           <RefreshCw
-            className={`h-4 w-4 ${branchesQuery.isFetching ? 'animate-spin' : ''}`}
+            className={`h-4 w-4 ${effectiveQuery.isFetching ? 'animate-spin' : ''}`}
           />
         </Button>
       </div>

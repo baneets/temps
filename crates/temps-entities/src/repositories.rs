@@ -31,6 +31,9 @@ pub struct PresetInfo {
     pub icon_url: Option<String>,
     /// Project type category (e.g., "frontend", "backend", "fullstack")
     pub project_type: String,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Repository preset cache structure

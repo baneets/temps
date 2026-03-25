@@ -591,6 +591,9 @@ pub struct ContainerInfoResponse {
     /// Compose service name (e.g. "web", "redis"). None for single-container deployments.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
+    /// Per-service URL for compose deployments (e.g. "https://web-myapp.localho.st")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_url: Option<String>,
 }
 
 impl ContainerInfoResponse {
@@ -598,6 +601,7 @@ impl ContainerInfoResponse {
         info: temps_deployer::ContainerInfo,
         node_name: Option<String>,
         service_name: Option<String>,
+        service_url: Option<String>,
     ) -> Self {
         Self {
             container_id: info.container_id,
@@ -607,13 +611,14 @@ impl ContainerInfoResponse {
             created_at: info.created_at.to_rfc3339(),
             node_name,
             service_name,
+            service_url,
         }
     }
 }
 
 impl From<temps_deployer::ContainerInfo> for ContainerInfoResponse {
     fn from(info: temps_deployer::ContainerInfo) -> Self {
-        Self::from_info(info, None, None)
+        Self::from_info(info, None, None, None)
     }
 }
 
@@ -651,6 +656,12 @@ pub struct ContainerDetailResponse {
     /// Resource limits
     #[schema(nullable = true)]
     pub resource_limits: Option<ResourceLimitsResponse>,
+    /// Compose service name (e.g. "web", "redis"). None for single-container deployments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Per-service URL for compose deployments
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_url: Option<String>,
 }
 
 /// Environment variable with masked sensitive values

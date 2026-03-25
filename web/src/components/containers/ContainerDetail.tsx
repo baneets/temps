@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useQuery } from '@tanstack/react-query'
+import { ExternalLink } from 'lucide-react'
 import { ContainerMetrics } from './ContainerMetrics'
 import { ContainerLogs } from './ContainerLogs'
 import { ContainerConfiguration } from './ContainerConfiguration'
@@ -69,6 +70,17 @@ export function ContainerDetail({
                 {container.image_name}
               </code>
             </p>
+            {container.service_url && (
+              <a
+                href={container.service_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-blue-500 hover:text-blue-400 mt-1"
+              >
+                {container.service_url.replace('https://', '')}
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
             <Badge

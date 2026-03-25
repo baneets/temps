@@ -113,6 +113,7 @@ const baseNavItems: NavItem[] = [
       { title: 'Session Replays', url: 'analytics/replays' },
       { title: 'Uptime', url: 'monitors' },
       { title: 'Metrics', url: 'monitoring' },
+      { title: 'Request Logs', url: 'request-logs' },
       { title: 'Traces', url: 'traces' },
       { title: 'Speed', url: 'speed' },
     ],

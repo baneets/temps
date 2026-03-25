@@ -146,6 +146,118 @@ const formSchema = z.object({
 
 export type ProjectFormValues = z.infer<typeof formSchema>
 
+// Compose file selector for docker-compose preset
+function ComposeFileSelector({
+  form,
+  presetData,
+}: {
+  form: ReturnType<typeof useForm<ProjectFormValues>>
+  presetData: { presets?: { preset: string; compose_files?: string[] | null; composeFiles?: string[] | null }[] } | undefined | null
+}) {
+  const [isCustomPath, setIsCustomPath] = useState(false)
+
+  // Extract compose files from the docker-compose preset data
+  const composeFiles = useMemo(() => {
+    if (!presetData?.presets) return []
+    const composePreset = presetData.presets.find(
+      (p) => p.preset === 'docker-compose'
+    )
+    // Handle both camelCase (from API) and snake_case
+    const files = composePreset?.composeFiles ?? composePreset?.compose_files ?? []
+    return files
+  }, [presetData])
+
+  // Auto-select first compose file when files are discovered
+  useEffect(() => {
+    if (composeFiles.length > 0 && !form.getValues('composePath')) {
+      form.setValue('composePath', composeFiles[0])
+    }
+  }, [composeFiles, form])
+
+  if (composeFiles.length === 0 || isCustomPath) {
+    return (
+      <FormField
+        control={form.control}
+        name="composePath"
+        render={({ field }) => (
+          <FormItem>
+            <div className="flex items-center justify-between">
+              <FormLabel>Compose File Path</FormLabel>
+              {composeFiles.length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setIsCustomPath(false)}
+                  className="h-auto py-1 px-2 text-xs"
+                >
+                  Back to detected files
+                </Button>
+              )}
+            </div>
+            <FormControl>
+              <Input
+                {...field}
+                placeholder="docker-compose.yml"
+                value={field.value || ''}
+              />
+            </FormControl>
+            <p className="text-xs text-muted-foreground">
+              Path to your compose file (e.g., docker-compose.yml, compose.yaml).
+            </p>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    )
+  }
+
+  return (
+    <FormField
+      control={form.control}
+      name="composePath"
+      render={({ field }) => (
+        <FormItem>
+          <div className="flex items-center justify-between">
+            <FormLabel>Compose File</FormLabel>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setIsCustomPath(true)}
+              className="h-auto py-1 px-2 text-xs"
+            >
+              Enter custom path
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {composeFiles.map((file) => (
+              <div
+                key={file}
+                className={cn(
+                  'flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors',
+                  field.value === file
+                    ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                    : 'hover:bg-muted/50'
+                )}
+                onClick={() => field.onChange(file)}
+              >
+                <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="font-mono text-sm">{file}</span>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {composeFiles.length} compose file{composeFiles.length !== 1 ? 's' : ''} found in your repository.
+            Each service with exposed ports gets a subdomain automatically.
+          </p>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  )
+}
+
 // Step definitions for different modes
 type WizardStep = 'repo-config' | 'services' | 'env-vars' | 'review'
 
@@ -750,26 +862,9 @@ export function ProjectConfigurator({
 
       {/* Docker Compose Configuration */}
       {form.watch('preset')?.split('::')[0]?.toLowerCase() === 'docker-compose' && (
-        <FormField
-          control={form.control}
-          name="composePath"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Compose File Path</FormLabel>
-              <FormControl>
-                <Input
-                  {...field}
-                  placeholder="docker-compose.yml"
-                  value={field.value || ''}
-                />
-              </FormControl>
-              <p className="text-xs text-muted-foreground">
-                Path to your compose file (e.g., docker-compose.yml, compose.yaml).
-                Each service with exposed ports gets a subdomain automatically.
-              </p>
-              <FormMessage />
-            </FormItem>
-          )}
+        <ComposeFileSelector
+          form={form}
+          presetData={presetData}
         />
       )}
 

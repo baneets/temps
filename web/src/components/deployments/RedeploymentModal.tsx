@@ -298,8 +298,9 @@ export function RedeploymentModal({
                         repoOwner={projectQuery.data?.repo_owner || ''}
                         repoName={projectQuery.data?.repo_name || ''}
                         connectionId={
-                          projectQuery.data?.git_provider_connection_id || 0
+                          projectQuery.data?.git_provider_connection_id || undefined
                         }
+                        gitUrl={(projectQuery.data as any)?.git_url}
                         defaultBranch={initialBranch || projectQuery.data?.main_branch}
                         value={selectedBranch}
                         onChange={(branch) => {

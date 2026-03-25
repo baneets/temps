@@ -206,6 +206,7 @@ pub struct CachedPresetInfo {
     pub exposed_port: Option<i32>,
     pub icon_url: Option<String>,
     pub project_type: String,
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Aggregated cache manager for all Git provider caches

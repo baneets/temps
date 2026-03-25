@@ -374,6 +374,10 @@ export function ProjectDetail() {
                 element={<RequestLogs project={project} />}
               />
               <Route
+                path="request-logs/*"
+                element={<RequestLogs project={project} />}
+              />
+              <Route
                 path="monitors"
                 element={<ProjectMonitors project={project} />}
               />

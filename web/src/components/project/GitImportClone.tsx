@@ -200,6 +200,7 @@ export function GitImportClone({
         iconUrl: p.icon_url,
         projectType: p.project_type,
         path: p.path,
+        composeFiles: (p as any).compose_files as string[] | undefined,
       }))
     : authenticatedPresetData?.presets
 

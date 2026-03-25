@@ -14,7 +14,7 @@ use std::io::Read;
 use std::sync::Arc;
 use temps_core::UtcDateTime;
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use temps_entities::{ip_geolocations, session_replay_events, session_replay_sessions, visitor};
 
@@ -1378,6 +1378,55 @@ impl SessionReplayService {
         session.update(self.db.as_ref()).await?;
 
         Ok(())
+    }
+
+    /// Hard-delete session replay events older than `retention_days` using
+    /// the event `timestamp` column (unix milliseconds), then remove any
+    /// sessions that no longer have events.
+    pub async fn cleanup_old_session_events(&self, retention_days: i64) {
+        let cutoff_ms = (Utc::now() - chrono::Duration::days(retention_days)).timestamp_millis();
+        info!(
+            "Session replay cleanup: deleting events older than {} ms (retention: {} days)",
+            cutoff_ms, retention_days
+        );
+
+        // 1. Delete events older than cutoff directly by timestamp
+        match session_replay_events::Entity::delete_many()
+            .filter(session_replay_events::Column::Timestamp.lt(cutoff_ms))
+            .exec(self.db.as_ref())
+            .await
+        {
+            Ok(res) => {
+                info!(
+                    "Session replay cleanup: deleted {} event rows older than {} days",
+                    res.rows_affected, retention_days
+                );
+            }
+            Err(e) => {
+                error!("Session replay cleanup: failed to delete old events: {}", e);
+                return;
+            }
+        }
+
+        // 2. Delete sessions that have no remaining events
+        let cutoff_dt = Utc::now() - chrono::Duration::days(retention_days);
+        match session_replay_sessions::Entity::delete_many()
+            .filter(session_replay_sessions::Column::CreatedAt.lt(cutoff_dt))
+            .exec(self.db.as_ref())
+            .await
+        {
+            Ok(res) => {
+                if res.rows_affected > 0 {
+                    info!(
+                        "Session replay cleanup: deleted {} old sessions",
+                        res.rows_affected
+                    );
+                }
+            }
+            Err(e) => {
+                error!("Session replay cleanup: failed to delete old sessions: {}", e);
+            }
+        }
     }
 
     /// Delete a session replay (soft delete)

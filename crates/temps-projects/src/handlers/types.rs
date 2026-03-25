@@ -258,6 +258,9 @@ pub struct ProjectResponse {
     pub updated_at: i64,
     pub last_deployment: Option<i64>,
     pub git_provider_connection_id: Option<i32>,
+    /// Git clone URL for the repository (used for public repos without a provider connection)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_url: Option<String>,
     /// Deployment configuration (resources, autoscaling, features)
     pub deployment_config: DeploymentConfig,
     /// Attack mode - when enabled, requires CAPTCHA verification for all project environments
@@ -291,6 +294,7 @@ impl ProjectResponse {
             updated_at: project.updated_at.timestamp_millis(),
             last_deployment: project.last_deployment.map(|d| d.timestamp_millis()),
             git_provider_connection_id: project.git_provider_connection_id,
+            git_url: project.git_url,
             attack_mode: project.attack_mode,
             enable_preview_environments: project.enable_preview_environments,
             source_type: project.source_type,

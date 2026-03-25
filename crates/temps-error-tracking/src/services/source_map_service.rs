@@ -230,6 +230,75 @@ impl SourceMapService {
         Ok(result.rows_affected)
     }
 
+    /// Delete source maps for releases that are no longer tied to any active deployment.
+    ///
+    /// An "active" release is one whose commit SHA matches the `commit_sha` of any
+    /// deployment currently pointed to by an environment's `current_deployment_id`.
+    /// All other source maps for the given project are deleted.
+    ///
+    /// Returns the number of source map rows deleted.
+    pub async fn delete_stale_source_maps(
+        &self,
+        project_id: i32,
+    ) -> Result<u64, SourceMapError> {
+        use temps_entities::{deployments, environments};
+
+        // Step 1: Find all environment current_deployment_ids for this project
+        let active_environments = environments::Entity::find()
+            .filter(environments::Column::ProjectId.eq(project_id))
+            .filter(environments::Column::DeletedAt.is_null())
+            .filter(environments::Column::CurrentDeploymentId.is_not_null())
+            .all(self.db.as_ref())
+            .await?;
+
+        let active_deployment_ids: Vec<i32> = active_environments
+            .iter()
+            .filter_map(|env| env.current_deployment_id)
+            .collect();
+
+        if active_deployment_ids.is_empty() {
+            debug!(
+                "No active deployments found for project {} — skipping source map cleanup",
+                project_id
+            );
+            return Ok(0);
+        }
+
+        // Step 2: Get the releases (commit SHAs) for those active deployments
+        let active_deployments = deployments::Entity::find()
+            .filter(deployments::Column::Id.is_in(active_deployment_ids))
+            .all(self.db.as_ref())
+            .await?;
+
+        let keep_releases: Vec<String> = active_deployments
+            .into_iter()
+            .map(|d| {
+                d.commit_sha
+                    .unwrap_or_else(|| format!("deploy-{}", d.id))
+            })
+            .collect();
+
+        if keep_releases.is_empty() {
+            return Ok(0);
+        }
+
+        // Step 3: Delete source maps whose release is NOT in the active set
+        let result = source_maps::Entity::delete_many()
+            .filter(source_maps::Column::ProjectId.eq(project_id))
+            .filter(source_maps::Column::Release.is_not_in(keep_releases.clone()))
+            .exec(self.db.as_ref())
+            .await?;
+
+        if result.rows_affected > 0 {
+            debug!(
+                "Cleaned up {} stale source map(s) for project {} (keeping releases: {:?})",
+                result.rows_affected, project_id, keep_releases
+            );
+        }
+
+        Ok(result.rows_affected)
+    }
+
     /// Delete a specific source map by ID
     pub async fn delete_by_id(
         &self,

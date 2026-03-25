@@ -5,7 +5,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { useState, useEffect } from 'react'
-import { ServerIcon } from 'lucide-react'
+import { ExternalLink, ServerIcon } from 'lucide-react'
 
 interface ContainerListProps {
   containers: ContainerInfoResponse[]
@@ -145,6 +145,20 @@ function ContainerCard({
             </div>
           </div>
         </div>
+        {container.service_url && (
+          <div
+            className="flex items-center gap-1 text-xs text-blue-500 hover:text-blue-400 cursor-pointer truncate"
+            onClick={(e) => {
+              e.stopPropagation()
+              window.open(container.service_url!, '_blank')
+            }}
+          >
+            <ExternalLink className="w-3 h-3 shrink-0" />
+            <span className="truncate">
+              {container.service_url.replace('https://', '')}
+            </span>
+          </div>
+        )}
         {container.node_name && (
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
             <ServerIcon className="w-3 h-3 shrink-0" />

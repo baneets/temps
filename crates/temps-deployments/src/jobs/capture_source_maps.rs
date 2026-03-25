@@ -384,6 +384,33 @@ impl WorkflowTask for CaptureSourceMapsJob {
             self.deployment_id, total_maps_captured, total_size
         );
 
+        // Clean up source maps from old releases no longer tied to active deployments
+        match self
+            .source_map_service
+            .delete_stale_source_maps(self.project_id)
+            .await
+        {
+            Ok(deleted) if deleted > 0 => {
+                self.log(format!(
+                    "Cleaned up {} stale source map(s) from previous deployments",
+                    deleted
+                ))
+                .await?;
+                info!(
+                    "Cleaned up {} stale source map(s) for project {}",
+                    deleted, self.project_id
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Non-fatal: log warning and continue
+                warn!(
+                    "Failed to clean up stale source maps for project {}: {}",
+                    self.project_id, e
+                );
+            }
+        }
+
         // Set output in context
         let mut updated_context = context.clone();
         updated_context.set_output(&self.job_id, "source_maps_captured", total_maps_captured)?;

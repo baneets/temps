@@ -49,33 +49,45 @@ export function FrameworkSelector({
     isLoading: presetsLoading,
   } = usePresets()
 
-  const detectedProjects = useMemo(
+  const rawDetectedProjects = useMemo(
     () => presetData?.presets || [],
     [presetData?.presets]
   )
+
+  // If the currently selected preset+path isn't in the detected list, inject it
+  // so the user sees their current selection highlighted among detected presets
+  const detectedProjects = useMemo(() => {
+    if (!selectedPreset || selectedPreset === 'custom' || rawDetectedProjects.length === 0) {
+      return rawDetectedProjects
+    }
+    const [selectedSlug, selectedPath] = selectedPreset.split('::')
+    if (!selectedSlug || !selectedPath) return rawDetectedProjects
+
+    const normalizedSelectedPath = normalizePath(selectedPath)
+    const alreadyExists = rawDetectedProjects.some((p) => {
+      return p.preset === selectedSlug && normalizePath(p.path) === normalizedSelectedPath
+    })
+
+    if (alreadyExists) return rawDetectedProjects
+
+    // Inject the current project's preset at the beginning
+    const presetInfo = getPresetBySlug(selectedSlug)
+    const injected: ProjectPresetResponse = {
+      preset: selectedSlug,
+      presetLabel: presetInfo?.label || selectedSlug,
+      exposedPort: presetInfo?.default_port || 0,
+      iconUrl: presetInfo?.icon_url || '',
+      projectType: presetInfo?.project_type || 'server',
+      path: selectedPath === 'root' ? './' : selectedPath,
+    }
+    return [injected, ...rawDetectedProjects]
+  }, [rawDetectedProjects, selectedPreset, getPresetBySlug])
+
   const hasDetectedPresets = detectedProjects.length > 0 && !error
 
-  // Check if the selected preset is in the detected list
-  const isSelectedInDetected = useMemo(() => {
-    if (!selectedPreset || selectedPreset === 'custom') return true
-    // Normalize the selected preset for comparison
-    const [selectedSlug, selectedPath] = selectedPreset.split('::')
-    const normalizedSelectedPath = normalizePath(selectedPath)
-
-    // Check if the full preset key (preset::normalizedPath) is in detected list
-    return detectedProjects.some((p) => {
-      const normalizedProjectPath = normalizePath(p.path)
-      return (
-        p.preset === selectedSlug &&
-        normalizedProjectPath === normalizedSelectedPath
-      )
-    })
-  }, [selectedPreset, detectedProjects])
-
-  // Determine if we should show all available presets or detected ones
-  // Force show all if selected preset is not in detected list
-  const shouldShowAllPresets =
-    !hasDetectedPresets || manualMode || !isSelectedInDetected
+  // Simple rule: if we have detected presets, show them. Otherwise show all.
+  // Only exception: manual mode (user clicked "Browse all presets")
+  const shouldShowAllPresets = manualMode || (!hasDetectedPresets && !isLoading)
 
   // Get presets to display based on mode
   const presetsToDisplay = useMemo(() => {
@@ -83,7 +95,7 @@ export function FrameworkSelector({
       // Show all available presets (excluding "custom" which is shown separately)
       return availablePresets.filter((preset) => preset.slug !== 'custom')
     }
-    // Show all detected presets (no need to collapse when multiple are found)
+    // Show all detected presets (including injected current selection if needed)
     return detectedProjects
   }, [shouldShowAllPresets, detectedProjects, availablePresets])
 
@@ -140,7 +152,7 @@ export function FrameworkSelector({
           )}
 
           {/* Toggle between detected and all presets */}
-          {hasDetectedPresets && !manualMode && (
+          {!shouldShowAllPresets && !manualMode && (
             <Button
               type="button"
               variant="outline"
@@ -167,8 +179,8 @@ export function FrameworkSelector({
         </div>
       </div>
 
-      {/* Show error/info alerts */}
-      {error && !manualMode && (
+      {/* Show error/info alerts — must match what's actually displayed below */}
+      {error && shouldShowAllPresets && (
         <Alert>
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
@@ -178,17 +190,16 @@ export function FrameworkSelector({
         </Alert>
       )}
 
-      {!hasDetectedPresets && !error && !manualMode && (
+      {shouldShowAllPresets && !error && !manualMode && (
         <Alert>
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>
-            No presets detected in this repository. Please select one from the
-            list below.
+            Select a preset for your project from the list below.
           </AlertDescription>
         </Alert>
       )}
 
-      {hasDetectedPresets && !manualMode && (
+      {!shouldShowAllPresets && !manualMode && (
         <Alert>
           <AlertDescription>
             ✓ We detected the following preset
@@ -320,6 +331,10 @@ function DetectedPresetCard({
   // Check if this preset is selected by comparing normalized paths
   const isSelected = useMemo(() => {
     const [selectedSlug, selectedPath] = selectedPreset.split('::')
+    // If no path in selection, match by slug only (e.g. existing project preset)
+    if (!selectedPath) {
+      return project.preset === selectedSlug
+    }
     const normalizedSelectedPath = normalizePath(selectedPath)
     return (
       project.preset === selectedSlug &&

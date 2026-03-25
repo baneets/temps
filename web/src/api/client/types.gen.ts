@@ -883,6 +883,14 @@ export type ContainerDetailResponse = {
      * Container restart count from Docker
      */
     restart_count?: number | null;
+    /**
+     * Compose service name (e.g. "web", "redis"). None for single-container deployments.
+     */
+    service_name?: string | null;
+    /**
+     * Per-service URL for compose deployments
+     */
+    service_url?: string | null;
     status: string;
 };
 
@@ -895,6 +903,14 @@ export type ContainerInfoResponse = {
      * Node name where this container is running. None for local (single-node) deployments.
      */
     node_name?: string | null;
+    /**
+     * Compose service name (e.g. "web", "redis"). None for single-container deployments.
+     */
+    service_name?: string | null;
+    /**
+     * Per-service URL for compose deployments (e.g. "https://web-myapp.localho.st")
+     */
+    service_url?: string | null;
     status: string;
 };
 
@@ -958,6 +974,18 @@ export type ContainerLogsQuery = {
      * Include timestamps in log output (default: false)
      */
     timestamps?: boolean;
+};
+
+export type ContainerMetrics = {
+    container_id: string;
+    container_name: string;
+    cpu_percent: number;
+    memory_bytes: number;
+    memory_limit: number;
+    memory_percent: number;
+    network_rx_bytes: number;
+    network_tx_bytes: number;
+    service: string;
 };
 
 /**
@@ -1574,6 +1602,39 @@ export type CreateSlackProviderRequest = {
     name: string;
 };
 
+export type CreateStackRequest = {
+    /**
+     * Compose content (required unless repo_url is provided)
+     */
+    compose_content?: string | null;
+    description?: string | null;
+    env_content?: string | null;
+    name: string;
+    node_id?: number | null;
+    /**
+     * Access token for private repos
+     */
+    repo_access_token?: string | null;
+    /**
+     * Branch to clone (defaults to repo default)
+     */
+    repo_branch?: string | null;
+    /**
+     * Path to compose file in repo (defaults to "docker-compose.yml")
+     */
+    repo_compose_path?: string | null;
+    /**
+     * Repository URL to fetch compose file from
+     */
+    repo_url?: string | null;
+};
+
+export type CreateStackRouteRequest = {
+    domain: string;
+    service_name?: string | null;
+    target_port: number;
+};
+
 export type CreateUserRequest = {
     email?: string | null;
     password?: string | null;
@@ -1863,6 +1924,10 @@ export type DeploymentConfig = {
      */
     automaticDeploy?: boolean;
     /**
+     * Enable container exec/shell access (disabled by default for security)
+     */
+    containerExecEnabled?: boolean;
+    /**
      * CPU limit in millicores (e.g., 2000 = 2 CPUs)
      */
     cpuLimit?: number | null;
@@ -1947,6 +2012,10 @@ export type DeploymentConfigSnapshot = {
      * Enable automatic deployments on git push
      */
     automaticDeploy?: boolean;
+    /**
+     * Enable container exec/shell access
+     */
+    containerExecEnabled?: boolean;
     /**
      * CPU limit in millicores
      */
@@ -2219,6 +2288,16 @@ export type DisableKvResponse = {
 
 export type DisableMfaRequest = {
     code: string;
+};
+
+export type DiscoverComposeRequest = {
+    repo_access_token?: string | null;
+    repo_branch?: string | null;
+    repo_url: string;
+};
+
+export type DiscoverComposeResponse = {
+    files: Array<string>;
 };
 
 /**
@@ -5286,6 +5365,16 @@ export type ListBlobsResponse = {
     hasMore: boolean;
 };
 
+export type ListBranchesRequest = {
+    repo_access_token?: string | null;
+    repo_url: string;
+};
+
+export type ListBranchesResponse = {
+    branches: Array<string>;
+    default_branch?: string | null;
+};
+
 export type ListCustomDomainsResponse = {
     domains: Array<CustomDomainResponse>;
     total: number;
@@ -6575,6 +6664,11 @@ export type PaginatedProjectList = {
     total: number;
 };
 
+export type PaginatedStacksResponse = {
+    items: Array<StackResponse>;
+    total: number;
+};
+
 export type PaginatedStaticBundlesResponse = {
     data: Array<StaticBundleResponse>;
     page: number;
@@ -6842,6 +6936,10 @@ export type PresetConfigSchema = DockerfilePresetConfig | NixpacksPresetConfig |
  */
 export type PresetInfo = {
     /**
+     * Compose file paths found in the repository (only for docker-compose preset)
+     */
+    compose_files?: Array<string> | null;
+    /**
      * Default exposed port for this preset
      */
     exposed_port?: number | null;
@@ -6986,13 +7084,55 @@ export type ProjectDashboardAnalytics = {
     unique_visitors: number;
 };
 
+/**
+ * Health summary for a single project (last 1 hour)
+ */
+export type ProjectHealthSummary = {
+    /**
+     * Average response time in ms
+     */
+    avg_response_time_ms: number;
+    /**
+     * Error rate as a percentage (0-100)
+     */
+    error_rate: number;
+    project_id: number;
+    /**
+     * Health status: "healthy", "degraded", "down", "unknown"
+     */
+    status: string;
+    /**
+     * Total errors (status >= 400) in the period
+     */
+    total_errors: number;
+    /**
+     * Total requests in the period
+     */
+    total_requests: number;
+};
+
 export type ProjectInfo = {
     created_at: string;
     id: number;
     slug: string;
 };
 
+/**
+ * Health summary for a single project based on its production monitors
+ */
+export type ProjectMonitorHealth = {
+    project_id: number;
+    /**
+     * Overall status: "operational", "degraded", "down", or "no_monitors"
+     */
+    status: string;
+};
+
 export type ProjectPresetResponse = {
+    /**
+     * Compose file paths found in the repository (only for docker-compose preset)
+     */
+    composeFiles?: Array<string> | null;
     /**
      * Default exposed port for this preset (e.g., 3000 for Next.js, 8000 for FastAPI)
      */
@@ -7031,6 +7171,10 @@ export type ProjectResponse = {
      */
     enable_preview_environments: boolean;
     git_provider_connection_id?: number | null;
+    /**
+     * Git clone URL for the repository (used for public repos without a provider connection)
+     */
+    git_url?: string | null;
     id: number;
     last_deployment?: number | null;
     main_branch: string;
@@ -7081,6 +7225,27 @@ export type ProjectUsageInfoResponse = {
     id: number;
     name: string;
     slug: string;
+};
+
+/**
+ * Batch health summary response
+ */
+export type ProjectsHealthResponse = {
+    /**
+     * Health summaries keyed by project ID
+     */
+    projects: {
+        [key: string]: ProjectHealthSummary;
+    };
+};
+
+/**
+ * Batch response for projects health
+ */
+export type ProjectsMonitorHealthResponse = {
+    projects: {
+        [key: string]: ProjectMonitorHealth;
+    };
 };
 
 export type PromoteDeploymentRequest = {
@@ -7844,6 +8009,17 @@ export type RoleInfo = {
      * Permissions included in this role
      */
     permissions: Array<string>;
+};
+
+export type RouteRefreshResponse = {
+    /**
+     * Human-readable message
+     */
+    message: string;
+    /**
+     * Number of routes loaded
+     */
+    route_count: number;
 };
 
 export type RouteResponse = {
@@ -8911,6 +9087,49 @@ export type SpeedMetricsPayload = {
     viewportWidth?: number | null;
 };
 
+export type StackContainersResponse = {
+    raw: string;
+};
+
+export type StackLogsResponse = {
+    logs: string;
+};
+
+export type StackResponse = {
+    compose_content: string;
+    created_at: string;
+    description?: string | null;
+    env_content?: string | null;
+    id: number;
+    last_synced_at?: string | null;
+    name: string;
+    node_id?: number | null;
+    /**
+     * JSON mapping of original_port -> new_port for port remapping
+     */
+    port_overrides?: unknown;
+    repo_branch?: string | null;
+    repo_compose_path?: string | null;
+    repo_url?: string | null;
+    state: string;
+    updated_at: string;
+};
+
+export type StackRouteResponse = {
+    created_at: string;
+    domain: string;
+    enabled: boolean;
+    id: number;
+    service_name?: string | null;
+    stack_id: number;
+    target_port: number;
+    updated_at: string;
+};
+
+export type StackStatsResponse = {
+    containers: Array<ContainerMetrics>;
+};
+
 export type StaticBundleResponse = {
     blob_path: string;
     checksum?: string | null;
@@ -9351,6 +9570,10 @@ export type TodayStatsResponse = {
      * Total requests today
      */
     total_requests: number;
+};
+
+export type ToggleStackRouteRequest = {
+    enabled: boolean;
 };
 
 export type TokenRenewalRequest = {
@@ -9811,6 +10034,14 @@ export type UpdateKvResponse = {
     success: boolean;
 };
 
+export type UpdatePortOverridesRequest = {
+    /**
+     * Port overrides: JSON mapping of original_port -> new_port (e.g. {"8080": 9090}).
+     * Pass null to clear.
+     */
+    port_overrides?: unknown;
+};
+
 export type UpdatePreferencesRequest = {
     preferences: NotificationPreferencesResponse;
 };
@@ -9924,6 +10155,17 @@ export type UpdateSpeedMetricsPayload = {
      * Interaction to Next Paint (milliseconds)
      */
     inp?: number | null;
+};
+
+export type UpdateStackRequest = {
+    compose_content?: string | null;
+    description?: string | null;
+    env_content?: string | null;
+    name?: string | null;
+    /**
+     * Port overrides: JSON mapping of original_port -> new_port (e.g. {"8080": 9090})
+     */
+    port_overrides?: unknown;
 };
 
 export type UpdateTokenRequest = {
@@ -19563,6 +19805,42 @@ export type TailLogsResponses = {
     200: unknown;
 };
 
+export type GetProjectsMonitorHealthData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Comma-separated list of project IDs
+         */
+        project_ids: string;
+    };
+    url: '/monitors-health/projects';
+};
+
+export type GetProjectsMonitorHealthErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetProjectsMonitorHealthResponses = {
+    /**
+     * Health summaries per project
+     */
+    200: ProjectsMonitorHealthResponse;
+};
+
+export type GetProjectsMonitorHealthResponse = GetProjectsMonitorHealthResponses[keyof GetProjectsMonitorHealthResponses];
+
 export type DeleteMonitorData = {
     body?: never;
     path: {
@@ -27301,6 +27579,38 @@ export type GetProxyLogByRequestIdResponses = {
 
 export type GetProxyLogByRequestIdResponse = GetProxyLogByRequestIdResponses[keyof GetProxyLogByRequestIdResponses];
 
+export type GetProjectsHealthData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Comma-separated list of project IDs
+         */
+        project_ids: string;
+    };
+    url: '/proxy-logs/stats/projects-health';
+};
+
+export type GetProjectsHealthErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetProjectsHealthResponses = {
+    /**
+     * Health summaries per project
+     */
+    200: ProjectsHealthResponse;
+};
+
+export type GetProjectsHealthResponse = GetProjectsHealthResponses[keyof GetProjectsHealthResponses];
+
 export type GetTimeBucketStatsData = {
     body?: never;
     path?: never;
@@ -28237,6 +28547,911 @@ export type GetPublicSettingsResponses = {
 };
 
 export type GetPublicSettingsResponse = GetPublicSettingsResponses[keyof GetPublicSettingsResponses];
+
+export type RefreshRouteTableData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/routes/refresh';
+};
+
+export type RefreshRouteTableErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RefreshRouteTableResponses = {
+    /**
+     * Route table refreshed
+     */
+    200: RouteRefreshResponse;
+};
+
+export type RefreshRouteTableResponse = RefreshRouteTableResponses[keyof RefreshRouteTableResponses];
+
+export type ListStacksData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Page number (default: 1)
+         */
+        page?: number;
+        /**
+         * Page size (default: 20, max: 100)
+         */
+        page_size?: number;
+    };
+    url: '/stacks';
+};
+
+export type ListStacksErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListStacksError = ListStacksErrors[keyof ListStacksErrors];
+
+export type ListStacksResponses = {
+    /**
+     * List of stacks
+     */
+    200: PaginatedStacksResponse;
+};
+
+export type ListStacksResponse = ListStacksResponses[keyof ListStacksResponses];
+
+export type CreateStackData = {
+    body: CreateStackRequest;
+    path?: never;
+    query?: never;
+    url: '/stacks';
+};
+
+export type CreateStackErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CreateStackError = CreateStackErrors[keyof CreateStackErrors];
+
+export type CreateStackResponses = {
+    /**
+     * Stack created
+     */
+    201: StackResponse;
+};
+
+export type CreateStackResponse = CreateStackResponses[keyof CreateStackResponses];
+
+export type ListBranchesData = {
+    body: ListBranchesRequest;
+    path?: never;
+    query?: never;
+    url: '/stacks/branches';
+};
+
+export type ListBranchesErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+    /**
+     * Repository connection failed
+     */
+    502: ProblemDetails;
+};
+
+export type ListBranchesError = ListBranchesErrors[keyof ListBranchesErrors];
+
+export type ListBranchesResponses = {
+    /**
+     * Branches listed
+     */
+    200: ListBranchesResponse;
+};
+
+export type ListBranchesResponse2 = ListBranchesResponses[keyof ListBranchesResponses];
+
+export type DiscoverComposeFilesData = {
+    body: DiscoverComposeRequest;
+    path?: never;
+    query?: never;
+    url: '/stacks/discover';
+};
+
+export type DiscoverComposeFilesErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+    /**
+     * Repository clone failed
+     */
+    502: ProblemDetails;
+};
+
+export type DiscoverComposeFilesError = DiscoverComposeFilesErrors[keyof DiscoverComposeFilesErrors];
+
+export type DiscoverComposeFilesResponses = {
+    /**
+     * Compose files found
+     */
+    200: DiscoverComposeResponse;
+};
+
+export type DiscoverComposeFilesResponse = DiscoverComposeFilesResponses[keyof DiscoverComposeFilesResponses];
+
+export type DeleteStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}';
+};
+
+export type DeleteStackErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Stack is running
+     */
+    409: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type DeleteStackError = DeleteStackErrors[keyof DeleteStackErrors];
+
+export type DeleteStackResponses = {
+    /**
+     * Stack deleted
+     */
+    204: void;
+};
+
+export type DeleteStackResponse = DeleteStackResponses[keyof DeleteStackResponses];
+
+export type GetStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}';
+};
+
+export type GetStackErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetStackError = GetStackErrors[keyof GetStackErrors];
+
+export type GetStackResponses = {
+    /**
+     * Stack details
+     */
+    200: StackResponse;
+};
+
+export type GetStackResponse = GetStackResponses[keyof GetStackResponses];
+
+export type UpdateStackData = {
+    body: UpdateStackRequest;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}';
+};
+
+export type UpdateStackErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type UpdateStackError = UpdateStackErrors[keyof UpdateStackErrors];
+
+export type UpdateStackResponses = {
+    /**
+     * Stack updated
+     */
+    200: StackResponse;
+};
+
+export type UpdateStackResponse = UpdateStackResponses[keyof UpdateStackResponses];
+
+export type GetStackContainersData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/containers';
+};
+
+export type GetStackContainersErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetStackContainersError = GetStackContainersErrors[keyof GetStackContainersErrors];
+
+export type GetStackContainersResponses = {
+    /**
+     * Stack containers
+     */
+    200: StackContainersResponse;
+};
+
+export type GetStackContainersResponse = GetStackContainersResponses[keyof GetStackContainersResponses];
+
+export type DeployStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/deploy';
+};
+
+export type DeployStackErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type DeployStackError = DeployStackErrors[keyof DeployStackErrors];
+
+export type DeployStackResponses = {
+    /**
+     * Stack deployed
+     */
+    200: StackResponse;
+};
+
+export type DeployStackResponse = DeployStackResponses[keyof DeployStackResponses];
+
+export type GetStackLogsData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: {
+        /**
+         * Service name filter
+         */
+        service?: string;
+        /**
+         * Number of lines (default: 200)
+         */
+        tail?: number;
+    };
+    url: '/stacks/{id}/logs';
+};
+
+export type GetStackLogsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetStackLogsError = GetStackLogsErrors[keyof GetStackLogsErrors];
+
+export type GetStackLogsResponses = {
+    /**
+     * Stack logs
+     */
+    200: StackLogsResponse;
+};
+
+export type GetStackLogsResponse = GetStackLogsResponses[keyof GetStackLogsResponses];
+
+export type UpdatePortOverridesData = {
+    body: UpdatePortOverridesRequest;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/port-overrides';
+};
+
+export type UpdatePortOverridesErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type UpdatePortOverridesError = UpdatePortOverridesErrors[keyof UpdatePortOverridesErrors];
+
+export type UpdatePortOverridesResponses = {
+    /**
+     * Port overrides updated
+     */
+    200: StackResponse;
+};
+
+export type UpdatePortOverridesResponse = UpdatePortOverridesResponses[keyof UpdatePortOverridesResponses];
+
+export type PullStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/pull';
+};
+
+export type PullStackErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type PullStackError = PullStackErrors[keyof PullStackErrors];
+
+export type PullStackResponses = {
+    /**
+     * Images pulled
+     */
+    200: StackResponse;
+};
+
+export type PullStackResponse = PullStackResponses[keyof PullStackResponses];
+
+export type RestartStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/restart';
+};
+
+export type RestartStackErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type RestartStackError = RestartStackErrors[keyof RestartStackErrors];
+
+export type RestartStackResponses = {
+    /**
+     * Stack restarted
+     */
+    200: StackResponse;
+};
+
+export type RestartStackResponse = RestartStackResponses[keyof RestartStackResponses];
+
+export type ListStackRoutesData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/routes';
+};
+
+export type ListStackRoutesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListStackRoutesError = ListStackRoutesErrors[keyof ListStackRoutesErrors];
+
+export type ListStackRoutesResponses = {
+    /**
+     * Stack routes
+     */
+    200: Array<StackRouteResponse>;
+};
+
+export type ListStackRoutesResponse = ListStackRoutesResponses[keyof ListStackRoutesResponses];
+
+export type CreateStackRouteData = {
+    body: CreateStackRouteRequest;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/routes';
+};
+
+export type CreateStackRouteErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CreateStackRouteError = CreateStackRouteErrors[keyof CreateStackRouteErrors];
+
+export type CreateStackRouteResponses = {
+    /**
+     * Route created
+     */
+    201: StackRouteResponse;
+};
+
+export type CreateStackRouteResponse = CreateStackRouteResponses[keyof CreateStackRouteResponses];
+
+export type GetStackStatsData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/stats';
+};
+
+export type GetStackStatsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetStackStatsError = GetStackStatsErrors[keyof GetStackStatsErrors];
+
+export type GetStackStatsResponses = {
+    /**
+     * Stack metrics
+     */
+    200: StackStatsResponse;
+};
+
+export type GetStackStatsResponse = GetStackStatsResponses[keyof GetStackStatsResponses];
+
+export type StopStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/stop';
+};
+
+export type StopStackErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type StopStackError = StopStackErrors[keyof StopStackErrors];
+
+export type StopStackResponses = {
+    /**
+     * Stack stopped
+     */
+    200: StackResponse;
+};
+
+export type StopStackResponse = StopStackResponses[keyof StopStackResponses];
+
+export type SyncStackData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/stacks/{id}/sync';
+};
+
+export type SyncStackErrors = {
+    /**
+     * Stack not linked to a repository
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+    /**
+     * Repository sync failed
+     */
+    502: ProblemDetails;
+};
+
+export type SyncStackError = SyncStackErrors[keyof SyncStackErrors];
+
+export type SyncStackResponses = {
+    /**
+     * Stack synced from repository
+     */
+    200: StackResponse;
+};
+
+export type SyncStackResponse = SyncStackResponses[keyof SyncStackResponses];
+
+export type DeleteStackRouteData = {
+    body?: never;
+    path: {
+        /**
+         * Stack ID
+         */
+        stack_id: number;
+        /**
+         * Route ID
+         */
+        route_id: number;
+    };
+    query?: never;
+    url: '/stacks/{stack_id}/routes/{route_id}';
+};
+
+export type DeleteStackRouteErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack or route not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type DeleteStackRouteError = DeleteStackRouteErrors[keyof DeleteStackRouteErrors];
+
+export type DeleteStackRouteResponses = {
+    /**
+     * Route deleted
+     */
+    204: void;
+};
+
+export type DeleteStackRouteResponse = DeleteStackRouteResponses[keyof DeleteStackRouteResponses];
+
+export type ToggleStackRouteData = {
+    body: ToggleStackRouteRequest;
+    path: {
+        /**
+         * Stack ID
+         */
+        stack_id: number;
+        /**
+         * Route ID
+         */
+        route_id: number;
+    };
+    query?: never;
+    url: '/stacks/{stack_id}/routes/{route_id}';
+};
+
+export type ToggleStackRouteErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Stack or route not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ToggleStackRouteError = ToggleStackRouteErrors[keyof ToggleStackRouteErrors];
+
+export type ToggleStackRouteResponses = {
+    /**
+     * Route updated
+     */
+    200: StackRouteResponse;
+};
+
+export type ToggleStackRouteResponse = ToggleStackRouteResponses[keyof ToggleStackRouteResponses];
 
 export type ListTemplatesData = {
     body?: never;

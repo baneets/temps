@@ -9,6 +9,18 @@ use tracing::debug;
 /// Session replay analytics plugin
 pub struct SessionReplayPlugin;
 
+impl SessionReplayPlugin {
+    /// Periodically hard-delete session replay data older than 15 days
+    async fn cleanup_loop(service: Arc<crate::services::SessionReplayService>) {
+        let retention_days = 15;
+        loop {
+            // Run every 6 hours
+            tokio::time::sleep(tokio::time::Duration::from_secs(6 * 3600)).await;
+            service.cleanup_old_session_events(retention_days).await;
+        }
+    }
+}
+
 impl Default for SessionReplayPlugin {
     fn default() -> Self {
         Self
@@ -30,7 +42,13 @@ impl TempsPlugin for SessionReplayPlugin {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
 
             let session_service = Arc::new(crate::services::SessionReplayService::new(db));
-            context.register_service(session_service);
+            context.register_service(session_service.clone());
+
+            // Start periodic cleanup of old session replay data (15-day retention)
+            let cleanup_service = session_service.clone();
+            tokio::spawn(async move {
+                Self::cleanup_loop(cleanup_service).await;
+            });
 
             debug!("Session replay services registered successfully");
             Ok(())

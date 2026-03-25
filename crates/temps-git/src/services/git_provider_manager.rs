@@ -32,6 +32,9 @@ pub struct ProjectPresetDomain {
     pub exposed_port: Option<u16>,
     pub icon_url: Option<String>,
     pub project_type: String,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2402,6 +2405,7 @@ impl GitProviderManager {
                 exposed_port: p.exposed_port,
                 icon_url: p.icon_url.clone(),
                 project_type: p.project_type.clone(),
+                compose_files: p.compose_files.clone(),
             })
             .collect();
 
@@ -2470,6 +2474,7 @@ impl GitProviderManager {
                     exposed_port,
                     icon_url,
                     project_type,
+                    compose_files: preset.compose_files,
                 }
             })
             .collect()

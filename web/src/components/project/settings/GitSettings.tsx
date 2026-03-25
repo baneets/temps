@@ -45,6 +45,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import GithubIcon from '@/icons/Github'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useFieldArray } from 'react-hook-form'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -55,6 +56,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm, useWatch } from 'react-hook-form'
@@ -78,9 +80,216 @@ const gitSettingsSchema = z.object({
   dockerfilePath: z.string().optional(),
   composePath: z.string().optional(),
   composeOverride: z.string().optional(),
+  publicPorts: z
+    .array(
+      z.object({
+        service: z.string(),
+        port: z.number().min(1).max(65535),
+      })
+    )
+    .optional(),
 })
 
 type GitSettingsFormValues = z.infer<typeof gitSettingsSchema>
+
+/** Known service/port combinations commonly found in Docker Compose files */
+const COMMON_PORTS: Record<string, number[]> = {
+  clickhouse: [8123, 9000],
+  postgres: [5432],
+  mysql: [3306],
+  redis: [6379],
+  mongodb: [27017],
+  elasticsearch: [9200, 9300],
+  rabbitmq: [5672, 15672],
+  kafka: [9092],
+  nginx: [80, 443],
+  traefik: [80, 443, 8080],
+  minio: [9000, 9001],
+  grafana: [3000],
+  prometheus: [9090],
+}
+
+function PortSuggestions({
+  suggestions,
+  currentPorts,
+  onAdd,
+}: {
+  suggestions: { service: string; port: number }[]
+  currentPorts: { service: string; port: number }[]
+  onAdd: (s: { service: string; port: number }) => void
+}) {
+  const remaining = suggestions.filter(
+    (s) =>
+      !currentPorts.some(
+        (cp) => cp.service === s.service && cp.port === s.port
+      )
+  )
+  if (remaining.length === 0) return null
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs text-muted-foreground">Detected from compose:</p>
+      <div className="flex flex-wrap gap-1.5">
+        {remaining.map((s) => (
+          <Button
+            key={`${s.service}:${s.port}`}
+            type="button"
+            variant="outline"
+            size="sm"
+            className="text-xs h-7"
+            onClick={() => onAdd(s)}
+          >
+            <Plus className="h-3 w-3 mr-1" />
+            {s.service}:{s.port}
+          </Button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function PublicPortsField({
+  form,
+}: {
+  form: ReturnType<typeof useForm<GitSettingsFormValues>>
+}) {
+  const { fields, append, remove } = useFieldArray({
+    control: form.control,
+    name: 'publicPorts',
+  })
+
+  // Parse compose override to suggest services/ports
+  const composeOverride = useWatch({
+    control: form.control,
+    name: 'composeOverride',
+  })
+
+  // Suggest services from compose override or common ports
+  const suggestions = useMemo(() => {
+    const result: { service: string; port: number }[] = []
+    // Parse services from compose override if available
+    if (composeOverride) {
+      let inServices = false
+      let currentService: string | null = null
+      let servicesIndent = 0
+      let serviceIndent: number | null = null
+      for (const line of composeOverride.split('\n')) {
+        const trimmed = line.trim()
+        const indent = line.length - line.trimStart().length
+        if (trimmed === 'services:' || trimmed.startsWith('services:')) {
+          inServices = true
+          servicesIndent = indent
+          serviceIndent = null
+          continue
+        }
+        if (inServices && indent <= servicesIndent && trimmed) {
+          inServices = false
+        }
+        if (
+          inServices &&
+          trimmed.endsWith(':') &&
+          !trimmed.includes(' ') &&
+          !trimmed.startsWith('-')
+        ) {
+          if (serviceIndent === null || indent === serviceIndent) {
+            serviceIndent = indent
+            currentService = trimmed.replace(':', '')
+            // Add common ports for this service
+            const known = COMMON_PORTS[currentService.toLowerCase()]
+            if (known) {
+              known.forEach((p) =>
+                result.push({ service: currentService!, port: p })
+              )
+            }
+          }
+        }
+        // Parse port entries
+        if (currentService && (trimmed.startsWith("- '") || trimmed.startsWith('- "'))) {
+          const portMatch = trimmed.match(/(\d+):(\d+)/)
+          if (portMatch) {
+            result.push({
+              service: currentService!,
+              port: parseInt(portMatch[2]),
+            })
+          }
+        }
+      }
+    }
+    return result
+  }, [composeOverride])
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <Label className="text-sm font-medium">Public Ports</Label>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Ports exposed publicly through the proxy. All other ports remain
+            private.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => append({ service: '', port: 0 })}
+        >
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          Add
+        </Button>
+      </div>
+
+      {fields.length === 0 && (
+        <p className="text-xs text-muted-foreground italic py-2">
+          No public ports configured. All services are private by default.
+        </p>
+      )}
+
+      {fields.map((field, index) => (
+        <div key={field.id} className="flex items-center gap-2">
+          <Input
+            placeholder="Service name"
+            list="compose-services"
+            className="flex-1 text-sm"
+            {...form.register(`publicPorts.${index}.service`)}
+          />
+          <Input
+            type="number"
+            placeholder="Port"
+            className="w-24 text-sm"
+            {...form.register(`publicPorts.${index}.port`, {
+              valueAsNumber: true,
+            })}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => remove(index)}
+          >
+            <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+          </Button>
+        </div>
+      ))}
+
+      <PortSuggestions
+        suggestions={suggestions}
+        currentPorts={(form.getValues('publicPorts') || []).map((p) => ({
+          service: p.service || '',
+          port: p.port || 0,
+        }))}
+        onAdd={(s) => append(s)}
+      />
+
+      {/* Datalist for autocomplete */}
+      <datalist id="compose-services">
+        {[...new Set(suggestions.map((s) => s.service))].map((svc) => (
+          <option key={svc} value={svc} />
+        ))}
+      </datalist>
+    </div>
+  )
+}
 
 function getGithubRepoUrl(owner: string, repo: string) {
   return `https://github.com/${owner}/${repo}`
@@ -123,6 +332,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
         (project?.preset_config as any)?.composePath || 'docker-compose.yml',
       composeOverride:
         (project?.preset_config as any)?.composeOverride || '',
+      publicPorts:
+        (project?.preset_config as any)?.publicPorts || [],
     },
   })
 
@@ -139,6 +350,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
           (project?.preset_config as any)?.composePath || 'docker-compose.yml',
         composeOverride:
           (project?.preset_config as any)?.composeOverride || '',
+        publicPorts:
+          (project?.preset_config as any)?.publicPorts || [],
       })
     }
   }, [project, form])
@@ -311,7 +524,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
 
   // Combined preset data: authenticated or public
   const effectivePresetData = presetQuery.data || publicPresetData
-  const effectivePresetLoading = presetQuery.isLoading || publicPresetQuery.isLoading
+  const effectivePresetLoading = presetQuery.isLoading || publicPresetQuery.isLoading || publicPresetQuery.isFetching
 
   const presets = useMemo(() => {
     if (effectivePresetData?.presets && effectivePresetData.presets.length > 0) {
@@ -355,6 +568,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                 preset: 'docker-compose',
                 composePath: values.composePath || 'docker-compose.yml',
                 composeOverride: values.composeOverride || undefined,
+                publicPorts: values.publicPorts?.length ? values.publicPorts : undefined,
               }
             : undefined
 
@@ -791,8 +1005,9 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                               normalizeDir(currentDirectory)
 
                             // Find matching preset by both name AND path
+                            const allPresets = effectivePresetData?.presets || []
                             const matchingPreset =
-                              presetQuery.data?.presets?.find((p: any) => {
+                              allPresets.find((p: any) => {
                                 const normalizedPresetPath = normalizeDir(
                                   p.path
                                 )
@@ -808,15 +1023,15 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
 
                             // Fallback: if no exact match, find by preset name only
                             const fallbackPreset =
-                              presetQuery.data?.presets?.find(
+                              allPresets.find(
                                 (p: any) => p.preset === field.value
                               )
                             if (fallbackPreset) {
                               return `${fallbackPreset.preset}::${normalizeDir(fallbackPreset.path)}`
                             }
 
-                            // Return just the slug if not found in detected presets
-                            return field.value
+                            // Fallback: construct value from slug + current directory
+                            return `${field.value}::${normalizedCurrentDir}`
                           }
 
                           const selectValue = getSelectValue()
@@ -981,7 +1196,10 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                       )}
 
                       {/* Compose settings - only shown when Docker Compose preset is selected */}
-                      {currentPreset?.split('::')[0] === 'docker-compose' && (
+                      {(currentPreset?.split('::')[0]?.replace('-', '')?.toLowerCase()?.includes('dockercompose') ||
+                        currentPreset?.split('::')[0] === 'docker-compose' ||
+                        project?.preset === 'docker-compose' ||
+                        project?.preset === 'dockercompose') && (
                         <>
                           <FormField
                             control={form.control}
@@ -1026,6 +1244,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                               </FormItem>
                             )}
                           />
+
+                          <PublicPortsField form={form} />
                         </>
                       )}
                     </>
@@ -1081,16 +1301,40 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                         )}
 
                         {(project.preset === 'docker-compose' || project.preset === 'dockercompose') && (
-                          <div className="space-y-2">
-                            <Label>Compose File Path</Label>
-                            <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                              <FileIcon className="h-4 w-4 text-muted-foreground" />
-                              <span className="font-mono text-sm">
-                                {(project.preset_config as any)
-                                  ?.composePath || (project.preset_config as any)?.compose_path || 'docker-compose.yml'}
-                              </span>
+                          <>
+                            <div className="space-y-2">
+                              <Label>Compose File Path</Label>
+                              <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
+                                <FileIcon className="h-4 w-4 text-muted-foreground" />
+                                <span className="font-mono text-sm">
+                                  {(project.preset_config as any)
+                                    ?.composePath || (project.preset_config as any)?.compose_path || 'docker-compose.yml'}
+                                </span>
+                              </div>
                             </div>
-                          </div>
+                            <div className="space-y-2">
+                              <Label>Public Ports</Label>
+                              {((project.preset_config as any)?.publicPorts?.length > 0 || (project.preset_config as any)?.public_ports?.length > 0) ? (
+                                <div className="flex flex-wrap gap-1.5">
+                                  {((project.preset_config as any)?.publicPorts || (project.preset_config as any)?.public_ports || []).map(
+                                    (pp: { service: string; port: number }) => (
+                                      <Badge
+                                        key={`${pp.service}:${pp.port}`}
+                                        variant="secondary"
+                                        className="font-mono text-xs"
+                                      >
+                                        {pp.service}:{pp.port}
+                                      </Badge>
+                                    )
+                                  )}
+                                </div>
+                              ) : (
+                                <p className="text-sm text-muted-foreground italic">
+                                  No public ports — all services are private
+                                </p>
+                              )}
+                            </div>
+                          </>
                         )}
                       </div>
                     </>
@@ -1283,8 +1527,9 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             normalizeDir(currentDirectory)
 
                           // Find matching preset by both name AND path
+                          const allPresets2 = effectivePresetData?.presets || []
                           const matchingPreset =
-                            presetQuery.data?.presets?.find((p: any) => {
+                            allPresets2.find((p: any) => {
                               const normalizedPresetPath = normalizeDir(p.path)
                               return (
                                 p.preset === field.value &&
@@ -1298,15 +1543,15 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
 
                           // Fallback: if no exact match, find by preset name only
                           const fallbackPreset =
-                            presetQuery.data?.presets?.find(
+                            allPresets2.find(
                               (p: any) => p.preset === field.value
                             )
                           if (fallbackPreset) {
                             return `${fallbackPreset.preset}::${normalizeDir(fallbackPreset.path)}`
                           }
 
-                          // Return just the slug if not found in detected presets
-                          return field.value
+                          // Fallback: construct value from slug + current directory
+                          return `${field.value}::${normalizedCurrentDir}`
                         }
 
                         const selectValue = getSelectValue()

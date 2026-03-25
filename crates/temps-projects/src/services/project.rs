@@ -1117,9 +1117,16 @@ impl ProjectService {
         Ok(Self::map_db_project_to_project(updated_project))
     }
 
-    /// Generate a unique project slug by checking for collisions and appending a short UUID if needed
+    /// Generate a unique project slug by checking for collisions and appending a short UUID if needed.
+    /// Slug is truncated to 40 chars max to keep DNS labels within the 63-char limit
+    /// when combined with environment slug and service name prefix.
     pub async fn generate_unique_project_slug(&self, name: &str) -> Result<String, ProjectError> {
-        let base_slug = slugify(name);
+        let mut base_slug = slugify(name);
+        // Truncate to 40 chars max (leaves room for "-production" env slug + "service-" prefix
+        // within the 63-char DNS label limit)
+        if base_slug.len() > 40 {
+            base_slug = base_slug[..40].trim_end_matches('-').to_string();
+        }
 
         // First, try the base slug
         let existing = projects::Entity::find()

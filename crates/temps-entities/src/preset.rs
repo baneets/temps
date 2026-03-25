@@ -842,6 +842,22 @@ pub struct DockerComposeConfig {
     /// Use to override ports, volumes, environment, commands, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compose_override: Option<String>,
+    /// Ports to expose publicly through the proxy.
+    /// Each entry specifies a service name and container port that gets a public subdomain.
+    /// All other ports remain private (accessible only via host-mapped ports).
+    /// Format: `[{"service": "web", "port": 8080}, {"service": "api", "port": 3000}]`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_ports: Vec<ComposePublicPort>,
+}
+
+/// A port that should be exposed publicly through the proxy for a compose service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposePublicPort {
+    /// Compose service name (e.g. "web", "clickhouse")
+    pub service: String,
+    /// Container port to expose (e.g. 8123)
+    pub port: u16,
 }
 
 /// Nixpacks preset configuration
@@ -1026,6 +1042,11 @@ mod tests {
         let preset = Preset::NextJs;
         let json = serde_json::to_string(&preset).unwrap();
         assert_eq!(json, "\"nextjs\"");
+
+        let compose = Preset::DockerCompose;
+        let json = serde_json::to_string(&compose).unwrap();
+        println!("DockerCompose serializes to: {}", json);
+        assert_eq!(json, "\"docker-compose\"");
     }
 
     #[test]

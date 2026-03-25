@@ -225,6 +225,7 @@ fn convert_preset_json(cache: Option<sea_orm::JsonValue>) -> Option<Vec<ProjectP
                             exposed_port: p.exposed_port.map(|port| port as i32),
                             icon_url: p.icon_url,
                             project_type: p.project_type,
+                            compose_files: p.compose_files,
                         })
                 })
                 .collect(),
@@ -300,6 +301,9 @@ pub struct ProjectPresetResponse {
     pub icon_url: Option<String>,
     /// Project type category (e.g., "frontend", "backend", "fullstack")
     pub project_type: String,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compose_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1020,6 +1024,7 @@ pub async fn get_repository_preset_by_name(
                     exposed_port: p.exposed_port.map(|port| port as i32),
                     icon_url: p.icon_url,
                     project_type: p.project_type,
+                    compose_files: p.compose_files,
                 })
                 .collect(),
             calculated_at: preset_result.calculated_at,
@@ -1763,6 +1768,7 @@ pub async fn get_repository_preset_live(
                     exposed_port: p.exposed_port.map(|port| port as i32),
                     icon_url: p.icon_url,
                     project_type: p.project_type,
+                    compose_files: p.compose_files,
                 })
                 .collect(),
             calculated_at: preset_result.calculated_at,

@@ -396,6 +396,8 @@ pub struct DetectedPreset {
     pub label: String,
     /// Exposed port if applicable
     pub exposed_port: Option<u16>,
+    /// Compose file paths found in the repository (only for docker-compose preset)
+    pub compose_files: Option<Vec<String>>,
 }
 
 /// Detect all presets in a file tree
@@ -478,11 +480,35 @@ pub fn detect_presets_from_file_tree(files: &[String]) -> Vec<DetectedPreset> {
                 dir.clone()
             };
 
+            // For docker-compose presets, collect all compose file paths in the repo
+            let compose_files = if preset.slug() == "docker-compose" {
+                let mut files_found: Vec<String> = Vec::new();
+                for (d, d_files) in &directory_files {
+                    for file_path in d_files {
+                        let filename = file_path.rsplit('/').next().unwrap_or(file_path);
+                        if docker_compose::COMPOSE_FILE_NAMES.contains(&filename) {
+                            // Build relative path from repo root
+                            let relative = if d.is_empty() {
+                                filename.to_string()
+                            } else {
+                                file_path.clone()
+                            };
+                            files_found.push(relative);
+                        }
+                    }
+                }
+                files_found.sort();
+                Some(files_found)
+            } else {
+                None
+            };
+
             presets.push(DetectedPreset {
                 path,
                 slug: preset.slug(),
                 label: preset.label(),
                 exposed_port: None, // Port will be determined during deployment
+                compose_files,
             });
         }
     }
