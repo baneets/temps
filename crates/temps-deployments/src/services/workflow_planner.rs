@@ -786,9 +786,28 @@ impl WorkflowPlanner {
         );
 
         // Gather environment variables for the deployment
-        let env_vars = self
+        let mut env_vars = self
             .gather_environment_variables(project, environment, deployment)
             .await?;
+
+        // Inject TEMPS_ASSET_PREFIX for stale-chunk prevention.
+        // Frameworks can use this to namespace static assets per deployment:
+        //   Next.js: assetPrefix: process.env.NEXT_PUBLIC_TEMPS_ASSET_PREFIX || ''
+        //   Vite:    base: process.env.TEMPS_ASSET_PREFIX || '/'
+        // The value is the deployment slug, which is unique and URL-safe.
+        let asset_prefix = format!("/_temps/assets/{}", deployment.slug);
+        env_vars.insert(
+            "TEMPS_ASSET_PREFIX".to_string(),
+            asset_prefix.clone(),
+        );
+        // NEXT_PUBLIC_ prefix makes it available at build time in Next.js client bundles
+        if project.preset == temps_entities::preset::Preset::NextJs {
+            env_vars.insert(
+                "NEXT_PUBLIC_TEMPS_ASSET_PREFIX".to_string(),
+                asset_prefix,
+            );
+        }
+
         debug!(
             "📦 Gathered {} environment variables for deployment",
             env_vars.len()
@@ -993,6 +1012,44 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
+            // Persist static assets for stale-chunk fallback (for static deployments too)
+            let search_paths_for_static_chunks: Vec<String> = match project.preset {
+                temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
+                _ => vec!["dist".to_string(), "build/static".to_string()],
+            };
+
+            // Rewrites: strip the build output prefix so stored paths match browser URLs.
+            // Vite: browser requests /assets/index-abc.js but file is at dist/assets/index-abc.js
+            // The "dist/" prefix must be stripped so the stored path matches the URL.
+            let path_rewrites_for_static_chunks: Vec<(String, String)> = match project.preset {
+                temps_entities::preset::Preset::Vite => {
+                    vec![("dist/".to_string(), String::new())]
+                }
+                _ => vec![
+                    ("dist/".to_string(), String::new()),
+                    ("build/".to_string(), String::new()),
+                ],
+            };
+
+            jobs.push(JobDefinition {
+                job_id: "persist_static_assets".to_string(),
+                job_type: "PersistStaticAssetsJob".to_string(),
+                name: "Persist Static Assets".to_string(),
+                description: Some(
+                    "Extract immutable static assets for stale-chunk fallback".to_string(),
+                ),
+                dependencies: vec!["build_image".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id,
+                    "deployment_slug": deployment.slug,
+                    "project_id": project.id,
+                    "environment_id": deployment.environment_id,
+                    "search_paths": search_paths_for_static_chunks,
+                    "path_rewrites": path_rewrites_for_static_chunks,
+                })),
+                required_for_completion: true,
+            });
+
             "deploy_static".to_string()
         } else {
             // Container deployment path: BuildImageJob + DeployImageJob
@@ -1093,13 +1150,58 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
+            // Persist static assets for stale-chunk fallback (runs in parallel with deploy_container)
+            let search_paths_for_chunks: Vec<String> = match project.preset {
+                temps_entities::preset::Preset::NextJs => {
+                    vec![".next/static".to_string()]
+                }
+                temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
+                _ => vec!["dist".to_string(), "build/static".to_string()],
+            };
+
+            let path_rewrites_for_chunks: Vec<(String, String)> = match project.preset {
+                temps_entities::preset::Preset::NextJs => {
+                    vec![(".next".to_string(), "_next".to_string())]
+                }
+                temps_entities::preset::Preset::Vite => {
+                    vec![("dist/".to_string(), String::new())]
+                }
+                _ => vec![
+                    ("dist/".to_string(), String::new()),
+                    ("build/".to_string(), String::new()),
+                ],
+            };
+
+            jobs.push(JobDefinition {
+                job_id: "persist_static_assets".to_string(),
+                job_type: "PersistStaticAssetsJob".to_string(),
+                name: "Persist Static Assets".to_string(),
+                description: Some(
+                    "Extract immutable static assets for stale-chunk fallback".to_string(),
+                ),
+                dependencies: vec!["build_image".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id,
+                    "deployment_slug": deployment.slug,
+                    "project_id": project.id,
+                    "environment_id": deployment.environment_id,
+                    "search_paths": search_paths_for_chunks,
+                    "path_rewrites": path_rewrites_for_chunks,
+                })),
+                required_for_completion: true,
+            });
+            debug!("Added persist_static_assets job for stale-chunk fallback");
+
             "deploy_container".to_string()
         };
 
-        // Job 4: Mark deployment as complete
-        // This synthetic job marks the deployment as "Completed" and updates environment routing
-        // It acts as a barrier between core deployment jobs and optional post-deployment jobs
-        // Depends on either deploy_static or deploy_container depending on deployment strategy
+        // mark_deployment_complete depends on deploy job + persist_static_assets
+        let complete_dependencies = vec![
+            deploy_job_id,
+            "persist_static_assets".to_string(),
+        ];
+
+        // Mark deployment as complete
         jobs.push(JobDefinition {
             job_id: "mark_deployment_complete".to_string(),
             job_type: "MarkDeploymentCompleteJob".to_string(),
@@ -1107,7 +1209,7 @@ impl WorkflowPlanner {
             description: Some(
                 "Mark deployment as complete and update environment routing".to_string(),
             ),
-            dependencies: vec![deploy_job_id],
+            dependencies: complete_dependencies,
             job_config: Some(serde_json::json!({
                 "deployment_id": deployment.id
             })),
@@ -1346,6 +1448,22 @@ impl WorkflowPlanner {
             })),
             required_for_completion: true,
         });
+
+        // Job 4: Take screenshot (optional, runs after deployment is live)
+        let screenshots_enabled = self.config_service.is_screenshots_enabled().await;
+        if screenshots_enabled {
+            jobs.push(JobDefinition {
+                job_id: "take_screenshot".to_string(),
+                job_type: "TakeScreenshotJob".to_string(),
+                name: "Take Screenshot".to_string(),
+                description: Some("Capture screenshot of deployed application".to_string()),
+                dependencies: vec!["mark_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "deployment_id": deployment.id
+                })),
+                required_for_completion: false,
+            });
+        }
 
         debug!(
             "Planned {} jobs for compose deployment of project '{}'",

@@ -155,22 +155,42 @@ function ComposeFileSelector({
   presetData: { presets?: { preset: string; compose_files?: string[] | null; composeFiles?: string[] | null }[] } | undefined | null
 }) {
   const [isCustomPath, setIsCustomPath] = useState(false)
+  const rootDirectory = form.watch('rootDirectory') || './'
 
-  // Extract compose files from the docker-compose preset data
+  // Extract compose files from the docker-compose preset data,
+  // filtered to only show files within the current root directory
   const composeFiles = useMemo(() => {
     if (!presetData?.presets) return []
     const composePreset = presetData.presets.find(
       (p) => p.preset === 'docker-compose'
     )
     // Handle both camelCase (from API) and snake_case
-    const files = composePreset?.composeFiles ?? composePreset?.compose_files ?? []
-    return files
-  }, [presetData])
+    const allFiles = composePreset?.composeFiles ?? composePreset?.compose_files ?? []
+
+    // Normalize root directory: strip leading ./ and trailing /
+    const normalizedRoot = rootDirectory.replace(/^\.\//, '').replace(/\/$/, '')
+
+    if (!normalizedRoot) {
+      // Root is repo root — show all files but use just the filename
+      return allFiles.map((f) => ({
+        full: f,
+        relative: f,
+      }))
+    }
+
+    // Filter to only files within the root directory, then make paths relative
+    return allFiles
+      .filter((f) => f.startsWith(normalizedRoot + '/'))
+      .map((f) => ({
+        full: f,
+        relative: f.slice(normalizedRoot.length + 1),
+      }))
+  }, [presetData, rootDirectory])
 
   // Auto-select first compose file when files are discovered
   useEffect(() => {
     if (composeFiles.length > 0 && !form.getValues('composePath')) {
-      form.setValue('composePath', composeFiles[0])
+      form.setValue('composePath', composeFiles[0].relative)
     }
   }, [composeFiles, form])
 
@@ -233,22 +253,22 @@ function ComposeFileSelector({
           <div className="space-y-2">
             {composeFiles.map((file) => (
               <div
-                key={file}
+                key={file.full}
                 className={cn(
                   'flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors',
-                  field.value === file
+                  field.value === file.relative
                     ? 'border-primary bg-primary/5 ring-1 ring-primary'
                     : 'hover:bg-muted/50'
                 )}
-                onClick={() => field.onChange(file)}
+                onClick={() => field.onChange(file.relative)}
               >
                 <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
-                <span className="font-mono text-sm">{file}</span>
+                <span className="font-mono text-sm">{file.relative}</span>
               </div>
             ))}
           </div>
           <p className="text-xs text-muted-foreground">
-            {composeFiles.length} compose file{composeFiles.length !== 1 ? 's' : ''} found in your repository.
+            {composeFiles.length} compose file{composeFiles.length !== 1 ? 's' : ''} found.
             Each service with exposed ports gets a subdomain automatically.
           </p>
           <FormMessage />
