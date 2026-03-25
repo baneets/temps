@@ -318,6 +318,8 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
   const [isSelectingRepository, setIsSelectingRepository] = useState(false)
+  const [publicRepoUrl, setPublicRepoUrl] = useState('')
+  const [parsedPublicRepo, setParsedPublicRepo] = useState<{ owner: string; name: string } | null>(null)
 
   // Unified form for all git settings
   const form = useForm<GitSettingsFormValues>({
@@ -737,30 +739,38 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             <Input
                               id="public-repo-url"
                               placeholder="https://github.com/owner/repo"
-                              defaultValue={project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`}
+                              value={publicRepoUrl || project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`}
                               onChange={(e) => {
-                                const url = e.target.value.trim()
+                                const url = e.target.value
+                                setPublicRepoUrl(url)
                                 // Parse GitHub/GitLab URL to extract owner/repo
-                                const match = url.match(/(?:github\.com|gitlab\.com)[/:]([^/]+)\/([^/.]+)/)
+                                // Handles: https://github.com/owner/repo, https://github.com/owner/repo.git,
+                                // https://github.com/owner/repo/tree/branch, etc.
+                                const match = url.trim().match(/(?:github\.com|gitlab\.com)[/:]([^/]+)\/([^/.\s]+)/)
                                 if (match) {
                                   const [, owner, repo] = match
-                                  setSelectedRepository({ owner, name: repo.replace(/\.git$/, '') } as RepositoryResponse)
+                                  setParsedPublicRepo({ owner, name: repo.replace(/\.git$/, '') })
+                                } else {
+                                  setParsedPublicRepo(null)
                                 }
                               }}
                             />
                             <p className="text-xs text-muted-foreground">
                               Enter the full URL of a public GitHub or GitLab repository.
                             </p>
-                            {selectedRepository && (
+                            {parsedPublicRepo && (
                               <div className="flex items-center gap-2">
+                                <p className="text-sm text-muted-foreground">
+                                  Detected: <span className="font-mono font-medium text-foreground">{parsedPublicRepo.owner}/{parsedPublicRepo.name}</span>
+                                </p>
                                 <Button
                                   type="button"
                                   size="sm"
-                                  onClick={() => {
-                                    if (selectedRepository) {
-                                      handleRepositorySelect(selectedRepository)
-                                      setIsSelectingRepository(false)
-                                    }
+                                  onClick={async () => {
+                                    await handleRepositorySelect({ owner: parsedPublicRepo.owner, name: parsedPublicRepo.name } as RepositoryResponse)
+                                    setIsSelectingRepository(false)
+                                    setPublicRepoUrl('')
+                                    setParsedPublicRepo(null)
                                   }}
                                 >
                                   Update Repository
