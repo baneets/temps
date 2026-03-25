@@ -203,12 +203,13 @@ function PublicPortsField({
           }
         }
         // Parse port entries: handles - 48080:80, - "48080:80", - '48080:80'
+        // Uses the host port (left side) since that's what's externally accessible
         if (currentService && trimmed.startsWith('-')) {
           const portMatch = trimmed.match(/(\d+):(\d+)/)
           if (portMatch) {
             result.push({
               service: currentService!,
-              port: parseInt(portMatch[2]),
+              port: parseInt(portMatch[1]),
             })
           }
         }
