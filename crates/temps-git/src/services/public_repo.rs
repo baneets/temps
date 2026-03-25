@@ -94,6 +94,8 @@ pub trait PublicRepoProvider: Send + Sync {
 /// GitHub public repository provider
 pub struct GitHubPublicProvider {
     client: reqwest::Client,
+    /// Optional auth token to avoid rate limits (from any configured GitHub connection)
+    token: Option<String>,
 }
 
 impl GitHubPublicProvider {
@@ -104,7 +106,33 @@ impl GitHubPublicProvider {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self {
+            client,
+            token: None,
+        }
+    }
+
+    /// Create a provider with an authentication token (increases rate limit from 60 to 5000/hr)
+    pub fn with_token(token: String) -> Self {
+        let client = reqwest::Client::builder()
+            .user_agent("Temps-Engine/1.0")
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        Self {
+            client,
+            token: Some(token),
+        }
+    }
+
+    /// Apply auth header if token is available
+    fn auth_request(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref token) = self.token {
+            req.header("Authorization", format!("token {}", token))
+        } else {
+            req
+        }
     }
 
     /// Send an HTTP request with retry logic for transient failures.
@@ -119,7 +147,7 @@ impl GitHubPublicProvider {
             .with_base_delay(std::time::Duration::from_secs(1))
             .with_max_delay(std::time::Duration::from_secs(10))
             .retry(|| {
-                let request = build_request();
+                let request = self.auth_request(build_request());
                 async move {
                     let response = request.send().await.map_err(Self::map_error)?;
 
@@ -602,6 +630,21 @@ impl PublicRepoProviderFactory {
     pub fn create(provider: &str) -> Result<Box<dyn PublicRepoProvider>, PublicRepoError> {
         match provider.to_lowercase().as_str() {
             "github" => Ok(Box::new(GitHubPublicProvider::new())),
+            "gitlab" => Ok(Box::new(GitLabPublicProvider::new(None))),
+            _ => Err(PublicRepoError::ProviderNotSupported(provider.to_string())),
+        }
+    }
+
+    /// Create a provider with an optional auth token (for higher rate limits)
+    pub fn create_with_token(
+        provider: &str,
+        token: Option<String>,
+    ) -> Result<Box<dyn PublicRepoProvider>, PublicRepoError> {
+        match provider.to_lowercase().as_str() {
+            "github" => match token {
+                Some(t) => Ok(Box::new(GitHubPublicProvider::with_token(t))),
+                None => Ok(Box::new(GitHubPublicProvider::new())),
+            },
             "gitlab" => Ok(Box::new(GitLabPublicProvider::new(None))),
             _ => Err(PublicRepoError::ProviderNotSupported(provider.to_string())),
         }
