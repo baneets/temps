@@ -161,8 +161,25 @@ impl WorkflowExecutor {
                     job_state.result = Some(result.clone());
                     job_state.status = result.status.clone();
 
-                    // Update context with job result
-                    context = result.context;
+                    // Merge outputs from job result into context
+                    // (don't overwrite — parallel jobs each have their own outputs)
+                    for (job_key, job_outputs) in result.context.outputs {
+                        context
+                            .outputs
+                            .entry(job_key)
+                            .or_default()
+                            .extend(job_outputs);
+                    }
+                    for (job_key, job_artifacts) in result.context.artifacts {
+                        context
+                            .artifacts
+                            .entry(job_key)
+                            .or_default()
+                            .extend(job_artifacts);
+                    }
+                    for (key, value) in result.context.vars {
+                        context.vars.insert(key, value);
+                    }
 
                     // Update job tracker with completion status
                     if let Some(ref tracker) = self.job_tracker {
