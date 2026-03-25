@@ -863,7 +863,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                         <div className="flex items-center gap-2 p-4 rounded-lg border bg-muted/50">
                           <GithubIcon className="h-5 w-5" />
                           <a
-                            href={getGithubRepoUrl(
+                            href={project.git_url || getGithubRepoUrl(
                               project.repo_owner,
                               project.repo_name
                             )}
@@ -871,12 +871,18 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                             rel="noopener noreferrer"
                             className="font-medium hover:underline"
                           >
-                            {project.repo_owner}/{project.repo_name}
+                            {isPublicRepo
+                              ? (project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`)
+                              : `${project.repo_owner}/${project.repo_name}`}
                           </a>
+                          {isPublicRepo && (
+                            <Badge variant="secondary" className="text-xs">Public</Badge>
+                          )}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                          Seamlessly create Deployments for any commits pushed
-                          to your Git repository.
+                          {isPublicRepo
+                            ? 'Public repository cloned directly via HTTPS.'
+                            : 'Seamlessly create Deployments for any commits pushed to your Git repository.'}
                         </p>
                       </>
                     )}
