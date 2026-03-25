@@ -644,6 +644,8 @@ pub async fn update_git_settings(
             settings.preset.clone(),
             settings.directory.clone(),
             settings.preset_config.clone(),
+            settings.git_url.clone(),
+            settings.is_public_repo,
         )
         .await
         .map_err(|e| {

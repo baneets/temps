@@ -584,6 +584,12 @@ pub struct UpdateGitSettingsRequest {
     pub repo_name: String,
     pub preset: Option<String>,
     pub directory: String,
+    /// Git clone URL for public repositories
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_url: Option<String>,
+    /// Whether this is a public repository (no git provider connection needed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_public_repo: Option<bool>,
     /// Preset-specific configuration (e.g., Dockerfile path for Docker preset)
     ///
     /// Example for Dockerfile preset:

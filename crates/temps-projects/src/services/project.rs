@@ -823,6 +823,8 @@ impl ProjectService {
         preset: Option<String>,
         directory: String,
         preset_config: Option<serde_json::Value>,
+        git_url: Option<String>,
+        is_public_repo: Option<bool>,
     ) -> Result<Project, ProjectError> {
         // Get the current project
         let project = projects::Entity::find_by_id(project_id)
@@ -895,6 +897,14 @@ impl ProjectService {
             } else {
                 active_project.git_provider_connection_id = Set(None);
             }
+        }
+
+        if let Some(url) = git_url {
+            active_project.git_url = Set(Some(url));
+        }
+
+        if let Some(is_public) = is_public_repo {
+            active_project.is_public_repo = Set(is_public);
         }
 
         // Update preset_config if provided (e.g., Dockerfile path for Docker preset)
