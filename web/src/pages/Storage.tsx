@@ -50,7 +50,7 @@ export function Storage() {
   })
 
   useEffect(() => {
-    setBreadcrumbs([{ label: 'Storage', href: '/storage' }])
+    setBreadcrumbs([{ label: 'Storage', href: '/settings/storage' }])
   }, [setBreadcrumbs])
 
   // Keyboard shortcut: N to open the create service dropdown
@@ -136,7 +136,7 @@ export function Storage() {
                 <div className="flex items-center justify-between">
                   <div
                     className="flex-1 cursor-pointer space-y-1"
-                    onClick={() => navigate(`/storage/${service.id}`)}
+                    onClick={() => navigate(`/settings/storage/${service.id}`)}
                   >
                     <CardTitle className="flex items-center gap-2">
                       <ServiceLogo service={service.service_type} />
@@ -172,7 +172,7 @@ export function Storage() {
                 </div>
               </CardHeader>
               <CardContent
-                onClick={() => navigate(`/storage/${service.id}`)}
+                onClick={() => navigate(`/settings/storage/${service.id}`)}
                 className="cursor-pointer"
               >
                 <div className="flex items-center text-sm text-muted-foreground">

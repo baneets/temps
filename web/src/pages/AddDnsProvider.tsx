@@ -474,7 +474,7 @@ export function AddDnsProvider() {
       toast.success('DNS provider created successfully')
       queryClient.invalidateQueries({ queryKey: ['dnsProviders'] })
       if (provider) {
-        navigate(`/dns-providers/${provider.id}`)
+        navigate(`/settings/dns-providers/${provider.id}`)
       }
     },
     onError: (err: Error) => {
@@ -487,7 +487,7 @@ export function AddDnsProvider() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'DNS Providers', href: '/dns-providers' },
+      { label: 'DNS Providers', href: '/settings/dns-providers' },
       { label: 'Add Provider' },
     ])
   }, [setBreadcrumbs])
@@ -1348,7 +1348,7 @@ export function AddDnsProvider() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate('/dns-providers')}
+            onClick={() => navigate('/settings/dns-providers')}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -1456,7 +1456,7 @@ export function AddDnsProvider() {
           <Button
             type="button"
             variant="outline"
-            onClick={currentStep === 'provider' ? () => navigate('/dns-providers') : handleBack}
+            onClick={currentStep === 'provider' ? () => navigate('/settings/dns-providers') : handleBack}
           >
             {currentStep === 'provider' ? 'Cancel' : (
               <>

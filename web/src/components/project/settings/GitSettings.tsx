@@ -1399,7 +1399,7 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                 </Alert>
               </CardContent>
               <CardFooter>
-                <Button onClick={() => navigate('/git-providers/add')}>
+                <Button onClick={() => navigate('/settings/git-providers/add')}>
                   <Plus className="mr-2 h-4 w-4" />
                   Add Git Provider
                 </Button>

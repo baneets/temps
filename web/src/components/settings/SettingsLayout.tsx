@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
 import {
   Bell,
+  Boxes,
   ChevronLeft,
   Cloud,
   Database,
@@ -52,18 +53,18 @@ const settingsNavGroups: SettingsNavGroup[] = [
   {
     label: 'Infrastructure',
     items: [
-      { title: 'Domains', url: '/domains', icon: Globe },
-      { title: 'Storage', url: '/storage', icon: Database },
-      { title: 'Email', url: '/email', icon: Mail },
-      { title: 'AI Gateway', url: '/ai-gateway', icon: Sparkles },
+      { title: 'Domains', url: '/settings/domains', icon: Globe },
+      { title: 'Storage', url: '/settings/storage', icon: Database },
+      { title: 'Email', url: '/settings/email', icon: Mail },
+      { title: 'AI Gateway', url: '/settings/ai-gateway', icon: Sparkles },
       {
         title: 'Git Providers',
-        url: '/git-providers',
+        url: '/settings/git-providers',
         icon: GitBranch,
       },
       {
         title: 'DNS Providers',
-        url: '/dns-providers',
+        url: '/settings/dns-providers',
         icon: Cloud,
       },
       {
@@ -74,7 +75,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
       {
         title: 'Docker Registry',
         url: '/settings/docker-registry',
-        icon: Globe,
+        icon: Boxes,
       },
       { title: 'Backups', url: '/settings/backups', icon: DatabaseBackup },
       { title: 'Worker Nodes', url: '/settings/nodes', icon: Network },

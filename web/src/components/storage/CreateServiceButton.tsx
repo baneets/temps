@@ -46,7 +46,7 @@ export function CreateServiceButton({
           <DropdownMenuItem
             key={provider.service_type}
             onClick={() => {
-              navigate(`/storage/create?type=${provider.service_type}`)
+              navigate(`/settings/storage/create?type=${provider.service_type}`)
             }}
             className="flex items-start gap-3 py-3 cursor-pointer"
           >

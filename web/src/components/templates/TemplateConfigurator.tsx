@@ -309,7 +309,7 @@ export function TemplateConfigurator({
           <p className="text-sm text-muted-foreground mb-4">
             You need to connect a Git provider to create projects from templates.
           </p>
-          <Button onClick={() => navigate('/git-providers')}>Connect Git Provider</Button>
+          <Button onClick={() => navigate('/settings/git-providers')}>Connect Git Provider</Button>
         </CardContent>
       </Card>
     )

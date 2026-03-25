@@ -309,8 +309,8 @@ export function CreateService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
-      { label: 'Create Service', href: '/storage/create' },
+      { label: 'Storage', href: '/settings/storage' },
+      { label: 'Create Service', href: '/settings/storage/create' },
     ])
   }, [setBreadcrumbs])
 
@@ -345,7 +345,7 @@ export function CreateService() {
       } else {
         toast.success('Service created successfully')
       }
-      navigate(`/storage/${data.id}`)
+      navigate(`/settings/storage/${data.id}`)
     },
   })
 
@@ -398,7 +398,7 @@ export function CreateService() {
               Please select a service type from the URL parameter.
             </p>
           </div>
-          <Link to="/storage">
+          <Link to="/settings/storage">
             <Button variant="outline">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Storage
@@ -438,7 +438,7 @@ export function CreateService() {
       <div className="sm:p-4 space-y-6 md:p-6 max-w-4xl mx-auto">
         {/* Header with provider info */}
         <div className="space-y-4">
-          <Link to="/storage">
+          <Link to="/settings/storage">
             <Button variant="ghost" size="sm" className="gap-2">
               <ArrowLeft className="h-4 w-4" />
               Back to Storage
@@ -555,7 +555,7 @@ export function CreateService() {
         <JsonSchemaForm
           schema={jsonSchema as any}
           onSubmit={handleSubmit}
-          onCancel={() => navigate('/storage')}
+          onCancel={() => navigate('/settings/storage')}
           submitText="Create Service"
           isSubmitting={createServiceMut.isPending}
           hiddenFields={

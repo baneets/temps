@@ -117,16 +117,16 @@ export function ServiceDetail() {
   useEffect(() => {
     if (service) {
       setBreadcrumbs([
-        { label: 'Storage', href: '/storage' },
+        { label: 'Storage', href: '/settings/storage' },
         {
           label: service.service.name || 'Service Details',
-          href: `/storage/${id}`,
+          href: `/settings/storage/${id}`,
         },
       ])
     } else {
       setBreadcrumbs([
-        { label: 'Storage', href: '/storage' },
-        { label: 'Service Details', href: `/storage/${id}` },
+        { label: 'Storage', href: '/settings/storage' },
+        { label: 'Service Details', href: `/settings/storage/${id}` },
       ])
     }
   }, [setBreadcrumbs, id, service])
@@ -206,7 +206,7 @@ export function ServiceDetail() {
     },
     onSuccess: () => {
       toast.success('Service deleted successfully')
-      navigate('/storage')
+      navigate('/settings/storage')
     },
     onError: (error: any) => {
       toast.error('Failed to delete service', {
@@ -289,7 +289,7 @@ export function ServiceDetail() {
       <div className="sm:p-4 space-y-6 md:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <Link to="/storage">
+            <Link to="/settings/storage">
               <Button variant="ghost" size="icon">
                 <ArrowLeft className="h-4 w-4" />
               </Button>
@@ -336,7 +336,7 @@ export function ServiceDetail() {
           </div>
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
-            <Link to={`/storage/${id}/browse`}>
+            <Link to={`/settings/storage/${id}/browse`}>
               <Button variant="outline" size="sm" className="gap-2">
                 <Database className="h-4 w-4" />
                 Browse Data

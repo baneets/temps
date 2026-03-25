@@ -234,7 +234,7 @@ export function DnsProviders() {
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
-            <Button onClick={() => navigate('/dns-providers/add')}>
+            <Button onClick={() => navigate('/settings/dns-providers/add')}>
               <Plus className="mr-2 h-4 w-4" />
               Add DNS Provider
               <KbdBadge keys="N" className="ml-2" />
@@ -287,7 +287,7 @@ export function DnsProviders() {
                   title="No DNS providers found"
                   description="Get started by adding a DNS provider like Cloudflare or Namecheap to enable automatic DNS record management"
                 >
-                  <Button onClick={() => navigate('/dns-providers/add')}>
+                  <Button onClick={() => navigate('/settings/dns-providers/add')}>
                     <Plus className="mr-2 h-4 w-4" />
                     Add DNS Provider
                   </Button>
@@ -299,7 +299,7 @@ export function DnsProviders() {
                       key={provider.id}
                       className="group relative p-4 border rounded-lg transition-colors hover:bg-muted/50 cursor-pointer"
                       onClick={() =>
-                        navigate(`/dns-providers/${provider.id}`)
+                        navigate(`/settings/dns-providers/${provider.id}`)
                       }
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
@@ -382,7 +382,7 @@ export function DnsProviders() {
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem
                                 onClick={() =>
-                                  navigate(`/dns-providers/${provider.id}`)
+                                  navigate(`/settings/dns-providers/${provider.id}`)
                                 }
                               >
                                 View Details

@@ -150,14 +150,14 @@ function ServiceCard({
               {isLinked ? (
                 <>
                   <Link
-                    to={`/storage/${service.id}/browse?path=${encodeURIComponent(getProjectResourcePath(service.service_type, projectSlug))}`}
+                    to={`/settings/storage/${service.id}/browse?path=${encodeURIComponent(getProjectResourcePath(service.service_type, projectSlug))}`}
                   >
                     <Button variant="outline" size="sm" className="gap-2">
                       <Database className="h-4 w-4" />
                       Browse Data
                     </Button>
                   </Link>
-                  <Link to={`/storage/${service.id}`}>
+                  <Link to={`/settings/storage/${service.id}`}>
                     <Button variant="outline" size="sm" className="gap-2">
                       View Details
                       <ArrowRight className="h-4 w-4" />
@@ -289,7 +289,7 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
   const { setBreadcrumbs } = useBreadcrumbs()
 
   useEffect(() => {
-    setBreadcrumbs([{ label: 'Storage', href: '/storage' }])
+    setBreadcrumbs([{ label: 'Storage', href: '/settings/storage' }])
   }, [setBreadcrumbs])
 
   const {

@@ -53,8 +53,8 @@ export function ImportService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/storage' },
-      { label: 'Import Service', href: '/storage/import' },
+      { label: 'Storage', href: '/settings/storage' },
+      { label: 'Import Service', href: '/settings/storage/import' },
     ])
   }, [setBreadcrumbs])
 
@@ -237,7 +237,7 @@ export function ImportService() {
     },
     onSuccess: () => {
       toast.success('Service imported successfully')
-      navigate('/storage')
+      navigate('/settings/storage')
     },
     onError: (error) => {
       toast.error(error?.message || 'Failed to import service')
@@ -276,7 +276,7 @@ export function ImportService() {
       <div className="sm:p-4 space-y-6 md:p-6 max-w-4xl mx-auto">
         {/* Header */}
         <div className="flex items-center gap-3">
-          <Link to="/storage">
+          <Link to="/settings/storage">
             <Button variant="ghost" size="icon">
               <ArrowLeft className="h-4 w-4" />
             </Button>

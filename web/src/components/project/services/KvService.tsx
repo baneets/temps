@@ -162,7 +162,7 @@ export function KvService({ project: _project }: KvServiceProps) {
                     </div>
                   </div>
                   <Button variant="outline" asChild>
-                    <Link to="/storage?tab=platform" className="gap-2">
+                    <Link to="/settings/storage?tab=platform" className="gap-2">
                       <ExternalLink className="h-4 w-4" />
                       Manage in Storage Settings
                     </Link>
@@ -179,7 +179,7 @@ export function KvService({ project: _project }: KvServiceProps) {
                     </AlertDescription>
                   </Alert>
                   <Button asChild>
-                    <Link to="/storage?tab=platform" className="gap-2">
+                    <Link to="/settings/storage?tab=platform" className="gap-2">
                       <ExternalLink className="h-4 w-4" />
                       Enable in Storage Settings
                     </Link>

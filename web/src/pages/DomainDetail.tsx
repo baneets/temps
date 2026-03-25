@@ -124,7 +124,7 @@ export function DomainDetail() {
   useEffect(() => {
     if (domain) {
       setBreadcrumbs([
-        { label: 'Domains', href: '/domains' },
+        { label: 'Domains', href: '/settings/domains' },
         { label: domain.domain },
       ])
     }
@@ -366,7 +366,7 @@ export function DomainDetail() {
               The requested domain could not be found.
             </AlertDescription>
           </Alert>
-          <Button className="mt-4" onClick={() => navigate('/domains')}>
+          <Button className="mt-4" onClick={() => navigate('/settings/domains')}>
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Domains
           </Button>
@@ -406,7 +406,7 @@ export function DomainDetail() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate('/domains')}
+              onClick={() => navigate('/settings/domains')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -823,7 +823,7 @@ export function DomainDetail() {
                                   {!dnsProviders.length && (
                                     <p className="text-xs text-muted-foreground">
                                       <a
-                                        href="/dns-providers/add"
+                                        href="/settings/dns-providers/add"
                                         className="underline"
                                       >
                                         Add a DNS provider

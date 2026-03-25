@@ -247,7 +247,7 @@ export function ExternalConnectivitySetup({
 
       // Always redirect to domain detail page after creating domain
       if (data && data.id) {
-        navigate(`/domains/${data.id}`)
+        navigate(`/settings/domains/${data.id}`)
       } else {
         console.error('Domain created but no ID returned:', data)
         toast.error('Domain created but could not navigate to detail page')

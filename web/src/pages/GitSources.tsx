@@ -187,7 +187,7 @@ export function GitSources() {
               <RefreshCw className="mr-2 h-4 w-4" />
               Refresh
             </Button>
-            <Button onClick={() => navigate('/git-providers/add')}>
+            <Button onClick={() => navigate('/settings/git-providers/add')}>
               <Plus className="mr-2 h-4 w-4" />
               Add Git Provider
               <KbdBadge keys="N" className="ml-2" />
@@ -243,7 +243,7 @@ export function GitSources() {
                   title="No git providers found"
                   description="Get started by setting up a Git provider like GitHub or GitLab"
                 >
-                  <Button onClick={() => navigate('/git-providers/add')}>
+                  <Button onClick={() => navigate('/settings/git-providers/add')}>
                     <Plus className="mr-2 h-4 w-4" />
                     Add Git Provider
                   </Button>
@@ -254,7 +254,7 @@ export function GitSources() {
                     <div
                       key={provider.id}
                       className="group relative p-4 border rounded-lg transition-colors hover:bg-muted/50 cursor-pointer"
-                      onClick={() => navigate(`/git-providers/${provider.id}`)}
+                      onClick={() => navigate(`/settings/git-providers/${provider.id}`)}
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
                         <div className="flex-1 min-w-0 space-y-1">

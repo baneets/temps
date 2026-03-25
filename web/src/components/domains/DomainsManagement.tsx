@@ -280,7 +280,7 @@ export function DomainsManagement({
         </div>
         <Button
           disabled={!canCreateDomains}
-          onClick={() => navigate('/domains/add')}
+          onClick={() => navigate('/settings/domains/add')}
         >
           <Globe className="mr-2 h-4 w-4" />
           {canCreateDomains ? 'Add Domain' : 'Managed by Cloudflare'}
@@ -375,7 +375,7 @@ export function DomainsManagement({
                 title="No domains found"
                 description="Get started by adding a custom domain"
                 action={
-                  <Button onClick={() => navigate('/domains/add')}>
+                  <Button onClick={() => navigate('/settings/domains/add')}>
                     <Plus className="mr-2 h-4 w-4" />
                     Add Domain
                   </Button>
@@ -393,7 +393,7 @@ export function DomainsManagement({
                     <div className="flex-1 min-w-0 space-y-1">
                       <div className="flex items-center gap-3">
                         <button
-                          onClick={() => navigate(`/domains/${domain.id}`)}
+                          onClick={() => navigate(`/settings/domains/${domain.id}`)}
                           className="font-medium truncate hover:underline text-left"
                         >
                           {domain.domain}

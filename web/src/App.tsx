@@ -279,14 +279,6 @@ const FullAppRoutes = () => {
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/account" element={<Account />} />
                 <Route path="/projects" element={<Projects />} />
-                <Route path="/storage" element={<Storage />} />
-                <Route path="/storage/create" element={<CreateService />} />
-                <Route path="/storage/import" element={<ImportService />} />
-                <Route path="/storage/:id" element={<ServiceDetail />} />
-                <Route path="/storage/:id/browse" element={<ServiceDataBrowser />} />
-                <Route path="/domains" element={<Domains />} />
-                <Route path="/domains/add" element={<AddDomain />} />
-                <Route path="/domains/:id" element={<DomainDetail />} />
                 <Route path="/monitoring" element={<Monitoring />}>
                   <Route index element={<Navigate to="resources" replace />} />
                   <Route path="providers/add" element={<AddNotificationProvider />} />
@@ -296,19 +288,6 @@ const FullAppRoutes = () => {
                 {/* Stacks - Docker Compose management */}
                 <Route path="/stacks" element={<Stacks />} />
                 <Route path="/stacks/:id" element={<StackDetail />} />
-                {/* AI Gateway - top-level platform feature */}
-                <Route path="/ai-gateway" element={<AiGateway />} />
-                {/* Email - top-level platform feature */}
-                <Route path="/email" element={<Email />} />
-                <Route path="/email/:id" element={<EmailDetail />} />
-                {/* Git Providers - top-level platform feature */}
-                <Route path="/git-providers" element={<GitSources />} />
-                <Route path="/git-providers/add" element={<AddGitProvider />} />
-                <Route path="/git-providers/:id" element={<GitProviderDetail />} />
-                {/* DNS Providers - top-level platform feature */}
-                <Route path="/dns-providers" element={<DnsProviders />} />
-                <Route path="/dns-providers/add" element={<AddDnsProvider />} />
-                <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
                 {/* Observe section */}
                 <Route path="/proxy-logs" element={<ProxyLogs />} />
                 <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />
@@ -322,6 +301,24 @@ const FullAppRoutes = () => {
                   <Route path="keys/new" element={<ApiKeyCreate />} />
                   <Route path="keys/:id" element={<ApiKeyDetail />} />
                   <Route path="keys/:id/edit" element={<ApiKeyEdit />} />
+                  {/* Infrastructure */}
+                  <Route path="domains" element={<Domains />} />
+                  <Route path="domains/add" element={<AddDomain />} />
+                  <Route path="domains/:id" element={<DomainDetail />} />
+                  <Route path="storage" element={<Storage />} />
+                  <Route path="storage/create" element={<CreateService />} />
+                  <Route path="storage/import" element={<ImportService />} />
+                  <Route path="storage/:id" element={<ServiceDetail />} />
+                  <Route path="storage/:id/browse" element={<ServiceDataBrowser />} />
+                  <Route path="email" element={<Email />} />
+                  <Route path="email/:id" element={<EmailDetail />} />
+                  <Route path="ai-gateway" element={<AiGateway />} />
+                  <Route path="git-providers" element={<GitSources />} />
+                  <Route path="git-providers/add" element={<AddGitProvider />} />
+                  <Route path="git-providers/:id" element={<GitProviderDetail />} />
+                  <Route path="dns-providers" element={<DnsProviders />} />
+                  <Route path="dns-providers/add" element={<AddDnsProvider />} />
+                  <Route path="dns-providers/:id" element={<DnsProviderDetail />} />
                   <Route path="load-balancer" element={<CustomRoutes />} />
                   <Route path="load-balancer/add" element={<AddRoute />} />
                   <Route path="docker-registry" element={<DockerRegistryPage />} />
@@ -329,12 +326,20 @@ const FullAppRoutes = () => {
                   <Route path="backups/s3-sources/new" element={<CreateS3Source />} />
                   <Route path="backups/s3-sources/:id" element={<S3SourceDetail />} />
                   <Route path="backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                  {/* Security */}
                   <Route path="security" element={<SecurityPage />} />
                   <Route path="rate-limiting" element={<RateLimitingPage />} />
                   <Route path="disk-monitoring" element={<DiskMonitoringPage />} />
                   <Route path="nodes" element={<NodesPage />} />
                   <Route path="plugins" element={<PluginsPage />} />
                 </Route>
+                {/* Redirects from old top-level routes to settings */}
+                <Route path="/domains" element={<Navigate to="/settings/domains" replace />} />
+                <Route path="/storage" element={<Navigate to="/settings/storage" replace />} />
+                <Route path="/email" element={<Navigate to="/settings/email" replace />} />
+                <Route path="/ai-gateway" element={<Navigate to="/settings/ai-gateway" replace />} />
+                <Route path="/git-providers" element={<Navigate to="/settings/git-providers" replace />} />
+                <Route path="/dns-providers" element={<Navigate to="/settings/dns-providers" replace />} />
                 {/* Projects */}
                 <Route path="/projects/new" element={<NewProject />} />
                 <Route path="/projects/import-wizard" element={<Import />} />

@@ -462,7 +462,7 @@ export function ServiceDataBrowser() {
   // Update breadcrumbs
   useEffect(() => {
     const crumbs = [
-      { label: 'Storage', href: '/storage' },
+      { label: 'Storage', href: '/settings/storage' },
       {
         label: service?.service?.name || 'Service',
         href: `/storage/${id}`,
@@ -999,7 +999,7 @@ export function ServiceDataBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate(`/storage/${id}`)}
+              onClick={() => navigate(`/settings/storage/${id}`)}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -1043,7 +1043,7 @@ export function ServiceDataBrowser() {
                   Retry
                 </Button>
                 <Button
-                  onClick={() => navigate(`/storage/${id}`)}
+                  onClick={() => navigate(`/settings/storage/${id}`)}
                   variant="outline"
                   className="gap-2"
                 >
@@ -1068,7 +1068,7 @@ export function ServiceDataBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate(`/storage/${id}`)}
+              onClick={() => navigate(`/settings/storage/${id}`)}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -1115,7 +1115,7 @@ export function ServiceDataBrowser() {
             )}
             <CardContent className="text-center pt-0">
               <Button
-                onClick={() => navigate(`/storage/${id}`)}
+                onClick={() => navigate(`/settings/storage/${id}`)}
                 variant="outline"
                 className="gap-2"
               >
@@ -1137,7 +1137,7 @@ export function ServiceDataBrowser() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate(`/storage/${id}`)}
+            onClick={() => navigate(`/settings/storage/${id}`)}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
