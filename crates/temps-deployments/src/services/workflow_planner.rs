@@ -1047,7 +1047,7 @@ impl WorkflowPlanner {
                     "search_paths": search_paths_for_static_chunks,
                     "path_rewrites": path_rewrites_for_static_chunks,
                 })),
-                required_for_completion: true,
+                required_for_completion: false, // Optimization only — must not block deployment
             });
 
             "deploy_static".to_string()
@@ -1188,18 +1188,15 @@ impl WorkflowPlanner {
                     "search_paths": search_paths_for_chunks,
                     "path_rewrites": path_rewrites_for_chunks,
                 })),
-                required_for_completion: true,
+                required_for_completion: false, // Optimization only — must not block deployment
             });
             debug!("Added persist_static_assets job for stale-chunk fallback");
 
             "deploy_container".to_string()
         };
 
-        // mark_deployment_complete depends on deploy job + persist_static_assets
-        let complete_dependencies = vec![
-            deploy_job_id,
-            "persist_static_assets".to_string(),
-        ];
+        // mark_deployment_complete depends only on the deploy job
+        let complete_dependencies = vec![deploy_job_id];
 
         // Mark deployment as complete
         jobs.push(JobDefinition {
