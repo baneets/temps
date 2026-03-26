@@ -1,27 +1,22 @@
-//! Content-addressable filesystem store.
+//! Content-addressable filesystem blob store.
 //!
-//! Layout:
+//! Layout (git-style double-prefix sharding):
 //! ```text
 //! {root}/
-//!   blobs/{hash[0..2]}/{hash}                          <- deduplicated content
-//!   manifests/{project}/{env}/{deployment}.json         <- path → hash maps
-//!   .tmp/                                              <- atomic write staging
+//!   blobs/{hash[0..2]}/{hash[2..4]}/{hash}
+//!   .tmp/
 //! ```
 //!
-//! One blob per unique file content. One manifest per deployment.
-//! 1000 deployments × 200 chunks = 1000 tiny JSON manifests + ~200 unique blobs
-//! (most chunks are shared across deployments).
+//! With 65,536 prefix buckets (256×256), even 1M blobs averages ~15 files per directory.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::debug;
 
 use crate::{FileStore, FileStoreError};
 
-/// Content-addressable filesystem store.
 pub struct FsFileStore {
     root: PathBuf,
 }
@@ -42,45 +37,57 @@ impl FsFileStore {
         format!("{:x}", hasher.finalize())
     }
 
-    /// Blob path: `blobs/{hash[0..2]}/{hash}`
+    /// Git-style double-prefix sharding: `blobs/{hash[0..2]}/{hash[2..4]}/{hash}`
     fn blob_path(&self, hash: &str) -> PathBuf {
-        let prefix = &hash[..2.min(hash.len())];
-        self.root.join("blobs").join(prefix).join(hash)
+        let h = hash.trim();
+        let p1 = &h[..2.min(h.len())];
+        let p2 = if h.len() >= 4 { &h[2..4] } else { "00" };
+        self.root.join("blobs").join(p1).join(p2).join(h)
     }
 
-    /// Manifest path: `manifests/{key}.json`
-    fn manifest_path(&self, key: &str) -> PathBuf {
-        let clean: PathBuf = key
+    /// Path-based cache: `cache/{sanitized_path}` (for edge caching, not CAS)
+    fn cache_path(&self, url_path: &str) -> PathBuf {
+        let clean: PathBuf = url_path
             .trim_start_matches('/')
             .split('/')
             .filter(|seg| !seg.is_empty() && *seg != ".." && *seg != ".")
             .collect();
-        self.root.join("manifests").join(format!("{}.json", clean.display()))
+        self.root.join("cache").join(clean)
     }
 
     fn tmp_dir(&self) -> PathBuf {
         self.root.join(".tmp")
     }
 
-    async fn atomic_write(&self, target: &std::path::Path, data: &[u8]) -> Result<(), FileStoreError> {
+    async fn atomic_write(
+        &self,
+        target: &std::path::Path,
+        data: &[u8],
+    ) -> Result<(), FileStoreError> {
         if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| FileStoreError::Io {
-                path: target.display().to_string(),
-                reason: format!("mkdir: {}", e),
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| FileStoreError::Io {
+                    path: target.display().to_string(),
+                    reason: format!("mkdir: {}", e),
+                })?;
         }
 
         let tmp = self.tmp_dir();
-        tokio::fs::create_dir_all(&tmp).await.map_err(|e| FileStoreError::Io {
-            path: tmp.display().to_string(),
-            reason: format!("mkdir tmp: {}", e),
-        })?;
+        tokio::fs::create_dir_all(&tmp)
+            .await
+            .map_err(|e| FileStoreError::Io {
+                path: tmp.display().to_string(),
+                reason: format!("mkdir tmp: {}", e),
+            })?;
 
         let tmp_file = tmp.join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::write(&tmp_file, data).await.map_err(|e| FileStoreError::Io {
-            path: tmp_file.display().to_string(),
-            reason: format!("write tmp: {}", e),
-        })?;
+        tokio::fs::write(&tmp_file, data)
+            .await
+            .map_err(|e| FileStoreError::Io {
+                path: tmp_file.display().to_string(),
+                reason: format!("write tmp: {}", e),
+            })?;
 
         if let Err(e) = tokio::fs::rename(&tmp_file, target).await {
             let _ = tokio::fs::remove_file(&tmp_file).await;
@@ -91,27 +98,6 @@ impl FsFileStore {
         }
 
         Ok(())
-    }
-
-    /// Recursively find all .json files under manifests/
-    fn find_manifests_recursive(dir: &std::path::Path, base: &std::path::Path) -> Vec<String> {
-        let mut results = Vec::new();
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return results;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                results.extend(Self::find_manifests_recursive(&path, base));
-            } else if path.extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(rel) = path.strip_prefix(base) {
-                    // Convert path back to key: strip .json extension
-                    let key = rel.with_extension("").display().to_string();
-                    results.push(key);
-                }
-            }
-        }
-        results
     }
 }
 
@@ -132,10 +118,12 @@ impl FileStore for FsFileStore {
     }
 
     async fn get_blob(&self, hash: &str) -> Result<Bytes, FileStoreError> {
-        let blob = self.blob_path(hash.trim());
+        let blob = self.blob_path(hash);
         let data = tokio::fs::read(&blob).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                FileStoreError::NotFound { path: hash.to_string() }
+                FileStoreError::NotFound {
+                    path: hash.to_string(),
+                }
             } else {
                 FileStoreError::Io {
                     path: hash.to_string(),
@@ -147,45 +135,47 @@ impl FileStore for FsFileStore {
     }
 
     async fn blob_exists(&self, hash: &str) -> Result<bool, FileStoreError> {
-        Ok(self.blob_path(hash.trim()).exists())
+        Ok(self.blob_path(hash).exists())
     }
 
-    async fn put_manifest(
-        &self,
-        manifest_key: &str,
-        entries: &HashMap<String, String>,
-    ) -> Result<(), FileStoreError> {
-        let json = serde_json::to_vec(entries).map_err(|e| FileStoreError::Backend(e.to_string()))?;
-        let path = self.manifest_path(manifest_key);
-        self.atomic_write(&path, &json).await?;
-        debug!("CAS: wrote manifest {} ({} entries)", manifest_key, entries.len());
-        Ok(())
+    async fn delete_blob(&self, hash: &str) -> Result<bool, FileStoreError> {
+        let blob = self.blob_path(hash);
+        match tokio::fs::remove_file(&blob).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(FileStoreError::Io {
+                path: hash.to_string(),
+                reason: format!("delete blob: {}", e),
+            }),
+        }
     }
 
-    async fn get_manifest(
-        &self,
-        manifest_key: &str,
-    ) -> Result<HashMap<String, String>, FileStoreError> {
-        let path = self.manifest_path(manifest_key);
-        let data = tokio::fs::read(&path).await.map_err(|e| {
+    // Path-based key-value methods (for edge caching, not CAS)
+
+    async fn put(&self, path: &str, data: Bytes) -> Result<u64, FileStoreError> {
+        let size = data.len() as u64;
+        let file_path = self.cache_path(path);
+        self.atomic_write(&file_path, &data).await?;
+        Ok(size)
+    }
+
+    async fn get(&self, path: &str) -> Result<Bytes, FileStoreError> {
+        let file_path = self.cache_path(path);
+        let data = tokio::fs::read(&file_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                FileStoreError::NotFound { path: manifest_key.to_string() }
+                FileStoreError::NotFound { path: path.to_string() }
             } else {
                 FileStoreError::Io {
-                    path: manifest_key.to_string(),
-                    reason: format!("read manifest: {}", e),
+                    path: path.to_string(),
+                    reason: format!("read: {}", e),
                 }
             }
         })?;
-        serde_json::from_slice(&data).map_err(|e| FileStoreError::Backend(e.to_string()))
+        Ok(Bytes::from(data))
     }
 
-    async fn list_manifests(&self) -> Result<Vec<String>, FileStoreError> {
-        let manifests_dir = self.root.join("manifests");
-        if !manifests_dir.exists() {
-            return Ok(Vec::new());
-        }
-        Ok(Self::find_manifests_recursive(&manifests_dir, &manifests_dir))
+    async fn exists(&self, path: &str) -> Result<bool, FileStoreError> {
+        Ok(self.cache_path(path).exists())
     }
 }
 
@@ -219,110 +209,57 @@ mod tests {
         let h1 = store.put_blob(data.clone()).await.unwrap();
         let h2 = store.put_blob(data.clone()).await.unwrap();
         assert_eq!(h1, h2);
-
-        // Only one blob on disk
-        let blob = store.blob_path(&h1);
-        assert!(blob.exists());
     }
 
     #[tokio::test]
-    async fn test_manifest_roundtrip() {
+    async fn test_blob_exists() {
         let (_dir, store) = temp_store();
+        let hash = store.put_blob(Bytes::from("test")).await.unwrap();
 
-        let mut entries = HashMap::new();
-        entries.insert("_next/static/chunks/main-abc.js".to_string(), "deadbeef".to_string());
-        entries.insert("_next/static/css/app.css".to_string(), "cafebabe".to_string());
-
-        store.put_manifest("1/1/100", &entries).await.unwrap();
-
-        let loaded = store.get_manifest("1/1/100").await.unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded["_next/static/chunks/main-abc.js"], "deadbeef");
+        assert!(store.blob_exists(&hash).await.unwrap());
+        assert!(!store.blob_exists("nonexistent").await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_list_manifests() {
+    async fn test_delete_blob() {
         let (_dir, store) = temp_store();
-        let entries = HashMap::new();
+        let hash = store.put_blob(Bytes::from("delete me")).await.unwrap();
 
-        store.put_manifest("1/1/100", &entries).await.unwrap();
-        store.put_manifest("1/1/101", &entries).await.unwrap();
-        store.put_manifest("2/3/200", &entries).await.unwrap();
-
-        let mut manifests = store.list_manifests().await.unwrap();
-        manifests.sort();
-        assert_eq!(manifests.len(), 3);
-        assert!(manifests.contains(&"1/1/100".to_string()));
-        assert!(manifests.contains(&"1/1/101".to_string()));
-        assert!(manifests.contains(&"2/3/200".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_get_resolves_through_manifest() {
-        let (_dir, store) = temp_store();
-        let data = Bytes::from("chunk content");
-
-        let hash = store.put_blob(data.clone()).await.unwrap();
-
-        let mut entries = HashMap::new();
-        entries.insert("_next/static/chunks/main.js".to_string(), hash.clone());
-        store.put_manifest("1/1/100", &entries).await.unwrap();
-
-        // get() should resolve path → manifest → blob
-        let retrieved = store.get("_next/static/chunks/main.js").await.unwrap();
-        assert_eq!(retrieved, data);
+        assert!(store.delete_blob(&hash).await.unwrap());
+        assert!(!store.blob_exists(&hash).await.unwrap());
+        assert!(!store.delete_blob(&hash).await.unwrap()); // already gone
     }
 
     #[tokio::test]
     async fn test_get_not_found() {
         let (_dir, store) = temp_store();
-        let result = store.get("nonexistent.js").await;
+        let result = store.get_blob("nonexistent").await;
         assert!(matches!(result, Err(FileStoreError::NotFound { .. })));
     }
 
     #[tokio::test]
-    async fn test_end_to_end_two_deployments() {
+    async fn test_double_prefix_sharding() {
         let (_dir, store) = temp_store();
+        let hash = store.put_blob(Bytes::from("shard test")).await.unwrap();
 
-        // Deployment 1: 3 chunks
-        let vendor = Bytes::from("vendor code shared");
-        let main_v1 = Bytes::from("main v1");
-        let css = Bytes::from("styles");
-
-        let h_vendor = store.put_blob(vendor.clone()).await.unwrap();
-        let h_main_v1 = store.put_blob(main_v1.clone()).await.unwrap();
-        let h_css = store.put_blob(css.clone()).await.unwrap();
-
-        let mut m1 = HashMap::new();
-        m1.insert("_next/static/chunks/vendor.js".to_string(), h_vendor.clone());
-        m1.insert("_next/static/chunks/main.js".to_string(), h_main_v1.clone());
-        m1.insert("_next/static/css/app.css".to_string(), h_css.clone());
-        store.put_manifest("1/1/100", &m1).await.unwrap();
-
-        // Deployment 2: vendor unchanged, main updated
-        let main_v2 = Bytes::from("main v2");
-        let h_main_v2 = store.put_blob(main_v2.clone()).await.unwrap();
-        // vendor and css dedup — same hash returned
-        let h_vendor_2 = store.put_blob(vendor.clone()).await.unwrap();
-        let h_css_2 = store.put_blob(css.clone()).await.unwrap();
-        assert_eq!(h_vendor, h_vendor_2);
-        assert_eq!(h_css, h_css_2);
-
-        let mut m2 = HashMap::new();
-        m2.insert("_next/static/chunks/vendor.js".to_string(), h_vendor.clone());
-        m2.insert("_next/static/chunks/main.js".to_string(), h_main_v2.clone());
-        m2.insert("_next/static/css/app.css".to_string(), h_css.clone());
-        store.put_manifest("1/1/101", &m2).await.unwrap();
-
-        // Blobs on disk: vendor, main_v1, main_v2, css = 4 blobs (not 6)
-        assert!(store.blob_exists(&h_vendor).await.unwrap());
-        assert!(store.blob_exists(&h_main_v1).await.unwrap());
-        assert!(store.blob_exists(&h_main_v2).await.unwrap());
-        assert!(store.blob_exists(&h_css).await.unwrap());
-
-        // Both deployment manifests accessible
-        assert_eq!(store.get_manifest("1/1/100").await.unwrap().len(), 3);
-        assert_eq!(store.get_manifest("1/1/101").await.unwrap().len(), 3);
+        // Verify blob is at blobs/{hash[0..2]}/{hash[2..4]}/{hash}
+        let blob = store.blob_path(&hash);
+        let components: Vec<_> = blob.components().collect();
+        let len = components.len();
+        // .../{p1}/{p2}/{hash}
+        assert_eq!(
+            components[len - 3].as_os_str().to_str().unwrap(),
+            &hash[..2]
+        );
+        assert_eq!(
+            components[len - 2].as_os_str().to_str().unwrap(),
+            &hash[2..4]
+        );
+        assert_eq!(
+            components[len - 1].as_os_str().to_str().unwrap(),
+            &hash
+        );
+        assert!(blob.exists());
     }
 
     #[tokio::test]

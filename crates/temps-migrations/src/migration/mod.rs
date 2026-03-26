@@ -52,6 +52,8 @@ mod m20260323_000001_create_compose_stack_routes;
 mod m20260323_000002_add_compose_stack_repo_source;
 mod m20260323_000003_add_compose_stack_port_overrides;
 mod m20260323_000004_add_deployment_container_service_name;
+mod m20260326_000001_create_asset_manifests;
+mod m20260326_000002_create_static_asset_cache;
 
 pub struct Migrator;
 
@@ -111,6 +113,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260323_000002_add_compose_stack_repo_source::Migration),
             Box::new(m20260323_000003_add_compose_stack_port_overrides::Migration),
             Box::new(m20260323_000004_add_deployment_container_service_name::Migration),
+            Box::new(m20260326_000001_create_asset_manifests::Migration),
+            Box::new(m20260326_000002_create_static_asset_cache::Migration),
         ]
     }
 }

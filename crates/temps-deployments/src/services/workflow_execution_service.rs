@@ -1098,10 +1098,13 @@ impl WorkflowExecutionService {
                 .with_log_id(db_job.log_id.clone())
                 .with_log_service(self.log_service.clone());
 
-                // Wire file store for stale-chunk persistence (if available)
+                // Wire file store for CAS blob storage
                 if let Some(store) = self.file_store.get() {
                     job = job.with_file_store(store.clone());
                 }
+
+                // Wire database for URL→hash mapping
+                job = job.with_db(self.db.clone());
 
                 Ok(Arc::new(job))
             }

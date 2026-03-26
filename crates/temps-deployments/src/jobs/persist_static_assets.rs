@@ -7,11 +7,14 @@
 //! The proxy looks up assets by URL path in the file store — no database table needed.
 
 use async_trait::async_trait;
+use sea_orm::{ActiveModelTrait, Set};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use temps_core::{JobResult, WorkflowContext, WorkflowError, WorkflowTask};
+use temps_database::DbConnection;
 use temps_deployer::ImageBuilder;
+use temps_entities::static_asset_cache;
 use temps_file_store::FileStore;
 use temps_logs::{LogLevel, LogService};
 use tracing::{debug, info, warn};
@@ -43,8 +46,10 @@ pub struct PersistStaticAssetsJob {
     image_builder: Arc<dyn ImageBuilder>,
     /// Legacy chunks directory (backward compat, will be removed).
     chunks_dir: PathBuf,
-    /// Content-addressable file store for persisting assets.
+    /// Content-addressable blob store for persisting assets.
     file_store: Option<Arc<dyn FileStore>>,
+    /// Database connection for storing URL→hash mappings.
+    db: Option<Arc<DbConnection>>,
     log_id: Option<String>,
     log_service: Option<Arc<LogService>>,
 }
@@ -93,6 +98,7 @@ impl PersistStaticAssetsJob {
             image_builder,
             chunks_dir,
             file_store: None,
+            db: None,
             log_id: None,
             log_service: None,
         }
@@ -100,6 +106,11 @@ impl PersistStaticAssetsJob {
 
     pub fn with_file_store(mut self, file_store: Arc<dyn FileStore>) -> Self {
         self.file_store = Some(file_store);
+        self
+    }
+
+    pub fn with_db(mut self, db: Arc<DbConnection>) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -357,13 +368,10 @@ impl WorkflowTask for PersistStaticAssetsJob {
             ))
             .await?;
 
-            // Persist each asset: store blob in CAS, collect path→hash for manifest
-            let mut manifest_entries: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
+            // Persist each asset: store blob in CAS + insert DB row for URL→hash mapping
             for asset_path in &asset_files {
                 let relative_path = asset_path.strip_prefix(&temp_dir).unwrap_or(asset_path);
 
-                // Build the URL-relative path with rewrites
                 let container_relative = format!(
                     "{}/{}",
                     search_path.trim_start_matches('/'),
@@ -381,41 +389,40 @@ impl WorkflowTask for PersistStaticAssetsJob {
                 let file_size = file_bytes.len() as u64;
 
                 // Store blob in CAS (deduplicated by content hash)
-                if let Some(file_store) = &self.file_store {
+                let content_hash = if let Some(file_store) = &self.file_store {
                     match file_store
                         .put_blob(bytes::Bytes::from(file_bytes.clone()))
                         .await
                     {
-                        Ok(hash) => {
-                            manifest_entries.insert(url_path.clone(), hash);
-                        }
+                        Ok(hash) => Some(hash),
                         Err(e) => {
                             warn!("Failed to store blob for {}: {}", url_path, e);
+                            None
                         }
+                    }
+                } else {
+                    None
+                };
+
+                // Insert URL→hash mapping in database
+                if let (Some(hash), Some(db)) = (&content_hash, &self.db) {
+                    let record = static_asset_cache::ActiveModel {
+                        url_path: Set(url_path.clone()),
+                        content_hash: Set(hash.clone()),
+                        project_id: Set(self.project_id),
+                        environment_id: Set(self.environment_id),
+                        deployment_id: Set(self.deployment_id),
+                        size_bytes: Set(file_size as i64),
+                        created_at: Set(chrono::Utc::now()),
+                        ..Default::default()
+                    };
+                    if let Err(e) = record.insert(db.as_ref()).await {
+                        warn!("Failed to insert static_asset_cache row for {}: {}", url_path, e);
                     }
                 }
 
                 total_assets += 1;
                 total_size += file_size;
-            }
-
-            // Write manifest for this deployment (one file instead of hundreds of refs)
-            if let Some(file_store) = &self.file_store {
-                if !manifest_entries.is_empty() {
-                    let manifest_key = format!(
-                        "{}/{}/{}",
-                        self.project_id, self.environment_id, self.deployment_id
-                    );
-                    if let Err(e) = file_store.put_manifest(&manifest_key, &manifest_entries).await {
-                        warn!("Failed to write manifest: {}", e);
-                    } else {
-                        self.log(format!(
-                            "Wrote CAS manifest with {} entries",
-                            manifest_entries.len()
-                        ))
-                        .await?;
-                    }
-                }
             }
 
             // Clean up temp directory
