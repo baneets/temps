@@ -39,7 +39,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { ArrowUpRight, Loader2, PlusIcon, RefreshCw } from 'lucide-react'
+import { ArrowUpRight, ChevronLeft, ChevronRight, Loader2, PlusIcon, RefreshCw } from 'lucide-react'
 import { EmptyPlaceholder } from '@/components/ui/empty-placeholder'
 
 const ITEMS_PER_PAGE = 10
@@ -54,6 +54,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const refreshIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const initialDeploymentCountRef = useRef<number | null>(null)
+  const [currentPage, setCurrentPage] = useState(1)
 
   // Handle opening new deployment modal
   const handleOpenNewDeployment = useCallback(() => {
@@ -70,13 +71,17 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
     ...getProjectDeploymentsOptions({
       path: { id: project.id },
       query: {
-        page: 1,
+        page: currentPage,
         per_page: ITEMS_PER_PAGE,
       },
     }),
     retry: false,
     refetchOnWindowFocus: true,
   })
+
+  const totalPages = deploymentsData
+    ? Math.ceil(deploymentsData.total / ITEMS_PER_PAGE)
+    : 1
 
   // Auto-refresh when coming from deployment details
   useEffect(() => {
@@ -462,6 +467,40 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
           ))}
         </ul>
       </Card>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-4">
+          <p className="text-sm text-muted-foreground">
+            <span className="hidden sm:inline">
+              Showing {(currentPage - 1) * ITEMS_PER_PAGE + 1}–{Math.min(currentPage * ITEMS_PER_PAGE, deploymentsData.total)} of {deploymentsData.total}
+            </span>
+            <span className="sm:hidden">
+              {currentPage} / {totalPages}
+            </span>
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1 || isFetching}
+            >
+              <ChevronLeft className="h-4 w-4" />
+              <span className="hidden sm:inline ml-1">Previous</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages || isFetching}
+            >
+              <span className="hidden sm:inline mr-1">Next</span>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
 
       <RedeploymentModal
         project={project}

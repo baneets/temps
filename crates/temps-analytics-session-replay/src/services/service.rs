@@ -1424,7 +1424,10 @@ impl SessionReplayService {
                 }
             }
             Err(e) => {
-                error!("Session replay cleanup: failed to delete old sessions: {}", e);
+                error!(
+                    "Session replay cleanup: failed to delete old sessions: {}",
+                    e
+                );
             }
         }
     }

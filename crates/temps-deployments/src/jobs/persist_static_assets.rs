@@ -69,8 +69,8 @@ impl std::fmt::Debug for PersistStaticAssetsJob {
 
 /// File extensions to persist as static assets.
 const STATIC_ASSET_EXTENSIONS: &[&str] = &[
-    "js", "css", "woff", "woff2", "ttf", "eot", "png", "jpg", "jpeg", "gif", "svg", "webp",
-    "avif", "ico", "json", "txt", "xml",
+    "js", "css", "woff", "woff2", "ttf", "eot", "png", "jpg", "jpeg", "gif", "svg", "webp", "avif",
+    "ico", "json", "txt", "xml",
 ];
 
 impl PersistStaticAssetsJob {
@@ -302,10 +302,8 @@ impl WorkflowTask for PersistStaticAssetsJob {
             };
 
             // Create temporary directory for extraction
-            let temp_dir = std::env::temp_dir().join(format!(
-                "temps-persist-assets-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let temp_dir =
+                std::env::temp_dir().join(format!("temps-persist-assets-{}", uuid::Uuid::new_v4()));
 
             if let Err(e) = tokio::fs::create_dir_all(&temp_dir).await {
                 warn!("Failed to create temp directory: {}", e);
@@ -417,7 +415,10 @@ impl WorkflowTask for PersistStaticAssetsJob {
                         ..Default::default()
                     };
                     if let Err(e) = record.insert(db.as_ref()).await {
-                        warn!("Failed to insert static_asset_cache row for {}: {}", url_path, e);
+                        warn!(
+                            "Failed to insert static_asset_cache row for {}: {}",
+                            url_path, e
+                        );
                     }
                 }
 
@@ -620,16 +621,22 @@ mod tests {
         // Browser requests /_next/static/chunks/main-abc123.js
         // Proxy strips leading / and looks for: chunks_dir/_next/static/chunks/main-abc123.js
         assert!(
-            chunks_dir.join("_next/static/chunks/main-abc123.js").exists(),
+            chunks_dir
+                .join("_next/static/chunks/main-abc123.js")
+                .exists(),
             "Next.js JS chunk must be accessible at _next/static/chunks/main-abc123.js"
         );
         assert!(
-            chunks_dir.join("_next/static/css/layout-xyz789.css").exists(),
+            chunks_dir
+                .join("_next/static/css/layout-xyz789.css")
+                .exists(),
             "Next.js CSS must be accessible at _next/static/css/layout-xyz789.css"
         );
         // .map files should NOT be persisted
         assert!(
-            !chunks_dir.join("_next/static/chunks/main-abc123.js.map").exists(),
+            !chunks_dir
+                .join("_next/static/chunks/main-abc123.js.map")
+                .exists(),
             "Source maps should not be persisted"
         );
 
@@ -720,13 +727,19 @@ mod tests {
         std::fs::write(v2_dir.join("main-bbb.js"), "v2").unwrap();
 
         // Both deployments' chunks accessible
-        assert!(env_chunks.join("100/_next/static/chunks/main-aaa.js").exists());
-        assert!(env_chunks.join("101/_next/static/chunks/main-bbb.js").exists());
+        assert!(env_chunks
+            .join("100/_next/static/chunks/main-aaa.js")
+            .exists());
+        assert!(env_chunks
+            .join("101/_next/static/chunks/main-bbb.js")
+            .exists());
 
         // Cleanup of v1 doesn't affect v2
         std::fs::remove_dir_all(env_chunks.join("100")).unwrap();
         assert!(!env_chunks.join("100").exists());
-        assert!(env_chunks.join("101/_next/static/chunks/main-bbb.js").exists());
+        assert!(env_chunks
+            .join("101/_next/static/chunks/main-bbb.js")
+            .exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

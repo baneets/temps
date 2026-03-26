@@ -237,10 +237,7 @@ impl SourceMapService {
     /// All other source maps for the given project are deleted.
     ///
     /// Returns the number of source map rows deleted.
-    pub async fn delete_stale_source_maps(
-        &self,
-        project_id: i32,
-    ) -> Result<u64, SourceMapError> {
+    pub async fn delete_stale_source_maps(&self, project_id: i32) -> Result<u64, SourceMapError> {
         use temps_entities::{deployments, environments};
 
         // Step 1: Find all environment current_deployment_ids for this project
@@ -272,10 +269,7 @@ impl SourceMapService {
 
         let keep_releases: Vec<String> = active_deployments
             .into_iter()
-            .map(|d| {
-                d.commit_sha
-                    .unwrap_or_else(|| format!("deploy-{}", d.id))
-            })
+            .map(|d| d.commit_sha.unwrap_or_else(|| format!("deploy-{}", d.id)))
             .collect();
 
         if keep_releases.is_empty() {

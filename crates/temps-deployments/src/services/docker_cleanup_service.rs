@@ -279,7 +279,7 @@ impl DockerCleanupService {
     /// Delete static_asset_cache rows older than `max_asset_cache_age_days`
     /// and garbage-collect CAS blobs no longer referenced by any row.
     async fn cleanup_stale_asset_cache(&self) {
-        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, ConnectionTrait};
+        use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
         use temps_entities::static_asset_cache;
 
         let cutoff = chrono::Utc::now() - chrono::Duration::days(self.max_asset_cache_age_days);
@@ -307,7 +307,9 @@ impl DockerCleanupService {
         let stale_count = stale_rows.len();
 
         // 2. Delete stale rows
-        let delete_result = self.db.as_ref()
+        let delete_result = self
+            .db
+            .as_ref()
             .execute(sea_orm::Statement::from_string(
                 sea_orm::DatabaseBackend::Postgres,
                 format!(

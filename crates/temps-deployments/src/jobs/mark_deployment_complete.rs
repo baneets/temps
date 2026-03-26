@@ -304,9 +304,12 @@ impl MarkDeploymentCompleteJob {
                  Container registration will be skipped. This means the Environments page \
                  will show 'No containers'. Check that deploy_container job set its outputs."
             );
-            self.log("WARNING: No container IDs found from deploy job — containers won't appear in UI".to_string())
-                .await
-                .ok();
+            self.log(
+                "WARNING: No container IDs found from deploy job — containers won't appear in UI"
+                    .to_string(),
+            )
+            .await
+            .ok();
         }
 
         if let Some(container_ids) = container_ids {

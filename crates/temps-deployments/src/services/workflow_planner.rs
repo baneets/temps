@@ -796,16 +796,10 @@ impl WorkflowPlanner {
         //   Vite:    base: process.env.TEMPS_ASSET_PREFIX || '/'
         // The value is the deployment slug, which is unique and URL-safe.
         let asset_prefix = format!("/_temps/assets/{}", deployment.slug);
-        env_vars.insert(
-            "TEMPS_ASSET_PREFIX".to_string(),
-            asset_prefix.clone(),
-        );
+        env_vars.insert("TEMPS_ASSET_PREFIX".to_string(), asset_prefix.clone());
         // NEXT_PUBLIC_ prefix makes it available at build time in Next.js client bundles
         if project.preset == temps_entities::preset::Preset::NextJs {
-            env_vars.insert(
-                "NEXT_PUBLIC_TEMPS_ASSET_PREFIX".to_string(),
-                asset_prefix,
-            );
+            env_vars.insert("NEXT_PUBLIC_TEMPS_ASSET_PREFIX".to_string(), asset_prefix);
         }
 
         debug!(

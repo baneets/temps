@@ -1473,15 +1473,13 @@ impl ProjectService {
                 None
             };
 
-            let provider =
-                PublicRepoProviderFactory::create_with_token(provider_name, token).map_err(
-                    |e| {
-                        ProjectError::Other(format!(
-                            "Failed to create public repo provider for {}: {}",
-                            provider_name, e
-                        ))
-                    },
-                )?;
+            let provider = PublicRepoProviderFactory::create_with_token(provider_name, token)
+                .map_err(|e| {
+                    ProjectError::Other(format!(
+                        "Failed to create public repo provider for {}: {}",
+                        provider_name, e
+                    ))
+                })?;
 
             let branches = provider
                 .list_branches(&project.repo_owner, &project.repo_name)

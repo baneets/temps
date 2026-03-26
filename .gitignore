@@ -40,3 +40,5 @@ __pycache__
 .claude
 .agents
 skills-lock.json
+
+.next

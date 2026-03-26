@@ -163,7 +163,9 @@ impl FileStore for FsFileStore {
         let file_path = self.cache_path(path);
         let data = tokio::fs::read(&file_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                FileStoreError::NotFound { path: path.to_string() }
+                FileStoreError::NotFound {
+                    path: path.to_string(),
+                }
             } else {
                 FileStoreError::Io {
                     path: path.to_string(),
@@ -255,10 +257,7 @@ mod tests {
             components[len - 2].as_os_str().to_str().unwrap(),
             &hash[2..4]
         );
-        assert_eq!(
-            components[len - 1].as_os_str().to_str().unwrap(),
-            &hash
-        );
+        assert_eq!(components[len - 1].as_os_str().to_str().unwrap(), &hash);
         assert!(blob.exists());
     }
 

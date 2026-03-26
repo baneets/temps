@@ -17,6 +17,7 @@ temps-deployer = { path = "../temps-deployer" }
 temps-entities = { path = "../temps-entities" }
 temps-log-aggregator = { path = "../temps-log-aggregator" }
 temps-error-tracking = { path = "../temps-error-tracking" }
+temps-file-store = { path = "../temps-file-store" }
 temps-git = { path = "../temps-git" }
 temps-logs = { path = "../temps-logs" }
 temps-queue = { path = "../temps-queue" }
@@ -55,6 +56,7 @@ zip = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+urlencoding = { workspace = true }
 
 [dev-dependencies]
 testcontainers = { workspace = true }

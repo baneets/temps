@@ -8,8 +8,8 @@ mod commands;
 use clap::{Parser, Subcommand};
 use commands::{
     AgentCommand, ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DoctorCommand,
-    DomainCommand, JoinCommand, NodeCommand, ProxyCommand, ResetPasswordCommand, ServeCommand,
-    ServicesCommand, SetupCommand, UpgradeCommand,
+    DomainCommand, EdgeCommand, JoinCommand, NodeCommand, ProxyCommand, ResetPasswordCommand,
+    ServeCommand, ServicesCommand, SetupCommand, UpgradeCommand,
 };
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
@@ -73,6 +73,8 @@ enum Commands {
     Agent(AgentCommand),
     /// Manage cluster worker nodes (list, show, drain, remove)
     Node(NodeCommand),
+    /// Start an edge CDN proxy node (caches static assets, proxies dynamic requests to origin)
+    Edge(EdgeCommand),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -147,6 +149,7 @@ fn main() -> anyhow::Result<()> {
              temps_static_files={level},\
              temps_vulnerability_scanner={level},\
              temps_agent={level},\
+             temps_edge={level},\
              temps_wireguard={level},\
              pingora=warn,\
              sqlx=warn,\
@@ -198,5 +201,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Join(join_cmd) => join_cmd.execute(),
         Commands::Agent(agent_cmd) => agent_cmd.execute(),
         Commands::Node(node_cmd) => node_cmd.execute(),
+        Commands::Edge(edge_cmd) => edge_cmd.execute(),
     }
 }
