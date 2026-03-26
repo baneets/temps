@@ -41,6 +41,7 @@ pub struct WorkflowExecutionService {
     source_map_service: OnceCell<Arc<SourceMapService>>,
     node_scheduler: OnceCell<Arc<crate::services::NodeScheduler>>,
     encryption_service: OnceCell<Arc<temps_core::EncryptionService>>,
+    file_store: OnceCell<Arc<dyn temps_file_store::FileStore>>,
 }
 
 impl WorkflowExecutionService {
@@ -73,6 +74,7 @@ impl WorkflowExecutionService {
             source_map_service: OnceCell::new(),
             node_scheduler: OnceCell::new(),
             encryption_service: OnceCell::new(),
+            file_store: OnceCell::new(),
         }
     }
 
@@ -84,6 +86,11 @@ impl WorkflowExecutionService {
     /// Set the encryption service for decrypting node tokens during remote deployments
     pub fn set_encryption_service(&self, service: Arc<temps_core::EncryptionService>) {
         let _ = self.encryption_service.set(service);
+    }
+
+    /// Set the content-addressable file store for deduplication of static assets
+    pub fn set_file_store(&self, store: Arc<dyn temps_file_store::FileStore>) {
+        let _ = self.file_store.set(store);
     }
 
     /// Set the source map service for automatic source map capture during deployments
@@ -1011,6 +1018,90 @@ impl WorkflowExecutionService {
                 )
                 .with_log_id(db_job.log_id.clone())
                 .with_log_service(self.log_service.clone());
+
+                Ok(Arc::new(job))
+            }
+
+            "PersistStaticAssetsJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let deployment_id = config
+                    .get("deployment_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "deployment_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let project_id = config
+                    .get("project_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "project_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let environment_id = config
+                    .get("environment_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| {
+                        WorkflowExecutionError::InvalidJobConfig(
+                            "environment_id is required".to_string(),
+                        )
+                    })? as i32;
+
+                let build_job_id = config
+                    .get("build_job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("build_image")
+                    .to_string();
+
+                let search_paths: Vec<String> = config
+                    .get("search_paths")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let path_rewrites: Vec<(String, String)> = config
+                    .get("path_rewrites")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let deployment_slug = config
+                    .get("deployment_slug")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&deployment_id.to_string())
+                    .to_string();
+
+                let chunks_dir = self
+                    .config_service
+                    .static_dir()
+                    .join("chunks")
+                    .join(project_id.to_string())
+                    .join(environment_id.to_string())
+                    .join(deployment_slug);
+
+                let mut job = crate::jobs::PersistStaticAssetsJob::new(
+                    db_job.job_id.clone(),
+                    deployment_id,
+                    project_id,
+                    environment_id,
+                    build_job_id,
+                    search_paths,
+                    path_rewrites,
+                    self.image_builder.clone(),
+                    chunks_dir,
+                )
+                .with_log_id(db_job.log_id.clone())
+                .with_log_service(self.log_service.clone());
+
+                // Wire file store for stale-chunk persistence (if available)
+                if let Some(store) = self.file_store.get() {
+                    job = job.with_file_store(store.clone());
+                }
 
                 Ok(Arc::new(job))
             }
