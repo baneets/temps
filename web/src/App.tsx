@@ -185,12 +185,6 @@ const AiGateway = lazy(() =>
     default: m.AiGatewayPage,
   }))
 )
-const Stacks = lazy(() =>
-  import('./pages/Stacks').then((m) => ({ default: m.Stacks }))
-)
-const StackDetail = lazy(() =>
-  import('./pages/StackDetail').then((m) => ({ default: m.StackDetail }))
-)
 
 // Loading component
 const PageLoader = () => (
@@ -290,9 +284,6 @@ const FullAppRoutes = () => {
                   <Route path="providers/edit/:id" element={<EditNotificationProvider />} />
                   <Route path=":section" element={<MonitoringSettings />} />
                 </Route>
-                {/* Stacks - Docker Compose management */}
-                <Route path="/stacks" element={<Stacks />} />
-                <Route path="/stacks/:id" element={<StackDetail />} />
                 {/* Observe section */}
                 <Route path="/proxy-logs" element={<ProxyLogs />} />
                 <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />

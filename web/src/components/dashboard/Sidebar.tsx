@@ -19,7 +19,6 @@ import {
   BadgeCheck,
   ChevronsUpDown,
   Folder,
-  Layers,
   LogOut,
   MoreHorizontal,
   ScrollText,
@@ -69,11 +68,6 @@ const navMainAll = [
     title: 'Monitoring',
     url: '/monitoring',
     icon: Activity,
-  },
-  {
-    title: 'Stacks',
-    url: '/stacks',
-    icon: Layers,
   },
 ]
 

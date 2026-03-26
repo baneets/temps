@@ -31,7 +31,6 @@ import {
   HardDrive,
   Home,
   Key,
-  Layers,
   Mail,
   Monitor,
   Network,
@@ -88,12 +87,6 @@ const mainNavItems: NavigationItem[] = [
     url: '/monitoring',
     icon: Activity,
     keywords: ['metrics', 'performance', 'analytics', 'stats', 'alerts', 'health'],
-  },
-  {
-    title: 'Stacks',
-    url: '/stacks',
-    icon: Layers,
-    keywords: ['docker', 'compose', 'stack', 'containers', 'multi-service'],
   },
 ]
 
