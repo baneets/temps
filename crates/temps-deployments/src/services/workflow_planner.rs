@@ -1012,15 +1012,12 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
-            // Persist static assets for stale-chunk fallback (for static deployments too)
+            // Persist static assets to CAS for stale-chunk fallback
             let search_paths_for_static_chunks: Vec<String> = match project.preset {
                 temps_entities::preset::Preset::Vite => vec!["dist/assets".to_string()],
                 _ => vec!["dist".to_string(), "build/static".to_string()],
             };
 
-            // Rewrites: strip the build output prefix so stored paths match browser URLs.
-            // Vite: browser requests /assets/index-abc.js but file is at dist/assets/index-abc.js
-            // The "dist/" prefix must be stripped so the stored path matches the URL.
             let path_rewrites_for_static_chunks: Vec<(String, String)> = match project.preset {
                 temps_entities::preset::Preset::Vite => {
                     vec![("dist/".to_string(), String::new())]
@@ -1036,7 +1033,7 @@ impl WorkflowPlanner {
                 job_type: "PersistStaticAssetsJob".to_string(),
                 name: "Persist Static Assets".to_string(),
                 description: Some(
-                    "Extract immutable static assets for stale-chunk fallback".to_string(),
+                    "Extract and deduplicate static assets for stale-chunk fallback".to_string(),
                 ),
                 dependencies: vec!["build_image".to_string()],
                 job_config: Some(serde_json::json!({
@@ -1047,7 +1044,7 @@ impl WorkflowPlanner {
                     "search_paths": search_paths_for_static_chunks,
                     "path_rewrites": path_rewrites_for_static_chunks,
                 })),
-                required_for_completion: false, // Optimization only — must not block deployment
+                required_for_completion: false,
             });
 
             "deploy_static".to_string()
@@ -1150,7 +1147,7 @@ impl WorkflowPlanner {
                 required_for_completion: true,
             });
 
-            // Persist static assets for stale-chunk fallback (runs in parallel with deploy_container)
+            // Persist static assets to CAS for stale-chunk fallback
             let search_paths_for_chunks: Vec<String> = match project.preset {
                 temps_entities::preset::Preset::NextJs => {
                     vec![".next/static".to_string()]
@@ -1177,7 +1174,7 @@ impl WorkflowPlanner {
                 job_type: "PersistStaticAssetsJob".to_string(),
                 name: "Persist Static Assets".to_string(),
                 description: Some(
-                    "Extract immutable static assets for stale-chunk fallback".to_string(),
+                    "Extract and deduplicate static assets for stale-chunk fallback".to_string(),
                 ),
                 dependencies: vec!["build_image".to_string()],
                 job_config: Some(serde_json::json!({
@@ -1188,9 +1185,8 @@ impl WorkflowPlanner {
                     "search_paths": search_paths_for_chunks,
                     "path_rewrites": path_rewrites_for_chunks,
                 })),
-                required_for_completion: false, // Optimization only — must not block deployment
+                required_for_completion: false,
             });
-            debug!("Added persist_static_assets job for stale-chunk fallback");
 
             "deploy_container".to_string()
         };
