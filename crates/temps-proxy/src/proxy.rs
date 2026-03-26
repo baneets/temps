@@ -1659,7 +1659,11 @@ impl LoadBalancer {
         let data = match file_store.get_blob(&content_hash).await {
             Ok(d) => d,
             Err(temps_file_store::FileStoreError::NotFound { .. }) => {
-                warn!("CAS blob missing for hash {} (path: {})", &content_hash[..8], url_path);
+                warn!(
+                    "CAS blob missing for hash {} (path: {})",
+                    &content_hash[..8],
+                    url_path
+                );
                 return Ok(false);
             }
             Err(e) => {
@@ -1681,10 +1685,7 @@ impl LoadBalancer {
             if if_none_match == etag {
                 let mut resp = ResponseHeader::build(StatusCode::NOT_MODIFIED, None)?;
                 resp.insert_header("ETag", &etag)?;
-                resp.insert_header(
-                    header::CACHE_CONTROL,
-                    "public, max-age=31536000, immutable",
-                )?;
+                resp.insert_header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")?;
                 self.set_tracking_cookies(session, &mut resp, ctx).await?;
                 session.write_response_header(Box::new(resp), false).await?;
                 session.write_response_body(None, true).await?;
@@ -2739,9 +2740,8 @@ impl ProxyHttp for LoadBalancer {
                             // Try path-keyed file store (stale-chunk fallback, no DB).
                             if Self::is_cacheable_static_asset(&ctx.path) {
                                 let url_path = ctx.path.trim_start_matches('/').to_string();
-                                if let Ok(true) = self
-                                    .serve_asset_from_store(session, ctx, &url_path)
-                                    .await
+                                if let Ok(true) =
+                                    self.serve_asset_from_store(session, ctx, &url_path).await
                                 {
                                     ctx.routing_status = "stale_chunk_fallback".to_string();
                                     return Ok(true);
@@ -2839,10 +2839,7 @@ impl ProxyHttp for LoadBalancer {
             if let Some(slash_pos) = after_prefix.find('/') {
                 let asset_path = after_prefix[slash_pos + 1..].to_string();
                 if Self::is_cacheable_static_asset(&asset_path) {
-                    if let Ok(true) = self
-                        .serve_asset_from_store(session, ctx, &asset_path)
-                        .await
-                    {
+                    if let Ok(true) = self.serve_asset_from_store(session, ctx, &asset_path).await {
                         ctx.routing_status = "prefixed_asset".to_string();
                         return Ok(true);
                     }

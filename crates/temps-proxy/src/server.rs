@@ -261,6 +261,11 @@ pub fn setup_proxy_server(
     let session_manager =
         Arc::new(SessionManagerImpl::new(db.clone(), crypto.clone())) as Arc<dyn SessionManager>;
 
+    // Create path-keyed file store for static asset serving
+    let cas_file_store: Arc<dyn temps_file_store::FileStore> = Arc::new(
+        temps_file_store::fs_store::FsFileStore::new(config_service.data_dir().join("cas")),
+    );
+
     // Create the main load balancer
     let mut lb = LoadBalancer::new(
         upstream_resolver,
@@ -325,6 +330,10 @@ pub fn setup_proxy_server(
         lb = lb.with_on_demand_manager(Arc::clone(on_demand_manager));
         info!("On-demand scale-to-zero enabled");
     }
+
+    // Wire path-keyed file store for static asset serving
+    lb = lb.with_file_store(cas_file_store);
+    info!("Path-keyed file store enabled");
 
     // Setup Pingora server with explicit configuration
     // Disable upgrade mode to avoid "Console API failed to start: channel closed" error
