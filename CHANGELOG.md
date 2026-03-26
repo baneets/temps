@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Docker Compose as a deployment preset (ADR-007): deploy multi-container apps via git-push pipeline with `DownloadRepo → DeployCompose → MarkComplete` workflow
+- Compose override: user-provided YAML merged with the main compose file at deploy time for port remapping, volume overrides, and command changes without modifying the original file
+- Public ports model: explicit control over which compose service ports are proxied publicly (private by default); each public port gets its own subdomain
+- Compose file picker in project creation: filters files by root directory, shows only compose files within the selected subfolder
+- Container exec and persistent terminal: WebSocket-based xterm.js shell (opt-in per project)
+- Per-service URLs in container list and detail views for compose deployments
+- Public ports configuration UI with autocomplete from compose override content (parses service names and port mappings)
+- Screenshot capture for Docker Compose deployments (was missing from compose workflow)
+- Content-addressable storage (CAS) for static assets: SHA-256 content hashing with blob deduplication across deployments (`blobs/{prefix}/{hash}` + `paths/{url_path}.ref` index)
+- Public repo URL input in Git Settings: edit mode shows URL field instead of git provider connection selector for public repos
+- Full repository URL and "Public" badge displayed for public repo projects in Git Settings
+- `git_url` and `is_public_repo` fields in UpdateGitSettings API for proper public repo persistence
+- Authenticated GitHub API calls for public repos: automatically uses token from any configured GitHub connection (5000 req/hr instead of 60)
+- Token validation against GitHub `/rate_limit` endpoint before use
 - Compose stack domain routing: map custom domains to specific container ports via `compose_stack_routes` table with full CRUD API, route toggle, and Pingora proxy integration
 - Compose stack UI routes tab with auto-detection of service:port mappings from compose YAML and manual fallback mode
 - Repository-backed compose stacks: create stacks from a git repository URL with optional branch, compose path, and access token; sync on demand to pull latest changes
@@ -15,12 +29,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `repo_url`, `repo_branch`, `repo_compose_path`, `last_synced_at` fields on stack API responses
 - Auto-scroll to bottom in stack log viewers
 - `git_ops` module publicly exported from `temps-git` for cross-crate reuse
+- Infrastructure pages (Domains, Storage, Email, AI Gateway, Git/DNS Providers) consolidated under Settings layout with sidebar navigation
+- Command palette (Cmd+K) synchronized with actual routes and settings structure
+- Backwards-compatible redirects from old top-level URLs (`/domains` → `/settings/domains`, etc.)
+- Stacks page added to main navigation and command palette
 
 ### Fixed
+- **Workflow context clobbering**: parallel jobs in the same batch overwrote each other's outputs; the executor now merges outputs from all parallel jobs instead of replacing the entire context — this was the root cause of containers not being registered after deployment
+- **Container registration silently skipped**: `persist_static_assets` was `required_for_completion: true` and `mark_deployment_complete` depended on it; if persist failed, containers were created in Docker but never registered in the database, causing "No containers yet" in the UI
+- **Orphaned container teardown**: previous deployment teardown only checked `deployment_containers` table; added slug-based fallback cleanup for containers with no database records
+- Compose preset name mismatch: save handler compared `=== 'docker-compose'` but stored projects used `'dockercompose'`, causing compose override and public ports to silently not be saved
+- Compose override port parsing: only matched quoted port entries (`- '48080:80'`), now also matches unquoted (`- 48080:80`)
+- Public port suggestions now use host port (left side of `48080:80`) instead of container port
+- GitHub API rate limit on public repos: `trigger-pipeline`, branch listing, and preset detection endpoints now use authenticated tokens from configured GitHub connections
+- `get_any_github_token()` validates token against GitHub API and filters to only GitHub/GitHub App provider types
+- TimescaleDB Docker volume path: all docs and quickstart guides fixed from `/var/lib/postgresql/data` to `/home/postgres/pgdata/data` (the `timescaledb-ha` image data directory)
+- Standardized all docs on `timescale/timescaledb-ha:pg18` image (some used non-existent `timescale/timescaledb:latest-pg18`)
+- CONTRIBUTING.md: added missing Docker volume mount for dev database
+- Docker Registry icon in Settings: changed from Globe to Boxes (was sharing icon with Domains)
 - CPU stats always showing 0.0% in container metrics: switched Docker stats API from `one_shot: true` to `stream: true` for valid `precpu_stats` delta calculation
 - Compose stack restart now uses `docker compose up -d --force-recreate` instead of `docker compose restart`, ensuring config and env variable changes are applied to running containers
 
 ### Changed
+- `FsFileStore` rewritten as content-addressable store: files stored by SHA-256 hash with path→hash reference index; identical content across deployments shares a single blob on disk
+- `persist_static_assets` job is now `required_for_completion: false` and does not block `mark_deployment_complete`; runs in parallel as a best-effort optimization
+- `GitProviderManager.get_any_github_token()`: new method for obtaining authenticated GitHub tokens from any configured connection, with proper provider type filtering and token validation
 - Replaced all `Command::new("git")` CLI calls with `git2` (libgit2) across `temps-deployments`, `temps-git` (GitHub provider, GitLab provider, provider manager), and integration tests; git CLI is no longer a runtime dependency
 
 ## [0.0.6] - 2026-03-19
