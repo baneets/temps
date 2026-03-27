@@ -1074,7 +1074,13 @@ impl Queryable for PostgresSource {
                 Some("desc") | Some("DESC") => "DESC",
                 _ => "ASC",
             };
-            sql.push_str(&format!(" ORDER BY {} {}", sort_by, sort_order));
+            // Quote the column name to handle camelCase identifiers correctly
+            let quoted_sort = if sort_by.starts_with('"') && sort_by.ends_with('"') {
+                sort_by.to_string() // Already quoted
+            } else {
+                format!("\"{}\"", sort_by)
+            };
+            sql.push_str(&format!(" ORDER BY {} {}", quoted_sort, sort_order));
         }
 
         // Add LIMIT and OFFSET

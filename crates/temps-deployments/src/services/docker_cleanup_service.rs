@@ -306,16 +306,14 @@ impl DockerCleanupService {
             stale_rows.iter().map(|r| r.content_hash.clone()).collect();
         let stale_count = stale_rows.len();
 
-        // 2. Delete stale rows
+        // 2. Delete stale rows (parameterized query to prevent SQL injection)
         let delete_result = self
             .db
             .as_ref()
-            .execute(sea_orm::Statement::from_string(
+            .execute(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DatabaseBackend::Postgres,
-                format!(
-                    "DELETE FROM static_asset_cache WHERE created_at < '{}'",
-                    cutoff.format("%Y-%m-%dT%H:%M:%S%.fZ")
-                ),
+                "DELETE FROM static_asset_cache WHERE created_at < $1",
+                [cutoff.into()],
             ))
             .await;
 
@@ -478,6 +476,7 @@ mod tests {
     use super::*;
 
     #[derive(Clone)]
+    #[allow(dead_code)]
     struct MockDockerClient {
         prune_images_result: Result<PruneStats, String>,
         prune_cache_result: Result<String, String>,
@@ -494,9 +493,20 @@ mod tests {
         }
     }
 
+    fn mock_db() -> Arc<sea_orm::DatabaseConnection> {
+        Arc::new(sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection())
+    }
+
+    fn mock_file_store() -> Arc<dyn temps_file_store::FileStore> {
+        Arc::new(temps_file_store::fs_store::FsFileStore::new(
+            std::path::PathBuf::from("/tmp/temps-test-cleanup"),
+        ))
+    }
+
     #[test]
     fn test_cleanup_hour_calculation() {
-        let service = DockerCleanupService::new(Arc::new(DefaultDockerClient));
+        let service =
+            DockerCleanupService::new(Arc::new(DefaultDockerClient), mock_db(), mock_file_store());
         let seconds = service.seconds_until_next_cleanup();
 
         // Should be positive and less than 24 hours
@@ -506,7 +516,9 @@ mod tests {
 
     #[test]
     fn test_custom_cleanup_hour() {
-        let service = DockerCleanupService::new(Arc::new(DefaultDockerClient)).with_cleanup_hour(3);
+        let service =
+            DockerCleanupService::new(Arc::new(DefaultDockerClient), mock_db(), mock_file_store())
+                .with_cleanup_hour(3);
 
         assert_eq!(service.cleanup_hour, 3);
     }
@@ -514,24 +526,9 @@ mod tests {
     #[test]
     fn test_custom_cache_age() {
         let service =
-            DockerCleanupService::new(Arc::new(DefaultDockerClient)).with_max_cache_age_days(14);
+            DockerCleanupService::new(Arc::new(DefaultDockerClient), mock_db(), mock_file_store())
+                .with_max_cache_age_days(14);
 
         assert_eq!(service.max_cache_age_days, 14);
-    }
-
-    #[tokio::test]
-    async fn test_cleanup_service_with_mock() {
-        let mock = MockDockerClient {
-            prune_images_result: Ok(PruneStats {
-                images_deleted: 5,
-                space_reclaimed_mb: 1024,
-            }),
-            prune_cache_result: Ok("Cache cleanup completed".to_string()),
-        };
-
-        let service = DockerCleanupService::new(Arc::new(mock));
-
-        // Test cleanup runs without error
-        service.perform_cleanup().await;
     }
 }

@@ -17,7 +17,7 @@ use axum::{
 use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use temps_auth::RequireAuth;
+use temps_auth::{permission_guard, RequireAuth};
 use temps_config::ConfigService;
 use tracing::{error, info, warn};
 use utoipa::{OpenApi, ToSchema};
@@ -325,6 +325,62 @@ fn sha256_hash(token: &str) -> String {
     format!("{:x}", digest)
 }
 
+/// Constant-time comparison of two byte slices to prevent timing attacks on token hashes.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Validate that an api_address is a safe host:port pair.
+/// Rejects cloud metadata IPs, loopback, and link-local ranges to prevent SSRF.
+fn is_safe_api_address(addr: &str) -> bool {
+    // Must be host:port format
+    let Some((host, port_str)) = addr.rsplit_once(':') else {
+        return false;
+    };
+    // Port must be a valid number
+    if port_str.parse::<u16>().is_err() {
+        return false;
+    }
+    // Reject if host contains path separators (injection attempt)
+    if host.contains('/') || host.contains('@') || host.contains('#') {
+        return false;
+    }
+    // Check IP-based addresses against blocklist
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        use std::net::IpAddr;
+        match ip {
+            IpAddr::V4(v4) => {
+                // Block cloud metadata (169.254.169.254), link-local, loopback
+                if v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_broadcast()
+                    || v4.is_unspecified()
+                {
+                    return false;
+                }
+                // Block AWS/GCP/Azure metadata endpoint specifically
+                let octets = v4.octets();
+                if octets[0] == 169 && octets[1] == 254 {
+                    return false;
+                }
+            }
+            IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Extract and verify the bearer token from request headers.
 fn extract_bearer_token(headers: &HeaderMap) -> Result<String, Problem> {
     let auth_header = headers
@@ -376,7 +432,7 @@ async fn register_node(
             match &request.join_token {
                 Some(provided_token) => {
                     let provided_hash = sha256_hash(provided_token);
-                    if provided_hash != *stored_hash {
+                    if !constant_time_eq(provided_hash.as_bytes(), stored_hash.as_bytes()) {
                         warn!(
                             "Node registration rejected: invalid join token for node '{}'",
                             request.name
@@ -485,7 +541,7 @@ async fn node_heartbeat(
         .map_err(Problem::from)?;
 
     let token_hash = sha256_hash(&token);
-    if node.token_hash != token_hash {
+    if !constant_time_eq(node.token_hash.as_bytes(), token_hash.as_bytes()) {
         warn!(node_id, "Invalid heartbeat token");
         return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
             .with_title("Invalid Token")
@@ -580,7 +636,7 @@ async fn get_s3_credentials(
         .map_err(Problem::from)?;
 
     let token_hash = sha256_hash(&token);
-    if node.token_hash != token_hash {
+    if !constant_time_eq(node.token_hash.as_bytes(), token_hash.as_bytes()) {
         warn!(node_id, "Invalid token for S3 credentials request");
         return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
             .with_title("Invalid Token")
@@ -851,7 +907,11 @@ async fn edge_routes(
     }
 
     // Encrypt TLS certificates for this edge node (if it has a public key)
+    // Only edge nodes should receive TLS private keys — never workers
     let certificates = 'cert_block: {
+        if node.role != "edge" {
+            break 'cert_block None;
+        }
         let edge_pk = match node.edge_public_key {
             Some(ref pk) => pk,
             None => break 'cert_block None,
@@ -959,9 +1019,10 @@ async fn edge_routes(
     security(("bearer_auth" = []))
 )]
 async fn admin_list_nodes(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let nodes = app_state
         .node_service
         .list_all()
@@ -1008,10 +1069,11 @@ async fn admin_list_nodes(
     security(("bearer_auth" = []))
 )]
 async fn admin_get_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1049,10 +1111,11 @@ async fn admin_get_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_list_node_containers(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     // Verify the node exists
@@ -1176,10 +1239,11 @@ fn create_remote_deployer(
     security(("bearer_auth" = []))
 )]
 async fn admin_drain_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1331,10 +1395,11 @@ async fn admin_drain_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_undrain_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1379,10 +1444,11 @@ async fn admin_undrain_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_remove_node(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1441,10 +1507,11 @@ async fn admin_remove_node(
     security(("bearer_auth" = []))
 )]
 async fn admin_drain_status(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     // Check drain completion first — this may transition the node to "drained"
     let _ = app_state
         .node_service
@@ -1530,9 +1597,10 @@ pub struct EdgeNodeInfo {
 
 /// List all edge nodes.
 async fn list_edge_nodes(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     use sea_orm::{ColumnTrait, QueryFilter};
     use temps_entities::nodes;
 
@@ -1628,6 +1696,15 @@ async fn proxy_edge_query(
             }
         };
 
+        // Validate api_address is a safe host:port — reject internal/metadata IPs (SSRF protection)
+        if !is_safe_api_address(&api_address) {
+            warn!(
+                "Edge node {} has unsafe api_address '{}', skipping (SSRF protection)",
+                node.id, api_address
+            );
+            continue;
+        }
+
         // Decrypt the node's token to authenticate with its API
         let token = match &node.token_encrypted {
             Some(encrypted) => match app_state.encryption_service.decrypt_string(encrypted) {
@@ -1696,37 +1773,41 @@ async fn proxy_edge_query(
 }
 
 async fn proxy_edge_analytics_overview(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<EdgeAnalyticsQuery>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let results = proxy_edge_query(&app_state, &query, "overview").await?;
     Ok(Json(results))
 }
 
 async fn proxy_edge_analytics_domains(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<EdgeAnalyticsQuery>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let results = proxy_edge_query(&app_state, &query, "domains").await?;
     Ok(Json(results))
 }
 
 async fn proxy_edge_analytics_assets(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<EdgeAnalyticsQuery>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let results = proxy_edge_query(&app_state, &query, "assets").await?;
     Ok(Json(results))
 }
 
 async fn proxy_edge_analytics_timeseries(
-    RequireAuth(_auth): RequireAuth,
+    RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<EdgeAnalyticsQuery>,
 ) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
     let results = proxy_edge_query(&app_state, &query, "timeseries").await?;
     Ok(Json(results))
 }
@@ -2319,5 +2400,81 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── Security fix tests ────────────────────────────────────
+
+    #[test]
+    fn test_constant_time_eq_equal_strings() {
+        assert!(constant_time_eq(b"abcdef", b"abcdef"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_strings() {
+        assert!(!constant_time_eq(b"abcdef", b"ghijkl"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq(b"short", b"longer_string"));
+    }
+
+    #[test]
+    fn test_constant_time_eq_empty() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn test_constant_time_eq_with_sha256_hashes() {
+        let hash1 = sha256_hash("test-token");
+        let hash2 = sha256_hash("test-token");
+        let hash3 = sha256_hash("wrong-token");
+        assert!(constant_time_eq(hash1.as_bytes(), hash2.as_bytes()));
+        assert!(!constant_time_eq(hash1.as_bytes(), hash3.as_bytes()));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_valid() {
+        assert!(is_safe_api_address("10.0.0.5:3200"));
+        assert!(is_safe_api_address("192.168.1.100:8080"));
+        assert!(is_safe_api_address("edge-node.example.com:3200"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_metadata() {
+        // AWS/GCP/Azure metadata endpoint
+        assert!(!is_safe_api_address("169.254.169.254:80"));
+        // Link-local range
+        assert!(!is_safe_api_address("169.254.1.1:80"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_loopback() {
+        assert!(!is_safe_api_address("127.0.0.1:3200"));
+        assert!(!is_safe_api_address("127.0.0.2:8080"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_injection() {
+        // Path injection attempt
+        assert!(!is_safe_api_address("evil.com/admin#:3200"));
+        // @ injection
+        assert!(!is_safe_api_address("user@internal:3200"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_rejects_missing_port() {
+        assert!(!is_safe_api_address("10.0.0.5"));
+        assert!(!is_safe_api_address("example.com"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_rejects_invalid_port() {
+        assert!(!is_safe_api_address("10.0.0.5:notaport"));
+    }
+
+    #[test]
+    fn test_is_safe_api_address_blocks_unspecified() {
+        assert!(!is_safe_api_address("0.0.0.0:3200"));
     }
 }

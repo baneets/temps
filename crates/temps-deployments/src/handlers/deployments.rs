@@ -1856,7 +1856,7 @@ pub async fn purge_asset_cache(
         .deployment_service
         .purge_asset_cache(project_id, None)
         .await
-        .map_err(|e| Problem::from(e))?;
+        .map_err(Problem::from)?;
 
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
@@ -1888,7 +1888,7 @@ pub async fn purge_environment_asset_cache(
         .deployment_service
         .purge_asset_cache(project_id, Some(environment_id))
         .await
-        .map_err(|e| Problem::from(e))?;
+        .map_err(Problem::from)?;
 
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }

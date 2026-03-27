@@ -631,6 +631,7 @@ mod tests {
                 wg_public_key: None,
                 role: "worker".to_string(),
                 labels: serde_json::json!({}),
+                edge_public_key: None,
             })
             .await;
 

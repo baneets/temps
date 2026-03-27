@@ -20,6 +20,8 @@ pub struct Model {
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
     pub certificate_id: Option<i32>,
+    /// Docker Compose service name this domain routes to (null = all services)
+    pub service_name: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -75,7 +75,6 @@ const STATIC_ASSET_EXTENSIONS: &[&str] = &[
 
 impl PersistStaticAssetsJob {
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         job_id: String,
         deployment_id: i32,
@@ -257,7 +256,7 @@ impl WorkflowTask for PersistStaticAssetsJob {
                         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
                         .collect();
                     // Sort descending by name (highest deployment ID first = newest)
-                    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+                    dirs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
                     // Remove all but the 2 most recent
                     for dir in dirs.iter().skip(2) {
@@ -533,6 +532,8 @@ mod tests {
         let job = PersistStaticAssetsJob::new(
             "test".to_string(),
             1,
+            1,
+            1,
             "build".to_string(),
             vec![],
             vec![(".next".to_string(), "_next".to_string())],
@@ -550,6 +551,8 @@ mod tests {
     fn test_apply_rewrites_vite_strip_dist() {
         let job = PersistStaticAssetsJob::new(
             "test".to_string(),
+            1,
+            1,
             1,
             "build".to_string(),
             vec![],
@@ -593,6 +596,8 @@ mod tests {
         let job = PersistStaticAssetsJob::new(
             "test".to_string(),
             100,
+            1,
+            1,
             "build".to_string(),
             vec![search_path.to_string()],
             vec![(".next".to_string(), "_next".to_string())],
@@ -671,6 +676,8 @@ mod tests {
         let job = PersistStaticAssetsJob::new(
             "test".to_string(),
             200,
+            1,
+            1,
             "build".to_string(),
             vec![search_path.to_string()],
             vec![("dist/".to_string(), String::new())],

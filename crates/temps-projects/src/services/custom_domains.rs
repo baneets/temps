@@ -188,6 +188,7 @@ impl CustomDomainService {
     }
 
     /// Create a new custom domain for a project
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_custom_domain(
         &self,
         project_id: i32,
@@ -196,6 +197,7 @@ impl CustomDomainService {
         redirect_to: Option<String>,
         status_code: Option<i32>,
         branch: Option<String>,
+        service_name: Option<String>,
     ) -> Result<project_custom_domains::Model, CustomDomainError> {
         info!(
             "Creating custom domain: {} for project: {}",
@@ -238,6 +240,7 @@ impl CustomDomainService {
             status: Set("pending".to_string()),
             message: Set(None),
             certificate_id: Set(None),
+            service_name: Set(service_name),
             ..Default::default()
         };
 
@@ -310,6 +313,7 @@ impl CustomDomainService {
         status: Option<String>,
         message: Option<String>,
         certificate_id: Option<i32>,
+        service_name: Option<String>,
     ) -> Result<project_custom_domains::Model, CustomDomainError> {
         info!("Updating custom domain ID: {}", id);
 
@@ -382,6 +386,13 @@ impl CustomDomainService {
         }
         if let Some(cert_id) = certificate_id {
             active_model.certificate_id = Set(Some(cert_id));
+        }
+        if let Some(sn) = service_name {
+            if sn.is_empty() {
+                active_model.service_name = Set(None);
+            } else {
+                active_model.service_name = Set(Some(sn));
+            }
         }
 
         let updated_domain = active_model.update(self.db.as_ref()).await?;
@@ -518,6 +529,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -545,6 +557,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -555,6 +568,7 @@ mod tests {
                 project_id,
                 env_id,
                 "duplicate.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -581,6 +595,7 @@ mod tests {
                 project_id,
                 env_id,
                 "get-test.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -614,6 +629,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -644,6 +660,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -653,6 +670,7 @@ mod tests {
                 project_id,
                 env_id,
                 "domain2.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -681,6 +699,7 @@ mod tests {
                 project_id,
                 env_id,
                 "env-domain.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -713,6 +732,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -725,6 +745,7 @@ mod tests {
                 Some("https://redirect.com".to_string()),
                 Some(301),
                 Some("main".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -758,6 +779,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -770,6 +792,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -779,6 +802,7 @@ mod tests {
             .update_custom_domain(
                 domain2.id,
                 Some("existing.com".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -809,6 +833,7 @@ mod tests {
                 project_id,
                 env_id,
                 "status-test.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -848,6 +873,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -870,6 +896,7 @@ mod tests {
                 project_id,
                 env_id,
                 "delete-test.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -918,6 +945,7 @@ mod tests {
                 Some("https://target.example.com".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -946,6 +974,7 @@ mod tests {
                 "www.example.com".to_string(),
                 Some("example.com".to_string()), // No https:// prefix
                 Some(301),
+                None,
                 None,
             )
             .await
@@ -1007,6 +1036,7 @@ mod tests {
                 Some("https://self-redirect.example.com/path".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await;
 
@@ -1036,6 +1066,7 @@ mod tests {
                 Some("https://domain-b.example.com".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1048,6 +1079,7 @@ mod tests {
                 "domain-b.example.com".to_string(),
                 Some("https://domain-a.example.com".to_string()),
                 Some(301),
+                None,
                 None,
             )
             .await;
@@ -1078,6 +1110,7 @@ mod tests {
                 Some("https://chain-b.example.com".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1089,6 +1122,7 @@ mod tests {
                 "chain-b.example.com".to_string(),
                 Some("https://chain-c.example.com".to_string()),
                 Some(301),
+                None,
                 None,
             )
             .await
@@ -1102,6 +1136,7 @@ mod tests {
                 "chain-c.example.com".to_string(),
                 Some("https://chain-a.example.com".to_string()),
                 Some(301),
+                None,
                 None,
             )
             .await;
@@ -1132,6 +1167,7 @@ mod tests {
                 Some("http://192.168.1.1".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await;
 
@@ -1160,6 +1196,7 @@ mod tests {
                 "localhost-test.example.com".to_string(),
                 Some("http://127.0.0.1:8080".to_string()),
                 Some(301),
+                None,
                 None,
             )
             .await;
@@ -1190,6 +1227,7 @@ mod tests {
                 Some("http://169.254.169.254/latest/meta-data".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await;
 
@@ -1218,6 +1256,7 @@ mod tests {
                 "ftp-test.example.com".to_string(),
                 Some("ftp://ftp.example.com".to_string()),
                 Some(301),
+                None,
                 None,
             )
             .await;
@@ -1248,6 +1287,7 @@ mod tests {
                 Some("https://update-b.example.com".to_string()),
                 Some(301),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1257,6 +1297,7 @@ mod tests {
                 project_id,
                 env_id,
                 "update-b.example.com".to_string(),
+                None,
                 None,
                 None,
                 None,
@@ -1272,6 +1313,7 @@ mod tests {
                 None,
                 Some("https://update-a.example.com".to_string()),
                 Some(301),
+                None,
                 None,
                 None,
                 None,
@@ -1305,6 +1347,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1317,6 +1360,7 @@ mod tests {
                 None,
                 Some("https://new-target.example.com".to_string()),
                 Some(301),
+                None,
                 None,
                 None,
                 None,
@@ -1350,7 +1394,7 @@ mod tests {
             };
 
             service
-                .create_custom_domain(project_id, env_id, domain, redirect, Some(301), None)
+                .create_custom_domain(project_id, env_id, domain, redirect, Some(301), None, None)
                 .await
                 .unwrap();
         }
@@ -1369,6 +1413,7 @@ mod tests {
                 None,
                 Some("https://depth-0.example.com".to_string()),
                 Some(301),
+                None,
                 None,
                 None,
                 None,

@@ -4,6 +4,7 @@ import {
 } from '@/api/client'
 import {
   createCustomDomainMutation,
+  listContainersOptions,
   listDomainsOptions,
   updateCustomDomainMutation,
 } from '@/api/client/@tanstack/react-query.gen'
@@ -37,6 +38,7 @@ const domainFormSchema = z.object({
   environment: z.string().min(1, 'Environment is required'),
   redirectTo: z.string().optional(),
   statusCode: z.number().optional(),
+  serviceName: z.string().optional(),
 })
 
 type DomainFormValues = z.infer<typeof domainFormSchema>
@@ -47,6 +49,8 @@ interface DomainFormProps {
   onSuccess: () => void
   onCancel: () => void
   initialData?: CustomDomainResponse
+  /** Project preset — when docker-compose, shows service selector */
+  preset?: string | null
 }
 
 /**
@@ -75,7 +79,9 @@ export function DomainForm({
   onSuccess,
   onCancel,
   initialData,
+  preset,
 }: DomainFormProps) {
+  const isDockerCompose = preset === 'docker-compose' || preset === 'dockercompose'
   // Fetch wildcard domains for initial state matching when editing
   const { data: wildcardData } = useQuery({
     ...listDomainsOptions({
@@ -146,6 +152,7 @@ export function DomainForm({
         '',
       redirectTo: initialData?.redirect_to ?? '',
       statusCode: initialData?.status_code ?? 301,
+      serviceName: (initialData as any)?.service_name ?? '',
     },
   })
 
@@ -155,6 +162,7 @@ export function DomainForm({
       environment_id: parseInt(data.environment),
       redirect_to: data.redirectTo || undefined,
       status_code: data.redirectTo ? data.statusCode : undefined,
+      service_name: data.serviceName || undefined,
     }
 
     if (initialData) {
@@ -174,6 +182,32 @@ export function DomainForm({
       })
     }
   }
+  // Watch environment to fetch compose service names
+  const watchedEnvironment = useWatch({
+    control: form.control,
+    name: 'environment',
+  })
+
+  // Fetch containers for the selected environment to get compose service names
+  const { data: containersData } = useQuery({
+    ...listContainersOptions({
+      path: {
+        project_id,
+        environment_id: parseInt(watchedEnvironment || '0'),
+      },
+    }),
+    enabled: isDockerCompose && !!watchedEnvironment && parseInt(watchedEnvironment) > 0,
+  })
+
+  // Extract unique service names from containers
+  const serviceNames = useMemo(() => {
+    if (!containersData?.containers) return []
+    const names = containersData.containers
+      .map((c) => c.service_name)
+      .filter((n): n is string => !!n)
+    return [...new Set(names)].sort()
+  }, [containersData])
+
   const watchedRedirectTo = useWatch({
     control: form.control,
     name: 'redirectTo',
@@ -252,6 +286,39 @@ export function DomainForm({
             </FormItem>
           )}
         />
+
+        {isDockerCompose && (
+          <FormField
+            control={form.control}
+            name="serviceName"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Compose Service</FormLabel>
+                <Select
+                  onValueChange={(val) => field.onChange(val === '_all_' ? '' : val)}
+                  value={field.value || '_all_'}
+                >
+                  <FormControl>
+                    <SelectTrigger>
+                      <SelectValue placeholder="All services" />
+                    </SelectTrigger>
+                  </FormControl>
+                  <SelectContent>
+                    <SelectItem value="_all_">All services</SelectItem>
+                    {serviceNames.map((name) => (
+                      <SelectItem key={name} value={name}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Route this domain to a specific Docker Compose service
+                </p>
+              </FormItem>
+            )}
+          />
+        )}
 
         <FormField
           control={form.control}

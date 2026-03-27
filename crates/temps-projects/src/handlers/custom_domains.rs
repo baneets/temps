@@ -82,6 +82,7 @@ pub async fn create_custom_domain(
             request.redirect_to,
             request.status_code,
             request.branch,
+            request.service_name,
         )
         .await?;
 
@@ -267,6 +268,7 @@ pub async fn update_custom_domain(
             None,
             None,
             None,
+            request.service_name,
         )
         .await?;
 
@@ -281,6 +283,7 @@ pub async fn update_custom_domain(
                 Some("".to_string()), // Empty string to clear
                 Some(0),              // 0 to clear status code
                 Some("".to_string()), // Empty string to clear branch
+                None,
                 None,
                 None,
                 None,

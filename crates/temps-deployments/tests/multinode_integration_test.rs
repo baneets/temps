@@ -34,6 +34,7 @@ fn make_node(id: i32, name: &str, status: &str, heartbeat_age_secs: i64) -> node
             "memory_used_bytes": 2_000_000_000u64,
             "memory_total_bytes": 8_000_000_000u64,
         }),
+        edge_public_key: None,
         last_heartbeat: Some(chrono::Utc::now() - chrono::Duration::seconds(heartbeat_age_secs)),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),

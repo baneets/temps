@@ -56,7 +56,12 @@ impl EdgeProxy {
         analytics: EdgeAnalyticsHandle,
         region: Option<String>,
     ) -> Self {
-        let parsed = url::Url::parse(origin_url).expect("Invalid origin URL");
+        let parsed = url::Url::parse(origin_url).unwrap_or_else(|e| {
+            panic!(
+                "EdgeProxy::new called with invalid origin URL '{}': {}",
+                origin_url, e
+            )
+        });
         let origin_host = parsed.host_str().unwrap_or("localhost").to_string();
         let origin_tls = parsed.scheme() == "https";
         let origin_port = parsed.port().unwrap_or(if origin_tls { 443 } else { 80 });
@@ -64,7 +69,7 @@ impl EdgeProxy {
         let origin_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|e| panic!("EdgeProxy::new failed to create HTTP client: {}", e));
 
         Self {
             origin_url: origin_url.trim_end_matches('/').to_string(),
@@ -486,25 +491,19 @@ impl ProxyHttp for EdgeProxy {
         Self::CTX: Send + Sync,
     {
         // Preserve the original Host header so the origin routes correctly
-        upstream_request.insert_header("Host", &ctx.host).unwrap();
+        upstream_request.insert_header("Host", &ctx.host)?;
 
         // Add edge identification headers
-        upstream_request
-            .insert_header("X-Edge-Proxy", "true")
-            .unwrap();
+        upstream_request.insert_header("X-Edge-Proxy", "true")?;
         if let Some(ref region) = self.region {
-            upstream_request
-                .insert_header("X-Edge-Region", region.as_str())
-                .unwrap();
+            upstream_request.insert_header("X-Edge-Region", region.as_str())?;
         }
 
         // Forward client IP
         if let Some(client_addr) = session.client_addr() {
             let ip = client_addr.to_string();
-            upstream_request
-                .insert_header("X-Forwarded-For", &ip)
-                .unwrap();
-            upstream_request.insert_header("X-Real-IP", &ip).unwrap();
+            upstream_request.insert_header("X-Forwarded-For", &ip)?;
+            upstream_request.insert_header("X-Real-IP", &ip)?;
         }
 
         Ok(())
@@ -520,13 +519,9 @@ impl ProxyHttp for EdgeProxy {
         Self::CTX: Send + Sync,
     {
         // Add edge headers to proxied responses
-        upstream_response
-            .insert_header("X-Edge-Cache", ctx.cache_status)
-            .unwrap();
+        upstream_response.insert_header("X-Edge-Cache", ctx.cache_status)?;
         if let Some(ref region) = self.region {
-            upstream_response
-                .insert_header("X-Edge-Region", region.as_str())
-                .unwrap();
+            upstream_response.insert_header("X-Edge-Region", region.as_str())?;
         }
         Ok(())
     }

@@ -40,6 +40,7 @@ export function AddDomainDialog({
           <DomainForm
             project_id={project.id}
             environments={environments}
+            preset={project.preset}
             onSuccess={onSuccess}
             onCancel={() => onOpenChange(false)}
           />

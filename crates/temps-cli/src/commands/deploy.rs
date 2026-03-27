@@ -63,7 +63,7 @@ struct DeployImageArgs {
 #[derive(Args)]
 struct DeployStaticArgs {
     /// Path to static files archive (tar.gz or zip) or directory
-    #[arg(short, long)]
+    #[arg(long)]
     path: PathBuf,
 
     /// Project slug or ID

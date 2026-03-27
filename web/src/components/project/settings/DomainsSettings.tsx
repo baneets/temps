@@ -108,6 +108,11 @@ export function DomainsSettings({ project }: DomainsSettingsProps) {
                     Environment: {domain.environment.slug}
                   </p>
                 )}
+                {(domain as any).service_name && (
+                  <p className="text-sm text-muted-foreground">
+                    Service: {(domain as any).service_name}
+                  </p>
+                )}
                 {domain.redirect_to && (
                   <p className="text-sm text-muted-foreground">
                     Redirects to: {domain.redirect_to} ({domain.status_code})

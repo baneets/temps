@@ -687,16 +687,27 @@ impl CachedPeerTable {
 
                         let project = projects_cache.get(&custom_domain.project_id);
 
+                        // Filter containers by service_name if specified (docker-compose service targeting)
+                        let target_containers: Vec<_> =
+                            if let Some(ref sn) = custom_domain.service_name {
+                                containers
+                                    .iter()
+                                    .filter(|c| c.service_name.as_deref() == Some(sn.as_str()))
+                                    .collect()
+                            } else {
+                                containers.iter().collect()
+                            };
+
                         // Determine backend type: static directory or upstream containers
                         let backend = if let Some(static_dir) = &deployment.static_dir_location {
                             // Static deployment - serve from directory
                             BackendType::StaticDir {
                                 path: static_dir.clone(),
                             }
-                        } else if !containers.is_empty() {
+                        } else if !target_containers.is_empty() {
                             // Container deployment - proxy to containers
-                            let mut backend_entries = Vec::with_capacity(containers.len());
-                            for c in &containers {
+                            let mut backend_entries = Vec::with_capacity(target_containers.len());
+                            for c in &target_containers {
                                 let node_addr = resolve_node_private_address(
                                     c.node_id,
                                     &mut nodes_cache,

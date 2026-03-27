@@ -390,6 +390,8 @@ pub struct CustomDomainRequest {
     pub status_code: Option<i32>,
     pub branch: Option<String>,
     pub environment_id: i32,
+    /// Docker Compose service name this domain routes to (only for docker-compose projects)
+    pub service_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -415,6 +417,9 @@ pub struct CustomDomainResponse {
     pub updated_at: i64,
     pub expiration_time: Option<i64>,
     pub last_renewed: Option<i64>,
+    /// Docker Compose service name this domain routes to
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
 }
 
 impl From<CustomDomainWithInfo> for CustomDomainResponse {
@@ -448,6 +453,7 @@ impl From<CustomDomainWithInfo> for CustomDomainResponse {
             last_renewed: domain_info
                 .as_ref()
                 .and_then(|info| info.last_renewed.map(|dt| dt.timestamp_millis())),
+            service_name: domain.service_name,
         }
     }
 }
@@ -662,6 +668,8 @@ pub struct UpdateCustomDomainRequest {
     pub redirect_to: Option<String>,
     pub status_code: Option<i32>,
     pub branch: Option<String>,
+    /// Docker Compose service name this domain routes to (empty string clears it)
+    pub service_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
