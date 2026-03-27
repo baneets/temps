@@ -5403,6 +5403,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 
 [[package]]
+name = "lol_html"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ff94cb6aef6ee52afd2c69331e9109906d855e82bd241f3110dfdf6185899ab"
+dependencies = [
+ "bitflags 2.10.0",
+ "cfg-if",
+ "cssparser",
+ "encoding_rs",
+ "foldhash 0.2.0",
+ "hashbrown 0.16.0",
+ "memchr",
+ "mime",
+ "precomputed-hash",
+ "selectors",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "loop9"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10836,6 +10855,7 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hmac",
  "log",
  "once_cell",
  "rand 0.8.5",
@@ -11119,6 +11139,39 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "urlencoding",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "temps-email-tracking"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.6",
+ "base64 0.22.1",
+ "chrono",
+ "hex",
+ "hmac",
+ "lol_html",
+ "reqwest",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sha2",
+ "temps-auth",
+ "temps-config",
+ "temps-core",
+ "temps-database",
+ "temps-email",
+ "temps-entities",
+ "temps-migrations",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "url",
  "urlencoding",
  "utoipa",
  "uuid",

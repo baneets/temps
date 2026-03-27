@@ -22,6 +22,11 @@ pub enum WebhookEventType {
     // Domain events
     DomainCreated,
     DomainProvisioned,
+
+    // Email events
+    EmailDelivered,
+    EmailBounced,
+    EmailComplained,
 }
 
 impl WebhookEventType {
@@ -37,6 +42,9 @@ impl WebhookEventType {
             Self::ProjectDeleted,
             Self::DomainCreated,
             Self::DomainProvisioned,
+            Self::EmailDelivered,
+            Self::EmailBounced,
+            Self::EmailComplained,
         ]
     }
 
@@ -52,6 +60,9 @@ impl WebhookEventType {
             Self::ProjectDeleted => "project.deleted",
             Self::DomainCreated => "domain.created",
             Self::DomainProvisioned => "domain.provisioned",
+            Self::EmailDelivered => "email.delivered",
+            Self::EmailBounced => "email.bounced",
+            Self::EmailComplained => "email.complained",
         }
     }
 
@@ -68,6 +79,9 @@ impl WebhookEventType {
             "project.deleted" | "project_deleted" => Some(Self::ProjectDeleted),
             "domain.created" | "domain_created" => Some(Self::DomainCreated),
             "domain.provisioned" | "domain_provisioned" => Some(Self::DomainProvisioned),
+            "email.delivered" | "email_delivered" => Some(Self::EmailDelivered),
+            "email.bounced" | "email_bounced" => Some(Self::EmailBounced),
+            "email.complained" | "email_complained" => Some(Self::EmailComplained),
             _ => None,
         }
     }
@@ -118,6 +132,7 @@ pub enum WebhookPayload {
     Deployment(DeploymentPayload),
     Project(ProjectPayload),
     Domain(DomainPayload),
+    Email(EmailEventPayload),
 }
 
 /// Deployment event payload
@@ -155,6 +170,17 @@ pub struct DomainPayload {
     pub project_name: String,
     pub is_primary: bool,
     pub ssl_status: Option<String>,
+}
+
+/// Email event payload (bounces, complaints, deliveries)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EmailEventPayload {
+    pub email_id: String,
+    pub event_type: String,
+    pub recipient: Option<String>,
+    pub bounce_type: Option<String>,
+    pub complaint_type: Option<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 #[cfg(test)]

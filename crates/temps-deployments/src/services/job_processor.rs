@@ -1273,13 +1273,13 @@ mod tests {
             .create_deployment_jobs(deployment.id)
             .await?;
 
-        // Verify jobs were created (nextjs project should create 7 jobs including
-        // configure_crons, scan_vulnerabilities, and capture_source_maps)
+        // Verify jobs were created (nextjs project should create 8 jobs including
+        // persist_static_assets, configure_crons, scan_vulnerabilities, and capture_source_maps)
         let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
         assert_eq!(
             jobs.len(),
-            7,
-            "Expected 7 jobs but got {}: {:?}",
+            8,
+            "Expected 8 jobs but got {}: {:?}",
             jobs.len(),
             job_ids
         );
@@ -1288,6 +1288,7 @@ mod tests {
         assert!(job_ids.contains(&"download_repo".to_string()));
         assert!(job_ids.contains(&"build_image".to_string()));
         assert!(job_ids.contains(&"deploy_container".to_string()));
+        assert!(job_ids.contains(&"persist_static_assets".to_string()));
         assert!(job_ids.contains(&"mark_deployment_complete".to_string()));
         assert!(job_ids.contains(&"configure_crons".to_string()));
         assert!(job_ids.contains(&"scan_vulnerabilities".to_string()));
@@ -1386,12 +1387,12 @@ mod tests {
             .create_deployment_jobs(deployment.id)
             .await?;
 
-        // Should create 3 jobs (no download_repo): build_image, deploy_container, mark_deployment_complete
+        // Should create 4 jobs (no download_repo): build_image, deploy_container, persist_static_assets, mark_deployment_complete
         let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
         assert_eq!(
             jobs.len(),
-            3,
-            "Expected 3 jobs but got {}: {:?}",
+            4,
+            "Expected 4 jobs but got {}: {:?}",
             jobs.len(),
             job_ids
         );
@@ -1399,6 +1400,7 @@ mod tests {
         assert!(!job_ids.contains(&"download_repo".to_string()));
         assert!(job_ids.contains(&"build_image".to_string()));
         assert!(job_ids.contains(&"deploy_container".to_string()));
+        assert!(job_ids.contains(&"persist_static_assets".to_string()));
         assert!(job_ids.contains(&"mark_deployment_complete".to_string()));
 
         Ok(())

@@ -67,10 +67,16 @@ pub struct SesCredentials {
     pub endpoint_url: Option<String>,
 }
 
+/// Default configuration set name for SES event tracking
+const DEFAULT_CONFIGURATION_SET: &str = "temps-tracking";
+
 /// AWS SES provider implementation
 pub struct SesProvider {
     client: Client,
     region: String,
+    /// SES Configuration Set name for event notifications (bounces, complaints, deliveries).
+    /// Auto-created with default name "temps-tracking" on first use.
+    configuration_set_name: String,
 }
 
 impl SesProvider {
@@ -97,9 +103,28 @@ impl SesProvider {
 
         let client = Client::new(&config);
 
+        // Auto-create the configuration set (idempotent — ignores AlreadyExists)
+        let config_set_name = DEFAULT_CONFIGURATION_SET.to_string();
+        if let Err(e) = client
+            .create_configuration_set()
+            .configuration_set_name(&config_set_name)
+            .send()
+            .await
+        {
+            let err_str = format!("{}", e);
+            // AlreadyExists is expected — ignore it
+            if !err_str.contains("AlreadyExists") && !err_str.contains("already exists") {
+                debug!(
+                    "Could not create SES configuration set '{}': {} (non-fatal)",
+                    config_set_name, err_str
+                );
+            }
+        }
+
         Ok(Self {
             client,
             region: region.to_string(),
+            configuration_set_name: config_set_name,
         })
     }
 
@@ -436,6 +461,9 @@ impl EmailProvider for SesProvider {
         if let Some(ref reply_to) = email.reply_to {
             send_request = send_request.reply_to_addresses(reply_to);
         }
+
+        // Attach SES Configuration Set for event notifications (bounces, complaints, deliveries)
+        send_request = send_request.configuration_set_name(&self.configuration_set_name);
 
         let result = send_request.send().await.map_err(|e| {
             // Extract detailed error information from AWS SDK error

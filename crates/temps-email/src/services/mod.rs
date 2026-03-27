@@ -8,6 +8,7 @@ mod validation_service;
 pub use domain_service::{CreateDomainRequest, DomainService, DomainWithDnsRecords};
 pub use email_service::{
     EmailService, EmailStats, ListEmailsOptions, SendEmailRequest, SendEmailResponse,
+    TrackingRewriter,
 };
 pub use provider_service::{
     CreateProviderRequest, ProviderCredentials, ProviderService, TestEmailResult,

@@ -52,6 +52,7 @@ mod m20260326_000001_create_asset_manifests;
 mod m20260326_000002_create_static_asset_cache;
 mod m20260326_000003_add_edge_public_key_to_nodes;
 mod m20260327_000001_add_service_name_to_custom_domains;
+mod m20260328_000001_create_email_events;
 
 pub struct Migrator;
 
@@ -111,6 +112,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260326_000002_create_static_asset_cache::Migration),
             Box::new(m20260326_000003_add_edge_public_key_to_nodes::Migration),
             Box::new(m20260327_000001_add_service_name_to_custom_domains::Migration),
+            Box::new(m20260328_000001_create_email_events::Migration),
         ]
     }
 }

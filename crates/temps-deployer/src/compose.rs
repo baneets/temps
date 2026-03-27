@@ -771,10 +771,7 @@ impl ComposeExecutor {
                 override_yaml.push_str(&format!("      {}: \"{}\"\n", key, value));
             }
             // Per-service label: the compose service name
-            override_yaml.push_str(&format!(
-                "      sh.temps.service: \"{}\"\n",
-                service
-            ));
+            override_yaml.push_str(&format!("      sh.temps.service: \"{}\"\n", service));
         }
 
         override_yaml

@@ -45,6 +45,9 @@ pub enum EmailError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Tracking rewrite failed for email {email_id}: {reason}")]
+    TrackingRewrite { email_id: String, reason: String },
 }
 
 impl From<serde_json::Error> for EmailError {

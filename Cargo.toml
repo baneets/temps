@@ -48,6 +48,7 @@ members = [
     "crates/temps-captcha-wasm",
     "crates/temps-webhooks",
     "crates/temps-email",
+    "crates/temps-email-tracking",
     "crates/temps-dns",
     "crates/temps-vulnerability-scanner",
     "crates/temps-kv",

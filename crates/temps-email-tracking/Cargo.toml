@@ -1,0 +1,59 @@
+[package]
+name = "temps-email-tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+temps-auth = { path = "../temps-auth" }
+temps-core = { path = "../temps-core" }
+temps-config = { path = "../temps-config" }
+temps-database = { path = "../temps-database" }
+temps-email = { path = "../temps-email" }
+temps-entities = { path = "../temps-entities" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Database
+sea-orm = { workspace = true }
+
+# Web framework
+axum = { workspace = true }
+
+# OpenAPI
+utoipa = { workspace = true }
+
+# Error handling & logging
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+uuid = { workspace = true }
+urlencoding = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+
+# HMAC for click tracking signatures
+hmac = "0.12"
+
+# Streaming HTML rewriter for pixel injection + link rewriting
+lol_html = "2"
+
+# HTTP client for SNS cert fetching + subscription confirmation
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+temps-migrations = { path = "../temps-migrations" }

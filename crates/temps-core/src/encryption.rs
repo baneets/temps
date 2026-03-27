@@ -109,6 +109,25 @@ impl EncryptionService {
         String::from_utf8(decrypted).map_err(|e| anyhow!("UTF-8 decode failed: {}", e))
     }
 
+    /// Derive a domain-specific subkey from the master key using HMAC-SHA256.
+    ///
+    /// This produces a deterministic 32-byte key for a given domain string,
+    /// cryptographically independent from the master key and from other derived keys.
+    /// Use this when you need a separate key for a specific purpose (e.g., HMAC signing).
+    pub fn derive_subkey(&self, domain: &str) -> [u8; 32] {
+        use hmac::{Hmac, Mac};
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(self.master_key.as_slice())
+            .expect("HMAC can take key of any size");
+        mac.update(domain.as_bytes());
+        let result = mac.finalize().into_bytes();
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&result);
+        key
+    }
+
     /// Generates a random encryption key as base64 string
     pub fn generate_key() -> String {
         let mut key = [0u8; 32];
