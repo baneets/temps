@@ -26,6 +26,9 @@ export function ContainerMetrics({
   containerId,
 }: ContainerMetricsProps) {
   const [metrics, setMetrics] = useState<Metrics | null>(null)
+  const [, setPrevMetrics] = useState<Metrics | null>(null)
+  const [networkRxRate, setNetworkRxRate] = useState(0)
+  const [networkTxRate, setNetworkTxRate] = useState(0)
   const [isConnected, setIsConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -42,7 +45,22 @@ export function ContainerMetrics({
     eventSource.onmessage = (event) => {
       try {
         const newMetric = JSON.parse(event.data)
-        setMetrics(newMetric)
+        setMetrics((prev) => {
+          if (prev) {
+            // Calculate network rate from delta between samples
+            const prevTime = new Date(prev.timestamp).getTime()
+            const newTime = new Date(newMetric.timestamp).getTime()
+            const intervalSec = Math.max((newTime - prevTime) / 1000, 1)
+
+            const rxDelta = Math.max(newMetric.network_rx_bytes - prev.network_rx_bytes, 0)
+            const txDelta = Math.max(newMetric.network_tx_bytes - prev.network_tx_bytes, 0)
+
+            setNetworkRxRate(rxDelta / intervalSec)
+            setNetworkTxRate(txDelta / intervalSec)
+          }
+          setPrevMetrics(prev)
+          return newMetric
+        })
       } catch (e) {
         console.error('Failed to parse metrics:', e)
       }
@@ -141,7 +159,7 @@ export function ContainerMetrics({
               </span>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              {formatBitRate(networkIn || 0)}
+              {formatByteRate(networkRxRate)}
             </p>
           </CardContent>
         </Card>
@@ -158,7 +176,7 @@ export function ContainerMetrics({
               </span>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              {formatBitRate(networkOut || 0)}
+              {formatByteRate(networkTxRate)}
             </p>
           </CardContent>
         </Card>
@@ -175,11 +193,10 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-function formatBitRate(bytes: number): string {
-  if (bytes === 0) return '0 b/s'
-  const bits = bytes * 8
-  const k = 1000
-  const sizes = ['b/s', 'Kb/s', 'Mb/s', 'Gb/s']
-  const i = Math.floor(Math.log(bits) / Math.log(k))
-  return parseFloat((bits / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+function formatByteRate(bytesPerSec: number): string {
+  if (bytesPerSec === 0) return '0 B/s'
+  const k = 1024
+  const sizes = ['B/s', 'KB/s', 'MB/s', 'GB/s']
+  const i = Math.floor(Math.log(bytesPerSec) / Math.log(k))
+  return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
