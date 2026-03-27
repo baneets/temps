@@ -116,6 +116,7 @@ export default function HistoryLogViewer({
   project: ProjectResponse
 }) {
   const [selectedEnv, setSelectedEnv] = useState<string | undefined>()
+  const [selectedService, setSelectedService] = useState<string | undefined>()
   const [selectedLevels, setSelectedLevels] = useState<LogLevel[]>([])
   const [searchText, setSearchText] = useState('')
   const [debouncedText, setDebouncedText] = useState('')
@@ -124,7 +125,7 @@ export default function HistoryLogViewer({
   const [cursorStack, setCursorStack] = useState<string[]>([])
   const parentRef = useRef<HTMLDivElement>(null)
   // Track filter key to reset pagination on filter changes
-  const filterKey = `${selectedEnv}-${selectedLevels.join(',')}-${debouncedText}-${timeRange}`
+  const filterKey = `${selectedEnv}-${selectedService}-${selectedLevels.join(',')}-${debouncedText}-${timeRange}`
   const prevFilterKeyRef = useRef(filterKey)
 
   // Debounce search text
@@ -167,7 +168,8 @@ export default function HistoryLogViewer({
       startTime: start,
       endTime: end,
       levels: selectedLevels.length > 0 ? selectedLevels : undefined,
-      envs: selectedEnv ? [selectedEnv] : undefined, // sends env ID as string
+      envs: selectedEnv ? [selectedEnv] : undefined,
+      services: selectedService ? [selectedService] : undefined,
       text: debouncedText || undefined,
       cursor,
       pageSize: 200,
@@ -232,6 +234,31 @@ export default function HistoryLogViewer({
                 {env.name}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+
+        <Select
+          value={selectedService ?? 'all'}
+          onValueChange={(v) => setSelectedService(v === 'all' ? undefined : v)}
+        >
+          <SelectTrigger className="w-full sm:w-auto sm:max-w-[300px]">
+            <SelectValue placeholder="All services" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All services</SelectItem>
+            {Array.from(
+              new Set(
+                (data?.lines ?? [])
+                  .map((l) => l.service)
+                  .filter((s) => s && s !== 'unknown')
+              )
+            )
+              .sort()
+              .map((service) => (
+                <SelectItem key={service} value={service}>
+                  {service}
+                </SelectItem>
+              ))}
           </SelectContent>
         </Select>
 

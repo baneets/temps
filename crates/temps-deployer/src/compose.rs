@@ -359,6 +359,21 @@ impl ComposeExecutor {
                 })?;
         }
 
+        // Write Temps labels override (injects sh.temps.* labels into every service for log collection)
+        if !request.labels.is_empty() {
+            let labels_override_path = project_dir.join("docker-compose.temps-labels.yml");
+            let labels_content =
+                self.generate_labels_override(&request.compose_content, &request.labels);
+            if !labels_content.is_empty() {
+                tokio::fs::write(&labels_override_path, &labels_content)
+                    .await
+                    .map_err(|e| ComposeError::FileWriteFailed {
+                        path: labels_override_path.display().to_string(),
+                        reason: e.to_string(),
+                    })?;
+            }
+        }
+
         // Write user-provided override if present (ports, volumes, commands, etc.)
         if let Some(ref user_override) = request.compose_override {
             if !user_override.trim().is_empty() {
@@ -481,6 +496,12 @@ impl ComposeExecutor {
         let temps_override = project_dir.join("docker-compose.temps-env.yml");
         if temps_override.exists() {
             cmd.args(["-f", "docker-compose.temps-env.yml"]);
+        }
+
+        // Include Temps labels override (injects sh.temps.* labels for log collection)
+        let labels_override = project_dir.join("docker-compose.temps-labels.yml");
+        if labels_override.exists() {
+            cmd.args(["-f", "docker-compose.temps-labels.yml"]);
         }
 
         // Include user-provided override (ports, volumes, etc.)
@@ -726,6 +747,83 @@ impl ComposeExecutor {
         }
 
         override_yaml
+    }
+
+    /// Generate a docker-compose override that adds Temps labels to every service.
+    /// These labels are required for log collection, monitoring, and container discovery.
+    fn generate_labels_override(
+        &self,
+        compose_content: &str,
+        labels: &HashMap<String, String>,
+    ) -> String {
+        // Reuse the same service parsing logic
+        let services = self.parse_service_names(compose_content);
+
+        if services.is_empty() || labels.is_empty() {
+            return String::new();
+        }
+
+        let mut override_yaml = String::from("services:\n");
+        for service in &services {
+            override_yaml.push_str(&format!("  {}:\n", service));
+            override_yaml.push_str("    labels:\n");
+            for (key, value) in labels {
+                override_yaml.push_str(&format!("      {}: \"{}\"\n", key, value));
+            }
+            // Per-service label: the compose service name
+            override_yaml.push_str(&format!(
+                "      sh.temps.service: \"{}\"\n",
+                service
+            ));
+        }
+
+        override_yaml
+    }
+
+    /// Parse service names from compose YAML content.
+    fn parse_service_names(&self, compose_content: &str) -> Vec<String> {
+        let mut services = Vec::new();
+        let mut in_services = false;
+        let mut services_indent: usize = 0;
+        let mut service_indent: Option<usize> = None;
+
+        for line in compose_content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            let indent = line.len() - line.trim_start().len();
+
+            if trimmed == "services:" || trimmed.starts_with("services:") {
+                in_services = true;
+                services_indent = indent;
+                service_indent = None;
+                continue;
+            }
+
+            if in_services {
+                if indent <= services_indent {
+                    in_services = false;
+                    continue;
+                }
+
+                if trimmed.ends_with(':') && !trimmed.contains(' ') && !trimmed.starts_with('-') {
+                    match service_indent {
+                        None => {
+                            service_indent = Some(indent);
+                            services.push(trimmed.trim_end_matches(':').to_string());
+                        }
+                        Some(si) if indent == si => {
+                            services.push(trimmed.trim_end_matches(':').to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        services
     }
 
     /// Parse a user override YAML and return the names of services that define `ports:`.
