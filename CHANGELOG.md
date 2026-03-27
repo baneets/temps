@@ -7,54 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7] - 2026-03-27
+
 ### Added
-- Docker Compose as a deployment preset (ADR-007): deploy multi-container apps via git-push pipeline with `DownloadRepo → DeployCompose → MarkComplete` workflow
-- Compose override: user-provided YAML merged with the main compose file at deploy time for port remapping, volume overrides, and command changes without modifying the original file
-- Public ports model: explicit control over which compose service ports are proxied publicly (private by default); each public port gets its own subdomain
+
+#### Docker Compose Deployments
+- Docker Compose as a first-class deployment preset: deploy multi-container apps via git-push with `DownloadRepo → DeployCompose → MarkComplete` pipeline
+- Compose override: user-provided YAML merged at deploy time for port remapping, volume overrides, and command changes without modifying the repository compose file
+- Public ports model: explicit control over which compose service ports are proxied publicly; each public port gets its own subdomain
+- Service-specific custom domain routing: `service_name` column on `project_custom_domains` lets custom domains target a specific compose service (e.g., `api.example.com` → `api:3000`)
 - Compose file picker in project creation: filters files by root directory, shows only compose files within the selected subfolder
-- Container exec and persistent terminal: WebSocket-based xterm.js shell (opt-in per project)
-- Per-service URLs in container list and detail views for compose deployments
-- Public ports configuration UI with autocomplete from compose override content (parses service names and port mappings)
-- Screenshot capture for Docker Compose deployments (was missing from compose workflow)
-- Content-addressable storage (CAS) for static assets: SHA-256 content hashing with blob deduplication across deployments (`blobs/{prefix}/{hash}` + `paths/{url_path}.ref` index)
-- Public repo URL input in Git Settings: edit mode shows URL field instead of git provider connection selector for public repos
-- Full repository URL and "Public" badge displayed for public repo projects in Git Settings
-- `git_url` and `is_public_repo` fields in UpdateGitSettings API for proper public repo persistence
-- Authenticated GitHub API calls for public repos: automatically uses token from any configured GitHub connection (5000 req/hr instead of 60)
-- Token validation against GitHub `/rate_limit` endpoint before use
-- Compose stack domain routing: map custom domains to specific container ports via `compose_stack_routes` table with full CRUD API, route toggle, and Pingora proxy integration
-- Compose stack UI routes tab with auto-detection of service:port mappings from compose YAML and manual fallback mode
-- Repository-backed compose stacks: create stacks from a git repository URL with optional branch, compose path, and access token; sync on demand to pull latest changes
-- `sync_stack` API endpoint (`POST /stacks/{id}/sync`) to re-fetch compose content from linked repository
-- `repo_url`, `repo_branch`, `repo_compose_path`, `last_synced_at` fields on stack API responses
-- Auto-scroll to bottom in stack log viewers
-- `git_ops` module publicly exported from `temps-git` for cross-crate reuse
-- Infrastructure pages (Domains, Storage, Email, AI Gateway, Git/DNS Providers) consolidated under Settings layout with sidebar navigation
+- Compose Service selector in domain settings UI for docker-compose projects
+- Per-service URLs in container list and detail views
+- Screenshot capture for Docker Compose deployments
+- Temps system environment variables injected into all compose services via auto-generated `docker-compose.temps-env.yml` override
+- Volume preservation across redeployments (`docker compose down` without `--volumes`); full cleanup on project/environment deletion
+
+#### Edge CDN Proxy
+- `temps edge` CLI command: lightweight, stateless CDN proxy node powered by Pingora — no database required
+- Automatic registration with the control plane via `POST /api/internal/nodes/register` with X25519 public key exchange
+- Route table sync every 15 seconds from `GET /api/internal/edge/routes`
+- ECIES-encrypted TLS certificate delivery: X25519 ECDH + HKDF-SHA256 + AES-256-GCM with forward secrecy (fresh ephemeral keypair per sync)
+- Certificates stored in memory only, never written to disk
+- Content-addressable local cache with LRU eviction (90% trigger, 80% target, 60s eviction cycle)
+- Heartbeat reporting every 30 seconds with cache statistics (hit rate, disk usage, entry count)
+- Configurable via CLI flags and environment variables (`TEMPS_ORIGIN_URL`, `TEMPS_EDGE_TOKEN`, etc.)
+- Persistent config at `~/.temps/edge.json` (0600 permissions) with node ID and private key
+- Region labels for analytics grouping (`--region us-east`)
+- SSRF protection for edge node `api_address` validation: blocks loopback, link-local, metadata, and unspecified IPs
+
+#### Content-Addressable Storage
+- Static asset caching via SHA-256 content hashing with git-style blob sharding (`blobs/{prefix}/{hash}`)
+- DB-backed URL→hash mapping in `static_asset_cache` table for proxy-level asset resolution
+- Stale-chunk fallback: old deployment assets remain accessible until GC runs
+- Asset cache purge API: `DELETE /projects/{id}/asset-cache` and per-environment variant
+- Purge Asset Cache button in environment settings UI
+- Nightly garbage collection for unreferenced blobs
+
+#### Container Exec
+- One-shot command execution: `POST /projects/{id}/environments/{env_id}/containers/{container_id}/exec`
+- Persistent terminal via WebSocket upgrade (xterm.js compatible) with PTY resize support
+- Opt-in per project (`container_exec_enabled`), `ContainersExec` permission guard
+
+#### CLI Deploy Commands
+- `temps deploy image`: deploy pre-built Docker images from any registry
+- `temps deploy static`: deploy static file directories or archives (`.tar.gz`, `.zip`); auto-creates tar.gz from directories
+- `temps deploy git`: trigger the build pipeline from a specific commit, branch, or tag
+- All three support `--wait` with configurable `--timeout` and 5-second polling
+- Authentication via `TEMPS_API_URL` / `TEMPS_API_TOKEN` environment variables
+
+#### Other
+- Public repo improvements: URL input in Git Settings, "Public" badge, `git_url` and `is_public_repo` API fields
+- Authenticated GitHub API calls for public repos (5000 req/hr instead of 60)
+- Infrastructure pages consolidated under Settings layout with sidebar navigation
 - Command palette (Cmd+K) synchronized with actual routes and settings structure
-- Backwards-compatible redirects from old top-level URLs (`/domains` → `/settings/domains`, etc.)
-- Stacks page added to main navigation and command palette
 
 ### Fixed
-- **Workflow context clobbering**: parallel jobs in the same batch overwrote each other's outputs; the executor now merges outputs from all parallel jobs instead of replacing the entire context — this was the root cause of containers not being registered after deployment
-- **Container registration silently skipped**: `persist_static_assets` was `required_for_completion: true` and `mark_deployment_complete` depended on it; if persist failed, containers were created in Docker but never registered in the database, causing "No containers yet" in the UI
-- **Orphaned container teardown**: previous deployment teardown only checked `deployment_containers` table; added slug-based fallback cleanup for containers with no database records
-- Compose preset name mismatch: save handler compared `=== 'docker-compose'` but stored projects used `'dockercompose'`, causing compose override and public ports to silently not be saved
-- Compose override port parsing: only matched quoted port entries (`- '48080:80'`), now also matches unquoted (`- 48080:80`)
-- Public port suggestions now use host port (left side of `48080:80`) instead of container port
-- GitHub API rate limit on public repos: `trigger-pipeline`, branch listing, and preset detection endpoints now use authenticated tokens from configured GitHub connections
-- `get_any_github_token()` validates token against GitHub API and filters to only GitHub/GitHub App provider types
-- TimescaleDB Docker volume path: all docs and quickstart guides fixed from `/var/lib/postgresql/data` to `/home/postgres/pgdata/data` (the `timescaledb-ha` image data directory)
-- Standardized all docs on `timescale/timescaledb-ha:pg18` image (some used non-existent `timescale/timescaledb:latest-pg18`)
-- CONTRIBUTING.md: added missing Docker volume mount for dev database
-- Docker Registry icon in Settings: changed from Globe to Boxes (was sharing icon with Domains)
-- CPU stats always showing 0.0% in container metrics: switched Docker stats API from `one_shot: true` to `stream: true` for valid `precpu_stats` delta calculation
-- Compose stack restart now uses `docker compose up -d --force-recreate` instead of `docker compose restart`, ensuring config and env variable changes are applied to running containers
+- **Workflow context clobbering**: parallel jobs overwrote each other's outputs; executor now merges outputs — root cause of containers not registering after deployment
+- **Container registration silently skipped**: `persist_static_assets` blocking `mark_deployment_complete`; now runs as non-blocking best-effort
+- **Orphaned container teardown**: added slug-based fallback cleanup for containers with no database records
+- **SQL injection surface**: ORDER BY identifiers now quoted for CamelCase PostgreSQL column support; static asset cache DELETE parameterized
+- **`temps deploy static` runtime panic**: duplicate `-p` short alias between `--path` and `--project` caused clap to panic; removed short alias from `--path`
+- **Edge proxy `.unwrap()` calls**: replaced with `?` error propagation in Pingora header insertion methods
+- Compose override port parsing: handles both quoted and unquoted port entries
+- Public port suggestions use host port (left side of mapping) instead of container port
+- GitHub API rate limiting on public repos: all endpoints use authenticated tokens
+- TimescaleDB Docker volume path corrected to `/home/postgres/pgdata/data` across all docs
+- CPU stats always showing 0.0%: Docker stats API switched from `one_shot` to `stream` mode
+- Docker Registry icon changed from Globe to Boxes in Settings
 
 ### Changed
-- `FsFileStore` rewritten as content-addressable store: files stored by SHA-256 hash with path→hash reference index; identical content across deployments shares a single blob on disk
-- `persist_static_assets` job is now `required_for_completion: false` and does not block `mark_deployment_complete`; runs in parallel as a best-effort optimization
-- `GitProviderManager.get_any_github_token()`: new method for obtaining authenticated GitHub tokens from any configured connection, with proper provider type filtering and token validation
-- Replaced all `Command::new("git")` CLI calls with `git2` (libgit2) across `temps-deployments`, `temps-git` (GitHub provider, GitLab provider, provider manager), and integration tests; git CLI is no longer a runtime dependency
+- `FsFileStore` rewritten as content-addressable store: identical content shares a single blob
+- `persist_static_assets` job no longer blocks `mark_deployment_complete`; runs in parallel
+- Replaced all `Command::new("git")` CLI calls with `git2` (libgit2); git CLI is no longer a runtime dependency
+- Standalone `temps-compose` crate and Stacks UI removed; Docker Compose is now a deployment preset alongside Dockerfile, Next.js, etc.
 
 ## [0.0.6] - 2026-03-19
 
