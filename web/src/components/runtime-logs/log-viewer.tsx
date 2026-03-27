@@ -542,11 +542,11 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
               value={selectedContainer}
               onValueChange={(value) => setSelectedContainer(value)}
             >
-              <SelectTrigger className="w-full sm:w-[250px]">
+              <SelectTrigger className="w-full sm:w-auto sm:max-w-[400px]">
                 <SelectValue placeholder="Select container">
                   {selectedContainer && containersData?.containers && (
-                    <div className="flex items-center gap-2 overflow-hidden">
-                      <span className="truncate">
+                    <div className="flex items-center gap-2">
+                      <span>
                         {
                           containersData.containers.find(
                             (c) => c.container_id === selectedContainer
@@ -567,7 +567,7 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
                     value={container.container_id}
                   >
                     <div className="flex flex-col items-start text-left">
-                      <span className="truncate max-w-[200px]">
+                      <span>
                         {container.container_name}
                       </span>
                       <span className="text-xs text-muted-foreground">

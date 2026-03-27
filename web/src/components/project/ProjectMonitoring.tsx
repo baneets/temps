@@ -483,7 +483,7 @@ export function ProjectMonitoring({ project }: ProjectMonitoringProps) {
         <div>
           <h3 className="text-lg font-medium">Monitoring</h3>
           <p className="text-sm text-muted-foreground">
-            Requests, CPU, and memory for {project.name}
+            Requests and response times for {project.name}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -564,16 +564,7 @@ export function ProjectMonitoring({ project }: ProjectMonitoringProps) {
             statusCodeFilter={statusCodeFilter}
           />
 
-          {/* CPU / Memory per environment */}
-          {!isStaticProject &&
-            filteredEnvironments.map((env) => (
-              <EnvironmentSection
-                key={env.id}
-                projectId={project.id}
-                environment={env}
-                isStaticProject={isStaticProject}
-              />
-            ))}
+          {/* CPU/Memory/Network metrics are in Environments → Containers */}
         </div>
       )}
     </div>
