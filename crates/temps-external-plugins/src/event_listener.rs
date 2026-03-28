@@ -525,6 +525,7 @@ mod tests {
             environment_name: "production".to_string(),
             commit_sha: Some("abc123".to_string()),
             url: Some("https://app.example.com".to_string()),
+            health_check_path: None,
         });
 
         let event = PluginEventListener::job_to_plugin_event(&job).unwrap();

@@ -68,6 +68,31 @@ impl StatusPagePlugin {
                                 }
                             }
                         }
+                        Job::DeploymentSucceeded(job) => {
+                            // Update monitor check_path from .temps.yaml if provided
+                            if let Some(ref health_path) = job.health_check_path {
+                                tracing::info!(
+                                    "Updating monitor check_path to '{}' for environment {} in project {}",
+                                    health_path,
+                                    job.environment_id,
+                                    job.project_id
+                                );
+                                if let Err(e) = monitor_service
+                                    .update_check_path_for_environment(
+                                        job.project_id,
+                                        job.environment_id,
+                                        health_path,
+                                    )
+                                    .await
+                                {
+                                    tracing::error!(
+                                        "Failed to update monitor check_path for environment {}: {:?}",
+                                        job.environment_id,
+                                        e
+                                    );
+                                }
+                            }
+                        }
                         Job::EnvironmentDeleted(job) => {
                             tracing::info!("Received EnvironmentDeleted job: {:?}", job);
                             // Delete all monitors associated with the environment

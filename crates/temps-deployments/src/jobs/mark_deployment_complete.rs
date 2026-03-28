@@ -739,6 +739,13 @@ impl MarkDeploymentCompleteJob {
             None
         };
 
+        // Extract health_check_path from any build job output in the workflow context
+        let health_check_path = context.outputs.values().find_map(|job_outputs| {
+            job_outputs
+                .get("health_check_path")
+                .and_then(|v| serde_json::from_value::<String>(v.clone()).ok())
+        });
+
         let event = Job::DeploymentSucceeded(temps_core::DeploymentSucceededJob {
             deployment_id: self.deployment_id,
             project_id: deployment.project_id,
@@ -746,6 +753,7 @@ impl MarkDeploymentCompleteJob {
             environment_name: active_environment.name.as_ref().clone(),
             commit_sha: deployment.commit_sha.clone(),
             url,
+            health_check_path,
         });
 
         if let Err(e) = self.queue.send(event).await {

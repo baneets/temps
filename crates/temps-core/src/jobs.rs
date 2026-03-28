@@ -115,6 +115,9 @@ pub struct DeploymentSucceededJob {
     pub environment_name: String,
     pub commit_sha: Option<String>,
     pub url: Option<String>,
+    /// Health check path from .temps.yaml, used to update the monitor's check_path
+    #[serde(default)]
+    pub health_check_path: Option<String>,
 }
 
 /// Job for when a deployment fails

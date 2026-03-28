@@ -19,12 +19,15 @@ pub enum StatusPageError {
 }
 
 // Request/Response DTOs
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct CreateMonitorRequest {
     pub name: String,
     pub monitor_type: String,
     pub environment_id: i32, // Required: monitors must be associated with an environment
+    #[serde(default)]
     pub check_interval_seconds: Option<i32>,
+    #[serde(default)]
+    pub check_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -34,6 +37,7 @@ pub struct MonitorResponse {
     pub environment_id: Option<i32>,
     pub name: String,
     pub monitor_type: String,
+    pub check_path: Option<String>,
     pub monitor_url: String, // The URL being monitored (constructed from environment)
     pub check_interval_seconds: i32,
     pub is_active: bool,
@@ -205,6 +209,7 @@ impl From<temps_entities::status_monitors::Model> for MonitorResponse {
             environment_id: model.environment_id,
             name: model.name,
             monitor_type: model.monitor_type,
+            check_path: model.check_path,
             monitor_url: String::new(), // Will be populated by service layer
             check_interval_seconds: model.check_interval_seconds,
             is_active: model.is_active,

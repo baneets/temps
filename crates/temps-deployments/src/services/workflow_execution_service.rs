@@ -315,6 +315,29 @@ impl WorkflowExecutionService {
             .ok_or_else(|| WorkflowExecutionError::DeploymentNotFound(deployment_id))
     }
 
+    /// Look up the health_check_path output from the build job for a deployment.
+    /// Returns None if no health config was found in .temps.yaml.
+    async fn get_health_check_path_from_jobs(&self, deployment_id: i32) -> Option<String> {
+        use temps_entities::deployment_jobs;
+
+        let jobs = deployment_jobs::Entity::find()
+            .filter(deployment_jobs::Column::DeploymentId.eq(deployment_id))
+            .filter(deployment_jobs::Column::JobType.eq("build_image"))
+            .all(self.db.as_ref())
+            .await
+            .ok()?;
+
+        for job in jobs {
+            if let Some(outputs) = &job.outputs {
+                if let Some(path) = outputs.get("health_check_path") {
+                    return serde_json::from_value::<String>(path.clone()).ok();
+                }
+            }
+        }
+
+        None
+    }
+
     async fn get_project(
         &self,
         project_id: i32,
@@ -1454,6 +1477,11 @@ impl WorkflowExecutionService {
                     None
                 };
 
+                // Extract health_check_path from deployment job outputs if available
+                let health_check_path = self
+                    .get_health_check_path_from_jobs(updated_deployment.id)
+                    .await;
+
                 let event = Job::DeploymentSucceeded(temps_core::DeploymentSucceededJob {
                     deployment_id: updated_deployment.id,
                     project_id: updated_deployment.project_id,
@@ -1461,6 +1489,7 @@ impl WorkflowExecutionService {
                     environment_name: environment.name.clone(),
                     commit_sha: updated_deployment.commit_sha.clone(),
                     url,
+                    health_check_path,
                 });
                 if let Err(e) = self.queue.send(event).await {
                     error!("Failed to send DeploymentSucceeded event: {}", e);

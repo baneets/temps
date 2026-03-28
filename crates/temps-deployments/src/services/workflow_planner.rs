@@ -1143,41 +1143,49 @@ impl WorkflowPlanner {
 
             // Persist static assets to CAS for stale-chunk fallback.
             // Only for frontend presets that produce hashed static assets.
-            let static_asset_config: Option<(Vec<String>, Vec<(String, String)>)> = match project.preset {
-                temps_entities::preset::Preset::NextJs => Some((
-                    vec![".next/static".to_string()],
-                    vec![(".next".to_string(), "_next".to_string())],
-                )),
-                temps_entities::preset::Preset::Vite | temps_entities::preset::Preset::Rsbuild => Some((
-                    vec!["dist/assets".to_string()],
-                    vec![("dist/".to_string(), String::new())],
-                )),
-                temps_entities::preset::Preset::Nuxt => Some((
-                    vec![".output/public/_nuxt".to_string()],
-                    vec![(".output/public/".to_string(), String::new())],
-                )),
-                temps_entities::preset::Preset::Remix | temps_entities::preset::Preset::Astro
-                | temps_entities::preset::Preset::SvelteKit | temps_entities::preset::Preset::SolidStart => Some((
-                    vec!["build/static".to_string(), "dist/assets".to_string()],
-                    vec![("build/".to_string(), String::new()), ("dist/".to_string(), String::new())],
-                )),
-                // Custom Dockerfile: may contain a frontend app (e.g., Next.js with Dockerfile)
-                // Try common frontend asset paths — job completes quickly if none exist
-                temps_entities::preset::Preset::Dockerfile => Some((
-                    vec![
-                        ".next/static".to_string(),
-                        "dist/assets".to_string(),
-                        "build/static".to_string(),
-                    ],
-                    vec![
-                        (".next".to_string(), "_next".to_string()),
-                        ("dist/".to_string(), String::new()),
-                        ("build/".to_string(), String::new()),
-                    ],
-                )),
-                // Backend presets (Rust, Go, Python, Java, etc.) don't produce static assets
-                _ => None,
-            };
+            #[allow(clippy::type_complexity)]
+            let static_asset_config: Option<(Vec<String>, Vec<(String, String)>)> =
+                match project.preset {
+                    temps_entities::preset::Preset::NextJs => Some((
+                        vec![".next/static".to_string()],
+                        vec![(".next".to_string(), "_next".to_string())],
+                    )),
+                    temps_entities::preset::Preset::Vite
+                    | temps_entities::preset::Preset::Rsbuild => Some((
+                        vec!["dist/assets".to_string()],
+                        vec![("dist/".to_string(), String::new())],
+                    )),
+                    temps_entities::preset::Preset::Nuxt => Some((
+                        vec![".output/public/_nuxt".to_string()],
+                        vec![(".output/public/".to_string(), String::new())],
+                    )),
+                    temps_entities::preset::Preset::Remix
+                    | temps_entities::preset::Preset::Astro
+                    | temps_entities::preset::Preset::SvelteKit
+                    | temps_entities::preset::Preset::SolidStart => Some((
+                        vec!["build/static".to_string(), "dist/assets".to_string()],
+                        vec![
+                            ("build/".to_string(), String::new()),
+                            ("dist/".to_string(), String::new()),
+                        ],
+                    )),
+                    // Custom Dockerfile: may contain a frontend app (e.g., Next.js with Dockerfile)
+                    // Try common frontend asset paths — job completes quickly if none exist
+                    temps_entities::preset::Preset::Dockerfile => Some((
+                        vec![
+                            ".next/static".to_string(),
+                            "dist/assets".to_string(),
+                            "build/static".to_string(),
+                        ],
+                        vec![
+                            (".next".to_string(), "_next".to_string()),
+                            ("dist/".to_string(), String::new()),
+                            ("build/".to_string(), String::new()),
+                        ],
+                    )),
+                    // Backend presets (Rust, Go, Python, Java, etc.) don't produce static assets
+                    _ => None,
+                };
 
             if let Some((search_paths, path_rewrites)) = static_asset_config {
                 jobs.push(JobDefinition {
@@ -1185,7 +1193,8 @@ impl WorkflowPlanner {
                     job_type: "PersistStaticAssetsJob".to_string(),
                     name: "Persist Static Assets".to_string(),
                     description: Some(
-                        "Extract and deduplicate static assets for stale-chunk fallback".to_string(),
+                        "Extract and deduplicate static assets for stale-chunk fallback"
+                            .to_string(),
                     ),
                     dependencies: vec!["build_image".to_string()],
                     job_config: Some(serde_json::json!({

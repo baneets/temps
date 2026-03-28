@@ -37,6 +37,7 @@ mod unit_tests {
             monitor_type: "web".to_string(),
             environment_id: 1,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         assert_eq!(request.name, "Test Monitor");
@@ -78,6 +79,7 @@ mod unit_tests {
             monitor_type: "web".to_string(),
             environment_id: 1,
             check_interval_seconds: None,
+            ..Default::default()
         };
 
         let api_monitor = CreateMonitorRequest {
@@ -85,6 +87,7 @@ mod unit_tests {
             monitor_type: "api".to_string(),
             environment_id: 1,
             check_interval_seconds: None,
+            ..Default::default()
         };
 
         assert_eq!(web_monitor.monitor_type, "web");
@@ -129,6 +132,7 @@ mod unit_tests {
             monitor_type: "web".to_string(),
             environment_id: 1,
             check_interval_seconds: None,
+            ..Default::default()
         };
 
         let monitor_with_interval = CreateMonitorRequest {
@@ -136,6 +140,7 @@ mod unit_tests {
             monitor_type: "web".to_string(),
             environment_id: 1,
             check_interval_seconds: Some(300),
+            ..Default::default()
         };
 
         assert!(monitor_without_interval.check_interval_seconds.is_none());
@@ -290,6 +295,7 @@ mod integration_tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let monitor = monitor_service
@@ -386,6 +392,7 @@ mod integration_tests {
                 monitor_type: "web".to_string(),
                 environment_id: environment.id,
                 check_interval_seconds: Some(60),
+                ..Default::default()
             };
             monitor_service
                 .create_monitor(project.id, request)
@@ -420,6 +427,7 @@ mod integration_tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
         let monitor = monitor_service
             .create_monitor(project.id, request)
@@ -757,6 +765,7 @@ mod integration_tests {
                 monitor_type: "web".to_string(),
                 environment_id: environment.id,
                 check_interval_seconds: Some(60),
+                ..Default::default()
             };
             monitor_service
                 .create_monitor(project.id, request)

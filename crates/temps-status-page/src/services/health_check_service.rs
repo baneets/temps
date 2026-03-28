@@ -133,11 +133,21 @@ impl HealthCheckService {
         {
             Ok(public_url) => {
                 debug!("Using public URL for health check: {}", public_url);
-                // Append /health endpoint if monitor type is "health"
-                if monitor.monitor_type == "health" {
-                    format!("{}/health", public_url.trim_end_matches('/'))
-                } else {
-                    public_url
+                // Use custom check_path if set, otherwise fall back to monitor_type logic
+                let base = public_url.trim_end_matches('/');
+                match &monitor.check_path {
+                    Some(path) if !path.is_empty() && path != "/" => {
+                        let path = if path.starts_with('/') {
+                            path.to_string()
+                        } else {
+                            format!("/{}", path)
+                        };
+                        format!("{}{}", base, path)
+                    }
+                    _ if monitor.monitor_type == "health" => {
+                        format!("{}/health", base)
+                    }
+                    _ => public_url,
                 }
             }
             Err(e) => {
@@ -194,7 +204,13 @@ impl HealthCheckService {
                 Ok(Ok(response)) => {
                     let status_code = response.status();
 
-                    let status = if status_code.is_success() {
+                    let status = if status_code.is_success()
+                        || status_code.as_u16() == 404
+                        || status_code.as_u16() == 405
+                    {
+                        // 2xx, 404, and 405 are all considered healthy — many apps
+                        // return 404 on / (API backends) or 405 (no GET handler)
+                        // but the server is running fine.
                         "operational"
                     } else if status_code.is_server_error() {
                         // For server errors, retry
@@ -643,9 +659,10 @@ impl HealthCheckService {
 
         match check_result {
             Ok(Ok(response)) => {
-                let status = if response.status().is_success() {
+                let code = response.status();
+                let status = if code.is_success() || code.as_u16() == 404 || code.as_u16() == 405 {
                     "operational"
-                } else if response.status().is_server_error() {
+                } else if code.is_server_error() {
                     "major_outage"
                 } else {
                     "degraded"
@@ -671,6 +688,7 @@ mod tests {
             environment_id: env_id,
             name: format!("monitor-{}", id),
             monitor_type: "web".to_string(),
+            check_path: None,
             check_interval_seconds: 60,
             is_active: true,
             created_at: Utc::now(),

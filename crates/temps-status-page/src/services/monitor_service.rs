@@ -86,11 +86,21 @@ impl MonitorService {
                     .get_deployment_url_by_slug(&env.subdomain)
                     .await
                 {
-                    // Append /health if monitor type is "health"
-                    let url = if response.monitor_type == "health" {
-                        format!("{}/health", base_url.trim_end_matches('/'))
-                    } else {
-                        base_url
+                    // Use custom check_path if set, otherwise fall back to monitor_type logic
+                    let base = base_url.trim_end_matches('/');
+                    let url = match &response.check_path {
+                        Some(path) if !path.is_empty() && path != "/" => {
+                            let path = if path.starts_with('/') {
+                                path.to_string()
+                            } else {
+                                format!("/{}", path)
+                            };
+                            format!("{}{}", base, path)
+                        }
+                        _ if response.monitor_type == "health" => {
+                            format!("{}/health", base)
+                        }
+                        _ => base_url,
                     };
                     response.monitor_url = url;
                 }
@@ -239,6 +249,7 @@ impl MonitorService {
             environment_id: Set(Some(request.environment_id)),
             name: Set(request.name),
             monitor_type: Set(request.monitor_type),
+            check_path: Set(request.check_path),
             check_interval_seconds: Set(request.check_interval_seconds.unwrap_or(60)),
             is_active: Set(true),
             ..Default::default()
@@ -399,6 +410,28 @@ impl MonitorService {
             .collect();
 
         Ok(result)
+    }
+
+    /// Update the check_path for all monitors of an environment
+    pub async fn update_check_path_for_environment(
+        &self,
+        project_id: i32,
+        environment_id: i32,
+        check_path: &str,
+    ) -> Result<(), StatusPageError> {
+        let monitors = status_monitors::Entity::find()
+            .filter(status_monitors::Column::ProjectId.eq(project_id))
+            .filter(status_monitors::Column::EnvironmentId.eq(Some(environment_id)))
+            .all(self.db.as_ref())
+            .await?;
+
+        for monitor in monitors {
+            let mut active: status_monitors::ActiveModel = monitor.into();
+            active.check_path = Set(Some(check_path.to_string()));
+            active.update(self.db.as_ref()).await?;
+        }
+
+        Ok(())
     }
 
     /// Update monitor active status
@@ -1025,6 +1058,7 @@ mod tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let result = service.create_monitor(project.id, request).await;
@@ -1053,6 +1087,7 @@ mod tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let created = service.create_monitor(project.id, request).await.unwrap();
@@ -1094,6 +1129,7 @@ mod tests {
             monitor_type: "web".to_string(),
             environment_id: env1.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
         service.create_monitor(project.id, request1).await.unwrap();
 
@@ -1102,6 +1138,7 @@ mod tests {
             monitor_type: "api".to_string(),
             environment_id: env2.id,
             check_interval_seconds: Some(120),
+            ..Default::default()
         };
         service.create_monitor(project.id, request2).await.unwrap();
 
@@ -1133,6 +1170,7 @@ mod tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let monitor = service.create_monitor(project.id, request).await.unwrap();
@@ -1168,6 +1206,7 @@ mod tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let monitor = service.create_monitor(project.id, request).await.unwrap();
@@ -1224,6 +1263,7 @@ mod tests {
             monitor_type: "web".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let monitor = service.create_monitor(project.id, request).await.unwrap();
@@ -1250,6 +1290,7 @@ mod tests {
             monitor_type: "health".to_string(),
             environment_id: environment.id,
             check_interval_seconds: Some(60),
+            ..Default::default()
         };
 
         let monitor = service.create_monitor(project.id, request).await.unwrap();
