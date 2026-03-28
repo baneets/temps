@@ -1161,6 +1161,20 @@ impl WorkflowPlanner {
                     vec!["build/static".to_string(), "dist/assets".to_string()],
                     vec![("build/".to_string(), String::new()), ("dist/".to_string(), String::new())],
                 )),
+                // Custom Dockerfile: may contain a frontend app (e.g., Next.js with Dockerfile)
+                // Try common frontend asset paths — job completes quickly if none exist
+                temps_entities::preset::Preset::Dockerfile => Some((
+                    vec![
+                        ".next/static".to_string(),
+                        "dist/assets".to_string(),
+                        "build/static".to_string(),
+                    ],
+                    vec![
+                        (".next".to_string(), "_next".to_string()),
+                        ("dist/".to_string(), String::new()),
+                        ("build/".to_string(), String::new()),
+                    ],
+                )),
                 // Backend presets (Rust, Go, Python, Java, etc.) don't produce static assets
                 _ => None,
             };

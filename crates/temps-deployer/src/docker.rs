@@ -702,18 +702,20 @@ impl ImageBuilder for DockerRuntime {
         source_path: &str,
         destination_path: &Path,
     ) -> Result<(), BuilderError> {
-        // Pull image if needed
-        self.docker
-            .create_image(
-                Some(bollard::query_parameters::CreateImageOptions {
-                    from_image: Some(image_name.to_string()),
-                    ..Default::default()
-                }),
-                None,
-                None,
-            )
-            .for_each(|_| async {})
-            .await;
+        // Skip pull for local images (temps-* are built locally, not from a registry)
+        if !image_name.starts_with("temps-") {
+            let _ = self.docker
+                .create_image(
+                    Some(bollard::query_parameters::CreateImageOptions {
+                        from_image: Some(image_name.to_string()),
+                        ..Default::default()
+                    }),
+                    None,
+                    None,
+                )
+                .for_each(|_| async {})
+                .await;
+        }
 
         // Create container
         let container_config = bollard::models::ContainerCreateBody {
