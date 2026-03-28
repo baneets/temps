@@ -1417,6 +1417,15 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
                                 </p>
                               )}
                             </div>
+
+                            {(project.preset_config as any)?.composeOverride && (
+                              <div className="space-y-2">
+                                <Label>Compose Override</Label>
+                                <pre className="p-3 rounded-lg border bg-muted/50 text-xs font-mono whitespace-pre-wrap overflow-x-auto">
+                                  {(project.preset_config as any)?.composeOverride}
+                                </pre>
+                              </div>
+                            )}
                           </>
                         )}
                       </div>

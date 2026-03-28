@@ -1,0 +1,401 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  e2e-test:
+    name: E2E Deployment Tests
+    runs-on: ubuntu-latest
+    # Run after the test build job from rust-tests.yml to reuse its Rust cache
+    needs: []
+    timeout-minutes: 60
+
+    services:
+      timescaledb:
+        image: timescale/timescaledb-ha:pg18
+        env:
+          POSTGRES_DB: temps
+          POSTGRES_USER: temps
+          POSTGRES_PASSWORD: temps
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U temps -d temps"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://temps:temps@localhost:5432/temps
+      TEMPS_DATA_DIR: /tmp/temps-data
+      ADMIN_EMAIL: admin@localho.st
+      ADMIN_PASSWORD: E2eTestPass123!
+      API_BASE: http://localhost:3000
+
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo apt-get autoremove -y && sudo apt-get clean
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Reuse the same Rust dependency cache as rust-tests.yml build-tests job
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-build
+          save-if: false
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: web/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('web/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install wasm-pack and build WASM
+        run: |
+          cargo install wasm-pack
+          cd crates/temps-captcha-wasm
+          bun install
+          bun run build
+
+      - name: Build Web UI
+        run: |
+          cd web
+          bun install
+          RSBUILD_OUTPUT_PATH=../crates/temps-cli/dist bun run build
+
+      - name: Build release binary
+        run: cargo build --release --bin temps
+        env:
+          FORCE_WEB_BUILD: 1
+          CARGO_INCREMENTAL: 0
+
+      - name: Install localho.st certificate into trust store
+        run: |
+          sudo cp localho.st.crt /usr/local/share/ca-certificates/localho.st.crt
+          sudo update-ca-certificates
+
+      - name: Prepare data directory
+        run: |
+          mkdir -p $TEMPS_DATA_DIR
+          # GeoLite2 database is checked into the repo
+          cp crates/temps-cli/GeoLite2-City.mmdb $TEMPS_DATA_DIR/GeoLite2-City.mmdb
+
+      - name: Verify TimescaleDB is ready
+        run: |
+          timeout 60 bash -c 'until nc -z localhost 5432; do sleep 1; done'
+          echo "TimescaleDB is ready"
+
+      - name: Run temps setup
+        run: |
+          ./target/release/temps setup --non-interactive \
+            --database-url "$DATABASE_URL" \
+            --data-dir "$TEMPS_DATA_DIR" \
+            --admin-email "$ADMIN_EMAIL" \
+            --admin-password "$ADMIN_PASSWORD" \
+            --wildcard-domain "*.localho.st" \
+            --wildcard-domain-cert localho.st.crt \
+            --wildcard-domain-key localho.st.key \
+            --skip-dns-records \
+            --skip-git \
+            --skip-geolite2-download \
+            --output-format json
+
+      - name: Start temps serve
+        run: |
+          ./target/release/temps serve \
+            --database-url "$DATABASE_URL" \
+            --data-dir "$TEMPS_DATA_DIR" \
+            --address 0.0.0.0:3000 \
+            --tls-address 0.0.0.0:3443 \
+            --disable-https-redirect \
+            --screenshot-provider noop &
+          echo $! > /tmp/temps.pid
+          echo "Temps server started with PID $(cat /tmp/temps.pid)"
+
+      - name: Wait for platform health
+        run: |
+          echo "Waiting for Temps to become healthy..."
+          timeout 120 bash -c 'until curl -sf http://localhost:3000/health > /dev/null 2>&1; do sleep 2; done'
+          echo "Platform is healthy"
+          curl -s http://localhost:3000/health | head -c 200
+          echo ""
+
+      - name: Authenticate and create API key
+        id: auth
+        run: |
+          # Login to get session cookie
+          LOGIN_RESPONSE=$(curl -s -w "\n%{http_code}" -c /tmp/cookies.txt \
+            -X POST "$API_BASE/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
+
+          HTTP_CODE=$(echo "$LOGIN_RESPONSE" | tail -1)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Login failed with HTTP $HTTP_CODE"
+            echo "$LOGIN_RESPONSE" | head -n -1
+            exit 1
+          fi
+          echo "Login successful"
+
+          # Create API key using session cookie
+          APIKEY_RESPONSE=$(curl -s -w "\n%{http_code}" -b /tmp/cookies.txt \
+            -X POST "$API_BASE/api-keys" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"e2e-test","role_type":"admin"}')
+
+          HTTP_CODE=$(echo "$APIKEY_RESPONSE" | tail -1)
+          APIKEY_BODY=$(echo "$APIKEY_RESPONSE" | head -n -1)
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "API key creation failed with HTTP $HTTP_CODE"
+            echo "$APIKEY_BODY"
+            exit 1
+          fi
+
+          API_KEY=$(echo "$APIKEY_BODY" | jq -r '.api_key')
+          if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
+            echo "Failed to extract API key from response"
+            echo "$APIKEY_BODY"
+            exit 1
+          fi
+
+          echo "API key created successfully"
+          echo "api_key=$API_KEY" >> $GITHUB_OUTPUT
+
+      - name: Deploy example applications
+        env:
+          API_KEY: ${{ steps.auth.outputs.api_key }}
+        run: |
+          set -euo pipefail
+
+          REPO_URL="https://github.com/${{ github.repository }}.git"
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+
+          # Define example apps: name|directory|preset
+          APPS=(
+            "nextjs-e2e|examples/nextjs/basic|nextjs"
+            "vite-e2e|examples/vite/react-basic|vite"
+            "go-e2e|examples/go/gin-basic|go"
+          )
+
+          RESULTS=()
+          FAILED=0
+
+          for APP_DEF in "${APPS[@]}"; do
+            IFS='|' read -r APP_NAME APP_DIR APP_PRESET <<< "$APP_DEF"
+            echo ""
+            echo "============================================"
+            echo "Deploying: $APP_NAME (preset: $APP_PRESET)"
+            echo "  Directory: $APP_DIR"
+            echo "  Branch: $BRANCH"
+            echo "============================================"
+
+            # --- Create project ---
+            CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -X POST "$API_BASE/projects" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"name\": \"$APP_NAME\",
+                \"repo_name\": \"$REPO_NAME\",
+                \"repo_owner\": \"$REPO_OWNER\",
+                \"directory\": \"$APP_DIR\",
+                \"main_branch\": \"$BRANCH\",
+                \"preset\": \"$APP_PRESET\",
+                \"git_url\": \"$REPO_URL\",
+                \"is_public_repo\": true,
+                \"automatic_deploy\": false,
+                \"storage_service_ids\": [],
+                \"performance_metrics_enabled\": false
+              }")
+
+            HTTP_CODE=$(echo "$CREATE_RESPONSE" | tail -1)
+            CREATE_BODY=$(echo "$CREATE_RESPONSE" | head -n -1)
+
+            if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+              echo "FAIL: Project creation failed with HTTP $HTTP_CODE"
+              echo "$CREATE_BODY" | jq . 2>/dev/null || echo "$CREATE_BODY"
+              RESULTS+=("$APP_NAME: FAIL (project creation)")
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            PROJECT_ID=$(echo "$CREATE_BODY" | jq -r '.id')
+            echo "Project created: id=$PROJECT_ID"
+
+            # --- Get production environment ID ---
+            ENV_RESPONSE=$(curl -s \
+              -H "Authorization: Bearer $API_KEY" \
+              "$API_BASE/projects/$PROJECT_ID")
+            ENV_ID=$(echo "$ENV_RESPONSE" | jq -r '.environments[0].id // empty')
+
+            if [ -z "$ENV_ID" ]; then
+              echo "FAIL: Could not find environment for project $PROJECT_ID"
+              RESULTS+=("$APP_NAME: FAIL (no environment)")
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+            echo "Environment ID: $ENV_ID"
+
+            # --- Trigger pipeline ---
+            TRIGGER_RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -X POST "$API_BASE/projects/$PROJECT_ID/trigger-pipeline" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" \
+              -d "{\"branch\": \"$BRANCH\", \"environment_id\": $ENV_ID}")
+
+            HTTP_CODE=$(echo "$TRIGGER_RESPONSE" | tail -1)
+            TRIGGER_BODY=$(echo "$TRIGGER_RESPONSE" | head -n -1)
+
+            if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+              echo "FAIL: Pipeline trigger failed with HTTP $HTTP_CODE"
+              echo "$TRIGGER_BODY" | jq . 2>/dev/null || echo "$TRIGGER_BODY"
+              RESULTS+=("$APP_NAME: FAIL (trigger pipeline)")
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+            echo "Pipeline triggered successfully"
+
+            # --- Poll deployment status ---
+            echo "Polling deployment status (timeout: 10 minutes)..."
+            DEPLOY_STATE="pending"
+            DEPLOY_ID=""
+            DEADLINE=$((SECONDS + 600))
+
+            while [ $SECONDS -lt $DEADLINE ]; do
+              DEPLOY_LIST=$(curl -s \
+                -H "Authorization: Bearer $API_KEY" \
+                "$API_BASE/projects/$PROJECT_ID/deployments?per_page=1")
+
+              DEPLOY_STATE=$(echo "$DEPLOY_LIST" | jq -r '.deployments[0].status // "pending"')
+              DEPLOY_ID=$(echo "$DEPLOY_LIST" | jq -r '.deployments[0].id // empty')
+
+              if [ "$DEPLOY_STATE" = "running" ] || [ "$DEPLOY_STATE" = "deployed" ] || [ "$DEPLOY_STATE" = "completed" ]; then
+                echo "Deployment $DEPLOY_ID reached state: $DEPLOY_STATE"
+                break
+              fi
+
+              if [ "$DEPLOY_STATE" = "failed" ] || [ "$DEPLOY_STATE" = "cancelled" ]; then
+                echo "Deployment $DEPLOY_ID failed with state: $DEPLOY_STATE"
+                if [ -n "$DEPLOY_ID" ]; then
+                  echo "--- Deployment jobs ---"
+                  curl -s -H "Authorization: Bearer $API_KEY" \
+                    "$API_BASE/projects/$PROJECT_ID/deployments/$DEPLOY_ID/jobs" | jq '.[] | {name: .name, status: .status}' 2>/dev/null || true
+                fi
+                break
+              fi
+
+              echo "  State: $DEPLOY_STATE (waiting...)"
+              sleep 15
+            done
+
+            if [ "$DEPLOY_STATE" != "running" ] && [ "$DEPLOY_STATE" != "deployed" ] && [ "$DEPLOY_STATE" != "completed" ]; then
+              echo "FAIL: Deployment did not reach running state (last state: $DEPLOY_STATE)"
+              RESULTS+=("$APP_NAME: FAIL (state: $DEPLOY_STATE)")
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            # --- Verify app is reachable ---
+            APP_URL="https://$APP_NAME.localho.st:3443/"
+            echo "Verifying app at $APP_URL ..."
+            sleep 5
+
+            VERIFY_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$APP_URL" || echo "000")
+
+            if [ "$VERIFY_CODE" = "200" ] || [ "$VERIFY_CODE" = "304" ]; then
+              echo "PASS: $APP_NAME is reachable (HTTP $VERIFY_CODE)"
+              RESULTS+=("$APP_NAME: PASS (HTTP $VERIFY_CODE)")
+            else
+              echo "WARN: $APP_NAME returned HTTP $VERIFY_CODE — retrying..."
+              sleep 10
+              VERIFY_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "$APP_URL" || echo "000")
+              if [ "$VERIFY_CODE" = "200" ] || [ "$VERIFY_CODE" = "304" ]; then
+                echo "PASS: $APP_NAME is reachable on retry (HTTP $VERIFY_CODE)"
+                RESULTS+=("$APP_NAME: PASS (HTTP $VERIFY_CODE, retry)")
+              else
+                echo "FAIL: $APP_NAME not reachable (HTTP $VERIFY_CODE)"
+                RESULTS+=("$APP_NAME: FAIL (HTTP $VERIFY_CODE)")
+                FAILED=$((FAILED + 1))
+              fi
+            fi
+          done
+
+          # --- Summary ---
+          echo ""
+          echo "============================================"
+          echo "E2E Test Results"
+          echo "============================================"
+          for RESULT in "${RESULTS[@]}"; do
+            echo "  $RESULT"
+          done
+          echo "============================================"
+
+          if [ $FAILED -gt 0 ]; then
+            echo "FAILED: $FAILED app(s) failed"
+            exit 1
+          else
+            echo "ALL PASSED"
+          fi
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Temps server logs (last 100 lines) ==="
+          if [ -f /tmp/temps.pid ]; then
+            PID=$(cat /tmp/temps.pid)
+            echo "Temps PID: $PID"
+            ps aux | grep temps || true
+          fi
+
+          echo ""
+          echo "=== Docker containers ==="
+          docker ps -a 2>/dev/null || true
+
+          echo ""
+          echo "=== Docker logs (last running containers) ==="
+          for CID in $(docker ps -q --last 5 2>/dev/null); do
+            echo "--- Container $CID ---"
+            docker logs --tail 50 "$CID" 2>&1 || true
+          done
+
+          echo ""
+          echo "=== Disk usage ==="
+          df -h /
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/temps.pid ]; then
+            kill $(cat /tmp/temps.pid) 2>/dev/null || true
+          fi
+          docker system prune -f 2>/dev/null || true
