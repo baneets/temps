@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.7] - 2026-03-27
+## [0.0.7] - 2026-03-29
 
 ### Added
 
@@ -70,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tracking stats card on the Email Detail page showing open count, click count, and first-event timestamps
 - 116 tests: 12 tracking service integration tests, 14 HTTP handler tests (tower::oneshot), including a full E2E flow test (send → open pixel → click redirect → query tracking summary → verify DB state)
 
+#### Health Monitoring
+- Health monitors now accept 404/405 as healthy status codes and support custom check paths via `.temps.yaml`
+- E2E deployment test workflow for CI/CD validation
+
 #### Other
 - Public repo improvements: URL input in Git Settings, "Public" badge, `git_url` and `is_public_repo` API fields
 - Authenticated GitHub API calls for public repos (5000 req/hr instead of 60)
@@ -89,6 +93,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TimescaleDB Docker volume path corrected to `/home/postgres/pgdata/data` across all docs
 - CPU stats always showing 0.0%: Docker stats API switched from `one_shot` to `stream` mode
 - Docker Registry icon changed from Globe to Boxes in Settings
+- Email events query now uses deterministic ordering to prevent flaky test results
+- Duplicate `email_events` CREATE TABLE migration converted to ALTER TABLE to fix migration errors
+- Next.js Docker preset E2E test reliability improvements
+- Compose label injection for log collection now uses correct Docker label keys
+- Network throughput display now shows actual rate instead of cumulative total
+- Container name truncation fixed in monitoring UI
+- Removed erroneous `--` from git checkout command (fixes #40)
+- `persist_static_assets` now includes Dockerfile preset and skips pull for local images
+- Backend presets correctly skip `persist_static_assets` step
 
 ### Changed
 - `FsFileStore` rewritten as content-addressable store: identical content shares a single blob
@@ -248,6 +261,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status page and uptime monitoring
 - Web UI built with React and Rsbuild
 
-[Unreleased]: https://github.com/gotempsh/temps/compare/v0.0.6...HEAD
+[Unreleased]: https://github.com/gotempsh/temps/compare/v0.0.7...HEAD
+[0.0.7]: https://github.com/gotempsh/temps/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/gotempsh/temps/compare/v0.1.0...v0.0.6
 [0.1.0]: https://github.com/gotempsh/temps/releases/tag/v0.1.0
