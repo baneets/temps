@@ -32,6 +32,12 @@ pub struct Model {
     pub error_message: Option<String>,
     pub sent_at: Option<DBDateTime>,
     pub created_at: DBDateTime,
+    pub track_opens: bool,
+    pub track_clicks: bool,
+    pub open_count: i32,
+    pub click_count: i32,
+    pub first_opened_at: Option<DBDateTime>,
+    pub first_clicked_at: Option<DBDateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

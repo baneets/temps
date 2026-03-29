@@ -4,6 +4,9 @@ mod audit;
 mod domains;
 mod emails;
 mod providers;
+pub mod tracking;
+#[cfg(test)]
+mod tracking_tests;
 mod types;
 mod validation;
 
@@ -13,13 +16,19 @@ use axum::Router;
 use std::sync::Arc;
 use utoipa::OpenApi;
 
-/// Configure email routes
+/// Configure email routes (authenticated)
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(providers::routes())
         .merge(domains::routes())
         .merge(emails::routes())
         .merge(validation::routes())
+        .merge(tracking::routes())
+}
+
+/// Configure public tracking routes (no auth required)
+pub fn configure_public_routes() -> Router<Arc<AppState>> {
+    tracking::public_routes()
 }
 
 #[derive(OpenApi)]
@@ -45,6 +54,12 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         emails::list_emails,
         emails::get_email,
         emails::get_email_stats,
+        // Tracking
+        tracking::track_open,
+        tracking::track_click,
+        tracking::get_email_tracking,
+        tracking::get_email_events,
+        tracking::get_email_links,
         // Validation
         validation::validate_email,
     ),
@@ -71,6 +86,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             types::EmailResponse,
             types::EmailStatsResponse,
             types::PaginatedEmailsResponse,
+            // Tracking types
+            tracking::EmailTrackingResponse,
+            tracking::TrackedLinkResponse,
+            tracking::TrackingEventResponse,
             // Validation types
             validation::ValidateEmailRequest,
             validation::ValidateEmailResponse,
@@ -86,6 +105,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         (name = "Email Providers", description = "Email provider management endpoints"),
         (name = "Email Domains", description = "Email domain management and verification"),
         (name = "Emails", description = "Email sending and retrieval"),
+        (name = "Email Tracking", description = "Email open and click tracking"),
         (name = "Email Validation", description = "Email address validation and verification")
     )
 )]

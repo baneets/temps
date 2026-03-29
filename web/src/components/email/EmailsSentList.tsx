@@ -30,8 +30,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Eye,
   Mail,
   MailX,
+  MousePointerClick,
   Search,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -58,6 +60,12 @@ interface Email {
   error_message: string | null
   sent_at: string | null
   created_at: string
+  track_opens: boolean
+  track_clicks: boolean
+  open_count: number
+  click_count: number
+  first_opened_at: string | null
+  first_clicked_at: string | null
 }
 
 interface PaginatedEmails {
@@ -356,6 +364,8 @@ export function EmailsSentList() {
                   <TableHead>Subject</TableHead>
                   <TableHead>To</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead className="hidden md:table-cell">Opens</TableHead>
+                  <TableHead className="hidden md:table-cell">Clicks</TableHead>
                   <TableHead>Date</TableHead>
                 </TableRow>
               </TableHeader>
@@ -377,6 +387,26 @@ export function EmailsSentList() {
                     </TableCell>
                     <TableCell>
                       <StatusBadge status={email.status} />
+                    </TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      {email.track_opens ? (
+                        <span className="flex items-center gap-1 text-sm">
+                          <Eye className="h-3 w-3 text-muted-foreground" />
+                          {email.open_count}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">--</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      {email.track_clicks ? (
+                        <span className="flex items-center gap-1 text-sm">
+                          <MousePointerClick className="h-3 w-3 text-muted-foreground" />
+                          {email.click_count}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">--</span>
+                      )}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDistanceToNow(

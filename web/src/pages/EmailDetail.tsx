@@ -22,6 +22,7 @@ import {
   Eye,
   FileText,
   Mail,
+  MousePointerClick,
   Tag,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
@@ -324,6 +325,54 @@ function EmailDetailContent({ email }: { email: EmailResponse }) {
           </CardHeader>
           <CardContent>
             <p className="text-sm text-destructive">{email.error_message}</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Tracking Stats */}
+      {(email.track_opens || email.track_clicks) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Eye className="h-4 w-4" />
+              Tracking
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {email.track_opens && (
+                <>
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Eye className="h-3 w-3" />
+                      Opens
+                    </p>
+                    <p className="text-2xl font-bold">{email.open_count}</p>
+                    {email.first_opened_at && (
+                      <p className="text-xs text-muted-foreground">
+                        First: {format(new Date(email.first_opened_at), 'PPp')}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+              {email.track_clicks && (
+                <>
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      <MousePointerClick className="h-3 w-3" />
+                      Clicks
+                    </p>
+                    <p className="text-2xl font-bold">{email.click_count}</p>
+                    {email.first_clicked_at && (
+                      <p className="text-xs text-muted-foreground">
+                        First: {format(new Date(email.first_clicked_at), 'PPp')}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </CardContent>
         </Card>
       )}

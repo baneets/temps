@@ -393,6 +393,14 @@ pub trait TempsPlugin: Send + Sync {
         None
     }
 
+    /// Configure public HTTP routes that don't require authentication.
+    ///
+    /// These routes are served under /api but bypass auth middleware.
+    /// Use for tracking pixels, webhooks, and other public endpoints.
+    fn configure_public_routes(&self, _context: &PluginContext) -> Option<PluginRoutes> {
+        None
+    }
+
     /// Provide OpenAPI schema for this plugin's endpoints
     ///
     /// Return None if this plugin doesn't have API documentation.
@@ -692,12 +700,17 @@ impl PluginManager {
 
         let plugin_context = self.context.create_plugin_context();
         let mut api_router = Router::new();
+        let mut public_router = Router::new();
 
         // Collect routes from all plugins
         for plugin in &self.plugins {
             if let Some(plugin_routes) = plugin.configure_routes(&plugin_context) {
                 debug!("Adding routes for plugin: {}", plugin.name());
                 api_router = api_router.merge(plugin_routes.router);
+            }
+            if let Some(public_routes) = plugin.configure_public_routes(&plugin_context) {
+                debug!("Adding public routes for plugin: {}", plugin.name());
+                public_router = public_router.merge(public_routes.router);
             }
         }
 
@@ -709,8 +722,11 @@ impl PluginManager {
         let _openapi_schema = self.build_unified_openapi()?;
         let docs_router = Router::new();
 
-        // Combine everything
-        let app = Router::new().nest("/api", api_router).merge(docs_router);
+        // Combine everything: public routes under /api (no auth), then authenticated routes
+        let app = Router::new()
+            .nest("/api", public_router)
+            .nest("/api", api_router)
+            .merge(docs_router);
 
         Ok(app)
     }

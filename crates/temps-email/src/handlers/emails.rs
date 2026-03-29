@@ -81,6 +81,8 @@ pub async fn send_email(
         text: request.text.clone(),
         headers: request.headers.clone(),
         tags: request.tags.clone(),
+        track_opens: request.track_opens.unwrap_or(false),
+        track_clicks: request.track_clicks.unwrap_or(false),
     };
 
     let result = state.email_service.send(send_request).await.map_err(|e| {
@@ -181,6 +183,12 @@ pub async fn list_emails(
             error_message: e.error_message,
             sent_at: e.sent_at.map(|dt| dt.to_rfc3339()),
             created_at: e.created_at.to_rfc3339(),
+            track_opens: e.track_opens,
+            track_clicks: e.track_clicks,
+            open_count: e.open_count,
+            click_count: e.click_count,
+            first_opened_at: e.first_opened_at.map(|dt| dt.to_rfc3339()),
+            first_clicked_at: e.first_clicked_at.map(|dt| dt.to_rfc3339()),
         })
         .collect();
 
@@ -246,6 +254,12 @@ pub async fn get_email(
         error_message: email.error_message,
         sent_at: email.sent_at.map(|dt| dt.to_rfc3339()),
         created_at: email.created_at.to_rfc3339(),
+        track_opens: email.track_opens,
+        track_clicks: email.track_clicks,
+        open_count: email.open_count,
+        click_count: email.click_count,
+        first_opened_at: email.first_opened_at.map(|dt| dt.to_rfc3339()),
+        first_clicked_at: email.first_clicked_at.map(|dt| dt.to_rfc3339()),
     };
 
     Ok(Json(response))

@@ -2915,9 +2915,21 @@ export type EmailProviderTypeRoute = 'ses' | 'scaleway';
 export type EmailResponse = {
     bcc_addresses?: Array<string> | null;
     cc_addresses?: Array<string> | null;
+    /**
+     * Number of times links in the email were clicked
+     */
+    click_count: number;
     created_at: string;
     domain_id?: number | null;
     error_message?: string | null;
+    /**
+     * When a link was first clicked
+     */
+    first_clicked_at?: string | null;
+    /**
+     * When the email was first opened
+     */
+    first_opened_at?: string | null;
     from_address: string;
     from_name?: string | null;
     headers?: {
@@ -2925,6 +2937,10 @@ export type EmailResponse = {
     } | null;
     html_body?: string | null;
     id: string;
+    /**
+     * Number of times the email was opened
+     */
+    open_count: number;
     project_id?: number | null;
     provider_message_id?: string | null;
     reply_to?: string | null;
@@ -2934,6 +2950,14 @@ export type EmailResponse = {
     tags?: Array<string> | null;
     text_body?: string | null;
     to_addresses: Array<string>;
+    /**
+     * Whether click tracking is enabled
+     */
+    track_clicks: boolean;
+    /**
+     * Whether open tracking is enabled
+     */
+    track_opens: boolean;
 };
 
 export type EmailStatsResponse = {
@@ -8306,6 +8330,14 @@ export type SendEmailRequestBody = {
      * Recipient email addresses
      */
     to: Array<string>;
+    /**
+     * Enable click tracking (link rewriting). Defaults to false.
+     */
+    track_clicks?: boolean | null;
+    /**
+     * Enable open tracking (tracking pixel injection). Defaults to false.
+     */
+    track_opens?: boolean | null;
 };
 
 export type SendEmailResponseBody = {

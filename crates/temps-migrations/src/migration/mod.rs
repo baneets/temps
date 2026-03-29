@@ -47,6 +47,7 @@ mod m20260313_000002_add_service_error_message;
 mod m20260314_000001_update_environment_route_trigger;
 mod m20260315_000001_add_last_activity_at_to_environments;
 mod m20260315_000002_create_error_alert_rules;
+mod m20260320_000001_add_email_tracking;
 mod m20260323_000004_add_deployment_container_service_name;
 mod m20260326_000001_create_asset_manifests;
 mod m20260326_000002_create_static_asset_cache;
@@ -108,6 +109,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260314_000001_update_environment_route_trigger::Migration),
             Box::new(m20260315_000001_add_last_activity_at_to_environments::Migration),
             Box::new(m20260315_000002_create_error_alert_rules::Migration),
+            Box::new(m20260320_000001_add_email_tracking::Migration),
             Box::new(m20260323_000004_add_deployment_container_service_name::Migration),
             Box::new(m20260326_000001_create_asset_manifests::Migration),
             Box::new(m20260326_000002_create_static_asset_cache::Migration),

@@ -1,7 +1,9 @@
 //! Handler types for the email service
 
 use crate::providers::EmailProviderType;
-use crate::services::{DomainService, EmailService, ProviderService, ValidationService};
+use crate::services::{
+    DomainService, EmailService, ProviderService, TrackingService, ValidationService,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ pub struct AppState {
     pub domain_service: Arc<DomainService>,
     pub email_service: Arc<EmailService>,
     pub validation_service: Arc<ValidationService>,
+    pub tracking_service: Arc<TrackingService>,
     pub audit_service: Arc<dyn AuditLogger>,
     /// DNS provider service for automatic DNS record setup
     pub dns_provider_service: Option<Arc<DnsProviderService>>,
@@ -281,6 +284,12 @@ pub struct SendEmailRequestBody {
     /// Tags for categorization
     #[schema(example = json!(["welcome", "onboarding"]))]
     pub tags: Option<Vec<String>>,
+    /// Enable open tracking (tracking pixel injection). Defaults to false.
+    #[serde(default)]
+    pub track_opens: Option<bool>,
+    /// Enable click tracking (link rewriting). Defaults to false.
+    #[serde(default)]
+    pub track_clicks: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -320,6 +329,18 @@ pub struct EmailResponse {
     pub sent_at: Option<String>,
     #[schema(example = "2025-12-03T10:30:00Z")]
     pub created_at: String,
+    /// Whether open tracking is enabled
+    pub track_opens: bool,
+    /// Whether click tracking is enabled
+    pub track_clicks: bool,
+    /// Number of times the email was opened
+    pub open_count: i32,
+    /// Number of times links in the email were clicked
+    pub click_count: i32,
+    /// When the email was first opened
+    pub first_opened_at: Option<String>,
+    /// When a link was first clicked
+    pub first_clicked_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

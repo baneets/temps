@@ -7,12 +7,12 @@ use sea_orm::{
 };
 use std::sync::Arc;
 use temps_entities::emails;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::errors::EmailError;
 use crate::providers::SendEmailRequest as ProviderSendRequest;
-use crate::services::{DomainService, ProviderService};
+use crate::services::{DomainService, ProviderService, TrackingService};
 
 /// Trait for rewriting HTML to inject tracking (pixel + click links).
 /// Implemented by `temps-email-tracking::HtmlTrackingRewriter`.
@@ -26,6 +26,7 @@ pub struct EmailService {
     provider_service: Arc<ProviderService>,
     domain_service: Arc<DomainService>,
     tracking_rewriter: Option<Arc<dyn TrackingRewriter>>,
+    tracking_service: Arc<TrackingService>,
 }
 
 /// Request to send an email
@@ -43,6 +44,10 @@ pub struct SendEmailRequest {
     pub text: Option<String>,
     pub headers: Option<std::collections::HashMap<String, String>>,
     pub tags: Option<Vec<String>>,
+    /// Enable open tracking (tracking pixel injection)
+    pub track_opens: bool,
+    /// Enable click tracking (link rewriting)
+    pub track_clicks: bool,
 }
 
 /// Response from sending an email
@@ -69,12 +74,14 @@ impl EmailService {
         db: Arc<DatabaseConnection>,
         provider_service: Arc<ProviderService>,
         domain_service: Arc<DomainService>,
+        tracking_service: Arc<TrackingService>,
     ) -> Self {
         Self {
             db,
             provider_service,
             domain_service,
             tracking_rewriter: None,
+            tracking_service,
         }
     }
 
@@ -108,6 +115,22 @@ impl EmailService {
         // Generate email ID
         let email_id = Uuid::new_v4();
 
+        // Apply tracking transformations if enabled
+        let track_opens = request.track_opens;
+        let track_clicks = request.track_clicks;
+        let mut tracked_html = request.html.clone();
+        let mut extracted_links = Vec::new();
+
+        if let Some(html) = &request.html {
+            if track_opens || track_clicks {
+                let transform_result =
+                    self.tracking_service
+                        .transform_html(email_id, html, track_opens, track_clicks);
+                tracked_html = Some(transform_result.html);
+                extracted_links = transform_result.links;
+            }
+        }
+
         // Create email record - always store for visualization
         let email = emails::ActiveModel {
             id: Set(email_id),
@@ -133,10 +156,28 @@ impl EmailService {
                 .map(serde_json::to_value)
                 .transpose()?),
             status: Set("queued".to_string()),
+            track_opens: Set(track_opens),
+            track_clicks: Set(track_clicks),
+            open_count: Set(0),
+            click_count: Set(0),
             ..Default::default()
         };
 
         let email_model = email.insert(self.db.as_ref()).await?;
+
+        // Store extracted links for click tracking
+        if !extracted_links.is_empty() {
+            if let Err(e) = self
+                .tracking_service
+                .store_links(email_id, &extracted_links)
+                .await
+            {
+                warn!(
+                    "Failed to store tracking links for email {}: {}",
+                    email_id, e
+                );
+            }
+        }
 
         // If no domain configured, capture email without sending (Mailhog-like behavior)
         let domain = match domain {
@@ -251,19 +292,7 @@ impl EmailService {
             }
         };
 
-        // Inject open/click tracking into HTML if a tracking rewriter is configured
-        let tracked_html =
-            if let (Some(html), Some(rewriter)) = (&request.html, &self.tracking_rewriter) {
-                match rewriter.rewrite(&email_id, html) {
-                    Ok(rewritten) => Some(rewritten),
-                    Err(e) => {
-                        debug!("Tracking rewrite failed, sending original HTML: {}", e);
-                        request.html.clone()
-                    }
-                }
-            } else {
-                request.html.clone()
-            };
+        // Use tracked HTML (with open/click tracking injected) if available
 
         let provider_request = ProviderSendRequest {
             from: request.from,
@@ -421,6 +450,7 @@ mod tests {
     use super::*;
     use crate::providers::{EmailProviderType, SesCredentials};
     use crate::services::provider_service::{CreateProviderRequest, ProviderCredentials};
+    use crate::services::TrackingService;
     use temps_core::EncryptionService;
     use temps_database::test_utils::TestDatabase;
 
@@ -436,10 +466,15 @@ mod tests {
         let encryption_service = create_test_encryption_service();
         let provider_service = ProviderService::new(db.db.clone(), encryption_service);
         let domain_service = DomainService::new(db.db.clone(), Arc::new(provider_service.clone()));
+        let tracking_service = Arc::new(TrackingService::new(
+            db.db.clone(),
+            "http://localhost:3000".to_string(),
+        ));
         let email_service = EmailService::new(
             db.db.clone(),
             Arc::new(provider_service.clone()),
             Arc::new(domain_service.clone()),
+            tracking_service,
         );
         (db, email_service, provider_service, domain_service)
     }
@@ -511,6 +546,8 @@ mod tests {
                 "value".to_string(),
             )])),
             tags: Some(vec!["tag1".to_string(), "tag2".to_string()]),
+            track_opens: false,
+            track_clicks: false,
         };
 
         assert_eq!(request.from, "sender@example.com");
@@ -727,6 +764,8 @@ mod tests {
             text: None,
             headers: None,
             tags: None,
+            track_opens: false,
+            track_clicks: false,
         };
 
         let result = email_service.send(request).await;
@@ -754,6 +793,8 @@ mod tests {
             text: None,
             headers: None,
             tags: None,
+            track_opens: false,
+            track_clicks: false,
         };
 
         let result = email_service.send(request).await;

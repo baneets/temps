@@ -13,7 +13,8 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::handlers::{self, AppState, EmailApiDoc};
 use crate::services::{
-    DomainService, EmailService, ProviderService, ValidationConfig, ValidationService,
+    DomainService, EmailService, ProviderService, TrackingService, ValidationConfig,
+    ValidationService,
 };
 use temps_dns::services::DnsProviderService;
 
@@ -55,11 +56,19 @@ impl TempsPlugin for EmailPlugin {
             let domain_service = Arc::new(DomainService::new(db.clone(), provider_service.clone()));
             context.register_service(domain_service.clone());
 
-            // Create EmailService
+            // Create TrackingService
+            // Use TEMPS_BASE_URL env var if set, otherwise default
+            let base_url = std::env::var("TEMPS_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:3000".to_string());
+            let tracking_service = Arc::new(TrackingService::new(db.clone(), base_url));
+            context.register_service(tracking_service.clone());
+
+            // Create EmailService with tracking support
             let email_service = Arc::new(EmailService::new(
                 db.clone(),
                 provider_service.clone(),
                 domain_service.clone(),
+                tracking_service.clone(),
             ));
             context.register_service(email_service.clone());
 
@@ -79,6 +88,7 @@ impl TempsPlugin for EmailPlugin {
                 domain_service,
                 email_service,
                 validation_service,
+                tracking_service,
                 audit_service,
                 dns_provider_service,
             });
@@ -93,11 +103,22 @@ impl TempsPlugin for EmailPlugin {
         // Get the AppState
         let app_state = context.require_service::<AppState>();
 
-        // Configure routes
+        // Configure authenticated routes
         let email_routes = handlers::configure_routes().with_state(app_state);
 
         Some(PluginRoutes {
             router: email_routes,
+        })
+    }
+
+    fn configure_public_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
+        let app_state = context.require_service::<AppState>();
+
+        // Public tracking routes (no auth required)
+        let tracking_routes = handlers::configure_public_routes().with_state(app_state);
+
+        Some(PluginRoutes {
+            router: tracking_routes,
         })
     }
 

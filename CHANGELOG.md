@@ -56,6 +56,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All three support `--wait` with configurable `--timeout` and 5-second polling
 - Authentication via `TEMPS_API_URL` / `TEMPS_API_TOKEN` environment variables
 
+#### Email Tracking
+- Email open tracking: 1x1 transparent tracking pixel injected before `</body>` in outgoing HTML emails when `track_opens: true` is set on the send API; pixel hits `GET /api/emails/{id}/track/open` which returns a GIF and records the open event with IP and user-agent
+- Email click tracking: all `<a href="http(s)://...">` links in HTML emails are rewritten to route through `GET /api/emails/{id}/track/click/{link_index}` when `track_clicks: true` is set; the endpoint records the click event and 302-redirects to the original URL; `mailto:`, `tel:`, `#anchor`, and `javascript:` links are preserved unchanged
+- `email_events` table for granular tracking event storage (event_type, link_url, link_index, ip_address, user_agent) with foreign key cascade to `emails`
+- `email_links` table mapping link indices to original URLs with per-link click counts
+- `track_opens`, `track_clicks`, `open_count`, `click_count`, `first_opened_at`, `first_clicked_at` columns on the `emails` table
+- `TrackingService` in `temps-email` crate: HTML transformation (pixel injection + link rewriting), event recording, counter management, and link/event queries
+- Authenticated tracking data endpoints: `GET /api/emails/{id}/tracking` (summary with unique open/click counts), `GET /api/emails/{id}/tracking/events` (filterable by event_type), `GET /api/emails/{id}/tracking/links` (per-link click stats)
+- `configure_public_routes()` on the `TempsPlugin` trait for unauthenticated endpoints (tracking pixel and click redirect), served under `/api` without auth middleware
+- `track_opens` and `track_clicks` fields on the `POST /api/emails` send API request body (default: false)
+- Open/click count columns in the Sent Emails table (frontend) with eye and click icons
+- Tracking stats card on the Email Detail page showing open count, click count, and first-event timestamps
+- 116 tests: 12 tracking service integration tests, 14 HTTP handler tests (tower::oneshot), including a full E2E flow test (send → open pixel → click redirect → query tracking summary → verify DB state)
+
 #### Other
 - Public repo improvements: URL input in Git Settings, "Public" badge, `git_url` and `is_public_repo` API fields
 - Authenticated GitHub API calls for public repos (5000 req/hr instead of 60)
