@@ -32,6 +32,7 @@ pub struct ErrorTrackingService {
     pub alerts: ErrorAlertService,
     source_map_service: OnceCell<Arc<SourceMapService>>,
     notification_callback: OnceCell<NotificationCallback>,
+    autopilot_callback: OnceCell<NotificationCallback>,
 }
 
 impl ErrorTrackingService {
@@ -44,6 +45,7 @@ impl ErrorTrackingService {
             alerts: ErrorAlertService::new(db),
             source_map_service: OnceCell::new(),
             notification_callback: OnceCell::new(),
+            autopilot_callback: OnceCell::new(),
         }
     }
 
@@ -60,6 +62,13 @@ impl ErrorTrackingService {
         let _ = self.notification_callback.set(callback);
     }
 
+    /// Set a callback for autopilot triggers.
+    /// This is called during plugin initialization to wire up with the autopilot job queue.
+    /// Only notifications with trigger_type "new_issue" or "regression" are forwarded.
+    pub fn set_autopilot_callback(&self, callback: NotificationCallback) {
+        let _ = self.autopilot_callback.set(callback);
+    }
+
     /// Send notifications for alert results
     async fn send_alert_notifications(&self, notifications: Vec<AlertNotification>) {
         if notifications.is_empty() {
@@ -68,20 +77,31 @@ impl ErrorTrackingService {
         }
         if let Some(callback) = self.notification_callback.get() {
             tracing::info!("Sending {} alert notification(s)", notifications.len());
-            for notification in notifications {
+            for notification in &notifications {
                 tracing::info!(
                     "Firing alert: rule='{}' group='{}' priority='{}'",
                     notification.rule_name,
                     notification.group_title,
                     notification.priority
                 );
-                callback(notification).await;
+                callback(notification.clone()).await;
             }
         } else {
             tracing::warn!(
                 "Alert notifications generated ({}) but no notification callback is set",
                 notifications.len()
             );
+        }
+
+        // Fire autopilot callback for new_issue and regression triggers
+        if let Some(autopilot_cb) = self.autopilot_callback.get() {
+            for notification in &notifications {
+                if notification.trigger_type == "new_issue"
+                    || notification.trigger_type == "regression"
+                {
+                    autopilot_cb(notification.clone()).await;
+                }
+            }
         }
     }
 

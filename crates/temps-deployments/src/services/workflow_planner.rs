@@ -1253,6 +1253,24 @@ impl WorkflowPlanner {
             debug!(
                 "Added configure_crons job to workflow (runs after deployment is marked complete)"
             );
+
+            // Job: Sync agent definitions from .temps/agents/*.yaml
+            // Runs in parallel with configure_crons, after deployment is complete
+            jobs.push(JobDefinition {
+                job_id: "configure_agents".to_string(),
+                job_type: "ConfigureAgentsJob".to_string(),
+                name: "Configure Agents".to_string(),
+                description: Some("Sync agent definitions from .temps/agents/*.yaml".to_string()),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "project_id": project.id,
+                    "download_job_id": "download_repo"
+                })),
+                required_for_completion: false,
+            });
+            debug!(
+                "Added configure_agents job to workflow (runs after deployment is marked complete)"
+            );
         } else {
             debug!("Skipping configure_crons job - no git info available");
         }

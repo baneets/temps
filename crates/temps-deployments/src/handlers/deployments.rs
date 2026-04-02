@@ -2019,6 +2019,23 @@ mod tests {
         ) -> Result<(), temps_git::GitProviderManagerError> {
             unimplemented!("mock")
         }
+
+        async fn push_files_and_create_pr(
+            &self,
+            _connection_id: i32,
+            _owner: &str,
+            _repo: &str,
+            _branch: &str,
+            _base_branch: &str,
+            _files: Vec<(String, Vec<u8>)>,
+            _commit_message: &str,
+            _pr_title: &str,
+            _pr_body: &str,
+        ) -> Result<temps_git::PullRequest, temps_git::GitProviderManagerError> {
+            Err(temps_git::GitProviderManagerError::Other(
+                "not implemented in test".into(),
+            ))
+        }
     }
 
     struct MockStaticDeployer;
@@ -2980,6 +2997,7 @@ mod tests {
                 as Arc<dyn temps_deployer::static_deployer::StaticDeployer>,
             log_service.clone(),
             Arc::new(MockCronConfigService) as Arc<dyn crate::jobs::CronConfigService>,
+            Arc::new(crate::jobs::NoOpAgentSyncService) as Arc<dyn crate::jobs::AgentSyncService>,
             Arc::new(ConfigService::new(
                 Arc::new(
                     temps_config::ServerConfig::new(

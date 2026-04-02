@@ -14,6 +14,7 @@ use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use temps_agents::AgentsPlugin;
 use temps_analytics::AnalyticsPlugin;
 use temps_analytics_events::EventsPlugin;
 use temps_analytics_funnels::FunnelsPlugin;
@@ -852,6 +853,11 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering AiGatewayPlugin");
     let ai_gateway_plugin = Box::new(temps_ai_gateway::AiGatewayPlugin::new());
     plugin_manager.register_plugin(ai_gateway_plugin);
+
+    // Autopilot Plugin - provides AI-powered error fixing
+    debug!("Registering AgentsPlugin");
+    let agents_plugin = Box::new(AgentsPlugin::new());
+    plugin_manager.register_plugin(agents_plugin);
 
     // 12. ApiKeyPlugin - provides API key management (depends on auth services)
     debug!("Registering ApiKeyPlugin");

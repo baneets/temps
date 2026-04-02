@@ -4064,6 +4064,71 @@ impl GitProviderManagerTrait for GitProviderManager {
 
         Ok(())
     }
+
+    async fn push_files_and_create_pr(
+        &self,
+        connection_id: i32,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        base_branch: &str,
+        files: Vec<(String, Vec<u8>)>,
+        commit_message: &str,
+        pr_title: &str,
+        pr_body: &str,
+    ) -> Result<
+        super::git_provider_manager_trait::PullRequest,
+        super::git_provider_manager_trait::GitProviderManagerError,
+    > {
+        use super::git_provider_manager_trait::GitProviderManagerError as TraitError;
+
+        let connection = self
+            .get_connection(connection_id)
+            .await
+            .map_err(|_| TraitError::ConnectionNotFound(connection_id))?;
+
+        let provider_service = self
+            .get_provider_service(connection.provider_id)
+            .await
+            .map_err(|_| TraitError::ProviderNotFound(connection.provider_id))?;
+
+        let access_token = self
+            .validate_and_refresh_connection_token(connection_id)
+            .await
+            .map_err(|e| TraitError::DecryptionError(e.to_string()))?;
+
+        // Push files to the branch (creates the branch + commit)
+        provider_service
+            .push_files_to_repository(&access_token, owner, repo, branch, files, commit_message)
+            .await
+            .map_err(|e| {
+                TraitError::Other(format!(
+                    "Failed to push files to {}/{} branch {}: {}",
+                    owner, repo, branch, e
+                ))
+            })?;
+
+        // Create the pull request
+        let pr = provider_service
+            .create_pull_request(
+                &access_token,
+                owner,
+                repo,
+                pr_title,
+                pr_body,
+                branch,
+                base_branch,
+            )
+            .await
+            .map_err(|e| {
+                TraitError::Other(format!(
+                    "Failed to create pull request in {}/{} ({}->{}): {}",
+                    owner, repo, branch, base_branch, e
+                ))
+            })?;
+
+        Ok(pr)
+    }
 }
 
 #[cfg(test)]

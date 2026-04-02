@@ -42,6 +42,10 @@ import { ErrorGroupDetail } from './ErrorGroupDetail'
 import RequestLogs from './RequestLogs'
 import Traces from './Traces'
 import { ProjectAgentActivity } from './AiGateway'
+import { AutofixerPage } from '@/components/autofixer/AutofixerPage'
+import { AutofixerPanel } from '@/components/autofixer/AutofixerPanel'
+import { AutopilotPage } from '@/components/agents/AutopilotPage'
+import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import {
@@ -398,6 +402,18 @@ export function ProjectDetail() {
                 element={<ProjectAgentActivity projectId={project.id} />}
               />
               <Route
+                path="agents"
+                element={<AutopilotPage project={project} />}
+              />
+              <Route
+                path="agents/:runId"
+                element={<AutopilotRunDetail project={project} />}
+              />
+              <Route
+                path="autofixer"
+                element={<AutofixerPage project={project} />}
+              />
+              <Route
                 path="errors"
                 element={<ErrorTracking project={project} />}
               />
@@ -416,6 +432,10 @@ export function ProjectDetail() {
               <Route
                 path="errors/:errorGroupId"
                 element={<ErrorGroupDetail project={project} />}
+              />
+              <Route
+                path="errors/:errorGroupId/autofix"
+                element={<AutofixerPanel project={project} />}
               />
               <Route
                 path="errors/:errorGroupId/event/:eventId"

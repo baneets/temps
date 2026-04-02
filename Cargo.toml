@@ -61,6 +61,7 @@ members = [
     "crates/temps-plugin-sdk",
     "crates/temps-wireguard",
     "crates/temps-ai-gateway",
+    "crates/temps-agents",
     "crates/temps-agent",
     "crates/temps-edge",
     "crates/temps-external-plugins",

@@ -61,7 +61,7 @@ export function ProjectSettings({ project, refetch }: ProjectSettingsProps) {
           path="webhooks/:webhookId"
           element={<WebhookDetail project={project} />}
         />
-        <Route path="*" element={<Navigate to="general" replace />} />
+        <Route path="*" element={<Navigate to="." replace />} />
       </Routes>
     </Card>
   )

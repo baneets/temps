@@ -340,6 +340,15 @@ pub struct Commit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: i32,
+    pub url: String,
+    pub title: String,
+    pub head_branch: String,
+    pub base_branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileContent {
     pub path: String,
     pub content: String,
@@ -363,6 +372,7 @@ pub struct User {
 }
 
 /// Trait that all git providers must implement
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait GitProviderService: Send + Sync {
     /// Get the provider type
@@ -607,6 +617,32 @@ pub trait GitProviderService: Send + Sync {
         files: Vec<(String, Vec<u8>)>,
         commit_message: &str,
     ) -> Result<Commit, GitProviderError>;
+
+    /// Create a pull request / merge request
+    ///
+    /// # Arguments
+    /// * `access_token` - Access token for authentication
+    /// * `owner` - Repository owner
+    /// * `repo` - Repository name
+    /// * `title` - Pull request title
+    /// * `body` - Pull request description body
+    /// * `head_branch` - Source branch containing the changes
+    /// * `base_branch` - Target branch to merge into
+    ///
+    /// # Returns
+    /// * `Ok(PullRequest)` - The created pull request
+    /// * `Err(GitProviderError::NotImplemented)` - If the provider does not support pull requests
+    /// * `Err(GitProviderError)` - If creation fails
+    async fn create_pull_request(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<PullRequest, GitProviderError>;
 }
 
 /// Factory for creating provider instances

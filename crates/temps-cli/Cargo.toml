@@ -25,6 +25,7 @@ temps-analytics-performance = { path = "../temps-analytics-performance" }
 temps-analytics-session-replay = { path = "../temps-analytics-session-replay" }
 temps-audit = { path = "../temps-audit" }
 temps-auth = { path = "../temps-auth" }
+temps-agents = { path = "../temps-agents" }
 temps-backup = { path = "../temps-backup" }
 temps-config = { path = "../temps-config" }
 temps-core = { path = "../temps-core" }

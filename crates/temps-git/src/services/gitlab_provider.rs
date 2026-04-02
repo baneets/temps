@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, Repository, User, WebhookConfig,
+    GitProviderType, PullRequest, Repository, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -1457,6 +1457,100 @@ impl GitProviderService for GitLabProvider {
             date: chrono::DateTime::parse_from_rfc3339(&commit_response.created_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
+        })
+    }
+
+    async fn create_pull_request(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<PullRequest, GitProviderError> {
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
+
+        // URL encode the project path (owner/repo)
+        let project_path = format!("{}/{}", owner, repo);
+        let encoded_path = urlencoding::encode(&project_path);
+
+        let url = format!(
+            "{}/api/v4/projects/{}/merge_requests",
+            self.base_url, encoded_path
+        );
+
+        #[derive(Serialize)]
+        struct CreateMergeRequestBody<'a> {
+            title: &'a str,
+            description: &'a str,
+            source_branch: &'a str,
+            target_branch: &'a str,
+        }
+
+        let request_body = CreateMergeRequestBody {
+            title,
+            description: body,
+            source_branch: head_branch,
+            target_branch: base_branch,
+        };
+
+        info!(
+            "Creating merge request '{}' in {}/{}: {} -> {}",
+            title, owner, repo, head_branch, base_branch
+        );
+
+        let response = self
+            .send_with_retry(|| {
+                client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&request_body)
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            error!(
+                "Failed to create merge request in {}/{}: {} - {}",
+                owner, repo, status, error_text
+            );
+            return Err(GitProviderError::ApiError(format!(
+                "Failed to create merge request in {}/{}: {} - {}",
+                owner, repo, status, error_text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct GitLabMergeRequest {
+            iid: i32,
+            web_url: String,
+            title: String,
+            source_branch: String,
+            target_branch: String,
+        }
+
+        let mr: GitLabMergeRequest = response.json().await.map_err(|e| {
+            GitProviderError::ApiError(format!("Failed to parse merge request response: {}", e))
+        })?;
+
+        info!(
+            "Successfully created merge request !{} in {}/{}",
+            mr.iid, owner, repo
+        );
+
+        Ok(PullRequest {
+            number: mr.iid,
+            url: mr.web_url,
+            title: mr.title,
+            head_branch: mr.source_branch,
+            base_branch: mr.target_branch,
         })
     }
 }

@@ -200,6 +200,16 @@ pub struct AlarmFiredJob {
     pub title: String,
 }
 
+/// Job for triggering an autopilot run (AI-powered error fix)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutopilotTriggerJob {
+    pub project_id: i32,
+    pub trigger_type: String,
+    pub trigger_source_id: Option<i32>,
+    pub trigger_source_type: Option<String>,
+    pub error_group_id: Option<i32>,
+}
+
 /// Job for when an alarm is resolved
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlarmResolvedJob {
@@ -263,6 +273,8 @@ pub enum Job {
     // Alarm events
     AlarmFired(AlarmFiredJob),
     AlarmResolved(AlarmResolvedJob),
+    // Autopilot events
+    AutopilotTrigger(AutopilotTriggerJob),
 }
 
 impl fmt::Display for Job {
@@ -305,6 +317,7 @@ impl fmt::Display for Job {
             Job::RouteTableUpdated(job) => write!(f, "RouteTableUpdated(env: {:?}, deployment: {:?}, routes: {})", job.environment_id, job.deployment_id, job.route_count),
             Job::AlarmFired(job) => write!(f, "AlarmFired(id: {}, project: {}, type: {}, severity: {})", job.alarm_id, job.project_id, job.alarm_type, job.severity),
             Job::AlarmResolved(job) => write!(f, "AlarmResolved(id: {}, project: {}, type: {})", job.alarm_id, job.project_id, job.alarm_type),
+            Job::AutopilotTrigger(job) => write!(f, "AutopilotTrigger(project: {}, type: {}, source: {:?})", job.project_id, job.trigger_type, job.trigger_source_id),
         }
     }
 }

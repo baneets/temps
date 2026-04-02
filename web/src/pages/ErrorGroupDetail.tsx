@@ -3,6 +3,7 @@ import {
   getErrorGroupOptions,
   listErrorEventsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import { AutofixButton } from '@/components/autofixer/AutofixButton'
 import { SentryEventDetail } from '@/components/error-tracking/SentryEventDetail'
 import { SentryListItem } from '@/components/error-tracking/SentryListItem'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -164,6 +165,15 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
           </div>
         </div>
       </div>
+
+      {/* Autofix section */}
+      {project.git_provider_connection_id && (
+        <AutofixButton
+          projectId={project.id}
+          projectSlug={project.slug}
+          errorGroupId={parseInt(errorGroupId!)}
+        />
+      )}
 
       {/* Tabs for different views */}
       <Tabs value={selectedTab} onValueChange={setSelectedTab}>

@@ -24,6 +24,10 @@ pub struct TempsConfig {
     /// Health check configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<HealthCheckConfig>,
+
+    /// Agent configurations (alternative to .temps/agents/*.yaml files)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<AgentYamlConfig>>,
 }
 
 /// Cron job configuration
@@ -107,6 +111,110 @@ fn default_health_timeout() -> u64 {
 
 fn default_health_retries() -> u32 {
     3
+}
+
+// ── Agent YAML config ─────────────────────────────────────────────────────────
+
+/// Agent YAML configuration from .temps/agents/*.yaml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentYamlConfig {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub on: AgentTriggers,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_max_turns")]
+    pub max_turns: i32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: i32,
+    #[serde(default = "default_budget")]
+    pub daily_budget_cents: i32,
+    #[serde(default = "default_cooldown")]
+    pub cooldown_minutes: i32,
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+    #[serde(default = "default_deliverable")]
+    pub deliverable: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentTriggers {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleTrigger>,
+    #[serde(default = "default_true")]
+    pub manual: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorTrigger {
+    #[serde(default)]
+    pub new_issue: bool,
+    #[serde(default)]
+    pub regression: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleTrigger {
+    pub cron: Option<String>,
+}
+
+fn default_provider() -> String {
+    "claude_cli".to_string()
+}
+fn default_max_turns() -> i32 {
+    25
+}
+fn default_timeout() -> i32 {
+    600
+}
+fn default_budget() -> i32 {
+    500
+}
+fn default_cooldown() -> i32 {
+    30
+}
+fn default_branch_prefix() -> String {
+    "agents/".to_string()
+}
+fn default_deliverable() -> String {
+    "pull_request".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+
+impl AgentYamlConfig {
+    /// Convert the `on:` triggers to a JSON value for DB storage
+    pub fn trigger_config_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": self.on.error.as_ref().map(|e| serde_json::json!({
+                "new_issue": e.new_issue,
+                "regression": e.regression,
+            })),
+            "schedule": self.on.schedule.as_ref().map(|s| serde_json::json!({
+                "cron": s.cron,
+            })),
+            "manual": self.on.manual,
+        })
+    }
+
+    /// Derive a slug from the agent name (lowercase, hyphens)
+    pub fn slug(&self) -> String {
+        self.name
+            .to_lowercase()
+            .replace(' ', "-")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect()
+    }
 }
 
 impl TempsConfig {
@@ -259,6 +367,7 @@ build:
             build: None,
             env: None,
             health: None,
+            agents: None,
         };
 
         let yaml = config.to_yaml().unwrap();
@@ -280,5 +389,64 @@ health:
         assert_eq!(health.interval, 30); // default
         assert_eq!(health.timeout, 5); // default
         assert_eq!(health.retries, 3); // default
+    }
+
+    #[test]
+    fn test_agent_yaml_parsing() {
+        let yaml = r#"
+name: error-fixer
+description: Fixes production errors
+on:
+  error:
+    new_issue: true
+    regression: true
+  manual: true
+prompt: |
+  Fix the error: {{error_type}}
+provider: claude_cli
+max_turns: 25
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.name, "error-fixer");
+        assert_eq!(agent.slug(), "error-fixer");
+        assert!(agent.on.error.as_ref().unwrap().new_issue);
+        assert!(agent.prompt.unwrap().contains("{{error_type}}"));
+    }
+
+    #[test]
+    fn test_agent_yaml_defaults() {
+        let yaml = "name: minimal-agent\n";
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.provider, "claude_cli");
+        assert_eq!(agent.max_turns, 25);
+        assert_eq!(agent.timeout_seconds, 600);
+        assert!(agent.enabled);
+    }
+
+    #[test]
+    fn test_agent_slug_normalizes_spaces_and_special_chars() {
+        let yaml = "name: My Cool Agent!\n";
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.slug(), "my-cool-agent");
+    }
+
+    #[test]
+    fn test_agent_trigger_config_json() {
+        let yaml = r#"
+name: test-agent
+on:
+  error:
+    new_issue: true
+    regression: false
+  schedule:
+    cron: "0 9 * * 1"
+  manual: false
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let json = agent.trigger_config_json();
+        assert_eq!(json["manual"], false);
+        assert_eq!(json["error"]["new_issue"], true);
+        assert_eq!(json["error"]["regression"], false);
+        assert_eq!(json["schedule"]["cron"], "0 9 * * 1");
     }
 }

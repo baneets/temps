@@ -133,6 +133,22 @@ impl GitProviderManagerTrait for LocalFixtureGitProvider {
             "Archive not available for fixtures".to_string(),
         ))
     }
+    async fn push_files_and_create_pr(
+        &self,
+        _: i32,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: Vec<(String, Vec<u8>)>,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<temps_git::PullRequest, temps_git::GitProviderManagerError> {
+        Err(temps_git::GitProviderManagerError::Other(
+            "not implemented".into(),
+        ))
+    }
 }
 
 /// Recursively copy directory contents

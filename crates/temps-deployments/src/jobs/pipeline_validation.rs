@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use temps_core::{LogWriter, WorkflowBuilder, WorkflowError, WorkflowTask};
-use temps_git::{GitProviderManagerError, GitProviderManagerTrait, RepositoryInfo};
+use temps_git::{GitProviderManagerError, GitProviderManagerTrait, PullRequest, RepositoryInfo};
 
 use crate::jobs::{
     BuildImageJobBuilder, BuildImageOutput, DeployImageJobBuilder, DeploymentTarget,
@@ -212,6 +212,23 @@ impl GitProviderManagerTrait for MockGitProviderManager {
         _branch_or_ref: &str,
         _archive_path: &Path,
     ) -> Result<(), GitProviderManagerError> {
+        Err(GitProviderManagerError::Other(
+            "Mock: not implemented".to_string(),
+        ))
+    }
+
+    async fn push_files_and_create_pr(
+        &self,
+        _connection_id: i32,
+        _owner: &str,
+        _repo: &str,
+        _branch: &str,
+        _base_branch: &str,
+        _files: Vec<(String, Vec<u8>)>,
+        _commit_message: &str,
+        _pr_title: &str,
+        _pr_body: &str,
+    ) -> Result<PullRequest, GitProviderManagerError> {
         Err(GitProviderManagerError::Other(
             "Mock: not implemented".to_string(),
         ))

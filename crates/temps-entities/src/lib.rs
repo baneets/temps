@@ -4,8 +4,16 @@ pub mod ai_gateway_config;
 pub mod ai_provider_keys;
 pub mod ai_usage_logs;
 pub mod alarms;
+// Agent entities (renamed from autopilot)
+pub mod agent_run_logs;
+pub mod agent_runs;
+pub mod project_agents;
+// Legacy autopilot entities (kept for migration compatibility)
 pub mod api_keys;
 pub mod audit_logs;
+pub mod autopilot_configs;
+pub mod autopilot_run_logs;
+pub mod autopilot_runs;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;

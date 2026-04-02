@@ -15,6 +15,7 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
+  Sparkles,
 } from 'lucide-react'
 import {
   useCallback,
@@ -121,14 +122,10 @@ const baseNavItems: NavItem[] = [
 
   // Error Tracking
   {
-    title: 'Errors',
+    title: 'Issues',
     url: 'errors',
     icon: ShieldAlert,
     kbd: 'E',
-    subItems: [
-      { title: 'Issues', url: 'errors' },
-      { title: 'Alert Rules', url: 'errors/alert-rules' },
-    ],
   },
 
   // Logs
@@ -144,6 +141,13 @@ const baseNavItems: NavItem[] = [
     title: 'AI Activity',
     url: 'ai-activity',
     icon: Bot,
+  },
+
+  // Agents
+  {
+    title: 'Agents',
+    url: 'agents',
+    icon: Sparkles,
   },
 
   // Services (merged: Storage + Services + KV + Blob)
@@ -174,6 +178,7 @@ const baseNavItems: NavItem[] = [
       { title: 'Security', url: 'settings/security' },
       { title: 'Cron Jobs', url: 'settings/cron-jobs' },
       { title: 'Webhooks', url: 'settings/webhooks' },
+      { title: 'Alert Rules', url: 'errors/alert-rules' },
     ],
   },
 ]

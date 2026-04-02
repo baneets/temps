@@ -150,6 +150,9 @@ impl TempsPlugin for DeploymentsPlugin {
                 static_deployer,
                 log_service.clone(),
                 cron_service,
+                context
+                    .get_service::<dyn crate::jobs::AgentSyncService>()
+                    .unwrap_or_else(|| Arc::new(crate::jobs::NoOpAgentSyncService)),
                 config_service.clone(),
                 screenshot_service,
                 docker,
