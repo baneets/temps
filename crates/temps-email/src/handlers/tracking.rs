@@ -63,6 +63,8 @@ pub fn public_routes() -> Router<Arc<AppState>> {
 /// Configure authenticated tracking data routes
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/emails/events/stats", get(get_global_event_stats))
+        .route("/emails/events", get(get_global_events))
         .route("/emails/{id}/tracking", get(get_email_tracking))
         .route("/emails/{id}/tracking/events", get(get_email_events))
         .route("/emails/{id}/tracking/links", get(get_email_links))
@@ -168,6 +170,140 @@ pub async fn track_click(
     }
 }
 
+// ============================================================
+// GLOBAL TRACKING ENDPOINTS
+// ============================================================
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlobalEventStatsResponse {
+    pub delivered: u64,
+    pub opened: u64,
+    pub clicked: u64,
+    pub bounced: u64,
+    pub complained: u64,
+    pub open_rate: Option<f64>,
+    pub click_rate: Option<f64>,
+    pub bounce_rate: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaginatedEventsResponse {
+    pub events: Vec<TrackingEventResponse>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GlobalEventsQuery {
+    pub event_type: Option<String>,
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+}
+
+/// GET /emails/events/stats
+#[utoipa::path(
+    tag = "Email Tracking",
+    get,
+    path = "/emails/events/stats",
+    responses(
+        (status = 200, description = "Global tracking statistics", body = GlobalEventStatsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_event_stats(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EmailsRead);
+
+    let stats = state
+        .tracking_service
+        .get_global_stats()
+        .await
+        .map_err(|e| {
+            error!("Failed to get global tracking stats: {}", e);
+            internal_server_error()
+                .detail("Failed to get tracking statistics")
+                .build()
+        })?;
+
+    Ok(Json(GlobalEventStatsResponse {
+        delivered: stats.delivered,
+        opened: stats.opened,
+        clicked: stats.clicked,
+        bounced: stats.bounced,
+        complained: stats.complained,
+        open_rate: stats.open_rate,
+        click_rate: stats.click_rate,
+        bounce_rate: stats.bounce_rate,
+    }))
+}
+
+/// GET /emails/events
+#[utoipa::path(
+    tag = "Email Tracking",
+    get,
+    path = "/emails/events",
+    params(
+        ("event_type" = Option<String>, Query, description = "Filter by event type (open, click)"),
+        ("page" = Option<u64>, Query, description = "Page number (default: 1)"),
+        ("page_size" = Option<u64>, Query, description = "Page size (default: 20, max: 100)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated tracking events", body = PaginatedEventsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_events(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GlobalEventsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EmailsRead);
+
+    let page = query.page.unwrap_or(1);
+    let page_size = std::cmp::min(query.page_size.unwrap_or(20), 100);
+
+    let (events, total) = state
+        .tracking_service
+        .get_all_events(query.event_type.as_deref(), page, page_size)
+        .await
+        .map_err(|e| {
+            error!("Failed to get global events: {}", e);
+            internal_server_error()
+                .detail("Failed to get tracking events")
+                .build()
+        })?;
+
+    let response = PaginatedEventsResponse {
+        events: events
+            .into_iter()
+            .map(|e| TrackingEventResponse {
+                id: e.id,
+                email_id: e.email_id.to_string(),
+                event_type: e.event_type,
+                link_url: e.link_url,
+                link_index: e.link_index,
+                ip_address: e.ip_address,
+                user_agent: e.user_agent,
+                created_at: e.created_at.to_rfc3339(),
+            })
+            .collect(),
+        total,
+        page,
+        page_size,
+    };
+
+    Ok(Json(response))
+}
+
+// ============================================================
+// PER-EMAIL TRACKING ENDPOINTS
+// ============================================================
+
 /// Email tracking summary
 #[derive(Debug, Serialize, ToSchema)]
 pub struct EmailTrackingResponse {
@@ -195,6 +331,7 @@ pub struct TrackedLinkResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrackingEventResponse {
     pub id: i64,
+    pub email_id: String,
     pub event_type: String,
     pub link_url: Option<String>,
     pub link_index: Option<i32>,
@@ -337,6 +474,7 @@ pub async fn get_email_events(
         .into_iter()
         .map(|e| TrackingEventResponse {
             id: e.id,
+            email_id: e.email_id.to_string(),
             event_type: e.event_type,
             link_url: e.link_url,
             link_index: e.link_index,

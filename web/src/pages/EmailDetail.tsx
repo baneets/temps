@@ -66,12 +66,11 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function HeadersDisplay({ headers }: { headers: Record<string, string> | null | undefined }) {
-  if (!headers) return null
+  if (!headers || Object.keys(headers).length === 0) {
+    return <p className="text-sm text-muted-foreground">No custom headers were set for this email.</p>
+  }
 
   const entries = Object.entries(headers)
-  if (entries.length === 0) {
-    return <p className="text-sm text-muted-foreground">No headers available</p>
-  }
 
   return (
     <div className="space-y-2">
@@ -584,7 +583,7 @@ export function EmailDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Email', href: '/settings/email' },
+      { label: 'Email', href: '/settings/email?tab=emails' },
       { label: email?.subject || 'Email Details' },
     ])
   }, [setBreadcrumbs, email?.subject])
@@ -594,7 +593,7 @@ export function EmailDetail() {
       <div className="container max-w-6xl mx-auto py-6 space-y-6">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/settings/email">
+            <Link to="/settings/email?tab=emails">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Emails
             </Link>
@@ -610,7 +609,7 @@ export function EmailDetail() {
       <div className="container max-w-6xl mx-auto py-6 space-y-6">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/settings/email">
+            <Link to="/settings/email?tab=emails">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Emails
             </Link>
@@ -632,7 +631,7 @@ export function EmailDetail() {
     <div className="container max-w-6xl mx-auto py-6 space-y-6">
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="sm" asChild>
-          <Link to="/settings/email">
+          <Link to="/settings/email?tab=emails">
             <ArrowLeft className="h-4 w-4 mr-2" />
             Back to Emails
           </Link>
