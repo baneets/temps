@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **AI Agents framework**: `temps-agents` crate introducing project-scoped AI agents that run Claude CLI or OpenAI Codex against your codebase; agents are configured per-project with a system prompt, max turns, and a choice of AI provider
+- **Autopilot cron scheduling**: agents can be scheduled with a cron expression (e.g. `0 * * * *`) so they run automatically — the `CronScheduler` service manages all active schedules and fires agent runs without manual intervention
+- **Autofixer**: agents integrated with error tracking — open an error group and trigger an AI-powered fix that creates a sandboxed agent run, streams the output, and surfaces a diff or summary in the UI
+- **Conversation continuation**: Claude CLI backend supports `--continue` to resume an existing conversation in the working directory, enabling multi-turn autopilot sessions that build on prior context
+- **Agent run history**: `agent_runs` and `agent_run_logs` tables track every run with status, stdout/stderr output, exit code, and timestamps; browsable from the Autopilot UI
+- **Autopilot UI page**: new Autopilot section per project showing run history, run detail with streamed logs, trigger button, and cron schedule configuration
+- **Autofixer panel**: dedicated side panel on the Error Group detail page showing autofixer run status and AI-generated fix output
 - **Email tracking analytics UI**: event timeline on email detail page showing individual open/click/bounce/delivery events with IP, user-agent, and metadata; new Analytics tab with delivery rate cards and global event log
 - **Global email events endpoint**: `GET /emails/events` lists tracking events across all emails with optional `email_id` and `event_type` filters; `GET /emails/events/stats` returns aggregated open/click/bounce rates
 - **Node SDK regenerated**: includes `tracked_html_body`, `track_opens`, `track_clicks`, `TrackingEventResponse`, `TrackedLinkResponse`, `EmailTrackingResponse` types and SDK functions
