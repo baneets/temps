@@ -288,7 +288,7 @@ impl AiCliProvider for ClaudeCliProvider {
 
 /// Parse Claude CLI JSON output for token usage and model information.
 /// Claude CLI may emit JSON objects per line (JSON Lines format).
-fn parse_claude_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
+pub fn parse_claude_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
     let mut tokens_input: Option<i32> = None;
     let mut tokens_output: Option<i32> = None;
     let mut model: Option<String> = None;

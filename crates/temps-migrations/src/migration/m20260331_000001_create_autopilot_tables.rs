@@ -125,6 +125,7 @@ impl MigrationTrait for Migration {
                     .table(AutopilotConfigs::Table)
                     .col(AutopilotConfigs::ProjectId)
                     .unique()
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;
@@ -264,6 +265,7 @@ impl MigrationTrait for Migration {
                     .name("idx_autopilot_runs_project_id")
                     .table(AutopilotRuns::Table)
                     .col(AutopilotRuns::ProjectId)
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;
@@ -274,6 +276,7 @@ impl MigrationTrait for Migration {
                     .name("idx_autopilot_runs_status")
                     .table(AutopilotRuns::Table)
                     .col(AutopilotRuns::Status)
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;
@@ -285,6 +288,7 @@ impl MigrationTrait for Migration {
                     .table(AutopilotRuns::Table)
                     .col(AutopilotRuns::TriggerSourceType)
                     .col(AutopilotRuns::TriggerSourceId)
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;
@@ -338,6 +342,7 @@ impl MigrationTrait for Migration {
                     .table(AutopilotRunLogs::Table)
                     .col(AutopilotRunLogs::RunId)
                     .col(AutopilotRunLogs::CreatedAt)
+                    .if_not_exists()
                     .to_owned(),
             )
             .await?;

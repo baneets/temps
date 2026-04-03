@@ -33,6 +33,8 @@ pub struct Model {
     pub branch_prefix: String,
     /// "pull_request", "commit", or "none"
     pub deliverable: String,
+    /// Whether to run this agent inside an isolated sandbox container
+    pub sandbox_enabled: bool,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

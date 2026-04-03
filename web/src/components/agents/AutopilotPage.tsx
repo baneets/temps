@@ -11,9 +11,11 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Play, Sparkles } from 'lucide-react'
+import { Box, Pencil, Play, Plus, Sparkles } from 'lucide-react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
+import { AgentSettingsDialog } from './AgentSettingsDialog'
 import {
   listAgents,
   listAllRuns,
@@ -64,10 +66,14 @@ function AgentCard({
   agent,
   projectId,
   queryClient,
+  onEdit,
+  onNavigate,
 }: {
   agent: Agent
   projectId: number
   queryClient: ReturnType<typeof useQueryClient>
+  onEdit: (agent: Agent) => void
+  onNavigate: (slug: string) => void
 }) {
   const trigger = useMutation({
     mutationFn: () => triggerAgent(projectId, agent.slug),
@@ -88,7 +94,12 @@ function AgentCard({
       <CardContent className="p-4">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
-            <h3 className="font-medium">{agent.name}</h3>
+            <button
+              className="font-medium hover:underline text-left"
+              onClick={() => onNavigate(agent.slug)}
+            >
+              {agent.name}
+            </button>
             {agent.source === 'yaml' && (
               <span className="text-xs bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded">YAML</span>
             )}
@@ -97,6 +108,15 @@ function AgentCard({
             <span className={`text-xs px-2 py-0.5 rounded ${agent.enabled ? 'bg-green-500/10 text-green-400' : 'bg-muted text-muted-foreground'}`}>
               {agent.enabled ? 'Active' : 'Disabled'}
             </span>
+            {agent.source !== 'yaml' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onEdit(agent)}
+              >
+                <Pencil className="h-3 w-3" />
+              </Button>
+            )}
             {agent.trigger_config?.manual && (
               <Button
                 variant="ghost"
@@ -119,6 +139,7 @@ function AgentCard({
           {agent.trigger_config?.error?.regression && <span className="bg-muted px-1.5 py-0.5 rounded">regressions</span>}
           {nextRun && <span className="bg-muted px-1.5 py-0.5 rounded">{nextRun}</span>}
           {agent.trigger_config?.manual && <span className="bg-muted px-1.5 py-0.5 rounded">manual</span>}
+          {agent.sandbox_enabled && <span className="bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded">sandbox</span>}
         </div>
       </CardContent>
     </Card>
@@ -128,6 +149,8 @@ function AgentCard({
 export function AutopilotPage({ project }: AutopilotPageProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null)
 
   const {
     data: agents,
@@ -166,6 +189,21 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
         <p className="text-muted-foreground text-sm mb-4 text-center max-w-md">
           Create agents via the dashboard or add <code className="text-xs bg-muted px-1 py-0.5 rounded">.temps/agents/*.yaml</code> files to your repository.
         </p>
+        <Button
+          onClick={() => {
+            setEditingAgent(null)
+            setDialogOpen(true)
+          }}
+        >
+          <Plus className="h-4 w-4 mr-2" />
+          Create Agent
+        </Button>
+        <AgentSettingsDialog
+          open={dialogOpen}
+          onOpenChange={setDialogOpen}
+          projectId={project.id}
+          agent={editingAgent}
+        />
       </div>
     )
   }
@@ -174,7 +212,24 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl font-semibold">Agents</h1>
+        <Button
+          size="sm"
+          onClick={() => {
+            setEditingAgent(null)
+            setDialogOpen(true)
+          }}
+        >
+          <Plus className="h-3 w-3 mr-1" />
+          New Agent
+        </Button>
       </div>
+
+      <AgentSettingsDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        projectId={project.id}
+        agent={editingAgent}
+      />
 
       {/* Agent cards */}
       {agents && agents.length > 0 && (
@@ -185,6 +240,11 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
               agent={agent}
               projectId={project.id}
               queryClient={queryClient}
+              onEdit={(a) => {
+                setEditingAgent(a)
+                setDialogOpen(true)
+              }}
+              onNavigate={(slug) => navigate(`detail/${slug}`)}
             />
           ))}
         </div>
@@ -216,6 +276,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
                   <TableHead>Status</TableHead>
                   <TableHead>Agent</TableHead>
                   <TableHead>Trigger</TableHead>
+                  <TableHead className="hidden md:table-cell">Sandbox</TableHead>
                   <TableHead className="hidden md:table-cell">PR</TableHead>
                   <TableHead className="hidden md:table-cell">Files</TableHead>
                   <TableHead className="hidden md:table-cell">Cost</TableHead>
@@ -243,6 +304,16 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {run.trigger_type === 'autofixer' ? 'Autofix' : run.trigger_type}
+                    </TableCell>
+                    <TableCell className="hidden md:table-cell">
+                      {run.sandbox_enabled ? (
+                        <span className="text-xs bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                          <Box className="h-3 w-3" />
+                          Yes
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No</span>
+                      )}
                     </TableCell>
                     <TableCell className="hidden md:table-cell text-sm">
                       {run.pr_number ? `#${run.pr_number}` : '-'}

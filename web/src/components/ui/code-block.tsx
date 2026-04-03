@@ -726,17 +726,17 @@ export function CodeBlock({
   return (
     <div className={cn('relative group', className)}>
       {title && (
-        <div className="px-4 py-2 bg-muted/50 dark:bg-zinc-900/50 border-b border-border text-xs text-muted-foreground font-mono rounded-t-lg">
+        <div className="px-4 py-2 bg-zinc-200/70 dark:bg-zinc-900/50 border-b border-border text-xs text-muted-foreground font-mono rounded-t-lg">
           {title}
         </div>
       )}
       <div
         className={cn(
           'relative rounded-lg overflow-hidden',
-          'bg-muted/30 dark:bg-zinc-950/50',
+          'bg-zinc-100 dark:bg-zinc-950/50',
           'border border-border',
           'transition-colors duration-200',
-          'group-hover:bg-muted/40 dark:group-hover:bg-zinc-950/70',
+          'hover:bg-zinc-100/80 dark:group-hover:bg-zinc-950/70',
           title && 'rounded-t-none border-t-0'
         )}
       >
@@ -763,8 +763,8 @@ export function CodeBlock({
             variant="ghost"
             className={cn(
               'h-7 px-2',
-              'bg-background/80 dark:bg-zinc-800/50',
-              'hover:bg-background dark:hover:bg-zinc-800',
+              'bg-zinc-200/80 dark:bg-zinc-800/50',
+              'hover:bg-zinc-300 dark:hover:bg-zinc-800',
               'text-muted-foreground hover:text-foreground',
               'backdrop-blur-sm'
             )}
@@ -782,8 +782,8 @@ export function CodeBlock({
               variant="ghost"
               className={cn(
                 'h-7 px-2',
-                'bg-background/80 dark:bg-zinc-800/50',
-                'hover:bg-background dark:hover:bg-zinc-800',
+                'bg-zinc-200/80 dark:bg-zinc-800/50',
+                'hover:bg-zinc-300 dark:hover:bg-zinc-800',
                 'text-muted-foreground hover:text-foreground',
                 'backdrop-blur-sm'
               )}
@@ -802,8 +802,8 @@ export function CodeBlock({
               variant="ghost"
               className={cn(
                 'h-7 px-2',
-                'bg-background/80 dark:bg-zinc-800/50',
-                'hover:bg-background dark:hover:bg-zinc-800',
+                'bg-zinc-200/80 dark:bg-zinc-800/50',
+                'hover:bg-zinc-300 dark:hover:bg-zinc-800',
                 'text-muted-foreground hover:text-foreground',
                 'backdrop-blur-sm'
               )}

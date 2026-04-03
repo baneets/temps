@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
+  Box,
   Clock,
   ExternalLink,
   FileCode,
@@ -585,6 +586,22 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
               <p className="text-xs text-muted-foreground">Duration</p>
               <p className="text-sm font-medium">
                 {formatDuration(run.started_at, run.completed_at)}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="p-4 flex items-center gap-2">
+            <Box className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs text-muted-foreground">Sandbox</p>
+              <p className="text-sm font-medium">
+                {run.sandbox_enabled ? (
+                  <span className="text-orange-400">Docker</span>
+                ) : (
+                  'Host'
+                )}
               </p>
             </div>
           </CardContent>

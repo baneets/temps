@@ -141,6 +141,8 @@ pub struct AgentYamlConfig {
     pub deliverable: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

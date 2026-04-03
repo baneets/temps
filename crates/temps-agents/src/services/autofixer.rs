@@ -12,9 +12,12 @@ use temps_entities::{error_events, error_groups, projects};
 use temps_error_tracking::services::source_map_service::SourceMapService;
 use temps_git::services::git_provider_manager_trait::{GitProviderManagerTrait, PullRequest};
 
-use crate::ai_cli::{create_provider, AiRunConfig, OnEventCallback};
+use crate::ai_cli::OnEventCallback;
 use crate::error::AgentError;
+use crate::sandbox::SandboxCreateConfig;
+use crate::services::executor::build_claude_cmd;
 use crate::services::run_service::{AgentRunService, UpdateRunFields};
+use crate::services::sandbox_registry::SandboxRegistry;
 
 /// Autofixer service: implements the two-phase AI error-fixing workflow.
 ///
@@ -30,6 +33,7 @@ pub struct AutofixerService {
     queue: Arc<dyn JobQueue>,
     run_service: Arc<AgentRunService>,
     source_map_service: Option<Arc<SourceMapService>>,
+    sandbox_registry: Arc<SandboxRegistry>,
 }
 
 impl AutofixerService {
@@ -40,6 +44,7 @@ impl AutofixerService {
         queue: Arc<dyn JobQueue>,
         run_service: Arc<AgentRunService>,
         source_map_service: Option<Arc<SourceMapService>>,
+        sandbox_registry: Arc<SandboxRegistry>,
     ) -> Self {
         Self {
             db,
@@ -48,6 +53,7 @@ impl AutofixerService {
             queue,
             run_service,
             source_map_service,
+            sandbox_registry,
         }
     }
 
@@ -153,6 +159,17 @@ impl AutofixerService {
                 ),
             })?;
 
+        // Create sandbox for this run (persists across analysis → fix → PR phases)
+        let sandbox_config = SandboxCreateConfig {
+            run_id,
+            host_work_dir: work_dir.clone(),
+            cpu_limit: None,
+            memory_limit_mb: None,
+            env_vars: std::collections::HashMap::new(),
+            idle_timeout: Duration::from_secs(3600),
+        };
+        self.sandbox_registry.get_or_create(sandbox_config).await?;
+
         // Update status → "analyzing"
         self.run_service
             .update_status(
@@ -202,18 +219,6 @@ impl AutofixerService {
             user_context_section = user_context_section,
         );
 
-        // Resolve AI CLI provider (default: claude_cli)
-        let provider =
-            create_provider("claude_cli").ok_or_else(|| AgentError::AiCliNotInstalled {
-                provider: "claude_cli".to_string(),
-            })?;
-
-        if !provider.check_installed().await {
-            return Err(AgentError::AiCliNotInstalled {
-                provider: "claude_cli".to_string(),
-            });
-        }
-
         // Set up streaming callback
         let run_service_for_stream = self.run_service.clone();
         let on_event: OnEventCallback = Arc::new(move |line: String| {
@@ -236,16 +241,33 @@ impl AutofixerService {
             )
             .await?;
 
-        let ai_config = AiRunConfig {
-            work_dir: work_dir.clone(),
-            prompt,
-            api_key: String::new(),
-            max_turns: 10,
-            timeout: Duration::from_secs(300),
-            on_event: Some(on_event),
-        };
+        // Run Claude CLI inside sandbox
+        let cmd = build_claude_cmd("claude_cli", &prompt, 10, false);
+        let exec_result = tokio::time::timeout(
+            Duration::from_secs(300),
+            self.sandbox_registry.exec(
+                run_id,
+                cmd,
+                std::collections::HashMap::new(),
+                Some(on_event),
+            ),
+        )
+        .await
+        .map_err(|_| AgentError::AiCliTimeout {
+            provider: "claude_cli".to_string(),
+            timeout_secs: 300,
+        })??;
 
-        let ai_result = provider.run(ai_config).await?;
+        if exec_result.exit_code != 0 {
+            return Err(AgentError::AiCliFailed {
+                provider: "claude_cli".to_string(),
+                exit_code: exec_result.exit_code,
+                stderr: exec_result.stdout,
+            });
+        }
+
+        let (tokens_input, tokens_output, model) =
+            crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
 
         self.run_service
             .append_log(
@@ -253,34 +275,15 @@ impl AutofixerService {
                 "info",
                 "Claude analysis completed",
                 Some(serde_json::json!({
-                    "exit_code": ai_result.exit_code,
-                    "tokens_input": ai_result.tokens_input,
-                    "tokens_output": ai_result.tokens_output,
+                    "exit_code": exec_result.exit_code,
+                    "tokens_input": tokens_input,
+                    "tokens_output": tokens_output,
                 })),
             )
             .await?;
 
         // Extract the result text from the stream-json output
-        let analysis_text = ai_result
-            .output
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if !trimmed.starts_with('{') {
-                    return None;
-                }
-                serde_json::from_str::<serde_json::Value>(trimmed)
-                    .ok()
-                    .and_then(|v| {
-                        if v.get("type")?.as_str()? == "result" {
-                            v.get("result")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .next()
-            .unwrap_or_else(|| ai_result.output.clone());
+        let analysis_text = extract_result_text(&exec_result.stdout);
 
         // Save analysis text and transition to "analyzed"
         self.run_service
@@ -290,10 +293,10 @@ impl AutofixerService {
                     status: Some("analyzed".to_string()),
                     phase: Some("analyzed".to_string()),
                     analysis: Some(analysis_text),
-                    ai_output: Some(ai_result.output),
-                    ai_model: ai_result.model,
-                    tokens_input: ai_result.tokens_input,
-                    tokens_output: ai_result.tokens_output,
+                    ai_output: Some(exec_result.stdout),
+                    ai_model: model,
+                    tokens_input,
+                    tokens_output,
                     ..Default::default()
                 },
             )
@@ -408,18 +411,6 @@ impl AutofixerService {
             Do NOT change unrelated files."
             .to_string();
 
-        // Resolve AI CLI provider
-        let provider =
-            create_provider("claude_cli").ok_or_else(|| AgentError::AiCliNotInstalled {
-                provider: "claude_cli".to_string(),
-            })?;
-
-        if !provider.check_installed().await {
-            return Err(AgentError::AiCliNotInstalled {
-                provider: "claude_cli".to_string(),
-            });
-        }
-
         // Streaming callback
         let run_service_for_stream = self.run_service.clone();
         let on_event: OnEventCallback = Arc::new(move |line: String| {
@@ -442,17 +433,33 @@ impl AutofixerService {
             )
             .await?;
 
-        let ai_config = AiRunConfig {
-            work_dir: work_dir.clone(),
-            prompt,
-            api_key: String::new(),
-            max_turns: 20,
-            timeout: Duration::from_secs(600),
-            on_event: Some(on_event),
-        };
-
         // Use --continue to keep the full analysis context from the same session
-        let ai_result = provider.continue_conversation(ai_config).await?;
+        let cmd = build_claude_cmd("claude_cli", &prompt, 20, true);
+        let exec_result = tokio::time::timeout(
+            Duration::from_secs(600),
+            self.sandbox_registry.exec(
+                run_id,
+                cmd,
+                std::collections::HashMap::new(),
+                Some(on_event),
+            ),
+        )
+        .await
+        .map_err(|_| AgentError::AiCliTimeout {
+            provider: "claude_cli".to_string(),
+            timeout_secs: 600,
+        })??;
+
+        if exec_result.exit_code != 0 {
+            return Err(AgentError::AiCliFailed {
+                provider: "claude_cli".to_string(),
+                exit_code: exec_result.exit_code,
+                stderr: exec_result.stdout,
+            });
+        }
+
+        let (tokens_input, tokens_output, model) =
+            crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
 
         self.run_service
             .append_log(
@@ -460,9 +467,9 @@ impl AutofixerService {
                 "info",
                 "Claude fix generation completed",
                 Some(serde_json::json!({
-                    "exit_code": ai_result.exit_code,
-                    "tokens_input": ai_result.tokens_input,
-                    "tokens_output": ai_result.tokens_output,
+                    "exit_code": exec_result.exit_code,
+                    "tokens_input": tokens_input,
+                    "tokens_output": tokens_output,
                 })),
             )
             .await?;
@@ -472,10 +479,10 @@ impl AutofixerService {
             .update_status(
                 run_id,
                 UpdateRunFields {
-                    ai_output: Some(ai_result.output.clone()),
-                    ai_model: ai_result.model.clone(),
-                    tokens_input: ai_result.tokens_input,
-                    tokens_output: ai_result.tokens_output,
+                    ai_output: Some(exec_result.stdout),
+                    ai_model: model,
+                    tokens_input,
+                    tokens_output,
                     ..Default::default()
                 },
             )
@@ -505,7 +512,8 @@ impl AutofixerService {
                 )
                 .await?;
 
-            // Clean up work dir since there's nothing to create a PR from
+            // Clean up sandbox + work dir since there's nothing to create a PR from
+            let _ = self.sandbox_registry.release(run_id).await;
             let _ = fs::remove_dir_all(&work_dir).await;
             return Ok(());
         }
@@ -731,7 +739,8 @@ impl AutofixerService {
             pr.url
         );
 
-        // Clean up temp dir
+        // Release sandbox, then clean up temp dir
+        let _ = self.sandbox_registry.release(run_id).await;
         if let Err(e) = fs::remove_dir_all(&work_dir).await {
             tracing::warn!(
                 "Autofixer run {}: failed to clean up work dir {:?}: {}",
@@ -865,18 +874,6 @@ impl AutofixerService {
 
         let prompt = latest_message.to_string();
 
-        // Resolve AI CLI provider
-        let provider =
-            create_provider("claude_cli").ok_or_else(|| AgentError::AiCliNotInstalled {
-                provider: "claude_cli".to_string(),
-            })?;
-
-        if !provider.check_installed().await {
-            return Err(AgentError::AiCliNotInstalled {
-                provider: "claude_cli".to_string(),
-            });
-        }
-
         // Streaming callback
         let run_service_for_stream = self.run_service.clone();
         let on_event: OnEventCallback = Arc::new(move |line: String| {
@@ -890,39 +887,36 @@ impl AutofixerService {
             })
         });
 
-        let ai_config = AiRunConfig {
-            work_dir: work_dir.clone(),
-            prompt,
-            api_key: String::new(),
-            max_turns: 10,
-            timeout: Duration::from_secs(300),
-            on_event: Some(on_event),
-        };
+        // Use --continue to resume the same conversation in the sandbox
+        let cmd = build_claude_cmd("claude_cli", &prompt, 10, true);
+        let exec_result = tokio::time::timeout(
+            Duration::from_secs(300),
+            self.sandbox_registry.exec(
+                run_id,
+                cmd,
+                std::collections::HashMap::new(),
+                Some(on_event),
+            ),
+        )
+        .await
+        .map_err(|_| AgentError::AiCliTimeout {
+            provider: "claude_cli".to_string(),
+            timeout_secs: 300,
+        })??;
 
-        // Use --continue to resume the same conversation
-        let ai_result = provider.continue_conversation(ai_config).await?;
+        if exec_result.exit_code != 0 {
+            return Err(AgentError::AiCliFailed {
+                provider: "claude_cli".to_string(),
+                exit_code: exec_result.exit_code,
+                stderr: exec_result.stdout,
+            });
+        }
+
+        let (tokens_input, tokens_output, model) =
+            crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
 
         // Extract the result text
-        let analysis_text = ai_result
-            .output
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if !trimmed.starts_with('{') {
-                    return None;
-                }
-                serde_json::from_str::<serde_json::Value>(trimmed)
-                    .ok()
-                    .and_then(|v| {
-                        if v.get("type")?.as_str()? == "result" {
-                            v.get("result")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .next()
-            .unwrap_or_else(|| ai_result.output.clone());
+        let analysis_text = extract_result_text(&exec_result.stdout);
 
         // Save updated analysis and transition back to "analyzed"
         self.run_service
@@ -932,10 +926,10 @@ impl AutofixerService {
                     status: Some("analyzed".to_string()),
                     phase: Some("analyzed".to_string()),
                     analysis: Some(analysis_text),
-                    ai_output: Some(ai_result.output),
-                    ai_model: ai_result.model,
-                    tokens_input: ai_result.tokens_input,
-                    tokens_output: ai_result.tokens_output,
+                    ai_output: Some(exec_result.stdout),
+                    ai_model: model,
+                    tokens_input,
+                    tokens_output,
                     ..Default::default()
                 },
             )
@@ -986,7 +980,8 @@ impl AutofixerService {
             .append_log(run_id, "info", "Run cancelled by user", None)
             .await?;
 
-        // Clean up temp dir if it exists
+        // Release sandbox, then clean up temp dir
+        let _ = self.sandbox_registry.release(run_id).await;
         let work_dir = Self::work_dir(run_id);
         if work_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&work_dir).await {
@@ -1171,6 +1166,31 @@ impl AutofixerService {
             None,
         ))
     }
+}
+
+/// Extract the result text from Claude CLI's stream-json output.
+/// Looks for a JSON line with `{"type": "result", "result": "..."}` and returns
+/// the result string. Falls back to the full output if not found.
+fn extract_result_text(output: &str) -> String {
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('{') {
+                return None;
+            }
+            serde_json::from_str::<serde_json::Value>(trimmed)
+                .ok()
+                .and_then(|v| {
+                    if v.get("type")?.as_str()? == "result" {
+                        v.get("result")?.as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .next()
+        .unwrap_or_else(|| output.to_string())
 }
 
 #[cfg(test)]

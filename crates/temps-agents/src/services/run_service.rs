@@ -223,7 +223,11 @@ impl AgentRunService {
         let page_size = std::cmp::min(page_size.unwrap_or(20), 100);
 
         let paginator = agent_runs::Entity::find()
-            .filter(agent_runs::Column::AgentId.eq(agent_id))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(agent_runs::Column::AgentId.eq(agent_id))
+                    .add(agent_runs::Column::ConfigId.eq(agent_id)),
+            )
             .order_by(agent_runs::Column::CreatedAt, Order::Desc)
             .paginate(self.db.as_ref(), page_size);
 

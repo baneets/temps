@@ -70,6 +70,26 @@ impl From<AgentError> for Problem {
             AgentError::Io(_) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
                 .with_title("Internal Server Error")
                 .with_detail(error.to_string()),
+            AgentError::SandboxCreationFailed { .. } => {
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Sandbox Creation Failed")
+                    .with_detail(error.to_string())
+            }
+            AgentError::SandboxNotFound { .. } => {
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Sandbox Not Found")
+                    .with_detail(error.to_string())
+            }
+            AgentError::SandboxExecFailed { .. } => {
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Sandbox Exec Failed")
+                    .with_detail(error.to_string())
+            }
+            AgentError::SandboxProviderUnavailable { .. } => {
+                problemdetails::new(StatusCode::SERVICE_UNAVAILABLE)
+                    .with_title("Sandbox Provider Unavailable")
+                    .with_detail(error.to_string())
+            }
         }
     }
 }
@@ -180,6 +200,7 @@ pub struct AgentConfigResponse {
     pub cooldown_minutes: i32,
     pub branch_prefix: String,
     pub deliverable: String,
+    pub sandbox_enabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -205,6 +226,7 @@ impl From<project_agents::Model> for AgentConfigResponse {
             cooldown_minutes: model.cooldown_minutes,
             branch_prefix: model.branch_prefix,
             deliverable: model.deliverable,
+            sandbox_enabled: model.sandbox_enabled,
             created_at: model.created_at.to_rfc3339(),
             updated_at: model.updated_at.to_rfc3339(),
         }

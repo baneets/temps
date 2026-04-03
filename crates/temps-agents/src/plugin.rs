@@ -16,11 +16,15 @@ use temps_deployments::jobs::configure_agents::{
 };
 
 use crate::handlers::AppState;
+use crate::sandbox::docker::{DockerSandboxConfig, DockerSandboxProvider};
+use crate::sandbox::local::LocalSandboxProvider;
+use crate::sandbox::SandboxProvider;
 use crate::services::autofixer::AutofixerService;
 use crate::services::config_service::AgentConfigService;
 use crate::services::cron_scheduler::AgentCronScheduler;
 use crate::services::executor::AgentExecutor;
 use crate::services::run_service::AgentRunService;
+use crate::services::sandbox_registry::SandboxRegistry;
 
 use temps_entities::project_agents;
 
@@ -347,7 +351,40 @@ impl TempsPlugin for AgentsPlugin {
             let queue = context.require_service::<dyn JobQueue>();
             let git_provider_manager = context.require_service::<dyn GitProviderManagerTrait>();
 
-            let notification_service = context.get_service::<NotificationService>();
+            let notification_service = context.require_service::<NotificationService>();
+
+            // Set up sandbox provider: try Docker first, fall back to local
+            let sandbox_provider: Arc<dyn SandboxProvider> =
+                match bollard::Docker::connect_with_local_defaults() {
+                    Ok(docker) => {
+                        let docker = Arc::new(docker);
+                        match docker.ping().await {
+                            Ok(_) => {
+                                let config = DockerSandboxConfig::default();
+                                let provider = DockerSandboxProvider::new(docker, config);
+                                if let Err(e) = provider.ensure_image().await {
+                                    tracing::warn!(
+                                        "Failed to build sandbox image, using local fallback: {}",
+                                        e
+                                    );
+                                    Arc::new(LocalSandboxProvider::new())
+                                } else {
+                                    tracing::info!("Docker sandbox provider initialized");
+                                    Arc::new(provider)
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Docker not responding, using local sandbox: {}", e);
+                                Arc::new(LocalSandboxProvider::new())
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Docker not available, using local sandbox: {}", e);
+                        Arc::new(LocalSandboxProvider::new())
+                    }
+                };
+            let sandbox_registry = Arc::new(SandboxRegistry::new(sandbox_provider));
 
             let config_service = Arc::new(AgentConfigService::new(
                 db.clone(),
@@ -377,6 +414,7 @@ impl TempsPlugin for AgentsPlugin {
                 run_service.clone(),
                 config_service.clone(),
                 notification_service,
+                sandbox_registry.clone(),
             ));
             context.register_service(executor.clone());
 
@@ -388,6 +426,7 @@ impl TempsPlugin for AgentsPlugin {
                 queue.clone(),
                 run_service.clone(),
                 source_map_service,
+                sandbox_registry,
             ));
             context.register_service(autofixer_service.clone());
 
@@ -486,6 +525,7 @@ mod tests {
             cooldown_minutes: 60,
             branch_prefix: String::new(),
             deliverable: "pull_request".to_string(),
+            sandbox_enabled: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

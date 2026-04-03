@@ -14,30 +14,11 @@ use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_notifications::services::NotificationService;
 use temps_notifications::types::{Notification, NotificationPriority};
 
-use crate::ai_cli::{create_provider, AiCliProvider, AiRunConfig, AiRunResult};
+use crate::ai_cli::{AiCliProvider, AiRunConfig, AiRunResult, OnEventCallback};
 use crate::error::AgentError;
+use crate::sandbox::SandboxCreateConfig;
+use crate::services::sandbox_registry::SandboxRegistry;
 
-/// Wrapper that lets an `Arc<dyn AiCliProvider>` be used as `Box<dyn AiCliProvider>`.
-struct ArcAiCliProvider(Arc<dyn AiCliProvider>);
-
-#[async_trait::async_trait]
-impl AiCliProvider for ArcAiCliProvider {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    async fn check_installed(&self) -> bool {
-        self.0.check_installed().await
-    }
-    async fn get_status(&self) -> crate::ai_cli::AiCliStatus {
-        self.0.get_status().await
-    }
-    async fn run(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
-        self.0.run(config).await
-    }
-    async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
-        self.0.continue_conversation(config).await
-    }
-}
 use crate::services::config_service::AgentConfigService;
 use crate::services::prompt_builder::PromptBuilder;
 use crate::services::run_service::{AgentRunService, UpdateRunFields};
@@ -49,13 +30,16 @@ pub struct AgentExecutor {
     queue: Arc<dyn JobQueue>,
     run_service: Arc<AgentRunService>,
     config_service: Arc<AgentConfigService>,
-    notification_service: Option<Arc<NotificationService>>,
+    notification_service: Arc<NotificationService>,
     /// If set, this provider is used instead of resolving one from config.
     /// Intended for testing — inject a fake provider that simulates AI behaviour.
     ai_provider_override: Option<Arc<dyn AiCliProvider>>,
+    /// Sandbox registry for running AI CLI inside isolated containers.
+    sandbox_registry: Arc<SandboxRegistry>,
 }
 
 impl AgentExecutor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<DatabaseConnection>,
         git_provider_manager: Arc<dyn GitProviderManagerTrait>,
@@ -63,7 +47,8 @@ impl AgentExecutor {
         queue: Arc<dyn JobQueue>,
         run_service: Arc<AgentRunService>,
         config_service: Arc<AgentConfigService>,
-        notification_service: Option<Arc<NotificationService>>,
+        notification_service: Arc<NotificationService>,
+        sandbox_registry: Arc<SandboxRegistry>,
     ) -> Self {
         Self {
             db,
@@ -74,6 +59,7 @@ impl AgentExecutor {
             config_service,
             notification_service,
             ai_provider_override: None,
+            sandbox_registry,
         }
     }
 
@@ -114,7 +100,8 @@ impl AgentExecutor {
             }
         }
 
-        // Always attempt cleanup of the temp directory
+        // Always attempt cleanup: release sandbox first, then temp directory
+        let _ = self.sandbox_registry.release(run_id).await;
         if work_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&work_dir).await {
                 tracing::warn!(
@@ -218,6 +205,31 @@ impl AgentExecutor {
                 ),
             })?;
 
+        // Step 6b: Create sandbox if enabled for this agent
+        let use_sandbox = config.sandbox_enabled;
+        if use_sandbox {
+            let sandbox_config = SandboxCreateConfig {
+                run_id,
+                host_work_dir: work_dir.clone(),
+                cpu_limit: None,
+                memory_limit_mb: None,
+                env_vars: std::collections::HashMap::new(),
+                idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
+            };
+            self.sandbox_registry.get_or_create(sandbox_config).await?;
+            self.run_service
+                .append_log(
+                    run_id,
+                    "info",
+                    &format!(
+                        "Sandbox created ({} provider)",
+                        self.sandbox_registry.provider_name()
+                    ),
+                    None,
+                )
+                .await?;
+        }
+
         // Step 7: Update status → "analyzing"
         self.run_service
             .update_status(
@@ -287,29 +299,10 @@ impl AgentExecutor {
                     ),
                 })?
         } else {
-            // No API key stored — using subscription mode.
-            // The CLI will use its own built-in auth (claude setup-token).
             String::new()
         };
 
-        // Step 10: Resolve AI CLI provider (use injected override for testing)
-        let provider: Box<dyn AiCliProvider> = if let Some(ref p) = self.ai_provider_override {
-            Box::new(ArcAiCliProvider(p.clone()))
-        } else {
-            let p = create_provider(&config.ai_provider).ok_or_else(|| {
-                AgentError::AiCliNotInstalled {
-                    provider: config.ai_provider.clone(),
-                }
-            })?;
-            if !p.check_installed().await {
-                return Err(AgentError::AiCliNotInstalled {
-                    provider: config.ai_provider.clone(),
-                });
-            }
-            p
-        };
-
-        // Step 11: Update status → "fixing"
+        // Step 10: Update status → "fixing"
         self.run_service
             .update_status(
                 run_id,
@@ -329,12 +322,10 @@ impl AgentExecutor {
             .await?;
         tracing::info!("Run {}: invoking AI CLI {}", run_id, config.ai_provider);
 
-        // Step 12: Run AI CLI with real-time streaming
-        // Save all JSON events to agent_run_logs for real-time streaming.
-        // The frontend renders them nicely — raw JSON is never shown to users.
+        // Step 11: Run AI CLI via sandbox (or direct provider for testing)
         let run_service_for_stream = self.run_service.clone();
         let stream_run_id = run_id;
-        let on_event: crate::ai_cli::OnEventCallback = Arc::new(move |line: String| {
+        let on_event: OnEventCallback = Arc::new(move |line: String| {
             let svc = run_service_for_stream.clone();
             let rid = stream_run_id;
             Box::pin(async move {
@@ -346,16 +337,78 @@ impl AgentExecutor {
             })
         });
 
-        let ai_config = AiRunConfig {
-            work_dir: work_dir.clone(),
-            prompt,
-            api_key,
-            max_turns: config.max_turns,
-            timeout: Duration::from_secs(config.timeout_seconds as u64),
-            on_event: Some(on_event),
-        };
+        let ai_result = if let Some(ref override_provider) = self.ai_provider_override {
+            // Testing path: use injected provider directly
+            let ai_config = AiRunConfig {
+                work_dir: work_dir.clone(),
+                prompt,
+                api_key: api_key.clone(),
+                max_turns: config.max_turns,
+                timeout: Duration::from_secs(config.timeout_seconds as u64),
+                on_event: Some(on_event),
+            };
+            override_provider.run(ai_config).await?
+        } else if use_sandbox {
+            // Sandbox path: execute AI CLI inside isolated container
+            let cmd = build_claude_cmd(&config.ai_provider, &prompt, config.max_turns, false);
 
-        let ai_result = provider.run(ai_config).await?;
+            let mut env = std::collections::HashMap::new();
+            if !api_key.is_empty() {
+                env.insert("ANTHROPIC_API_KEY".to_string(), api_key);
+            }
+
+            let exec_result = tokio::time::timeout(
+                Duration::from_secs(config.timeout_seconds as u64),
+                self.sandbox_registry.exec(run_id, cmd, env, Some(on_event)),
+            )
+            .await
+            .map_err(|_| AgentError::AiCliTimeout {
+                provider: config.ai_provider.clone(),
+                timeout_secs: config.timeout_seconds as u64,
+            })??;
+
+            if exec_result.exit_code != 0 {
+                return Err(AgentError::AiCliFailed {
+                    provider: config.ai_provider.clone(),
+                    exit_code: exec_result.exit_code,
+                    stderr: exec_result.stdout,
+                });
+            }
+
+            let (tokens_input, tokens_output, model) =
+                crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+
+            AiRunResult {
+                output: exec_result.stdout,
+                exit_code: exec_result.exit_code,
+                tokens_input,
+                tokens_output,
+                model,
+                changed_files: None,
+            }
+        } else {
+            // Direct path: run AI CLI on host (no sandbox)
+            let provider =
+                crate::ai_cli::create_provider(&config.ai_provider).ok_or_else(|| {
+                    AgentError::AiCliNotInstalled {
+                        provider: config.ai_provider.clone(),
+                    }
+                })?;
+            if !provider.check_installed().await {
+                return Err(AgentError::AiCliNotInstalled {
+                    provider: config.ai_provider.clone(),
+                });
+            }
+            let ai_config = AiRunConfig {
+                work_dir: work_dir.clone(),
+                prompt,
+                api_key,
+                max_turns: config.max_turns,
+                timeout: Duration::from_secs(config.timeout_seconds as u64),
+                on_event: Some(on_event),
+            };
+            provider.run(ai_config).await?
+        };
 
         // Step 13: Save AI output immediately (so it's preserved even if push fails later)
         self.run_service
@@ -660,27 +713,29 @@ impl AgentExecutor {
             .append_log(run_id, "info", "Autopilot run completed successfully", None)
             .await?;
 
-        // Step 23: Send notification if available
-        if let Some(ref ns) = self.notification_service {
-            let notification = Notification::new(
-                format!("Autopilot fixed: {} in {}", error_type, project.name),
-                format!(
-                    "Autopilot run #{} created PR #{} to fix '{}'. Review and merge: {}",
-                    run_id, pr.number, error_message, pr.url
-                ),
-            )
-            .with_priority(NotificationPriority::Normal)
-            .with_metadata("run_id", run_id.to_string())
-            .with_metadata("project", project.name.clone())
-            .with_metadata("branch", branch_name);
+        // Step 23: Send notification
+        let notification = Notification::new(
+            format!("Autopilot fixed: {} in {}", error_type, project.name),
+            format!(
+                "Autopilot run #{} created PR #{} to fix '{}'. Review and merge: {}",
+                run_id, pr.number, error_message, pr.url
+            ),
+        )
+        .with_priority(NotificationPriority::Normal)
+        .with_metadata("run_id", run_id.to_string())
+        .with_metadata("project", project.name.clone())
+        .with_metadata("branch", branch_name);
 
-            if let Err(e) = ns.send_notification(notification).await {
-                tracing::warn!(
-                    "Run {}: failed to send completion notification: {}",
-                    run_id,
-                    e
-                );
-            }
+        if let Err(e) = self
+            .notification_service
+            .send_notification(notification)
+            .await
+        {
+            tracing::warn!(
+                "Run {}: failed to send completion notification: {}",
+                run_id,
+                e
+            );
         }
 
         Ok(())
@@ -760,6 +815,45 @@ impl AgentExecutor {
             stack_trace,
             None, // environment lookup would require joining environments table
         ))
+    }
+}
+
+/// Build the CLI command args for running Claude (or Codex) in a sandbox.
+pub fn build_claude_cmd(
+    provider_name: &str,
+    prompt: &str,
+    max_turns: i32,
+    continue_conversation: bool,
+) -> Vec<String> {
+    match provider_name {
+        "claude_cli" => {
+            let mut cmd = vec!["claude".to_string(), "--print".to_string()];
+            if continue_conversation {
+                cmd.push("--continue".to_string());
+            }
+            cmd.push(prompt.to_string());
+            cmd.extend_from_slice(&[
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--max-turns".to_string(),
+                max_turns.to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "--verbose".to_string(),
+            ]);
+            cmd
+        }
+        "codex_cli" => {
+            vec![
+                "codex".to_string(),
+                "--approval-mode".to_string(),
+                "full-auto".to_string(),
+                "--quiet".to_string(),
+                prompt.to_string(),
+            ]
+        }
+        _ => {
+            vec![provider_name.to_string(), prompt.to_string()]
+        }
     }
 }
 
@@ -1075,6 +1169,7 @@ mod tests {
             cooldown_minutes: 30,
             branch_prefix: "autopilot/".into(),
             deliverable: "pull_request".into(),
+            sandbox_enabled: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1172,6 +1267,16 @@ mod tests {
         ))
     }
 
+    fn make_notification_service(db: Arc<sea_orm::DatabaseConnection>) -> Arc<NotificationService> {
+        let enc = make_encryption_service();
+        Arc::new(NotificationService::new(db, enc))
+    }
+
+    fn make_sandbox_registry() -> Arc<SandboxRegistry> {
+        use crate::sandbox::local::LocalSandboxProvider;
+        Arc::new(SandboxRegistry::new(Arc::new(LocalSandboxProvider::new())))
+    }
+
     /// Build a MockDatabase for the happy path.
     ///
     /// Sea-ORM MockDatabase serves query results as a single FIFO queue.
@@ -1246,8 +1351,17 @@ mod tests {
             output: "I fixed the TypeError by adding a null check.".into(),
         });
 
-        let executor = AgentExecutor::new(db, git, enc, queue.clone(), run_svc, config_svc, None)
-            .with_ai_provider(ai);
+        let executor = AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue.clone(),
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+        .with_ai_provider(ai);
 
         executor.execute_run(run_id).await;
 
@@ -1374,8 +1488,17 @@ mod tests {
         let config_svc = Arc::new(AgentConfigService::new(db.clone(), enc.clone()));
 
         let ai = Arc::new(NoChangesAiCli);
-        let executor = AgentExecutor::new(db, git, enc, queue.clone(), run_svc, config_svc, None)
-            .with_ai_provider(ai);
+        let executor = AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue.clone(),
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+        .with_ai_provider(ai);
 
         executor.execute_run(run_id).await;
 
@@ -1487,8 +1610,17 @@ mod tests {
             output: "I refactored the entire codebase".into(),
         });
 
-        let executor = AgentExecutor::new(db, git, enc, queue.clone(), run_svc, config_svc, None)
-            .with_ai_provider(ai);
+        let executor = AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue.clone(),
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+        .with_ai_provider(ai);
 
         executor.execute_run(run_id).await;
 
@@ -1566,8 +1698,17 @@ mod tests {
             output: "".into(),
         });
 
-        let executor = AgentExecutor::new(db, git, enc, queue.clone(), run_svc, config_svc, None)
-            .with_ai_provider(ai);
+        let executor = AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue.clone(),
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+        .with_ai_provider(ai);
 
         executor.execute_run(run_id).await;
 
@@ -1660,8 +1801,17 @@ mod tests {
         let config_svc = Arc::new(AgentConfigService::new(db.clone(), enc.clone()));
 
         let ai: Arc<dyn AiCliProvider> = Arc::new(FailingAiCli);
-        let executor = AgentExecutor::new(db, git, enc, queue.clone(), run_svc, config_svc, None)
-            .with_ai_provider(ai);
+        let executor = AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue.clone(),
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+        .with_ai_provider(ai);
 
         executor.execute_run(run_id).await;
 
@@ -1733,8 +1883,17 @@ mod tests {
             files_to_create: vec![],
             output: "".into(),
         });
-        let executor = AgentExecutor::new(db, git, enc, queue.clone(), run_svc, config_svc, None)
-            .with_ai_provider(ai);
+        let executor = AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue.clone(),
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+        .with_ai_provider(ai);
 
         executor.execute_run(run_id).await;
 

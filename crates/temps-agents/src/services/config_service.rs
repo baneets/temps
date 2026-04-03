@@ -34,6 +34,7 @@ pub struct UpsertAgentRequest {
     pub timeout_seconds: Option<i32>,
     pub deliverable: Option<String>,
     pub branch_prefix: Option<String>,
+    pub sandbox_enabled: Option<bool>,
 }
 
 pub struct AgentConfigService {
@@ -261,6 +262,9 @@ impl AgentConfigService {
             if let Some(prefix) = request.branch_prefix {
                 active.branch_prefix = Set(prefix);
             }
+            if let Some(sandbox_enabled) = request.sandbox_enabled {
+                active.sandbox_enabled = Set(sandbox_enabled);
+            }
 
             let model = active
                 .update(self.db.as_ref())
@@ -298,6 +302,7 @@ impl AgentConfigService {
                 deliverable: Set(request
                     .deliverable
                     .unwrap_or_else(|| "pull_request".to_string())),
+                sandbox_enabled: Set(request.sandbox_enabled.unwrap_or(false)),
                 ..Default::default()
             };
 
@@ -431,6 +436,7 @@ impl AgentConfigService {
             deliverable: Set(request
                 .deliverable
                 .unwrap_or_else(|| "pull_request".to_string())),
+            sandbox_enabled: Set(request.sandbox_enabled.unwrap_or(false)),
             ..Default::default()
         };
 
@@ -564,6 +570,9 @@ impl AgentConfigService {
         if let Some(prefix) = request.branch_prefix {
             active.branch_prefix = Set(prefix);
         }
+        if let Some(sandbox_enabled) = request.sandbox_enabled {
+            active.sandbox_enabled = Set(sandbox_enabled);
+        }
 
         let model = active
             .update(self.db.as_ref())
@@ -632,6 +641,7 @@ impl AgentConfigService {
                 active.cooldown_minutes = Set(yaml_agent.cooldown_minutes);
                 active.branch_prefix = Set(yaml_agent.branch_prefix.clone());
                 active.deliverable = Set(yaml_agent.deliverable.clone());
+                active.sandbox_enabled = Set(yaml_agent.sandbox);
                 active.enabled = Set(yaml_agent.enabled);
                 active
                     .update(self.db.as_ref())
@@ -656,6 +666,7 @@ impl AgentConfigService {
                     cooldown_minutes: Set(yaml_agent.cooldown_minutes),
                     branch_prefix: Set(yaml_agent.branch_prefix.clone()),
                     deliverable: Set(yaml_agent.deliverable.clone()),
+                    sandbox_enabled: Set(yaml_agent.sandbox),
                     ..Default::default()
                 };
                 active
@@ -714,6 +725,7 @@ mod tests {
             cooldown_minutes: 60,
             branch_prefix: String::new(),
             deliverable: "pull_request".to_string(),
+            sandbox_enabled: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -818,6 +830,7 @@ mod tests {
             name: None,
             description: None,
             branch_prefix: None,
+            sandbox_enabled: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -848,6 +861,7 @@ mod tests {
             name: None,
             description: None,
             branch_prefix: None,
+            sandbox_enabled: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -887,6 +901,7 @@ mod tests {
             name: None,
             description: None,
             branch_prefix: None,
+            sandbox_enabled: None,
         };
 
         let result = svc.upsert_config(1, request).await;

@@ -4,3 +4,4 @@ pub mod cron_scheduler;
 pub mod executor;
 pub mod prompt_builder;
 pub mod run_service;
+pub mod sandbox_registry;

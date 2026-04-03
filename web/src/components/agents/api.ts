@@ -23,6 +23,7 @@ export interface Agent {
   cooldown_minutes: number
   branch_prefix: string
   deliverable: string
+  sandbox_enabled: boolean
   created_at: string
   updated_at: string
 }
@@ -54,6 +55,7 @@ export interface AgentRun {
   started_at: string | null
   completed_at: string | null
   created_at: string
+  sandbox_enabled: boolean
 }
 
 export interface AgentRunLog {
@@ -85,6 +87,7 @@ export interface CreateAgentRequest {
   cooldown_minutes?: number
   branch_prefix?: string
   deliverable?: string
+  sandbox_enabled?: boolean
 }
 
 export interface UpdateAgentRequest {
@@ -101,6 +104,7 @@ export interface UpdateAgentRequest {
   cooldown_minutes?: number
   branch_prefix?: string
   deliverable?: string
+  sandbox_enabled?: boolean
 }
 
 export interface PaginatedRuns {

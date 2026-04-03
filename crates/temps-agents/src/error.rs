@@ -54,6 +54,26 @@ pub enum AgentError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Sandbox creation failed for run {run_id} ({provider}): {reason}")]
+    SandboxCreationFailed {
+        run_id: i32,
+        provider: String,
+        reason: String,
+    },
+
+    #[error("Sandbox not found for run {run_id}")]
+    SandboxNotFound { run_id: i32 },
+
+    #[error("Sandbox exec failed for run {run_id} in sandbox {sandbox_id}: {reason}")]
+    SandboxExecFailed {
+        run_id: i32,
+        sandbox_id: String,
+        reason: String,
+    },
+
+    #[error("Sandbox provider '{provider}' unavailable: {reason}")]
+    SandboxProviderUnavailable { provider: String, reason: String },
 }
 
 impl From<sea_orm::DbErr> for AgentError {

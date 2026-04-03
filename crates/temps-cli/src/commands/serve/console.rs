@@ -788,6 +788,13 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let vulnerability_scanner_plugin = Box::new(VulnerabilityScannerPlugin::new());
     plugin_manager.register_plugin(vulnerability_scanner_plugin);
 
+    // 8.6. AgentsPlugin - MUST be registered before DeploymentsPlugin so DeploymentsPlugin can
+    // resolve AgentSyncService via the plugin context. If registered after, DeploymentsPlugin
+    // falls back to NoOpAgentSyncService and agent sync is silently skipped on every deployment.
+    debug!("Registering AgentsPlugin");
+    let agents_plugin = Box::new(AgentsPlugin::new());
+    plugin_manager.register_plugin(agents_plugin);
+
     // 9. DeploymentsPlugin - provides deployment orchestration (depends on deployer, screenshots, and vulnerability scanner)
     debug!("Registering DeploymentsPlugin");
     let deployments_plugin = Box::new(DeploymentsPlugin::new());
@@ -853,11 +860,6 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering AiGatewayPlugin");
     let ai_gateway_plugin = Box::new(temps_ai_gateway::AiGatewayPlugin::new());
     plugin_manager.register_plugin(ai_gateway_plugin);
-
-    // Autopilot Plugin - provides AI-powered error fixing
-    debug!("Registering AgentsPlugin");
-    let agents_plugin = Box::new(AgentsPlugin::new());
-    plugin_manager.register_plugin(agents_plugin);
 
     // 12. ApiKeyPlugin - provides API key management (depends on auth services)
     debug!("Registering ApiKeyPlugin");

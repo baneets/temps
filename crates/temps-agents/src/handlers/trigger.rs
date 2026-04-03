@@ -169,7 +169,12 @@ async fn trigger_agent(
         );
     }
 
-    let run_resp = AgentRunResponse::from_with_agent(run, Some(agent.slug), Some(agent.name));
+    let run_resp = AgentRunResponse::from_with_agent(
+        run,
+        Some(agent.slug),
+        Some(agent.name),
+        agent.sandbox_enabled,
+    );
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))
 }

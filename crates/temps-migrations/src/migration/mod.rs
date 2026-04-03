@@ -60,6 +60,7 @@ mod m20260401_000001_add_tracked_html_body_to_emails;
 mod m20260401_000001_autopilot_to_agents;
 mod m20260401_000002_add_autofixer_columns;
 mod m20260401_000002_add_missing_email_events_columns;
+mod m20260403_000001_add_sandbox_enabled;
 
 pub struct Migrator;
 
@@ -127,6 +128,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260401_000001_autopilot_to_agents::Migration),
             Box::new(m20260401_000002_add_autofixer_columns::Migration),
             Box::new(m20260401_000002_add_missing_email_events_columns::Migration),
+            Box::new(m20260403_000001_add_sandbox_enabled::Migration),
         ]
     }
 }

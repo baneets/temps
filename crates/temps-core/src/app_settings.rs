@@ -40,6 +40,9 @@ pub struct AppSettings {
 
     // Multi-node settings
     pub multi_node: MultiNodeSettings,
+
+    // Agent sandbox settings (global defaults)
+    pub agent_sandbox: AgentSandboxSettings,
 }
 
 /// Docker container log rotation settings
@@ -61,6 +64,32 @@ pub struct ContainerLogSettings {
     /// Maximum rotated log files for external service containers
     #[schema(example = 3)]
     pub service_max_file: u32,
+}
+
+/// Global agent sandbox settings. Controls whether agent runs are isolated
+/// inside Docker containers by default. Individual agents can override this.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct AgentSandboxSettings {
+    /// Whether sandbox is enabled globally for all agents by default.
+    /// Individual agents can override this with their `sandbox_enabled` field.
+    pub enabled: bool,
+    /// CPU limit in cores for sandbox containers
+    #[schema(example = 2.0)]
+    pub cpu_limit: f64,
+    /// Memory limit in MB for sandbox containers
+    #[schema(example = 2048)]
+    pub memory_limit_mb: u64,
+}
+
+impl Default for AgentSandboxSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cpu_limit: 2.0,
+            memory_limit_mb: 2048,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -179,6 +208,7 @@ impl Default for AppSettings {
             disk_space_alert: DiskSpaceAlertSettings::default(),
             container_logs: ContainerLogSettings::default(),
             multi_node: MultiNodeSettings::default(),
+            agent_sandbox: AgentSandboxSettings::default(),
         }
     }
 }

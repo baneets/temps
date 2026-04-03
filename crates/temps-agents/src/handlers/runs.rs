@@ -49,6 +49,8 @@ pub struct AgentRunResponse {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub created_at: String,
+    /// Whether this run executed inside a sandbox.
+    pub sandbox_enabled: bool,
 }
 
 impl From<agent_runs::Model> for AgentRunResponse {
@@ -79,6 +81,7 @@ impl From<agent_runs::Model> for AgentRunResponse {
             started_at: model.started_at.map(|t| t.to_rfc3339()),
             completed_at: model.completed_at.map(|t| t.to_rfc3339()),
             created_at: model.created_at.to_rfc3339(),
+            sandbox_enabled: false,
         }
     }
 }
@@ -89,10 +92,12 @@ impl AgentRunResponse {
         model: agent_runs::Model,
         agent_slug: Option<String>,
         agent_name: Option<String>,
+        sandbox_enabled: bool,
     ) -> Self {
         let mut resp = Self::from(model);
         resp.agent_slug = agent_slug;
         resp.agent_name = agent_name;
+        resp.sandbox_enabled = sandbox_enabled;
         resp
     }
 }
@@ -219,6 +224,7 @@ async fn list_all_runs(
                 run,
                 agent.map(|a| a.slug.clone()),
                 agent.map(|a| a.name.clone()),
+                agent.map(|a| a.sandbox_enabled).unwrap_or(false),
             )
         })
         .collect();
@@ -286,6 +292,7 @@ async fn list_agent_runs(
                 run,
                 Some(agent.slug.clone()),
                 Some(agent.name.clone()),
+                agent.sandbox_enabled,
             )
         })
         .collect();
@@ -339,6 +346,7 @@ async fn get_run_with_logs(
         run_with_logs.run,
         agent.as_ref().map(|a| a.slug.clone()),
         agent.as_ref().map(|a| a.name.clone()),
+        agent.as_ref().map(|a| a.sandbox_enabled).unwrap_or(false),
     );
 
     Ok(Json(AgentRunWithLogsResponse {
