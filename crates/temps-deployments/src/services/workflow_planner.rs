@@ -888,6 +888,30 @@ impl WorkflowPlanner {
                 .or_insert_with(|| commit_sha.clone());
         }
 
+        // Inject Sentry source map upload env vars so `@sentry/nextjs` (and other Sentry
+        // build plugins) automatically upload source maps to Temps during the build.
+        // This makes migration from Sentry zero-config — users don't need to change anything.
+        //
+        // Docker builds use networkmode "host" (BuildKit) so the container can reach the
+        // Temps server. Auth uses deployment tokens (dt_*) validated via the Sentry-compat API.
+        if let Some(api_url) = env_vars.get("TEMPS_API_URL").cloned() {
+            let sentry_url = api_url.trim_end_matches("/api").to_string();
+            env_vars
+                .entry("SENTRY_URL".to_string())
+                .or_insert(sentry_url);
+        }
+        if let Some(api_token) = env_vars.get("TEMPS_API_TOKEN").cloned() {
+            env_vars
+                .entry("SENTRY_AUTH_TOKEN".to_string())
+                .or_insert(api_token);
+        }
+        env_vars
+            .entry("SENTRY_ORG".to_string())
+            .or_insert_with(|| "default".to_string());
+        env_vars
+            .entry("SENTRY_PROJECT".to_string())
+            .or_insert_with(|| project.slug.clone());
+
         // Check if git info is available
         let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
 

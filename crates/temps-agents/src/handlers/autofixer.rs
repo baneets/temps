@@ -204,6 +204,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(add_context),
         )
         .route(
+            "/projects/{project_id}/autofixer/runs/{run_id}/re-analyze",
+            post(re_analyze),
+        )
+        .route(
             "/projects/{project_id}/autofixer/runs/{run_id}/fix",
             post(start_fix),
         )
@@ -601,6 +605,60 @@ async fn create_pr(
             branch_name: pr.head_branch,
         }),
     ))
+}
+
+/// Continue the conversation with user feedback.
+/// Uses the same Claude session (--continue) in the existing work directory.
+/// Requires phase == "analyzed".
+#[utoipa::path(
+    tag = "Autofixer",
+    post,
+    path = "/projects/{project_id}/autofixer/runs/{run_id}/re-analyze",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("run_id" = i32, Path, description = "Run ID"),
+    ),
+    responses(
+        (status = 202, description = "Conversation continued with feedback"),
+        (status = 400, description = "Run not in analyzed phase"),
+        (status = 404, description = "Run not found"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn re_analyze(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path((_project_id, run_id)): Path<(i32, i32)>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+
+    // Verify the run is in the right phase
+    let run = app_state
+        .run_service
+        .get_run(run_id)
+        .await
+        .map_err(Problem::from)?;
+
+    if run.phase.as_deref() != Some("analyzed") {
+        return Err(Problem::from(AgentError::Validation {
+            message: format!(
+                "Run {} cannot continue: expected phase 'analyzed', got '{}'",
+                run_id,
+                run.phase.as_deref().unwrap_or("none")
+            ),
+        }));
+    }
+
+    // Spawn conversation continuation in background (uses --continue, no re-clone)
+    let autofixer = app_state.autofixer_service.clone();
+    tokio::spawn(async move {
+        autofixer.continue_with_feedback(run_id).await;
+    });
+
+    Ok((StatusCode::ACCEPTED, Json(AutofixerRunResponse::from(run))))
 }
 
 /// Cancel an autofixer run and clean up the work directory.

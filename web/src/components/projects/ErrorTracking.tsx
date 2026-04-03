@@ -44,8 +44,10 @@ import {
   Activity,
   AlertTriangle,
   Bug,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
+  EyeOff,
   Info,
   Plus,
   RefreshCw,
@@ -215,13 +217,17 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
     switch (level?.toLowerCase()) {
       case 'error':
       case 'fatal':
-        return 'text-red-600 bg-red-100 dark:bg-red-900/20'
+      case 'referenceerror':
+      case 'typeerror':
+      case 'syntaxerror':
+      case 'rangeerror':
+        return 'text-red-400 bg-red-500/15 border border-red-500/20'
       case 'warning':
-        return 'text-yellow-600 bg-yellow-100 dark:bg-yellow-900/20'
+        return 'text-yellow-400 bg-yellow-500/15 border border-yellow-500/20'
       case 'info':
-        return 'text-blue-600 bg-blue-100 dark:bg-blue-900/20'
+        return 'text-blue-400 bg-blue-500/15 border border-blue-500/20'
       default:
-        return 'text-gray-600 bg-gray-100 dark:bg-gray-900/20'
+        return 'text-red-400 bg-red-500/15 border border-red-500/20'
     }
   }
   const handleCreateOrRegenerateDsn = () => {
@@ -575,63 +581,71 @@ After setup, trigger a test error and check the Temps error tracking dashboard t
                     </div>
                   ) : errorGroupsResponse?.pagination?.total_count &&
                     errorGroupsResponse?.pagination?.total_count > 0 ? (
-                    <div className="space-y-4">
-                      {errorGroupsResponse?.data?.map((group) => (
+                    <div className="space-y-2">
+                      {errorGroupsResponse?.data?.map((group) => {
+                        const isSettled = group.status === 'resolved' || group.status === 'ignored'
+                        const messageDiffers = group.message_template && group.message_template !== group.title
+                        return (
                         <div
                           key={group.id}
-                          className="flex items-start space-x-4 rounded-lg border p-4 hover:bg-muted/50 cursor-pointer transition-colors"
+                          className={cn(
+                            "flex items-center gap-4 rounded-lg border p-4 hover:bg-muted/50 cursor-pointer transition-colors",
+                            isSettled && "opacity-60"
+                          )}
                           onClick={() =>
                             handleErrorGroupClick(group.id.toString())
                           }
                         >
-                          <div className="flex-1 space-y-2">
-                            <div className="flex items-start justify-between">
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <Badge
-                                    className={cn(
-                                      getSeverityColor(
-                                        group.error_type || 'error'
-                                      )
-                                    )}
-                                  >
-                                    {group.error_type || 'error'}
-                                  </Badge>
-                                  <span className="font-medium">
-                                    {group.title}
-                                  </span>
-                                </div>
-                                {group.message_template && (
-                                  <p className="text-sm text-muted-foreground line-clamp-2">
-                                    {group.message_template}
-                                  </p>
+                          {/* Left: occurrence count pill */}
+                          <div className="flex flex-col items-center gap-0.5 flex-shrink-0 min-w-[48px]">
+                            <span className="text-lg font-semibold leading-none">{group.total_count}</span>
+                            <span className="text-[10px] text-muted-foreground leading-none">events</span>
+                          </div>
+
+                          {/* Center: error info */}
+                          <div className="flex-1 min-w-0 space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  'text-xs font-medium',
+                                  getSeverityColor(group.error_type || 'error')
                                 )}
-                              </div>
-                              <ChevronRight className="h-5 w-5 text-muted-foreground" />
-                            </div>
-                            <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                              <span className="flex items-center gap-1">
-                                <Bug className="h-3 w-3" />
-                                {group.total_count} occurrences
-                              </span>
-                              <span className="flex items-center gap-1">
-                                <Activity className="h-3 w-3" />
-                                {group.status}
-                              </span>
-                              {group.first_seen && (
-                                <span>
-                                  First seen <TimeAgo date={group.first_seen} />
+                              >
+                                {group.error_type || 'error'}
+                              </Badge>
+                              {group.status === 'resolved' && (
+                                <span className="flex items-center gap-1 text-[10px] text-green-500">
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  Resolved
                                 </span>
                               )}
-                              {group.last_seen && (
-                                <span>
-                                  Last seen <TimeAgo date={group.last_seen} />
+                              {group.status === 'ignored' && (
+                                <span className="flex items-center gap-1 text-[10px] text-yellow-500">
+                                  <EyeOff className="h-3 w-3" />
+                                  Ignored
                                 </span>
+                              )}
+                            </div>
+                            <p className="font-medium text-sm leading-snug truncate">{group.title}</p>
+                            {messageDiffers && (
+                              <p className="text-xs text-muted-foreground truncate">{group.message_template}</p>
+                            )}
+                            <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                              {group.last_seen && (
+                                <span><TimeAgo date={group.last_seen} /></span>
+                              )}
+                              {group.first_seen && group.last_seen && group.first_seen !== group.last_seen && (
+                                <span className="hidden sm:inline">First <TimeAgo date={group.first_seen} /></span>
                               )}
                             </div>
                           </div>
+
+                          {/* Right: chevron */}
+                          <ChevronRight className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                         </div>
-                      ))}
+                        )
+                      })}
                     </div>
                   ) : (
                     <EmptyState

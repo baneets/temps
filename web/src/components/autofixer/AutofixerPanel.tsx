@@ -8,7 +8,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { AutopilotStatusBadge } from '@/components/agents/AutopilotStatusBadge'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -20,7 +19,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   startAnalysis,
@@ -29,10 +28,10 @@ import {
   startFix,
   createPR,
   cancelRun,
+  reAnalyze,
   getLatestRunForError,
   type AutofixerRunLog,
 } from './api'
-import { cn } from '@/lib/utils'
 
 interface AutofixerPanelProps {
   project: ProjectResponse
@@ -51,6 +50,12 @@ function parseConversationEvents(logs: AutofixerRunLog[]) {
   }> = []
 
   for (const log of logs) {
+    // User messages appear as their own bubble
+    if (log.level === 'user_message') {
+      events.push({ type: 'user_message', content: log.message })
+      continue
+    }
+
     if (log.level !== 'ai_event') continue
     const trimmed = log.message.trim()
     if (!trimmed.startsWith('{')) continue
@@ -85,7 +90,6 @@ function renderMarkdown(text: string) {
   const elements: React.ReactNode[] = []
   let inCodeBlock = false
   let codeLines: string[] = []
-  let codeLang = ''
 
   lines.forEach((line, idx) => {
     if (line.startsWith('```')) {
@@ -99,7 +103,6 @@ function renderMarkdown(text: string) {
         inCodeBlock = false
       } else {
         inCodeBlock = true
-        codeLang = line.slice(3).trim()
       }
       return
     }
@@ -178,7 +181,6 @@ function renderInline(text: string): React.ReactNode {
 
 export function AutofixerPanel({ project }: AutofixerPanelProps) {
   const { errorGroupId } = useParams<{ errorGroupId: string }>()
-  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [runId, setRunId] = useState<number | null>(null)
   const [contextInput, setContextInput] = useState('')
@@ -284,13 +286,31 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
     }
   }, [streamLogs.length, isStreaming])
 
-  // Merge logs
+  // Merge logs — deduplicate optimistic user messages with real server logs
   const allLogs = (() => {
     const merged = [...fetchedLogs]
     for (const sl of streamLogs) {
-      if (!merged.some((l) => l.id === sl.id)) merged.push(sl)
+      // Skip if already in fetched logs by ID
+      if (sl.id > 0 && merged.some((l) => l.id === sl.id)) continue
+      // For optimistic user messages (negative ID), skip if a real server log
+      // with the same message already exists
+      if (sl.id < 0 && sl.level === 'user_message') {
+        const hasDuplicate = merged.some(
+          (l) => l.level === 'user_message' && l.message === sl.message
+        )
+        if (hasDuplicate) continue
+      }
+      merged.push(sl)
     }
-    return merged.sort((a, b) => a.id - b.id)
+    // Sort: negative IDs (optimistic) go after positive IDs with the same timestamp
+    return merged.sort((a, b) => {
+      if (a.id > 0 && b.id > 0) return a.id - b.id
+      if (a.id < 0 && b.id < 0) return a.id - b.id // both negative, keep insertion order
+      // Place optimistic messages (negative) at the end
+      if (a.id < 0) return 1
+      if (b.id < 0) return -1
+      return 0
+    })
   })()
 
   const conversationEvents = parseConversationEvents(allLogs)
@@ -309,19 +329,46 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
   // Create PR mutation
   const prMutation = useMutation({
     mutationFn: () => createPR(project.id, runId!),
-    onSuccess: (updatedRun) => {
+    onSuccess: () => {
       toast.success('PR created!')
       queryClient.invalidateQueries({ queryKey: ['autofixer-run', project.id, runId] })
     },
     onError: (e: Error) => toast.error(e.message),
   })
 
-  // Add context
+  const [isSendingContext, setIsSendingContext] = useState(false)
+
+  // Send context — show message immediately, save to backend, and auto-trigger re-analysis if in "analyzed" phase
   const sendContext = async () => {
-    if (!contextInput.trim() || !runId) return
-    await addContext(project.id, runId, contextInput)
+    if (!contextInput.trim() || !runId || isSendingContext) return
+    const message = contextInput.trim()
     setContextInput('')
-    toast.success('Context added')
+    setIsSendingContext(true)
+
+    // Optimistic: show user message in the stream immediately
+    const optimisticLog: AutofixerRunLog = {
+      id: -Date.now(), // negative temp id to avoid collision with real DB ids
+      run_id: runId,
+      level: 'user_message',
+      message,
+      metadata: null,
+      created_at: new Date().toISOString(),
+    }
+    setStreamLogs((prev) => [...prev, optimisticLog])
+
+    try {
+      await addContext(project.id, runId, message)
+
+      // If we're in the "analyzed" phase, automatically trigger re-analysis
+      if (run?.phase === 'analyzed') {
+        await reAnalyze(project.id, runId)
+        queryClient.invalidateQueries({ queryKey: ['autofixer-run', project.id, runId] })
+      }
+    } catch {
+      toast.error('Failed to send message')
+    } finally {
+      setIsSendingContext(false)
+    }
   }
 
   // Error detail sidebar (shared between initial and active states)
@@ -338,7 +385,15 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
               {eg.total_count || 0} occurrences
             </span>
           </div>
-          <CardTitle className="text-base leading-snug">{eg.title}</CardTitle>
+          <CardTitle className="text-base leading-snug">
+            <Link
+              to={`/projects/${project.slug}/errors/${errorGroupId}`}
+              className="hover:underline inline-flex items-center gap-1.5 group"
+            >
+              {eg.title}
+              <ExternalLink className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+            </Link>
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           {eg.first_seen && (
@@ -489,7 +544,7 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
           )}
         </div>
         <div className="flex gap-2">
-          {!['completed', 'failed', 'cancelled'].includes(run.status) && (
+          {!['completed', 'failed', 'cancelled', 'analyzed', 'fix_ready'].includes(run.status) && (
             <Button
               variant="outline"
               size="sm"
@@ -540,7 +595,7 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
         }>
           <CardContent className="p-4 flex items-center justify-between gap-4">
             <div className="text-sm">
-              {phase === 'analyzed' && 'Analysis complete. Review the findings, then generate a fix.'}
+              {phase === 'analyzed' && 'Analysis complete. Send feedback below to refine, or generate a fix.'}
               {phase === 'fix_ready' && 'Fix is ready. Review the changes, then create a pull request.'}
               {phase === 'completed' && run.pr_url && (
                 <span className="flex items-center gap-2">
@@ -555,10 +610,20 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
                   </a>
                 </span>
               )}
-              {phase === 'completed' && !run.pr_url && 'Completed.'}
+              {phase === 'completed' && !run.pr_url && (
+                <span>
+                  Completed
+                  {run.completed_at && (
+                    <span className="text-muted-foreground"> — {new Date(run.completed_at).toLocaleString()}</span>
+                  )}
+                </span>
+              )}
               {(run.status === 'failed' || run.status === 'cancelled') && (
                 <span className="text-red-400">
-                  {run.status === 'failed' ? 'Run failed.' : 'Run cancelled.'}
+                  {run.status === 'failed' ? 'Run failed' : 'Run cancelled'}
+                  {run.completed_at && (
+                    <span className="text-red-400/70"> — {new Date(run.completed_at).toLocaleString()}</span>
+                  )}
                 </span>
               )}
             </div>
@@ -652,6 +717,16 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
           <CardContent>
             <div ref={scrollRef} className="space-y-3 max-h-[500px] overflow-y-auto">
               {conversationEvents.map((event, i) => {
+                if (event.type === 'user_message') {
+                  return (
+                    <div key={i} className="flex justify-end">
+                      <div className="max-w-[80%] rounded-lg bg-primary/10 border border-primary/20 px-3 py-2">
+                        <p className="text-xs font-medium text-primary/70 mb-1">You</p>
+                        <p className="text-sm">{event.content}</p>
+                      </div>
+                    </div>
+                  )
+                }
                 if (event.type === 'text') {
                   return (
                     <div key={i} className="text-sm leading-relaxed">
@@ -715,11 +790,15 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
         </Card>
       )}
 
-      {/* Context input — let user provide hints to the AI */}
+      {/* Chat input — during analysis: adds context; during review: sends feedback and re-analyzes */}
       {(run.phase === 'analyzing' || run.phase === 'analyzed') && (
         <div className="flex gap-2 items-end">
           <textarea
-            placeholder="Help the AI: e.g., 'This started after we added the new auth flow' or 'Check the fetchUsers function'"
+            placeholder={
+              run.phase === 'analyzed'
+                ? "Send feedback to re-analyze: e.g., 'Check the auth middleware' or 'This is not a test bug, fix it anyway'"
+                : "Add context: e.g., 'This started after the auth migration'"
+            }
             value={contextInput}
             onChange={(e) => {
               setContextInput(e.target.value)
@@ -734,9 +813,19 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
             }}
             rows={1}
             className="flex-1 rounded-md border border-[var(--border)] bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-[var(--primary)] resize-none overflow-hidden"
+            disabled={isSendingContext}
           />
-          <Button variant="outline" size="icon" onClick={sendContext}>
-            <Send className="h-4 w-4" />
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={sendContext}
+            disabled={isSendingContext || !contextInput.trim()}
+          >
+            {isSendingContext ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
           </Button>
         </div>
       )}

@@ -34,6 +34,9 @@ impl AiCliProvider for ArcAiCliProvider {
     async fn run(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
         self.0.run(config).await
     }
+    async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
+        self.0.continue_conversation(config).await
+    }
 }
 use crate::services::config_service::AgentConfigService;
 use crate::services::prompt_builder::PromptBuilder;
@@ -832,6 +835,12 @@ mod tests {
                 ),
             })
         }
+        async fn continue_conversation(
+            &self,
+            config: AiRunConfig,
+        ) -> Result<AiRunResult, AgentError> {
+            self.run(config).await
+        }
     }
 
     /// Fake AI CLI that returns an error.
@@ -854,6 +863,12 @@ mod tests {
                 exit_code: 1,
                 stderr: "Simulated failure".into(),
             })
+        }
+        async fn continue_conversation(
+            &self,
+            config: AiRunConfig,
+        ) -> Result<AiRunResult, AgentError> {
+            self.run(config).await
         }
     }
 
@@ -880,6 +895,12 @@ mod tests {
                 model: Some("fake-model".into()),
                 changed_files: Some(vec![]),
             })
+        }
+        async fn continue_conversation(
+            &self,
+            config: AiRunConfig,
+        ) -> Result<AiRunResult, AgentError> {
+            self.run(config).await
         }
     }
 

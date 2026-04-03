@@ -273,9 +273,20 @@ impl ErrorTrackingService {
         page: Option<u64>,
         page_size: Option<u64>,
     ) -> Result<(Vec<ErrorEventDomain>, u64), ErrorTrackingError> {
-        self.crud
+        let (mut events, total) = self
+            .crud
             .list_error_events(group_id, project_id, page, page_size)
-            .await
+            .await?;
+
+        if let Some(sm_service) = self.source_map_service.get() {
+            for event in &mut events {
+                if let Some(data) = &mut event.data {
+                    sm_service.symbolicate_stored_event(project_id, data).await;
+                }
+            }
+        }
+
+        Ok((events, total))
     }
 
     /// Get error statistics (delegates to analytics service)

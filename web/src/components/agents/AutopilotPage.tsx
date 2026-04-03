@@ -214,10 +214,8 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Status</TableHead>
+                  <TableHead>Agent</TableHead>
                   <TableHead>Trigger</TableHead>
-                  <TableHead className="hidden md:table-cell">
-                    Error ID
-                  </TableHead>
                   <TableHead className="hidden md:table-cell">PR</TableHead>
                   <TableHead className="hidden md:table-cell">Files</TableHead>
                   <TableHead className="hidden md:table-cell">Cost</TableHead>
@@ -229,16 +227,22 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
                   <TableRow
                     key={run.id}
                     className="cursor-pointer hover:bg-muted/50"
-                    onClick={() => navigate(`${run.id}`)}
+                    onClick={() => {
+                      if (run.trigger_type === 'autofixer' && run.trigger_source_id) {
+                        navigate(`/projects/${project.slug}/errors/${run.trigger_source_id}/autofix`)
+                      } else {
+                        navigate(`${run.id}`)
+                      }
+                    }}
                   >
                     <TableCell>
                       <AutopilotStatusBadge status={run.status} />
                     </TableCell>
                     <TableCell className="text-sm">
-                      {run.trigger_type}
+                      {run.agent_name || (run.trigger_type === 'autofixer' ? 'Autofix' : '-')}
                     </TableCell>
-                    <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
-                      {run.trigger_source_id ?? '-'}
+                    <TableCell className="text-sm text-muted-foreground">
+                      {run.trigger_type === 'autofixer' ? 'Autofix' : run.trigger_type}
                     </TableCell>
                     <TableCell className="hidden md:table-cell text-sm">
                       {run.pr_number ? `#${run.pr_number}` : '-'}

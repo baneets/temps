@@ -195,6 +195,95 @@ impl AiCliProvider for ClaudeCliProvider {
             changed_files: None,
         })
     }
+
+    async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut cmd = Command::new("claude");
+        cmd.arg("--print")
+            .arg("--continue") // Continue the most recent conversation in this directory
+            .arg(&config.prompt)
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--max-turns")
+            .arg(config.max_turns.to_string())
+            .arg("--dangerously-skip-permissions")
+            .arg("--verbose")
+            .current_dir(&config.work_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if !config.api_key.is_empty() {
+            cmd.env("ANTHROPIC_API_KEY", &config.api_key);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                AgentError::AiCliNotInstalled {
+                    provider: self.name().to_string(),
+                }
+            } else {
+                AgentError::Io(e)
+            }
+        })?;
+
+        let stdout_handle = child.stdout.take().expect("stdout was piped");
+        let on_event = config.on_event.clone();
+
+        let stream_task = tokio::spawn(async move {
+            let reader = BufReader::new(stdout_handle);
+            let mut lines = reader.lines();
+            let mut all_output = String::new();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                all_output.push_str(&line);
+                all_output.push('\n');
+
+                if let Some(ref cb) = on_event {
+                    cb(line).await;
+                }
+            }
+
+            all_output
+        });
+
+        let wait_result = tokio::time::timeout(config.timeout, child.wait()).await;
+
+        let status = match wait_result {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(AgentError::Io(e)),
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(AgentError::AiCliTimeout {
+                    provider: self.name().to_string(),
+                    timeout_secs: config.timeout.as_secs(),
+                });
+            }
+        };
+
+        let stdout = stream_task.await.unwrap_or_default();
+        let exit_code = status.code().unwrap_or(-1);
+
+        if !status.success() {
+            let stderr = String::new();
+            return Err(AgentError::AiCliFailed {
+                provider: self.name().to_string(),
+                exit_code,
+                stderr,
+            });
+        }
+
+        let (tokens_input, tokens_output, model) = parse_claude_output(&stdout);
+
+        Ok(AiRunResult {
+            output: stdout,
+            exit_code,
+            tokens_input,
+            tokens_output,
+            model,
+            changed_files: None,
+        })
+    }
 }
 
 /// Parse Claude CLI JSON output for token usage and model information.

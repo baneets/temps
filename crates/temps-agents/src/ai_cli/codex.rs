@@ -132,6 +132,12 @@ impl AiCliProvider for CodexCliProvider {
             changed_files: None,
         })
     }
+
+    async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
+        // Codex CLI doesn't have a --continue flag, so just run a new session
+        // in the same work directory. The context is lost, but it's the best we can do.
+        self.run(config).await
+    }
 }
 
 /// Parse Codex CLI JSON output for token usage and model information.

@@ -6,6 +6,9 @@ import {
 import { AutofixButton } from '@/components/autofixer/AutofixButton'
 import { SentryEventDetail } from '@/components/error-tracking/SentryEventDetail'
 import { SentryListItem } from '@/components/error-tracking/SentryListItem'
+import {
+  updateErrorGroupMutation,
+} from '@/api/client/@tanstack/react-query.gen'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -24,9 +27,9 @@ import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { cn } from '@/lib/utils'
 import { extractSentryEvent } from '@/lib/sentry-utils'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
-import { AlertTriangle, ArrowLeft } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, Check, EyeOff, RotateCcw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
@@ -37,6 +40,7 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
   }>()
   const navigate = useNavigate()
   const { setBreadcrumbs } = useBreadcrumbs()
+  const queryClient = useQueryClient()
   const [selectedTab, setSelectedTab] = useState('overview')
 
   // Fetch error group details
@@ -58,6 +62,24 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
     }),
     enabled: !!errorGroupId,
   })
+
+  const statusMutation = useMutation({
+    ...updateErrorGroupMutation(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: getErrorGroupOptions({
+          path: { group_id: parseInt(errorGroupId!), project_id: project.id },
+        }).queryKey,
+      })
+    },
+  })
+
+  const updateStatus = (status: string) => {
+    statusMutation.mutate({
+      path: { group_id: parseInt(errorGroupId!), project_id: project.id },
+      body: { status },
+    })
+  }
 
   usePageTitle(errorGroup ? `Error: ${errorGroup.title}` : 'Error Details')
 
@@ -149,9 +171,49 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
               >
                 {errorGroup.error_type || 'error'}
               </Badge>
-              <h1 className="text-2xl font-semibold">{errorGroup.title}</h1>
+              <h1 className="text-2xl font-semibold flex-1">{errorGroup.title}</h1>
+              <div className="flex gap-2 flex-shrink-0">
+                {(errorGroup as any).status !== 'resolved' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateStatus('resolved')}
+                    disabled={statusMutation.isPending}
+                  >
+                    <Check className="h-4 w-4 mr-1.5" />
+                    Resolve
+                  </Button>
+                )}
+                {(errorGroup as any).status !== 'ignored' && (errorGroup as any).status !== 'resolved' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateStatus('ignored')}
+                    disabled={statusMutation.isPending}
+                  >
+                    <EyeOff className="h-4 w-4 mr-1.5" />
+                    Ignore
+                  </Button>
+                )}
+                {((errorGroup as any).status === 'resolved' || (errorGroup as any).status === 'ignored') && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => updateStatus('unresolved')}
+                    disabled={statusMutation.isPending}
+                  >
+                    <RotateCcw className="h-4 w-4 mr-1.5" />
+                    Unresolve
+                  </Button>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-6 text-sm text-muted-foreground">
+              {(errorGroup as any).status && (errorGroup as any).status !== 'unresolved' && (
+                <Badge variant={(errorGroup as any).status === 'resolved' ? 'default' : 'secondary'} className="text-xs">
+                  {(errorGroup as any).status}
+                </Badge>
+              )}
               <span>{errorGroup.total_count || 0} occurrences</span>
               <span>•</span>
               <span>
@@ -168,11 +230,13 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
 
       {/* Autofix section */}
       {project.git_provider_connection_id && (
-        <AutofixButton
-          projectId={project.id}
-          projectSlug={project.slug}
-          errorGroupId={parseInt(errorGroupId!)}
-        />
+        <div className="mb-6">
+          <AutofixButton
+            projectId={project.id}
+            projectSlug={project.slug}
+            errorGroupId={parseInt(errorGroupId!)}
+          />
+        </div>
       )}
 
       {/* Tabs for different views */}

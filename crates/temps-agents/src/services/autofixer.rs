@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 use temps_core::{EncryptionService, JobQueue};
 use temps_entities::{error_events, error_groups, projects};
+use temps_error_tracking::services::source_map_service::SourceMapService;
 use temps_git::services::git_provider_manager_trait::{GitProviderManagerTrait, PullRequest};
 
 use crate::ai_cli::{create_provider, AiRunConfig, OnEventCallback};
@@ -28,6 +29,7 @@ pub struct AutofixerService {
     #[allow(dead_code)]
     queue: Arc<dyn JobQueue>,
     run_service: Arc<AgentRunService>,
+    source_map_service: Option<Arc<SourceMapService>>,
 }
 
 impl AutofixerService {
@@ -37,6 +39,7 @@ impl AutofixerService {
         encryption_service: Arc<EncryptionService>,
         queue: Arc<dyn JobQueue>,
         run_service: Arc<AgentRunService>,
+        source_map_service: Option<Arc<SourceMapService>>,
     ) -> Self {
         Self {
             db,
@@ -44,6 +47,7 @@ impl AutofixerService {
             encryption_service,
             queue,
             run_service,
+            source_map_service,
         }
     }
 
@@ -359,12 +363,14 @@ impl AutofixerService {
             });
         }
 
-        let analysis = run.analysis.clone().ok_or(AgentError::Validation {
-            message: format!(
-                "Autofixer run {} has no analysis text; cannot generate fix",
-                run_id
-            ),
-        })?;
+        if run.analysis.is_none() {
+            return Err(AgentError::Validation {
+                message: format!(
+                    "Autofixer run {} has no analysis text; cannot generate fix",
+                    run_id
+                ),
+            });
+        }
 
         // Update status → "fixing"
         self.run_service
@@ -393,19 +399,14 @@ impl AutofixerService {
             .append_log(run_id, "info", "Generating fix based on analysis...", None)
             .await?;
 
-        // Build fix prompt
-        let prompt = format!(
-            "Based on your previous analysis of this error, now fix it.\n\n\
-            Your analysis was:\n\
-            {analysis}\n\n\
-            Instructions:\n\
+        // Build fix prompt — short since Claude already has the full analysis context
+        let prompt = "Now fix this error. Instructions:\n\
             1. Apply the minimal fix required\n\
             2. Write a test that would have caught this bug\n\
             3. Run existing tests if they exist\n\
             4. Commit with message: fix: <description>\n\n\
-            Do NOT change unrelated files.",
-            analysis = analysis,
-        );
+            Do NOT change unrelated files."
+            .to_string();
 
         // Resolve AI CLI provider
         let provider =
@@ -433,7 +434,12 @@ impl AutofixerService {
         });
 
         self.run_service
-            .append_log(run_id, "info", "Running Claude to generate fix...", None)
+            .append_log(
+                run_id,
+                "info",
+                "Continuing conversation to generate fix...",
+                None,
+            )
             .await?;
 
         let ai_config = AiRunConfig {
@@ -445,7 +451,8 @@ impl AutofixerService {
             on_event: Some(on_event),
         };
 
-        let ai_result = provider.run(ai_config).await?;
+        // Use --continue to keep the full analysis context from the same session
+        let ai_result = provider.continue_conversation(ai_config).await?;
 
         self.run_service
             .append_log(
@@ -740,6 +747,7 @@ impl AutofixerService {
     // ── User context ───────────────────────────────────────────────────────────
 
     /// Append a user message to the run's `user_context` field.
+    /// Also appends a `user_message` log entry so the message appears in the conversation.
     pub async fn add_context(&self, run_id: i32, message: String) -> Result<(), AgentError> {
         let run = self.run_service.get_run(run_id).await?;
 
@@ -760,11 +768,184 @@ impl AutofixerService {
             )
             .await?;
 
+        // Log as user_message so it appears in the conversation stream
+        self.run_service
+            .append_log(run_id, "user_message", &message, None)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Continue the conversation with user feedback.
+    /// Uses `--continue` to resume the same Claude session in the existing work directory.
+    /// The run must be in "analyzed" phase. This does NOT re-clone the repo.
+    pub async fn continue_with_feedback(&self, run_id: i32) {
+        tracing::info!(
+            "Autofixer run {}: continuing conversation with user feedback",
+            run_id
+        );
+
+        match self.continue_with_feedback_inner(run_id).await {
+            Ok(()) => {
+                tracing::info!("Autofixer run {}: feedback conversation completed", run_id);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Autofixer run {}: feedback conversation failed: {}",
+                    run_id,
+                    e
+                );
+                let _ = self
+                    .run_service
+                    .update_status(
+                        run_id,
+                        UpdateRunFields {
+                            status: Some("failed".to_string()),
+                            phase: Some("failed".to_string()),
+                            error_message: Some(e.to_string()),
+                            completed_at: Some(Utc::now()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                let _ = self
+                    .run_service
+                    .append_log(
+                        run_id,
+                        "error",
+                        &format!("Conversation failed: {}", e),
+                        None,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    async fn continue_with_feedback_inner(&self, run_id: i32) -> Result<(), AgentError> {
+        let run = self.run_service.get_run(run_id).await?;
+
+        // Get the latest user context (the user's feedback message)
+        let user_context = run.user_context.clone().unwrap_or_default();
+        if user_context.is_empty() {
+            return Err(AgentError::Validation {
+                message: format!(
+                    "Autofixer run {} has no user context to continue with",
+                    run_id
+                ),
+            });
+        }
+
+        // Verify work directory still exists (no re-cloning needed)
+        let work_dir = Self::work_dir(run_id);
+        if !work_dir.exists() {
+            return Err(AgentError::Validation {
+                message: format!(
+                    "Autofixer run {} work directory {:?} no longer exists. \
+                     The server may have been restarted. Please start a new analysis.",
+                    run_id, work_dir
+                ),
+            });
+        }
+
+        // Update status → "analyzing" (so SSE stream reconnects)
+        self.run_service
+            .update_status(
+                run_id,
+                UpdateRunFields {
+                    status: Some("analyzing".to_string()),
+                    phase: Some("analyzing".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        // Build the follow-up prompt from the latest user message
+        // Extract just the last message (after the last double newline separator)
+        let latest_message = user_context.rsplit("\n\n").next().unwrap_or(&user_context);
+
+        let prompt = latest_message.to_string();
+
+        // Resolve AI CLI provider
+        let provider =
+            create_provider("claude_cli").ok_or_else(|| AgentError::AiCliNotInstalled {
+                provider: "claude_cli".to_string(),
+            })?;
+
+        if !provider.check_installed().await {
+            return Err(AgentError::AiCliNotInstalled {
+                provider: "claude_cli".to_string(),
+            });
+        }
+
+        // Streaming callback
+        let run_service_for_stream = self.run_service.clone();
+        let on_event: OnEventCallback = Arc::new(move |line: String| {
+            let svc = run_service_for_stream.clone();
+            Box::pin(async move {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+                let _ = svc.append_log(run_id, "ai_event", trimmed, None).await;
+            })
+        });
+
+        let ai_config = AiRunConfig {
+            work_dir: work_dir.clone(),
+            prompt,
+            api_key: String::new(),
+            max_turns: 10,
+            timeout: Duration::from_secs(300),
+            on_event: Some(on_event),
+        };
+
+        // Use --continue to resume the same conversation
+        let ai_result = provider.continue_conversation(ai_config).await?;
+
+        // Extract the result text
+        let analysis_text = ai_result
+            .output
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    return None;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|v| {
+                        if v.get("type")?.as_str()? == "result" {
+                            v.get("result")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .next()
+            .unwrap_or_else(|| ai_result.output.clone());
+
+        // Save updated analysis and transition back to "analyzed"
+        self.run_service
+            .update_status(
+                run_id,
+                UpdateRunFields {
+                    status: Some("analyzed".to_string()),
+                    phase: Some("analyzed".to_string()),
+                    analysis: Some(analysis_text),
+                    ai_output: Some(ai_result.output),
+                    ai_model: ai_result.model,
+                    tokens_input: ai_result.tokens_input,
+                    tokens_output: ai_result.tokens_output,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
         self.run_service
             .append_log(
                 run_id,
                 "info",
-                &format!("User context added: {}", message),
+                "Analysis updated. Review the findings and click 'Generate Fix' to proceed.",
                 None,
             )
             .await?;
@@ -921,14 +1102,38 @@ impl AutofixerService {
             .map_err(AgentError::Database)?;
 
         let stack_trace = if let Some(event) = &latest_event {
-            if let Some(ref data_val) = event.data {
-                if let Some(frames) = data_val.get("stack_trace").and_then(|v| v.as_array()) {
+            // Symbolicate in-memory before reading frames so agent sees original file paths
+            let mut data_owned = event.data.clone();
+            if let Some(ref mut data_val) = data_owned {
+                if let Some(ref sm_service) = self.source_map_service {
+                    sm_service
+                        .symbolicate_stored_event(event.project_id, data_val)
+                        .await;
+                }
+            }
+            if let Some(ref data_val) = data_owned {
+                // Try Sentry envelope format: data["sentry"]["exception"]["values"][0]["stacktrace"]["frames"]
+                let sentry_frames = data_val
+                    .get("sentry")
+                    .and_then(|s| s.get("exception"))
+                    .and_then(|e| e.get("values"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|exc| exc.get("stacktrace"))
+                    .and_then(|st| st.get("frames"))
+                    .and_then(|f| f.as_array());
+
+                // Fallback: legacy data["stack_trace"] array
+                let legacy_frames = data_val.get("stack_trace").and_then(|v| v.as_array());
+
+                if let Some(frames) = sentry_frames.or(legacy_frames) {
                     frames
                         .iter()
+                        .rev() // most recent first
                         .map(|frame| {
+                            // Prefer symbolicated filename over minified abs_path
                             let file = frame
                                 .get("filename")
-                                .or_else(|| frame.get("abs_path"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("?");
                             let func = frame
@@ -940,7 +1145,12 @@ impl AutofixerService {
                                 .and_then(|v| v.as_i64())
                                 .map(|n| n.to_string())
                                 .unwrap_or_else(|| "?".to_string());
-                            format!("  at {} ({}:{})", func, file, lineno)
+                            let colno = frame
+                                .get("colno")
+                                .and_then(|v| v.as_i64())
+                                .map(|n| format!(":{}", n))
+                                .unwrap_or_default();
+                            format!("  at {} ({}:{}{})", func, file, lineno, colno)
                         })
                         .collect::<Vec<_>>()
                         .join("\n")

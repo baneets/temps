@@ -138,6 +138,9 @@ async fn trigger_agent(
         .map_err(Problem::from)?;
 
     // Spawn the executor in the background
+    // TODO: Manual triggers should use the two-phase interactive flow (analyze → review → fix)
+    // instead of autonomous execution. This requires unifying the agent executor with the
+    // autofixer's workflow engine. For now, manual triggers run autonomously.
     let executor = app_state.executor.clone();
     let run_id = run.id;
     tokio::spawn(async move {

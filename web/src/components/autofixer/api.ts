@@ -112,6 +112,16 @@ export async function getLatestRunForError(
   return match || null
 }
 
+export async function reAnalyze(projectId: number, runId: number): Promise<void> {
+  const response = await fetch(`/api/projects/${projectId}/autofixer/runs/${runId}/re-analyze`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(text || 'Failed to start re-analysis')
+  }
+}
+
 export async function cancelRun(projectId: number, runId: number): Promise<void> {
   await fetch(`/api/projects/${projectId}/autofixer/runs/${runId}/cancel`, {
     method: 'POST',

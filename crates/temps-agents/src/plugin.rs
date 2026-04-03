@@ -7,6 +7,7 @@ use temps_core::plugin::{
     PluginContext, PluginError, PluginRoutes, ServiceRegistrationContext, TempsPlugin,
 };
 use temps_core::{Job, JobQueue, JobReceiver};
+use temps_error_tracking::services::source_map_service::SourceMapService;
 use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_notifications::services::NotificationService;
 
@@ -17,6 +18,7 @@ use temps_deployments::jobs::configure_agents::{
 use crate::handlers::AppState;
 use crate::services::autofixer::AutofixerService;
 use crate::services::config_service::AgentConfigService;
+use crate::services::cron_scheduler::AgentCronScheduler;
 use crate::services::executor::AgentExecutor;
 use crate::services::run_service::AgentRunService;
 
@@ -91,6 +93,12 @@ impl AgentsPlugin {
                 .get("alarm")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            "schedule" => agent
+                .trigger_config
+                .get("schedule")
+                .and_then(|s| s.get("cron"))
+                .and_then(|v| v.as_str())
+                .is_some(),
             "manual" => true,
             _ => false,
         };
@@ -372,12 +380,14 @@ impl TempsPlugin for AgentsPlugin {
             ));
             context.register_service(executor.clone());
 
+            let source_map_service = context.get_service::<SourceMapService>();
             let autofixer_service = Arc::new(AutofixerService::new(
                 db,
                 git_provider_manager,
                 encryption_service,
                 queue.clone(),
                 run_service.clone(),
+                source_map_service,
             ));
             context.register_service(autofixer_service.clone());
 
@@ -395,6 +405,13 @@ impl TempsPlugin for AgentsPlugin {
                     config_service_for_jobs,
                 )
                 .await;
+            });
+
+            // Start the cron scheduler for agents with schedule triggers
+            let cron_scheduler = AgentCronScheduler::new(config_service.clone(), queue.clone());
+            tokio::spawn(async move {
+                tracing::debug!("Starting agent cron scheduler");
+                cron_scheduler.run().await;
             });
 
             // Store state for route configuration

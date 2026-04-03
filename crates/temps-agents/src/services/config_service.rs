@@ -89,6 +89,16 @@ impl AgentConfigService {
             .map_err(AgentError::Database)
     }
 
+    /// List all enabled agents across all projects.
+    /// Used by the cron scheduler to check schedules.
+    pub async fn list_all_enabled_agents(&self) -> Result<Vec<project_agents::Model>, AgentError> {
+        project_agents::Entity::find()
+            .filter(project_agents::Column::Enabled.eq(true))
+            .all(self.db.as_ref())
+            .await
+            .map_err(AgentError::Database)
+    }
+
     /// List enabled agents that match a trigger type for a project.
     /// Checks the `trigger_config` JSONB for matching trigger types.
     pub async fn list_agents_for_trigger(

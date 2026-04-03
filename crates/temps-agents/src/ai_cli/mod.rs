@@ -55,6 +55,9 @@ pub trait AiCliProvider: Send + Sync {
     async fn check_installed(&self) -> bool;
     async fn get_status(&self) -> AiCliStatus;
     async fn run(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError>;
+    /// Continue an existing conversation in the same work directory.
+    /// Uses `--continue` to resume the most recent session.
+    async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError>;
 }
 
 /// Create an AI CLI provider by name
