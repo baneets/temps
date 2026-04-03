@@ -1,7 +1,9 @@
 'use client'
 
 import { getEmailOptions } from '@/api/client/@tanstack/react-query.gen'
+import { client } from '@/api/client/client.gen'
 import { EmailResponse } from '@/api/client/types.gen'
+import { EmailEventTimeline } from '@/components/email/EmailEventTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -64,12 +66,11 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function HeadersDisplay({ headers }: { headers: Record<string, string> | null | undefined }) {
-  if (!headers) return null
+  if (!headers || Object.keys(headers).length === 0) {
+    return <p className="text-sm text-muted-foreground">No custom headers were set for this email.</p>
+  }
 
   const entries = Object.entries(headers)
-  if (entries.length === 0) {
-    return <p className="text-sm text-muted-foreground">No headers available</p>
-  }
 
   return (
     <div className="space-y-2">
@@ -186,6 +187,20 @@ function EmailDetailContent({ email }: { email: EmailResponse }) {
   const hasHtml = !!email.html_body
   const hasText = !!email.text_body
   const defaultTab = hasHtml ? 'preview' : hasText ? 'text' : 'details'
+
+  const { data: trackingLinks } = useQuery({
+    queryKey: ['email-tracking-links', email.id],
+    queryFn: async () => {
+      const res = await client.get<
+        { link_index: number; original_url: string; click_count: number }[]
+      >({
+        url: '/emails/{id}/tracking/links',
+        path: { id: email.id },
+      })
+      return res.data ?? []
+    },
+    enabled: !!(email as any).track_clicks,
+  })
 
   return (
     <div className="space-y-6">
@@ -373,8 +388,41 @@ function EmailDetailContent({ email }: { email: EmailResponse }) {
                 </>
               )}
             </div>
+
+            {/* Per-link click breakdown */}
+            {trackingLinks && trackingLinks.length > 0 && (
+              <div className="mt-4 border-t pt-4">
+                <p className="text-sm font-medium mb-2">Link Clicks</p>
+                <div className="space-y-2">
+                  {trackingLinks.map((link) => (
+                    <div
+                      key={link.link_index}
+                      className="flex items-center justify-between text-sm gap-4"
+                    >
+                      <a
+                        href={link.original_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-500 hover:underline truncate min-w-0 flex-1"
+                        title={link.original_url}
+                      >
+                        {link.original_url}
+                      </a>
+                      <Badge variant={link.click_count > 0 ? 'default' : 'secondary'} className="shrink-0">
+                        {link.click_count} {link.click_count === 1 ? 'click' : 'clicks'}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
+      )}
+
+      {/* Event Timeline */}
+      {(email.track_opens || email.track_clicks) && (
+        <EmailEventTimeline emailId={email.id} />
       )}
 
       {/* Email Content */}
@@ -535,7 +583,7 @@ export function EmailDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Email', href: '/settings/email' },
+      { label: 'Email', href: '/settings/email?tab=emails' },
       { label: email?.subject || 'Email Details' },
     ])
   }, [setBreadcrumbs, email?.subject])
@@ -545,7 +593,7 @@ export function EmailDetail() {
       <div className="container max-w-6xl mx-auto py-6 space-y-6">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/settings/email">
+            <Link to="/settings/email?tab=emails">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Emails
             </Link>
@@ -561,7 +609,7 @@ export function EmailDetail() {
       <div className="container max-w-6xl mx-auto py-6 space-y-6">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" asChild>
-            <Link to="/settings/email">
+            <Link to="/settings/email?tab=emails">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Emails
             </Link>
@@ -583,7 +631,7 @@ export function EmailDetail() {
     <div className="container max-w-6xl mx-auto py-6 space-y-6">
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="sm" asChild>
-          <Link to="/settings/email">
+          <Link to="/settings/email?tab=emails">
             <ArrowLeft className="h-4 w-4 mr-2" />
             Back to Emails
           </Link>

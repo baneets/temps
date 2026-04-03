@@ -22,6 +22,27 @@ use uuid::Uuid;
 
 use super::types::AppState;
 
+/// Extract IP and user agent from RequestMetadata extension (if available) or headers
+fn extract_metadata(
+    metadata: &Option<axum::Extension<RequestMetadata>>,
+    headers: &axum::http::HeaderMap,
+) -> (Option<String>, Option<String>) {
+    if let Some(axum::Extension(meta)) = metadata {
+        (Some(meta.ip_address.clone()), Some(meta.user_agent.clone()))
+    } else {
+        let ip = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(|s| s.trim().to_string());
+        let ua = headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        (ip, ua)
+    }
+}
+
 // 1x1 transparent GIF
 const TRACKING_PIXEL: &[u8] = &[
     0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0xff, 0xff, 0xff,
@@ -42,6 +63,8 @@ pub fn public_routes() -> Router<Arc<AppState>> {
 /// Configure authenticated tracking data routes
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/emails/events/stats", get(get_global_event_stats))
+        .route("/emails/events", get(get_global_events))
         .route("/emails/{id}/tracking", get(get_email_tracking))
         .route("/emails/{id}/tracking/events", get(get_email_events))
         .route("/emails/{id}/tracking/links", get(get_email_links))
@@ -66,7 +89,8 @@ pub fn routes() -> Router<Arc<AppState>> {
 pub async fn track_open(
     State(state): State<Arc<AppState>>,
     Path(email_id): Path<String>,
-    axum::Extension(metadata): axum::Extension<RequestMetadata>,
+    metadata: Option<axum::Extension<RequestMetadata>>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let email_id = match Uuid::parse_str(&email_id) {
         Ok(id) => id,
@@ -80,15 +104,9 @@ pub async fn track_open(
         }
     };
 
-    if let Err(e) = state
-        .tracking_service
-        .record_open(
-            email_id,
-            Some(metadata.ip_address.clone()),
-            Some(metadata.user_agent.clone()),
-        )
-        .await
-    {
+    let (ip, ua) = extract_metadata(&metadata, &headers);
+
+    if let Err(e) = state.tracking_service.record_open(email_id, ip, ua).await {
         warn!("Failed to record open event for email {}: {}", email_id, e);
     }
 
@@ -124,7 +142,8 @@ pub async fn track_open(
 pub async fn track_click(
     State(state): State<Arc<AppState>>,
     Path((email_id, link_index)): Path<(String, i32)>,
-    axum::Extension(metadata): axum::Extension<RequestMetadata>,
+    metadata: Option<axum::Extension<RequestMetadata>>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     let email_id = match Uuid::parse_str(&email_id) {
         Ok(id) => id,
@@ -133,14 +152,11 @@ pub async fn track_click(
         }
     };
 
+    let (ip, ua) = extract_metadata(&metadata, &headers);
+
     match state
         .tracking_service
-        .record_click(
-            email_id,
-            link_index,
-            Some(metadata.ip_address.clone()),
-            Some(metadata.user_agent.clone()),
-        )
+        .record_click(email_id, link_index, ip, ua)
         .await
     {
         Ok(redirect_url) => Redirect::temporary(&redirect_url).into_response(),
@@ -153,6 +169,140 @@ pub async fn track_click(
         }
     }
 }
+
+// ============================================================
+// GLOBAL TRACKING ENDPOINTS
+// ============================================================
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlobalEventStatsResponse {
+    pub delivered: u64,
+    pub opened: u64,
+    pub clicked: u64,
+    pub bounced: u64,
+    pub complained: u64,
+    pub open_rate: Option<f64>,
+    pub click_rate: Option<f64>,
+    pub bounce_rate: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PaginatedEventsResponse {
+    pub events: Vec<TrackingEventResponse>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GlobalEventsQuery {
+    pub event_type: Option<String>,
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+}
+
+/// GET /emails/events/stats
+#[utoipa::path(
+    tag = "Email Tracking",
+    get,
+    path = "/emails/events/stats",
+    responses(
+        (status = 200, description = "Global tracking statistics", body = GlobalEventStatsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_event_stats(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EmailsRead);
+
+    let stats = state
+        .tracking_service
+        .get_global_stats()
+        .await
+        .map_err(|e| {
+            error!("Failed to get global tracking stats: {}", e);
+            internal_server_error()
+                .detail("Failed to get tracking statistics")
+                .build()
+        })?;
+
+    Ok(Json(GlobalEventStatsResponse {
+        delivered: stats.delivered,
+        opened: stats.opened,
+        clicked: stats.clicked,
+        bounced: stats.bounced,
+        complained: stats.complained,
+        open_rate: stats.open_rate,
+        click_rate: stats.click_rate,
+        bounce_rate: stats.bounce_rate,
+    }))
+}
+
+/// GET /emails/events
+#[utoipa::path(
+    tag = "Email Tracking",
+    get,
+    path = "/emails/events",
+    params(
+        ("event_type" = Option<String>, Query, description = "Filter by event type (open, click)"),
+        ("page" = Option<u64>, Query, description = "Page number (default: 1)"),
+        ("page_size" = Option<u64>, Query, description = "Page size (default: 20, max: 100)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated tracking events", body = PaginatedEventsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_events(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<GlobalEventsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EmailsRead);
+
+    let page = query.page.unwrap_or(1);
+    let page_size = std::cmp::min(query.page_size.unwrap_or(20), 100);
+
+    let (events, total) = state
+        .tracking_service
+        .get_all_events(query.event_type.as_deref(), page, page_size)
+        .await
+        .map_err(|e| {
+            error!("Failed to get global events: {}", e);
+            internal_server_error()
+                .detail("Failed to get tracking events")
+                .build()
+        })?;
+
+    let response = PaginatedEventsResponse {
+        events: events
+            .into_iter()
+            .map(|e| TrackingEventResponse {
+                id: e.id,
+                email_id: e.email_id.to_string(),
+                event_type: e.event_type,
+                link_url: e.link_url,
+                link_index: e.link_index,
+                ip_address: e.ip_address,
+                user_agent: e.user_agent,
+                created_at: e.created_at.to_rfc3339(),
+            })
+            .collect(),
+        total,
+        page,
+        page_size,
+    };
+
+    Ok(Json(response))
+}
+
+// ============================================================
+// PER-EMAIL TRACKING ENDPOINTS
+// ============================================================
 
 /// Email tracking summary
 #[derive(Debug, Serialize, ToSchema)]
@@ -181,6 +331,7 @@ pub struct TrackedLinkResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct TrackingEventResponse {
     pub id: i64,
+    pub email_id: String,
     pub event_type: String,
     pub link_url: Option<String>,
     pub link_index: Option<i32>,
@@ -323,6 +474,7 @@ pub async fn get_email_events(
         .into_iter()
         .map(|e| TrackingEventResponse {
             id: e.id,
+            email_id: e.email_id.to_string(),
             event_type: e.event_type,
             link_url: e.link_url,
             link_index: e.link_index,
