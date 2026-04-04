@@ -52,6 +52,7 @@ export interface AgentRun {
   tokens_output: number
   estimated_cost_cents: number
   files_changed: number
+  analysis: string | null
   started_at: string | null
   completed_at: string | null
   created_at: string

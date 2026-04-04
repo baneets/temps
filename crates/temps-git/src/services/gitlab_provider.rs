@@ -1534,6 +1534,7 @@ impl GitProviderService for GitLabProvider {
             title: String,
             source_branch: String,
             target_branch: String,
+            sha: Option<String>,
         }
 
         let mr: GitLabMergeRequest = response.json().await.map_err(|e| {
@@ -1551,6 +1552,7 @@ impl GitProviderService for GitLabProvider {
             title: mr.title,
             head_branch: mr.source_branch,
             base_branch: mr.target_branch,
+            head_sha: mr.sha,
         })
     }
 }

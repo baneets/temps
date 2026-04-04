@@ -437,6 +437,72 @@ impl AgentExecutor {
             )
             .await?;
 
+        // Report deliverable: store the AI output as the report and complete.
+        // No branch, no PR, no deployment.
+        if config.deliverable == "report" {
+            // Extract the result text from stream-json output
+            let report_text = ai_result
+                .output
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if !trimmed.starts_with('{') {
+                        return None;
+                    }
+                    serde_json::from_str::<serde_json::Value>(trimmed)
+                        .ok()
+                        .and_then(|v| {
+                            if v.get("type")?.as_str()? == "result" {
+                                v.get("result")?.as_str().map(String::from)
+                            } else {
+                                None
+                            }
+                        })
+                })
+                .next()
+                .unwrap_or_else(|| ai_result.output.clone());
+
+            self.run_service
+                .update_status(
+                    run_id,
+                    UpdateRunFields {
+                        status: Some("completed".to_string()),
+                        analysis: Some(report_text.clone()),
+                        ai_output: Some(ai_result.output),
+                        ai_model: ai_result.model,
+                        tokens_input: ai_result.tokens_input,
+                        tokens_output: ai_result.tokens_output,
+                        completed_at: Some(Utc::now()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            self.run_service
+                .append_log(run_id, "info", "Report completed — no PR created.", None)
+                .await?;
+
+            // Notify user that the report is ready
+            let report_preview = if report_text.len() > 500 {
+                format!("{}...", &report_text[..500])
+            } else {
+                report_text
+            };
+            self.send_completion_notification(
+                run_id,
+                &config.name,
+                &project.name,
+                &format!(
+                    "Agent **{}** completed run #{} for **{}**.\n\n{}",
+                    config.name, run_id, project.name, report_preview
+                ),
+                &config.deliverable,
+            )
+            .await;
+
+            tracing::info!("Run {}: deliverable=report, completed without PR", run_id,);
+            return Ok(());
+        }
+
         // Step 14: Detect changes.
         // If the AI provider reported which files it changed, use that list.
         // Otherwise fall back to `git diff` (works when work_dir is a real git repo).
@@ -681,12 +747,15 @@ impl AgentExecutor {
         );
 
         // Step 21: Emit GitPushEvent to trigger preview deployment
+        // Use the actual commit SHA from the PR (not the branch name) so that
+        // SENTRY_RELEASE and other commit-based identifiers are valid.
+        let commit_ref = pr.head_sha.clone().unwrap_or_else(|| branch_name.clone());
         let push_job = Job::GitPushEvent(GitPushEventJob {
             owner: project.repo_owner.clone(),
             repo: project.repo_name.clone(),
             branch: Some(branch_name.clone()),
             tag: None,
-            commit: pr.head_branch.clone(),
+            commit: commit_ref,
             project_id: run.project_id,
         });
 
@@ -714,29 +783,17 @@ impl AgentExecutor {
             .await?;
 
         // Step 23: Send notification
-        let notification = Notification::new(
-            format!("Autopilot fixed: {} in {}", error_type, project.name),
-            format!(
-                "Autopilot run #{} created PR #{} to fix '{}'. Review and merge: {}",
-                run_id, pr.number, error_message, pr.url
+        self.send_completion_notification(
+            run_id,
+            &config.name,
+            &project.name,
+            &format!(
+                "Agent **{}** created PR #{} to fix '{}' in **{}**. Review and merge: {}",
+                config.name, pr.number, error_message, project.name, pr.url
             ),
+            &config.deliverable,
         )
-        .with_priority(NotificationPriority::Normal)
-        .with_metadata("run_id", run_id.to_string())
-        .with_metadata("project", project.name.clone())
-        .with_metadata("branch", branch_name);
-
-        if let Err(e) = self
-            .notification_service
-            .send_notification(notification)
-            .await
-        {
-            tracing::warn!(
-                "Run {}: failed to send completion notification: {}",
-                run_id,
-                e
-            );
-        }
+        .await;
 
         Ok(())
     }
@@ -815,6 +872,37 @@ impl AgentExecutor {
             stack_trace,
             None, // environment lookup would require joining environments table
         ))
+    }
+
+    /// Send a completion notification for any deliverable type.
+    async fn send_completion_notification(
+        &self,
+        run_id: i32,
+        agent_name: &str,
+        project_name: &str,
+        body: &str,
+        deliverable: &str,
+    ) {
+        let notification = Notification::new(
+            format!("{}: {} (run #{})", agent_name, project_name, run_id),
+            body.to_string(),
+        )
+        .with_priority(NotificationPriority::Normal)
+        .with_metadata("run_id", run_id.to_string())
+        .with_metadata("project", project_name.to_string())
+        .with_metadata("deliverable", deliverable.to_string());
+
+        if let Err(e) = self
+            .notification_service
+            .send_notification(notification)
+            .await
+        {
+            tracing::warn!(
+                "Run {}: failed to send completion notification: {}",
+                run_id,
+                e
+            );
+        }
     }
 }
 
@@ -1091,6 +1179,7 @@ mod tests {
                 title: pr_title.to_string(),
                 head_branch: branch.to_string(),
                 base_branch: base_branch.to_string(),
+                head_sha: Some("abc123def456".to_string()),
             })
         }
     }

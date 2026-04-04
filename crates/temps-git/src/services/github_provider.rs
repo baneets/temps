@@ -1890,6 +1890,7 @@ impl GitProviderService for GitHubProvider {
         struct PullRequestHead {
             #[serde(rename = "ref")]
             ref_name: String,
+            sha: Option<String>,
         }
 
         #[derive(Deserialize)]
@@ -1922,6 +1923,7 @@ impl GitProviderService for GitHubProvider {
             title: pr.title,
             head_branch: pr.head.ref_name,
             base_branch: pr.base.ref_name,
+            head_sha: pr.head.sha,
         })
     }
 }

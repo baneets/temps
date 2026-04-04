@@ -619,6 +619,20 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
         </Alert>
       )}
 
+      {/* Report / Analysis */}
+      {run.analysis && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Report</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm prose prose-invert max-w-none">
+              {renderMarkdown(run.analysis)}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* AI Result */}
       {run.ai_output && <AiOutputCard output={run.ai_output} />}
 

@@ -346,6 +346,8 @@ pub struct PullRequest {
     pub title: String,
     pub head_branch: String,
     pub base_branch: String,
+    /// The commit SHA at the head of the PR branch.
+    pub head_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

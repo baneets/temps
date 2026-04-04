@@ -46,6 +46,8 @@ pub struct AgentRunResponse {
     pub tokens_output: i32,
     pub estimated_cost_cents: i32,
     pub files_changed: i32,
+    /// Report / analysis text produced by the agent (used for report/notification deliverables).
+    pub analysis: Option<String>,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub created_at: String,
@@ -78,6 +80,7 @@ impl From<agent_runs::Model> for AgentRunResponse {
             tokens_output: model.tokens_output,
             estimated_cost_cents: model.estimated_cost_cents,
             files_changed: model.files_changed,
+            analysis: model.analysis,
             started_at: model.started_at.map(|t| t.to_rfc3339()),
             completed_at: model.completed_at.map(|t| t.to_rfc3339()),
             created_at: model.created_at.to_rfc3339(),
