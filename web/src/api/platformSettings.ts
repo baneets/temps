@@ -43,8 +43,10 @@ export interface DiskSpaceAlertSettings {
 
 export interface AgentSandboxSettings {
   enabled: boolean
+  image: string
   cpu_limit: number
   memory_limit_mb: number
+  network_mode: string
 }
 
 // Re-export the types from the API for consistency
@@ -121,8 +123,10 @@ export async function getPlatformSettings(): Promise<PlatformSettings> {
         },
         agent_sandbox: data.agent_sandbox || {
           enabled: false,
+          image: '',
           cpu_limit: 2.0,
           memory_limit_mb: 2048,
+          network_mode: 'full',
         },
         attack_mode: data.attack_mode || false,
       }
@@ -288,8 +292,10 @@ function getDefaultSettings(): PlatformSettings {
     },
     agent_sandbox: {
       enabled: false,
+      image: '',
       cpu_limit: 2.0,
       memory_limit_mb: 2048,
+      network_mode: 'full',
     },
     attack_mode: false,
   }

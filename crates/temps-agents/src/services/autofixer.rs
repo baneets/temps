@@ -163,8 +163,10 @@ impl AutofixerService {
         let sandbox_config = SandboxCreateConfig {
             run_id,
             host_work_dir: work_dir.clone(),
+            image: None,
             cpu_limit: None,
             memory_limit_mb: None,
+            network_mode: None,
             env_vars: std::collections::HashMap::new(),
             idle_timeout: Duration::from_secs(3600),
         };

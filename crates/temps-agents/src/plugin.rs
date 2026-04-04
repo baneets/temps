@@ -525,7 +525,7 @@ mod tests {
             cooldown_minutes: 60,
             branch_prefix: String::new(),
             deliverable: "pull_request".to_string(),
-            sandbox_enabled: false,
+            sandbox_enabled: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

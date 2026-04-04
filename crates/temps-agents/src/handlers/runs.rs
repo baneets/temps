@@ -227,7 +227,7 @@ async fn list_all_runs(
                 run,
                 agent.map(|a| a.slug.clone()),
                 agent.map(|a| a.name.clone()),
-                agent.map(|a| a.sandbox_enabled).unwrap_or(false),
+                agent.and_then(|a| a.sandbox_enabled).unwrap_or(false),
             )
         })
         .collect();
@@ -295,7 +295,7 @@ async fn list_agent_runs(
                 run,
                 Some(agent.slug.clone()),
                 Some(agent.name.clone()),
-                agent.sandbox_enabled,
+                agent.sandbox_enabled.unwrap_or(false),
             )
         })
         .collect();
@@ -349,7 +349,10 @@ async fn get_run_with_logs(
         run_with_logs.run,
         agent.as_ref().map(|a| a.slug.clone()),
         agent.as_ref().map(|a| a.name.clone()),
-        agent.as_ref().map(|a| a.sandbox_enabled).unwrap_or(false),
+        agent
+            .as_ref()
+            .and_then(|a| a.sandbox_enabled)
+            .unwrap_or(false),
     );
 
     Ok(Json(AgentRunWithLogsResponse {

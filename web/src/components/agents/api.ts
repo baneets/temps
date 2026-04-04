@@ -23,7 +23,7 @@ export interface Agent {
   cooldown_minutes: number
   branch_prefix: string
   deliverable: string
-  sandbox_enabled: boolean
+  sandbox_enabled: boolean | null
   created_at: string
   updated_at: string
 }

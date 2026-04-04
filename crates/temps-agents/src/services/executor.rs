@@ -63,6 +63,11 @@ impl AgentExecutor {
         }
     }
 
+    /// Access the sandbox registry (for status checks).
+    pub fn sandbox_registry(&self) -> &SandboxRegistry {
+        &self.sandbox_registry
+    }
+
     /// For testing: inject a custom AI CLI provider instead of resolving from config.
     pub fn with_ai_provider(mut self, provider: Arc<dyn AiCliProvider>) -> Self {
         self.ai_provider_override = Some(provider);
@@ -219,14 +224,20 @@ impl AgentExecutor {
             })
             .unwrap_or_default();
 
-        // Agent-level sandbox_enabled overrides global default
-        let use_sandbox = config.sandbox_enabled || global_sandbox.enabled;
+        // Per-agent overrides global: None = use global, Some(true/false) = explicit
+        let use_sandbox = config.sandbox_enabled.unwrap_or(global_sandbox.enabled);
         if use_sandbox {
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 host_work_dir: work_dir.clone(),
+                image: if global_sandbox.image.is_empty() {
+                    None
+                } else {
+                    Some(global_sandbox.image.clone())
+                },
                 cpu_limit: Some(global_sandbox.cpu_limit),
                 memory_limit_mb: Some(global_sandbox.memory_limit_mb),
+                network_mode: Some(global_sandbox.network_mode.clone()),
                 env_vars: std::collections::HashMap::new(),
                 idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
             };
@@ -1477,7 +1488,7 @@ mod tests {
             cooldown_minutes: 30,
             branch_prefix: "autopilot/".into(),
             deliverable: "pull_request".into(),
-            sandbox_enabled: false,
+            sandbox_enabled: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

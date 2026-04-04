@@ -74,20 +74,29 @@ pub struct AgentSandboxSettings {
     /// Whether sandbox is enabled globally for all agents by default.
     /// Individual agents can override this with their `sandbox_enabled` field.
     pub enabled: bool,
+    /// Docker image for sandbox containers (e.g. "node:20-slim", "python:3.12-slim", or a custom image).
+    /// Leave empty to use the built-in default image.
+    #[schema(example = "")]
+    pub image: String,
     /// CPU limit in cores for sandbox containers
     #[schema(example = 2.0)]
     pub cpu_limit: f64,
     /// Memory limit in MB for sandbox containers
     #[schema(example = 2048)]
     pub memory_limit_mb: u64,
+    /// Network access level: "full" (unrestricted), "restricted" (Temps network only), "none" (no network)
+    #[schema(example = "full")]
+    pub network_mode: String,
 }
 
 impl Default for AgentSandboxSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            image: String::new(),
             cpu_limit: 2.0,
             memory_limit_mb: 2048,
+            network_mode: "full".to_string(),
         }
     }
 }

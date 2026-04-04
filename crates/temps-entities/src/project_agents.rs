@@ -33,8 +33,9 @@ pub struct Model {
     pub branch_prefix: String,
     /// "pull_request", "commit", or "none"
     pub deliverable: String,
-    /// Whether to run this agent inside an isolated sandbox container
-    pub sandbox_enabled: bool,
+    /// Whether to run this agent inside an isolated sandbox container.
+    /// None = use global default, Some(true) = force on, Some(false) = force off.
+    pub sandbox_enabled: Option<bool>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

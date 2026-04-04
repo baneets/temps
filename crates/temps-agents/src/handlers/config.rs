@@ -200,7 +200,8 @@ pub struct AgentConfigResponse {
     pub cooldown_minutes: i32,
     pub branch_prefix: String,
     pub deliverable: String,
-    pub sandbox_enabled: bool,
+    /// None = use global sandbox setting, true = force on, false = force off
+    pub sandbox_enabled: Option<bool>,
     pub created_at: String,
     pub updated_at: String,
 }

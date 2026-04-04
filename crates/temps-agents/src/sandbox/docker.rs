@@ -210,10 +210,26 @@ impl SandboxProvider for DockerSandboxProvider {
             )
             .await;
 
+        // Use config overrides, fall back to provider defaults
+        let image = config
+            .image
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.config.image);
         let cpu_limit = config.cpu_limit.unwrap_or(self.config.default_cpu_limit);
         let memory_limit_mb = config
             .memory_limit_mb
             .unwrap_or(self.config.default_memory_limit_mb);
+        let network = config
+            .network_mode
+            .as_deref()
+            .unwrap_or(&self.config.network_mode);
+        // Map user-friendly names to Docker network modes
+        let docker_network = match network {
+            "none" => "none".to_string(),
+            "full" | "host" => "host".to_string(),
+            other => other.to_string(), // "restricted" uses the default bridge network
+        };
 
         let host_work_dir = config.host_work_dir.to_string_lossy().to_string();
 
@@ -234,7 +250,7 @@ impl SandboxProvider for DockerSandboxProvider {
 
         let host_config = bollard::models::HostConfig {
             binds: Some(binds),
-            network_mode: Some(self.config.network_mode.clone()),
+            network_mode: Some(docker_network),
             // Resource limits
             nano_cpus: Some((cpu_limit * 1_000_000_000.0) as i64),
             memory: Some(memory_limit_mb as i64 * 1024 * 1024),
@@ -254,7 +270,7 @@ impl SandboxProvider for DockerSandboxProvider {
         );
 
         let container_config = bollard::models::ContainerCreateBody {
-            image: Some(self.config.image.clone()),
+            image: Some(image.to_string()),
             // Keep the container alive — exec calls run commands inside it
             cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
             env: if env_vars.is_empty() {
@@ -523,6 +539,16 @@ impl SandboxProvider for DockerSandboxProvider {
 
     fn name(&self) -> &str {
         "docker"
+    }
+
+    async fn is_available(&self) -> bool {
+        self.docker.ping().await.is_ok()
+    }
+
+    async fn image_status(&self) -> Result<(bool, String), AgentError> {
+        let image_name = self.config.image.clone();
+        let ready = self.docker.inspect_image(&image_name).await.is_ok();
+        Ok((ready, image_name))
     }
 }
 

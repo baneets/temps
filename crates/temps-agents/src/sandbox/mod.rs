@@ -27,10 +27,14 @@ pub struct SandboxCreateConfig {
     pub run_id: i32,
     /// Path to the cloned repository on the host (for bind mount / upload)
     pub host_work_dir: PathBuf,
+    /// Custom Docker image override (empty = use provider default)
+    pub image: Option<String>,
     /// CPU limit in cores (e.g. 2.0)
     pub cpu_limit: Option<f64>,
     /// Memory limit in megabytes
     pub memory_limit_mb: Option<u64>,
+    /// Network access: "full", "restricted", "none"
+    pub network_mode: Option<String>,
     /// Environment variables to inject (ANTHROPIC_API_KEY, etc.)
     pub env_vars: HashMap<String, String>,
     /// Maximum time the sandbox should stay alive without activity
@@ -72,4 +76,11 @@ pub trait SandboxProvider: Send + Sync {
 
     /// Provider name for logging and error messages.
     fn name(&self) -> &str;
+
+    /// Check if the sandbox backend is available (e.g. Docker daemon reachable).
+    async fn is_available(&self) -> bool;
+
+    /// Check if the sandbox image is built/available.
+    /// Returns (is_ready, image_name).
+    async fn image_status(&self) -> Result<(bool, String), AgentError>;
 }

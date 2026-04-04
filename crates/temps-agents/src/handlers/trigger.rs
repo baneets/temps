@@ -67,6 +67,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/agents/cli-status",
             get(get_cli_status),
         )
+        .route(
+            "/projects/{project_id}/agents/sandbox-status",
+            get(get_sandbox_status),
+        )
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -173,7 +177,7 @@ async fn trigger_agent(
         run,
         Some(agent.slug),
         Some(agent.name),
-        agent.sandbox_enabled,
+        agent.sandbox_enabled.unwrap_or(false),
     );
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))
@@ -230,4 +234,49 @@ async fn get_cli_status(
     };
 
     Ok(Json(status))
+}
+
+// ── Sandbox Status ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SandboxStatusResponse {
+    docker_available: bool,
+    image_ready: bool,
+    image_name: String,
+    error: Option<String>,
+}
+
+async fn get_sandbox_status(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(_project_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsRead);
+
+    let sandbox_registry = &app_state.executor.sandbox_registry();
+    let provider = sandbox_registry.provider();
+
+    // Check Docker connectivity
+    let docker_available = provider.is_available().await;
+
+    // Check if sandbox image exists
+    let (image_ready, image_name, error) = if docker_available {
+        match provider.image_status().await {
+            Ok((ready, name)) => (ready, name, None),
+            Err(e) => (false, String::new(), Some(e.to_string())),
+        }
+    } else {
+        (
+            false,
+            String::new(),
+            Some("Docker is not available on this server".to_string()),
+        )
+    };
+
+    Ok(Json(SandboxStatusResponse {
+        docker_available,
+        image_ready,
+        image_name,
+        error,
+    }))
 }

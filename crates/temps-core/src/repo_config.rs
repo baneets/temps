@@ -141,8 +141,9 @@ pub struct AgentYamlConfig {
     pub deliverable: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// None = use global sandbox setting, Some(true) = force on, Some(false) = force off
     #[serde(default)]
-    pub sandbox: bool,
+    pub sandbox: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

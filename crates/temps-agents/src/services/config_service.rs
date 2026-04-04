@@ -263,7 +263,7 @@ impl AgentConfigService {
                 active.branch_prefix = Set(prefix);
             }
             if let Some(sandbox_enabled) = request.sandbox_enabled {
-                active.sandbox_enabled = Set(sandbox_enabled);
+                active.sandbox_enabled = Set(Some(sandbox_enabled));
             }
 
             let model = active
@@ -302,7 +302,7 @@ impl AgentConfigService {
                 deliverable: Set(request
                     .deliverable
                     .unwrap_or_else(|| "pull_request".to_string())),
-                sandbox_enabled: Set(request.sandbox_enabled.unwrap_or(false)),
+                sandbox_enabled: Set(request.sandbox_enabled),
                 ..Default::default()
             };
 
@@ -436,7 +436,7 @@ impl AgentConfigService {
             deliverable: Set(request
                 .deliverable
                 .unwrap_or_else(|| "pull_request".to_string())),
-            sandbox_enabled: Set(request.sandbox_enabled.unwrap_or(false)),
+            sandbox_enabled: Set(request.sandbox_enabled),
             ..Default::default()
         };
 
@@ -571,7 +571,7 @@ impl AgentConfigService {
             active.branch_prefix = Set(prefix);
         }
         if let Some(sandbox_enabled) = request.sandbox_enabled {
-            active.sandbox_enabled = Set(sandbox_enabled);
+            active.sandbox_enabled = Set(Some(sandbox_enabled));
         }
 
         let model = active
@@ -725,7 +725,7 @@ mod tests {
             cooldown_minutes: 60,
             branch_prefix: String::new(),
             deliverable: "pull_request".to_string(),
-            sandbox_enabled: false,
+            sandbox_enabled: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

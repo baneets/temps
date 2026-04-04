@@ -22,6 +22,11 @@ impl SandboxRegistry {
         }
     }
 
+    /// Get a reference to the underlying sandbox provider.
+    pub fn provider(&self) -> &dyn SandboxProvider {
+        self.provider.as_ref()
+    }
+
     /// Get an existing sandbox or create a new one for the given run.
     pub async fn get_or_create(
         &self,
@@ -162,8 +167,10 @@ mod tests {
         SandboxCreateConfig {
             run_id,
             host_work_dir: work_dir,
+            image: None,
             cpu_limit: None,
             memory_limit_mb: None,
+            network_mode: None,
             env_vars: HashMap::new(),
             idle_timeout: Duration::from_secs(3600),
         }

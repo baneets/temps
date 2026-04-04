@@ -55,7 +55,7 @@ export function AgentSettingsDialog({
   const [dailyBudgetCents, setDailyBudgetCents] = useState(agent?.daily_budget_cents ?? 500)
   const [cooldownMinutes, setCooldownMinutes] = useState(agent?.cooldown_minutes ?? 30)
   const [branchPrefix, setBranchPrefix] = useState(agent?.branch_prefix ?? 'agents/')
-  const [sandboxEnabled, setSandboxEnabled] = useState(agent?.sandbox_enabled ?? false)
+  const [sandboxEnabled, setSandboxEnabled] = useState<boolean | null>(agent?.sandbox_enabled ?? null)
 
   // Triggers
   const [triggerNewIssue, setTriggerNewIssue] = useState(
@@ -81,7 +81,7 @@ export function AgentSettingsDialog({
     setDailyBudgetCents(agent?.daily_budget_cents ?? 500)
     setCooldownMinutes(agent?.cooldown_minutes ?? 30)
     setBranchPrefix(agent?.branch_prefix ?? 'agents/')
-    setSandboxEnabled(agent?.sandbox_enabled ?? false)
+    setSandboxEnabled(agent?.sandbox_enabled ?? null)
     setTriggerNewIssue(agent?.trigger_config?.error?.new_issue ?? true)
     setTriggerRegression(agent?.trigger_config?.error?.regression ?? true)
     setTriggerManual(agent?.trigger_config?.manual ?? true)
@@ -133,7 +133,7 @@ export function AgentSettingsDialog({
         daily_budget_cents: dailyBudgetCents,
         cooldown_minutes: cooldownMinutes,
         branch_prefix: branchPrefix,
-        sandbox_enabled: sandboxEnabled,
+        sandbox_enabled: sandboxEnabled ?? undefined,
       })
     } else {
       if (!slug.trim()) {
@@ -157,7 +157,7 @@ export function AgentSettingsDialog({
         daily_budget_cents: dailyBudgetCents,
         cooldown_minutes: cooldownMinutes,
         branch_prefix: branchPrefix,
-        sandbox_enabled: sandboxEnabled,
+        sandbox_enabled: sandboxEnabled ?? undefined,
       })
     }
   }
@@ -343,21 +343,30 @@ export function AgentSettingsDialog({
           {/* Sandbox */}
           <div className="space-y-3">
             <h3 className="text-sm font-medium">Sandbox</h3>
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="sandbox" className="text-sm font-normal">
-                  Run in sandbox
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  Execute AI inside an isolated Docker container with resource
-                  limits and no host access.
-                </p>
-              </div>
-              <Switch
-                id="sandbox"
-                checked={sandboxEnabled}
-                onCheckedChange={setSandboxEnabled}
-              />
+            <div className="space-y-1.5">
+              <Label htmlFor="sandbox-mode" className="text-sm font-normal">
+                Isolation mode
+              </Label>
+              <Select
+                value={sandboxEnabled === null ? 'default' : sandboxEnabled ? 'on' : 'off'}
+                onValueChange={(value) => {
+                  setSandboxEnabled(
+                    value === 'default' ? null : value === 'on'
+                  )
+                }}
+              >
+                <SelectTrigger id="sandbox-mode" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">Use global setting</SelectItem>
+                  <SelectItem value="on">Always sandbox</SelectItem>
+                  <SelectItem value="off">Always host</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                "Use global setting" follows the sandbox default from Settings.
+              </p>
             </div>
           </div>
         </div>

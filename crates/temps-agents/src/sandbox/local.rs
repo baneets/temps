@@ -143,6 +143,14 @@ impl SandboxProvider for LocalSandboxProvider {
     fn name(&self) -> &str {
         "local"
     }
+
+    async fn is_available(&self) -> bool {
+        true // Local provider is always available
+    }
+
+    async fn image_status(&self) -> Result<(bool, String), AgentError> {
+        Ok((true, "local (no container)".to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -155,8 +163,10 @@ mod tests {
         SandboxCreateConfig {
             run_id,
             host_work_dir: work_dir,
+            image: None,
             cpu_limit: None,
             memory_limit_mb: None,
+            network_mode: None,
             env_vars: HashMap::new(),
             idle_timeout: Duration::from_secs(3600),
         }
