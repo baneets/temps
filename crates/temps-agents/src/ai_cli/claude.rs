@@ -135,6 +135,7 @@ impl AiCliProvider for ClaudeCliProvider {
 
         // Stream stdout line by line, calling on_event for each JSON line
         let stdout_handle = child.stdout.take().expect("stdout was piped");
+        let stderr_handle = child.stderr.take().expect("stderr was piped");
         let on_event = config.on_event.clone();
 
         let stream_task = tokio::spawn(async move {
@@ -155,6 +156,20 @@ impl AiCliProvider for ClaudeCliProvider {
             all_output
         });
 
+        // Capture stderr in parallel
+        let stderr_task = tokio::spawn(async move {
+            let reader = BufReader::new(stderr_handle);
+            let mut lines = reader.lines();
+            let mut all_stderr = String::new();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                all_stderr.push_str(&line);
+                all_stderr.push('\n');
+            }
+
+            all_stderr
+        });
+
         // Wait for process to finish with timeout
         let wait_result = tokio::time::timeout(config.timeout, child.wait()).await;
 
@@ -170,17 +185,23 @@ impl AiCliProvider for ClaudeCliProvider {
             }
         };
 
-        // Get the accumulated output from the stream task
+        // Get the accumulated output from both tasks
         let stdout = stream_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
         let exit_code = status.code().unwrap_or(-1);
 
         if !status.success() {
-            // Read stderr for error message
-            let stderr = String::new(); // stderr was already consumed
+            // Include both stderr and stdout in the error — Claude CLI sometimes
+            // prints errors to stdout in stream-json mode
+            let error_output = if stderr.trim().is_empty() {
+                stdout.clone()
+            } else {
+                stderr
+            };
             return Err(AgentError::AiCliFailed {
                 provider: self.name().to_string(),
                 exit_code,
-                stderr,
+                stderr: error_output,
             });
         }
 
@@ -228,6 +249,7 @@ impl AiCliProvider for ClaudeCliProvider {
         })?;
 
         let stdout_handle = child.stdout.take().expect("stdout was piped");
+        let stderr_handle = child.stderr.take().expect("stderr was piped");
         let on_event = config.on_event.clone();
 
         let stream_task = tokio::spawn(async move {
@@ -247,6 +269,19 @@ impl AiCliProvider for ClaudeCliProvider {
             all_output
         });
 
+        let stderr_task = tokio::spawn(async move {
+            let reader = BufReader::new(stderr_handle);
+            let mut lines = reader.lines();
+            let mut all_stderr = String::new();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                all_stderr.push_str(&line);
+                all_stderr.push('\n');
+            }
+
+            all_stderr
+        });
+
         let wait_result = tokio::time::timeout(config.timeout, child.wait()).await;
 
         let status = match wait_result {
@@ -262,14 +297,19 @@ impl AiCliProvider for ClaudeCliProvider {
         };
 
         let stdout = stream_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
         let exit_code = status.code().unwrap_or(-1);
 
         if !status.success() {
-            let stderr = String::new();
+            let error_output = if stderr.trim().is_empty() {
+                stdout.clone()
+            } else {
+                stderr
+            };
             return Err(AgentError::AiCliFailed {
                 provider: self.name().to_string(),
                 exit_code,
-                stderr,
+                stderr: error_output,
             });
         }
 
