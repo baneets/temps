@@ -368,13 +368,18 @@ impl EmailProvider {
             )
         };
 
-        // Escape HTML in message, preserve newlines
-        let message_html = notification
-            .message
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('\n', "<br>");
+        // If the message already contains HTML tags, use it directly.
+        // Otherwise escape plain text and convert newlines to <br>.
+        let message_html = if notification.message.contains("</") {
+            notification.message.clone()
+        } else {
+            notification
+                .message
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\n', "<br>")
+        };
 
         format!(
             r#"<!DOCTYPE html>

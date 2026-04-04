@@ -875,6 +875,7 @@ impl AgentExecutor {
     }
 
     /// Send a completion notification for any deliverable type.
+    /// The body is markdown and gets converted to email-safe HTML before sending.
     async fn send_completion_notification(
         &self,
         run_id: i32,
@@ -883,9 +884,10 @@ impl AgentExecutor {
         body: &str,
         deliverable: &str,
     ) {
+        let html_body = Self::markdown_to_email_html(body);
         let notification = Notification::new(
             format!("{}: {} (run #{})", agent_name, project_name, run_id),
-            body.to_string(),
+            html_body,
         )
         .with_priority(NotificationPriority::Normal)
         .with_metadata("run_id", run_id.to_string())
@@ -903,6 +905,209 @@ impl AgentExecutor {
                 e
             );
         }
+    }
+
+    /// Convert markdown to email-safe HTML with inline styles.
+    /// Email clients ignore `<style>` blocks, so every element needs inline styles.
+    fn markdown_to_email_html(text: &str) -> String {
+        use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+        use std::fmt::Write;
+
+        const FONT: &str = "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;";
+        const MONO: &str =
+            "font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;";
+
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+
+        let parser = Parser::new_ext(text, options);
+        let mut html = String::with_capacity(text.len() * 2);
+        let mut in_code_block = false;
+        let mut table_alignments: Vec<Alignment> = Vec::new();
+        let mut table_cell_index: usize = 0;
+        let mut in_table_head = false;
+
+        for event in parser {
+            match event {
+                Event::Start(tag) => match tag {
+                    Tag::Paragraph => {
+                        let _ = write!(html, r#"<p style="margin:8px 0;line-height:1.6;{FONT}">"#);
+                    }
+                    Tag::Heading { level, .. } => {
+                        let (size, color, margin) = match level {
+                            pulldown_cmark::HeadingLevel::H1 => ("20px", "#111827", "20px 0 8px"),
+                            pulldown_cmark::HeadingLevel::H2 => ("17px", "#1f2937", "18px 0 8px"),
+                            pulldown_cmark::HeadingLevel::H3 => ("15px", "#374151", "14px 0 6px"),
+                            _ => ("14px", "#374151", "12px 0 4px"),
+                        };
+                        let _ = write!(
+                            html,
+                            r#"<{level} style="margin:{margin};font-size:{size};font-weight:600;color:{color};{FONT}">"#
+                        );
+                    }
+                    Tag::BlockQuote(_) => {
+                        let _ = write!(
+                            html,
+                            r#"<blockquote style="margin:12px 0;padding:8px 16px;border-left:3px solid #d1d5db;color:#6b7280;">"#
+                        );
+                    }
+                    Tag::CodeBlock(_) => {
+                        in_code_block = true;
+                        let _ = write!(
+                            html,
+                            r#"<pre style="background:#1e293b;color:#e2e8f0;padding:12px 16px;border-radius:6px;overflow-x:auto;{MONO}font-size:13px;margin:12px 0;line-height:1.5;"><code>"#
+                        );
+                    }
+                    Tag::List(Some(start)) => {
+                        let _ = write!(
+                            html,
+                            r#"<ol start="{start}" style="margin:8px 0;padding-left:24px;{FONT}">"#
+                        );
+                    }
+                    Tag::List(None) => {
+                        let _ = write!(
+                            html,
+                            r#"<ul style="margin:8px 0;padding-left:24px;{FONT}">"#
+                        );
+                    }
+                    Tag::Item => {
+                        let _ = write!(html, r#"<li style="margin:4px 0;line-height:1.5;">"#);
+                    }
+                    Tag::Table(alignments) => {
+                        table_alignments = alignments;
+                        let _ = write!(
+                            html,
+                            r#"<table style="width:100%;border-collapse:collapse;margin:12px 0;{FONT}">"#
+                        );
+                    }
+                    Tag::TableHead => {
+                        in_table_head = true;
+                        table_cell_index = 0;
+                        html.push_str("<thead><tr>");
+                    }
+                    Tag::TableRow => {
+                        table_cell_index = 0;
+                        html.push_str("<tr>");
+                    }
+                    Tag::TableCell => {
+                        let align = table_alignments
+                            .get(table_cell_index)
+                            .copied()
+                            .unwrap_or(Alignment::None);
+                        let text_align = match align {
+                            Alignment::Left => "left",
+                            Alignment::Center => "center",
+                            Alignment::Right => "right",
+                            Alignment::None => "left",
+                        };
+                        if in_table_head {
+                            let _ = write!(
+                                html,
+                                r#"<th style="text-align:{text_align};padding:8px 12px;border:1px solid #d1d5db;background:#f3f4f6;font-size:13px;font-weight:600;{FONT}">"#
+                            );
+                        } else {
+                            let _ = write!(
+                                html,
+                                r#"<td style="text-align:{text_align};padding:8px 12px;border:1px solid #e5e7eb;font-size:13px;{FONT}">"#
+                            );
+                        }
+                    }
+                    Tag::Emphasis => html.push_str("<em>"),
+                    Tag::Strong => {
+                        let _ = write!(html, r#"<strong style="font-weight:600;">"#);
+                    }
+                    Tag::Strikethrough => html.push_str("<del>"),
+                    Tag::Link {
+                        dest_url, title, ..
+                    } => {
+                        let t = if title.is_empty() {
+                            String::new()
+                        } else {
+                            format!(r#" title="{title}""#)
+                        };
+                        let _ = write!(
+                            html,
+                            r#"<a href="{dest_url}"{t} style="color:#2563eb;text-decoration:underline;">"#
+                        );
+                    }
+                    Tag::Image {
+                        dest_url, title, ..
+                    } => {
+                        let t = if title.is_empty() {
+                            String::new()
+                        } else {
+                            format!(r#" title="{title}""#)
+                        };
+                        let _ = write!(
+                            html,
+                            r#"<img src="{dest_url}"{t} style="max-width:100%;height:auto;" alt=""#
+                        );
+                    }
+                    _ => {}
+                },
+                Event::End(tag_end) => match tag_end {
+                    TagEnd::Paragraph => html.push_str("</p>"),
+                    TagEnd::Heading(level) => {
+                        let _ = write!(html, "</{level}>");
+                    }
+                    TagEnd::BlockQuote(_) => html.push_str("</blockquote>"),
+                    TagEnd::CodeBlock => {
+                        in_code_block = false;
+                        html.push_str("</code></pre>");
+                    }
+                    TagEnd::List(ordered) => {
+                        html.push_str(if ordered { "</ol>" } else { "</ul>" });
+                    }
+                    TagEnd::Item => html.push_str("</li>"),
+                    TagEnd::Table => html.push_str("</tbody></table>"),
+                    TagEnd::TableHead => {
+                        in_table_head = false;
+                        html.push_str("</tr></thead><tbody>");
+                    }
+                    TagEnd::TableRow => html.push_str("</tr>"),
+                    TagEnd::TableCell => {
+                        html.push_str(if in_table_head { "</th>" } else { "</td>" });
+                        table_cell_index += 1;
+                    }
+                    TagEnd::Emphasis => html.push_str("</em>"),
+                    TagEnd::Strong => html.push_str("</strong>"),
+                    TagEnd::Strikethrough => html.push_str("</del>"),
+                    TagEnd::Link => html.push_str("</a>"),
+                    TagEnd::Image => html.push_str(r#"" />"#),
+                    _ => {}
+                },
+                Event::Text(t) => {
+                    let escaped = t
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    html.push_str(&escaped);
+                    let _ = in_code_block; // suppress unused warning
+                }
+                Event::Code(code) => {
+                    let escaped = code
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    let _ = write!(
+                        html,
+                        r#"<code style="background:#f3f4f6;padding:2px 5px;border-radius:3px;{MONO}font-size:13px;">{escaped}</code>"#
+                    );
+                }
+                Event::SoftBreak => html.push('\n'),
+                Event::HardBreak => html.push_str("<br>"),
+                Event::Rule => {
+                    html.push_str(
+                        r#"<hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0;">"#,
+                    );
+                }
+                Event::Html(raw) | Event::InlineHtml(raw) => html.push_str(&raw),
+                _ => {}
+            }
+        }
+
+        html
     }
 }
 
