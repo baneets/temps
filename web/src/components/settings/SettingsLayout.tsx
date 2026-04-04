@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
 import {
   Bell,
+  Bot,
   Boxes,
   ChevronLeft,
   Cloud,
@@ -57,6 +58,11 @@ const settingsNavGroups: SettingsNavGroup[] = [
       { title: 'Storage', url: '/settings/storage', icon: Database },
       { title: 'Email', url: '/settings/email', icon: Mail },
       { title: 'AI Gateway', url: '/settings/ai-gateway', icon: Sparkles },
+      {
+        title: 'Agent Sandbox',
+        url: '/settings/agent-sandbox',
+        icon: Bot,
+      },
       {
         title: 'Git Providers',
         url: '/settings/git-providers',

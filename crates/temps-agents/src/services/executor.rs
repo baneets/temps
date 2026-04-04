@@ -9,7 +9,7 @@ use tokio::process::Command;
 
 use temps_core::jobs::GitPushEventJob;
 use temps_core::{EncryptionService, Job, JobQueue};
-use temps_entities::{error_events, error_groups, projects};
+use temps_entities::{error_events, error_groups, projects, settings};
 use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_notifications::services::NotificationService;
 use temps_notifications::types::{Notification, NotificationPriority};
@@ -206,13 +206,27 @@ impl AgentExecutor {
             })?;
 
         // Step 6b: Create sandbox if enabled for this agent
-        let use_sandbox = config.sandbox_enabled;
+        // Load global sandbox settings for resource limits
+        let global_sandbox = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data.get("agent_sandbox").cloned().and_then(|v| {
+                    serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
+                })
+            })
+            .unwrap_or_default();
+
+        // Agent-level sandbox_enabled overrides global default
+        let use_sandbox = config.sandbox_enabled || global_sandbox.enabled;
         if use_sandbox {
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 host_work_dir: work_dir.clone(),
-                cpu_limit: None,
-                memory_limit_mb: None,
+                cpu_limit: Some(global_sandbox.cpu_limit),
+                memory_limit_mb: Some(global_sandbox.memory_limit_mb),
                 env_vars: std::collections::HashMap::new(),
                 idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
             };

@@ -44,9 +44,9 @@ pub use utils::*;
 // Re-export external dependencies
 pub use anyhow;
 pub use app_settings::{
-    AppSettings, ContainerLogSettings, DiskSpaceAlertSettings, DnsProviderSettings,
-    DockerRegistrySettings, LetsEncryptSettings, MultiNodeSettings, RateLimitSettings,
-    ScreenshotSettings, SecurityHeadersSettings,
+    AgentSandboxSettings, AppSettings, ContainerLogSettings, DiskSpaceAlertSettings,
+    DnsProviderSettings, DockerRegistrySettings, LetsEncryptSettings, MultiNodeSettings,
+    RateLimitSettings, ScreenshotSettings, SecurityHeadersSettings,
 };
 pub use async_trait;
 pub use chrono;

@@ -185,6 +185,11 @@ const AiGateway = lazy(() =>
     default: m.AiGatewayPage,
   }))
 )
+const AgentSandboxSettingsPage = lazy(() =>
+  import('./components/settings/AgentSandboxSettings').then((m) => ({
+    default: m.AgentSandboxSettings,
+  }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -309,6 +314,7 @@ const FullAppRoutes = () => {
                   <Route path="email" element={<Email />} />
                   <Route path="email/:id" element={<EmailDetail />} />
                   <Route path="ai-gateway" element={<AiGateway />} />
+                  <Route path="agent-sandbox" element={<AgentSandboxSettingsPage />} />
                   <Route path="git-providers" element={<GitSources />} />
                   <Route path="git-providers/add" element={<AddGitProvider />} />
                   <Route path="git-providers/:id" element={<GitProviderDetail />} />

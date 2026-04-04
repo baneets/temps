@@ -41,6 +41,12 @@ export interface DiskSpaceAlertSettings {
   monitor_path: string | null
 }
 
+export interface AgentSandboxSettings {
+  enabled: boolean
+  cpu_limit: number
+  memory_limit_mb: number
+}
+
 // Re-export the types from the API for consistency
 export interface PlatformSettings extends AppSettings {
   dns_provider: DnsProviderSettings
@@ -51,6 +57,7 @@ export interface PlatformSettings extends AppSettings {
   security_headers: SecurityHeadersSettings
   rate_limiting: RateLimitSettings
   disk_space_alert: DiskSpaceAlertSettings
+  agent_sandbox: AgentSandboxSettings
   attack_mode?: boolean
 }
 
@@ -67,6 +74,7 @@ export async function getPlatformSettings(): Promise<PlatformSettings> {
       // Cast to include extended fields not yet in generated types
       const data = response.data as typeof response.data & {
         disk_space_alert?: DiskSpaceAlertSettings
+        agent_sandbox?: AgentSandboxSettings
         attack_mode?: boolean
       }
       // Ensure all required fields have defaults
@@ -110,6 +118,11 @@ export async function getPlatformSettings(): Promise<PlatformSettings> {
           threshold_percent: 80,
           check_interval_seconds: 300,
           monitor_path: null,
+        },
+        agent_sandbox: data.agent_sandbox || {
+          enabled: false,
+          cpu_limit: 2.0,
+          memory_limit_mb: 2048,
         },
         attack_mode: data.attack_mode || false,
       }
@@ -162,6 +175,7 @@ export async function updatePlatformSettings(
       security_headers: updated.security_headers,
       rate_limiting: updated.rate_limiting,
       disk_space_alert: updated.disk_space_alert,
+      agent_sandbox: updated.agent_sandbox,
       attack_mode: updated.attack_mode,
     }
     const response = await updateSettings({ body })
@@ -271,6 +285,11 @@ function getDefaultSettings(): PlatformSettings {
       threshold_percent: 80,
       check_interval_seconds: 300,
       monitor_path: null,
+    },
+    agent_sandbox: {
+      enabled: false,
+      cpu_limit: 2.0,
+      memory_limit_mb: 2048,
     },
     attack_mode: false,
   }
