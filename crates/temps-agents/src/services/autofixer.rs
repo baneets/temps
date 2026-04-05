@@ -32,7 +32,7 @@ pub struct AutofixerService {
     #[allow(dead_code)]
     queue: Arc<dyn JobQueue>,
     run_service: Arc<AgentRunService>,
-    source_map_service: Option<Arc<SourceMapService>>,
+    source_map_service: Arc<SourceMapService>,
     sandbox_registry: Arc<SandboxRegistry>,
 }
 
@@ -43,7 +43,7 @@ impl AutofixerService {
         encryption_service: Arc<EncryptionService>,
         queue: Arc<dyn JobQueue>,
         run_service: Arc<AgentRunService>,
-        source_map_service: Option<Arc<SourceMapService>>,
+        source_map_service: Arc<SourceMapService>,
         sandbox_registry: Arc<SandboxRegistry>,
     ) -> Self {
         Self {
@@ -1102,11 +1102,9 @@ impl AutofixerService {
             // Symbolicate in-memory before reading frames so agent sees original file paths
             let mut data_owned = event.data.clone();
             if let Some(ref mut data_val) = data_owned {
-                if let Some(ref sm_service) = self.source_map_service {
-                    sm_service
-                        .symbolicate_stored_event(event.project_id, data_val)
-                        .await;
-                }
+                self.source_map_service
+                    .symbolicate_stored_event(event.project_id, data_val)
+                    .await;
             }
             if let Some(ref data_val) = data_owned {
                 // Try Sentry envelope format: data["sentry"]["exception"]["values"][0]["stacktrace"]["frames"]

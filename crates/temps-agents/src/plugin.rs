@@ -441,7 +441,7 @@ impl TempsPlugin for AgentsPlugin {
             ));
             context.register_service(executor.clone());
 
-            let source_map_service = context.get_service::<SourceMapService>();
+            let source_map_service = context.require_service::<SourceMapService>();
             let autofixer_service = Arc::new(AutofixerService::new(
                 db,
                 git_provider_manager,
