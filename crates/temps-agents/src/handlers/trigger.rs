@@ -76,6 +76,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         // Global sandbox status and management (for settings page)
         .route("/settings/sandbox-status", get(get_global_sandbox_status))
         .route("/settings/sandbox-rebuild", post(rebuild_sandbox_image))
+        .route(
+            "/projects/{project_id}/agents/smoke-test",
+            post(smoke_test_agent),
+        )
+        .route("/settings/agent-token", post(save_agent_token))
+        .route("/settings/agent-models", get(list_available_models))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -179,11 +185,27 @@ async fn trigger_agent(
         );
     }
 
+    // Resolve sandbox against global setting
+    let global_sandbox_enabled = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("agent_sandbox")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    };
     let run_resp = AgentRunResponse::from_with_agent(
         run,
         Some(agent.slug),
         Some(agent.name),
-        agent.sandbox_enabled.unwrap_or(false),
+        agent.sandbox_enabled.unwrap_or(global_sandbox_enabled),
     );
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))
@@ -233,7 +255,7 @@ async fn get_cli_status(
             email: None,
             subscription_type: None,
             setup_hint: Some(format!(
-                "Unknown AI provider '{}'. Supported: claude_cli, codex_cli",
+                "Unknown AI provider '{}'. Supported: claude_cli, opencode, codex_cli",
                 provider_name
             )),
         },
@@ -344,4 +366,349 @@ async fn rebuild_sandbox_image(
             error: Some(e.to_string()),
         })),
     }
+}
+
+// ── Smoke Test ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SmokeTestResponse {
+    /// Whether the smoke test passed
+    passed: bool,
+    /// Where the test ran: "host" or "sandbox"
+    environment: String,
+    /// Claude CLI installed?
+    cli_installed: bool,
+    /// Claude CLI authenticated?
+    cli_authenticated: bool,
+    /// Claude CLI version
+    cli_version: Option<String>,
+    /// Auth email / method
+    auth_info: Option<String>,
+    /// What the user needs to do if the test failed
+    setup_hint: Option<String>,
+    /// Full output for debugging
+    detail: Option<String>,
+}
+
+/// Run a smoke test to verify Claude CLI works in the environment where agents
+/// will actually execute (host or sandbox container).
+async fn smoke_test_agent(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(_project_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+
+    // Check if sandbox is enabled globally
+    let global_sandbox = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data.get("agent_sandbox").cloned().and_then(|v| {
+                    serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
+                })
+            })
+            .unwrap_or_default()
+    };
+
+    if global_sandbox.enabled {
+        // Test inside a sandbox container
+        let registry = app_state.executor.sandbox_registry();
+        let provider = registry.provider();
+
+        if !provider.is_available().await {
+            return Ok(Json(SmokeTestResponse {
+                passed: false,
+                environment: "sandbox".into(),
+                cli_installed: false,
+                cli_authenticated: false,
+                cli_version: None,
+                auth_info: None,
+                setup_hint: Some(
+                    "Docker is not available. Install Docker or disable sandbox mode.".into(),
+                ),
+                detail: None,
+            }));
+        }
+
+        // Create a temporary sandbox for the smoke test
+        let test_run_id = 99999;
+        let work_dir = std::env::temp_dir().join("agent-smoke-test");
+        let _ = tokio::fs::create_dir_all(&work_dir).await;
+
+        // Inject the saved credential so the smoke test reflects real auth state
+        let mut test_env = std::collections::HashMap::new();
+        if let Some(ref encrypted_key) = global_sandbox.api_key_encrypted {
+            if let Ok(key) = app_state.encryption_service.decrypt_string(encrypted_key) {
+                if global_sandbox.auth_type == "subscription" {
+                    test_env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key);
+                } else {
+                    match global_sandbox.default_provider.as_str() {
+                        "codex_cli" => {
+                            test_env.insert("OPENAI_API_KEY".to_string(), key);
+                        }
+                        _ => {
+                            test_env.insert("ANTHROPIC_API_KEY".to_string(), key);
+                        }
+                    }
+                }
+            }
+        }
+
+        let image = format!("temps-sandbox-{}:latest", global_sandbox.runtime);
+        let sandbox_config = crate::sandbox::SandboxCreateConfig {
+            run_id: test_run_id,
+            host_work_dir: work_dir.clone(),
+            image: Some(image),
+            cpu_limit: Some(1.0),
+            memory_limit_mb: Some(512),
+            network_mode: Some("host".to_string()),
+            env_vars: test_env,
+            idle_timeout: std::time::Duration::from_secs(60),
+        };
+
+        let _handle = match registry.get_or_create(sandbox_config).await {
+            Ok(h) => h,
+            Err(e) => {
+                return Ok(Json(SmokeTestResponse {
+                    passed: false,
+                    environment: "sandbox".into(),
+                    cli_installed: false,
+                    cli_authenticated: false,
+                    cli_version: None,
+                    auth_info: None,
+                    setup_hint: Some(format!(
+                        "Failed to create sandbox: {}. Try rebuilding the image.",
+                        e
+                    )),
+                    detail: None,
+                }));
+            }
+        };
+
+        // Run `claude auth status` inside the sandbox
+        let result = registry
+            .exec(
+                test_run_id,
+                vec![
+                    "claude".to_string(),
+                    "auth".to_string(),
+                    "status".to_string(),
+                ],
+                std::collections::HashMap::new(),
+                None,
+            )
+            .await;
+
+        // Clean up
+        let _ = registry.release(test_run_id).await;
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+
+        match result {
+            Ok(exec_result) => {
+                let output = exec_result.stdout.trim().to_string();
+                let (authenticated, version, auth_info) = parse_auth_status(&output);
+                let cli_installed = exec_result.exit_code != 127; // 127 = command not found
+
+                Ok(Json(SmokeTestResponse {
+                    passed: authenticated,
+                    environment: "sandbox".into(),
+                    cli_installed,
+                    cli_authenticated: authenticated,
+                    cli_version: version,
+                    auth_info,
+                    setup_hint: if !authenticated {
+                        Some("Claude CLI inside the sandbox is not authenticated. Run 'claude setup-token' on the host (credentials are copied into the sandbox), or set ANTHROPIC_API_KEY as an environment variable.".into())
+                    } else {
+                        None
+                    },
+                    detail: Some(output),
+                }))
+            }
+            Err(e) => Ok(Json(SmokeTestResponse {
+                passed: false,
+                environment: "sandbox".into(),
+                cli_installed: false,
+                cli_authenticated: false,
+                cli_version: None,
+                auth_info: None,
+                setup_hint: Some(format!("Smoke test failed: {}", e)),
+                detail: None,
+            })),
+        }
+    } else {
+        // Test on host
+        let status = ai_cli::create_provider("claude_cli")
+            .map(|p| futures::executor::block_on(p.get_status()));
+
+        match status {
+            Some(s) => Ok(Json(SmokeTestResponse {
+                passed: s.authenticated,
+                environment: "host".into(),
+                cli_installed: s.installed,
+                cli_authenticated: s.authenticated,
+                cli_version: s.version,
+                auth_info: s.email.or(s.auth_method),
+                setup_hint: s.setup_hint,
+                detail: None,
+            })),
+            None => Ok(Json(SmokeTestResponse {
+                passed: false,
+                environment: "host".into(),
+                cli_installed: false,
+                cli_authenticated: false,
+                cli_version: None,
+                auth_info: None,
+                setup_hint: Some(
+                    "Claude CLI not found. Install: npm install -g @anthropic-ai/claude-code"
+                        .into(),
+                ),
+                detail: None,
+            })),
+        }
+    }
+}
+
+fn parse_auth_status(output: &str) -> (bool, Option<String>, Option<String>) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+        let authenticated = json
+            .get("loggedIn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let email = json.get("email").and_then(|v| v.as_str()).map(String::from);
+        let version = json
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        (authenticated, version, email)
+    } else {
+        // Fallback: check for "Logged in" in plain text
+        let authenticated = output.contains("Logged in") || output.contains("loggedIn");
+        (authenticated, None, None)
+    }
+}
+
+// ── Agent Token ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+struct SaveAgentTokenRequest {
+    /// The OAuth token from `claude setup-token` or an API key.
+    /// Will be encrypted before storage.
+    token: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SaveAgentTokenResponse {
+    saved: bool,
+}
+
+/// Save an encrypted AI provider token for use in sandbox containers.
+async fn save_agent_token(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Json(request): Json<SaveAgentTokenRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    use sea_orm::EntityTrait;
+
+    // Encrypt the token
+    let encrypted = app_state
+        .encryption_service
+        .encrypt_string(&request.token)
+        .map_err(|e| {
+            Problem::from(AgentError::EncryptionError {
+                message: format!("Failed to encrypt token: {}", e),
+            })
+        })?;
+
+    // Load current settings
+    let record = temps_entities::settings::Entity::find_by_id(1)
+        .one(app_state.db.as_ref())
+        .await
+        .map_err(|e| Problem::from(AgentError::Database(e)))?;
+
+    let mut settings_data = record
+        .map(|r| r.data)
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Update the agent_sandbox.api_key_encrypted field
+    if let Some(sandbox) = settings_data.get_mut("agent_sandbox") {
+        sandbox["api_key_encrypted"] = serde_json::Value::String(encrypted);
+    } else {
+        settings_data["agent_sandbox"] = serde_json::json!({ "api_key_encrypted": encrypted });
+    }
+
+    // Save back
+    use sea_orm::{ActiveModelTrait, Set};
+    let active = temps_entities::settings::ActiveModel {
+        id: Set(1),
+        data: Set(settings_data),
+        ..Default::default()
+    };
+    active
+        .update(app_state.db.as_ref())
+        .await
+        .map_err(|e| Problem::from(AgentError::Database(e)))?;
+
+    Ok(Json(SaveAgentTokenResponse { saved: true }))
+}
+
+// ── Available Models ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema)]
+struct AvailableModelsResponse {
+    provider: String,
+    models: Vec<String>,
+}
+
+/// List available models from the installed AI CLI.
+async fn list_available_models(
+    RequireAuth(auth): RequireAuth,
+    State(_app_state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    // Try opencode models first (gives structured list)
+    let opencode_result = Command::new("opencode")
+        .args(["models"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+
+    if let Ok(output) = opencode_result {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let models: Vec<String> = stdout
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            return Ok(Json(AvailableModelsResponse {
+                provider: "opencode".into(),
+                models,
+            }));
+        }
+    }
+
+    // Fallback: hardcoded list for Claude CLI (no models command)
+    Ok(Json(AvailableModelsResponse {
+        provider: "claude_cli".into(),
+        models: vec![
+            "claude-sonnet-4-6".into(),
+            "claude-opus-4-6".into(),
+            "claude-haiku-4-5".into(),
+            "sonnet".into(),
+            "opus".into(),
+            "haiku".into(),
+        ],
+    }))
 }

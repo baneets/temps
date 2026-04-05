@@ -18,7 +18,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
   createAgent,
@@ -55,6 +55,7 @@ export function AgentSettingsDialog({
   const [dailyBudgetCents, setDailyBudgetCents] = useState(agent?.daily_budget_cents ?? 500)
   const [cooldownMinutes, setCooldownMinutes] = useState(agent?.cooldown_minutes ?? 30)
   const [branchPrefix, setBranchPrefix] = useState(agent?.branch_prefix ?? 'agents/')
+  const [deliverable, setDeliverable] = useState(agent?.deliverable ?? 'pull_request')
   const [sandboxEnabled, setSandboxEnabled] = useState<boolean | null>(agent?.sandbox_enabled ?? null)
 
   // Triggers
@@ -66,6 +67,9 @@ export function AgentSettingsDialog({
   )
   const [triggerManual, setTriggerManual] = useState(
     agent?.trigger_config?.manual ?? true,
+  )
+  const [triggerCron, setTriggerCron] = useState(
+    agent?.trigger_config?.schedule?.cron ?? '',
   )
 
   // Reset form when dialog opens with different agent
@@ -81,11 +85,17 @@ export function AgentSettingsDialog({
     setDailyBudgetCents(agent?.daily_budget_cents ?? 500)
     setCooldownMinutes(agent?.cooldown_minutes ?? 30)
     setBranchPrefix(agent?.branch_prefix ?? 'agents/')
+    setDeliverable(agent?.deliverable ?? 'pull_request')
     setSandboxEnabled(agent?.sandbox_enabled ?? null)
     setTriggerNewIssue(agent?.trigger_config?.error?.new_issue ?? true)
     setTriggerRegression(agent?.trigger_config?.error?.regression ?? true)
     setTriggerManual(agent?.trigger_config?.manual ?? true)
+    setTriggerCron(agent?.trigger_config?.schedule?.cron ?? '')
   }
+
+  // Reset form when agent changes (opening dialog for a different agent)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { resetForm() }, [agent?.id, open])
 
   const createMutation = useMutation({
     mutationFn: (data: CreateAgentRequest) => createAgent(projectId, data),
@@ -115,9 +125,12 @@ export function AgentSettingsDialog({
   const isPending = createMutation.isPending || updateMutation.isPending
 
   const handleSubmit = () => {
-    const triggerConfig = {
+    const triggerConfig: Record<string, unknown> = {
       error: { new_issue: triggerNewIssue, regression: triggerRegression },
       manual: triggerManual,
+    }
+    if (triggerCron.trim()) {
+      triggerConfig.schedule = { cron: triggerCron.trim() }
     }
 
     if (isEdit) {
@@ -133,6 +146,7 @@ export function AgentSettingsDialog({
         daily_budget_cents: dailyBudgetCents,
         cooldown_minutes: cooldownMinutes,
         branch_prefix: branchPrefix,
+        deliverable,
         sandbox_enabled: sandboxEnabled ?? undefined,
       })
     } else {
@@ -157,6 +171,7 @@ export function AgentSettingsDialog({
         daily_budget_cents: dailyBudgetCents,
         cooldown_minutes: cooldownMinutes,
         branch_prefix: branchPrefix,
+        deliverable,
         sandbox_enabled: sandboxEnabled ?? undefined,
       })
     }
@@ -175,7 +190,7 @@ export function AgentSettingsDialog({
           <DialogTitle>{isEdit ? 'Edit Agent' : 'Create Agent'}</DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-6 py-4">
+        <form onSubmit={(e) => { e.preventDefault(); handleSubmit() }} className="space-y-6 py-4">
           {/* Basic info */}
           <div className="space-y-3">
             {!isEdit && (
@@ -253,6 +268,39 @@ export function AgentSettingsDialog({
                 onCheckedChange={setTriggerManual}
               />
             </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="trigger-cron" className="text-sm font-normal">
+                Schedule (cron)
+              </Label>
+              <Input
+                id="trigger-cron"
+                placeholder="e.g. 0 * * * * (every hour)"
+                value={triggerCron}
+                onChange={(e) => setTriggerCron(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Leave empty for no schedule. Uses standard cron syntax.
+              </p>
+            </div>
+          </div>
+
+          {/* Deliverable */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">Deliverable</h3>
+            <Select value={deliverable} onValueChange={setDeliverable}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pull_request">Pull Request</SelectItem>
+                <SelectItem value="report">Report</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {deliverable === 'report'
+                ? 'Agent produces a report — no branch, PR, or deployment.'
+                : 'Agent pushes a branch, creates a PR, and triggers a preview deployment.'}
+            </p>
           </div>
 
           {/* AI Provider */}
@@ -265,8 +313,9 @@ export function AgentSettingsDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="claude_cli">Claude CLI</SelectItem>
-                  <SelectItem value="codex_cli">Codex CLI</SelectItem>
+                  <SelectItem value="claude_cli">Claude Code</SelectItem>
+                  <SelectItem value="opencode">OpenCode</SelectItem>
+                  <SelectItem value="codex_cli">Codex</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -369,22 +418,22 @@ export function AgentSettingsDialog({
               </p>
             </div>
           </div>
-        </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} disabled={isPending}>
-            {isPending
-              ? isEdit
-                ? 'Saving...'
-                : 'Creating...'
-              : isEdit
-                ? 'Save'
-                : 'Create Agent'}
-          </Button>
-        </DialogFooter>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={isPending}>
+              {isPending
+                ? isEdit
+                  ? 'Saving...'
+                  : 'Creating...'
+                : isEdit
+                  ? 'Save'
+                  : 'Create Agent'}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   )

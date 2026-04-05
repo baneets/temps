@@ -24,8 +24,10 @@ import {
   Cpu,
   Globe,
   Loader2,
+  Play,
   RefreshCw,
   Save,
+  Sparkles,
   XCircle,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
@@ -100,11 +102,17 @@ function getResourcePresetLabel(cpu: number, memory: number): string {
 }
 
 export function AgentSandboxSettings() {
-  usePageTitle('Agent Sandbox')
+  usePageTitle('AI Agents')
 
   const { data: settings, isLoading } = useSettings()
   const updateSettings = useUpdateSettings()
 
+  const [defaultProvider, setDefaultProvider] = useState('claude_cli')
+  const [defaultModel, setDefaultModel] = useState('')
+  const [authType, setAuthType] = useState('subscription')
+  const [tokenInput, setTokenInput] = useState('')
+  const [tokenSaving, setTokenSaving] = useState(false)
+  const [tokenSaved, setTokenSaved] = useState(false)
   const [enabled, setEnabled] = useState(false)
   const [runtime, setRuntime] = useState('node')
   const [customImage, setCustomImage] = useState('')
@@ -114,9 +122,21 @@ export function AgentSandboxSettings() {
   const [isDirty, setIsDirty] = useState(false)
   const [resourcePreset, setResourcePreset] = useState('Standard')
 
+  const [availableModels, setAvailableModels] = useState<string[]>([])
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
+  const [smokeTestLoading, setSmokeTestLoading] = useState(false)
+  const [smokeTestResult, setSmokeTestResult] = useState<{
+    passed: boolean
+    environment: string
+    cli_installed: boolean
+    cli_authenticated: boolean
+    cli_version?: string
+    auth_info?: string
+    setup_hint?: string
+    detail?: string
+  } | null>(null)
 
   const fetchSandboxStatus = useCallback(async () => {
     setStatusLoading(true)
@@ -135,6 +155,10 @@ export function AgentSandboxSettings() {
   useEffect(() => {
     if (settings?.agent_sandbox) {
       const s = settings.agent_sandbox
+      setDefaultProvider(s.default_provider || 'claude_cli')
+      setDefaultModel(s.default_model || '')
+      setAuthType(s.auth_type || 'subscription')
+      setTokenSaved(!!s.api_key_encrypted)
       setEnabled(s.enabled)
       setRuntime(s.runtime || 'node')
       setCustomImage(s.custom_image || '')
@@ -147,6 +171,13 @@ export function AgentSandboxSettings() {
 
   useEffect(() => {
     fetchSandboxStatus()
+    // Fetch available models
+    fetch('/api/settings/agent-models')
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data?.models) setAvailableModels(data.models)
+      })
+      .catch(() => {})
   }, [fetchSandboxStatus])
 
   const handleRebuildImage = async () => {
@@ -173,6 +204,53 @@ export function AgentSandboxSettings() {
     }
   }
 
+  const handleSaveToken = async () => {
+    if (!tokenInput.trim()) return
+    setTokenSaving(true)
+    try {
+      const response = await fetch('/api/settings/agent-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: tokenInput.trim() }),
+      })
+      if (response.ok) {
+        setTokenSaved(true)
+        setTokenInput('')
+        toast.success('Token saved and encrypted')
+      } else {
+        toast.error('Failed to save token')
+      }
+    } catch {
+      toast.error('Failed to save token')
+    } finally {
+      setTokenSaving(false)
+    }
+  }
+
+  const handleSmokeTest = async () => {
+    setSmokeTestLoading(true)
+    setSmokeTestResult(null)
+    try {
+      // Use project_id=0 as a global test — the endpoint doesn't actually use it
+      const response = await fetch('/api/projects/0/agents/smoke-test', {
+        method: 'POST',
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setSmokeTestResult(data)
+        if (data.passed) {
+          toast.success('AI provider is configured correctly')
+        }
+      } else {
+        toast.error('Smoke test failed')
+      }
+    } catch {
+      toast.error('Failed to run smoke test')
+    } finally {
+      setSmokeTestLoading(false)
+    }
+  }
+
   const handleResourcePresetChange = (preset: string) => {
     setResourcePreset(preset)
     const p = RESOURCE_PRESETS.find((r) => r.label === preset)
@@ -185,8 +263,14 @@ export function AgentSandboxSettings() {
 
   const handleSave = async () => {
     try {
+      // Preserve api_key_encrypted from current settings (saved via separate endpoint)
+      const currentEncryptedKey = settings?.agent_sandbox?.api_key_encrypted
       await updateSettings.mutateAsync({
         agent_sandbox: {
+          default_provider: defaultProvider,
+          default_model: defaultModel,
+          auth_type: authType,
+          api_key_encrypted: currentEncryptedKey || undefined,
           enabled,
           runtime,
           custom_image: customImage,
@@ -212,7 +296,281 @@ export function AgentSandboxSettings() {
 
   return (
     <div className="space-y-6">
-      {/* Header + Docker status */}
+      {/* AI Provider */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5" />
+            AI Provider
+          </CardTitle>
+          <CardDescription>
+            Agents need an AI coding assistant installed and authenticated on the
+            server. Choose your provider below.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Provider cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[
+              {
+                id: 'claude_cli',
+                name: 'Claude Code',
+                install: 'npm install -g @anthropic-ai/claude-code',
+                auth: 'claude setup-token',
+              },
+              {
+                id: 'opencode',
+                name: 'OpenCode',
+                install: 'curl -fsSL https://opencode.ai/install | bash',
+                auth: 'opencode auth add',
+              },
+              {
+                id: 'codex_cli',
+                name: 'Codex',
+                install: 'npm install -g @openai/codex',
+                auth: 'Set OPENAI_API_KEY',
+              },
+            ].map((provider) => (
+              <button
+                key={provider.id}
+                onClick={() => {
+                  setDefaultProvider(provider.id)
+                  setIsDirty(true)
+                }}
+                className={`rounded-lg border p-4 space-y-2 text-left transition-colors ${
+                  defaultProvider === provider.id
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-primary/50'
+                }`}
+              >
+                <h4 className="text-sm font-medium">{provider.name}</h4>
+                <div className="text-xs text-muted-foreground space-y-1">
+                  <p>
+                    Install:{' '}
+                    <code className="bg-muted px-1 rounded">
+                      {provider.install}
+                    </code>
+                  </p>
+                  <p>
+                    Auth:{' '}
+                    <code className="bg-muted px-1 rounded">
+                      {provider.auth}
+                    </code>
+                  </p>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Auth type */}
+          <div className="rounded-lg border p-4 space-y-3">
+            <h4 className="text-sm font-medium">Authentication</h4>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => { setAuthType('subscription'); setIsDirty(true) }}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  authType === 'subscription'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-primary/50'
+                }`}
+              >
+                <p className="text-sm font-medium">Subscription</p>
+                <p className="text-xs text-muted-foreground">
+                  Claude Max/Pro — uses OAuth token from <code className="bg-muted px-1 rounded">claude setup-token</code>
+                </p>
+              </button>
+              <button
+                onClick={() => { setAuthType('api_key'); setIsDirty(true) }}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  authType === 'api_key'
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-primary/50'
+                }`}
+              >
+                <p className="text-sm font-medium">API Key</p>
+                <p className="text-xs text-muted-foreground">
+                  Pay-per-use — uses ANTHROPIC_API_KEY or OPENAI_API_KEY
+                </p>
+              </button>
+            </div>
+
+            {/* Credential input */}
+            <div className="space-y-2 pt-2">
+              <Label>
+                {authType === 'subscription'
+                  ? 'OAuth Token'
+                  : defaultProvider === 'codex_cli'
+                    ? 'OpenAI API Key'
+                    : 'Anthropic API Key'}
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                {authType === 'subscription'
+                  ? 'Run `claude setup-token` in your terminal and paste the token here.'
+                  : defaultProvider === 'codex_cli'
+                    ? 'Your OpenAI API key (sk-...).'
+                    : 'Your Anthropic API key (sk-ant-api03-...).'}
+                {' '}Encrypted before storage.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  placeholder={
+                    tokenSaved
+                      ? '••••••••••••• (saved)'
+                      : authType === 'subscription'
+                        ? 'Paste OAuth token from claude setup-token...'
+                        : 'Paste API key...'
+                  }
+                  value={tokenInput}
+                  onChange={(e) => {
+                    setTokenInput(e.target.value)
+                    setTokenSaved(false)
+                  }}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleSaveToken}
+                  disabled={tokenSaving || !tokenInput.trim()}
+                  className="shrink-0"
+                >
+                  {tokenSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5 mr-1" />
+                  )}
+                  Save
+                </Button>
+              </div>
+              {tokenSaved && !tokenInput && (
+                <div className="flex items-center gap-1.5 text-xs text-green-500">
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Credential encrypted and saved
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Model */}
+          <div className="rounded-lg border p-4 space-y-3">
+            <h4 className="text-sm font-medium">Model</h4>
+            <Select
+              value={
+                defaultModel === ''
+                  ? '_default'
+                  : availableModels.includes(defaultModel)
+                    ? defaultModel
+                    : '_custom'
+              }
+              onValueChange={(v) => {
+                if (v === '_default') {
+                  setDefaultModel('')
+                } else if (v === '_custom') {
+                  setDefaultModel(defaultModel || '')
+                } else {
+                  setDefaultModel(v)
+                }
+                setIsDirty(true)
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Use provider default" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_default">Use provider default</SelectItem>
+                {availableModels.map((model) => (
+                  <SelectItem key={model} value={model}>
+                    {model}
+                  </SelectItem>
+                ))}
+                <SelectItem value="_custom">Custom model...</SelectItem>
+              </SelectContent>
+            </Select>
+            {defaultModel !== '' && !availableModels.includes(defaultModel) && (
+              <Input
+                placeholder="e.g. anthropic/claude-sonnet-4-6"
+                value={defaultModel}
+                onChange={(e) => {
+                  setDefaultModel(e.target.value)
+                  setIsDirty(true)
+                }}
+              />
+            )}
+          </div>
+
+          {/* Smoke test */}
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium">Connection Test</h4>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleSmokeTest}
+                disabled={smokeTestLoading}
+              >
+                {smokeTestLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                ) : (
+                  <Play className="h-3.5 w-3.5 mr-2" />
+                )}
+                {smokeTestLoading ? 'Testing...' : 'Test Connection'}
+              </Button>
+            </div>
+
+            {smokeTestResult && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm">
+                  {smokeTestResult.cli_installed ? (
+                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                  ) : (
+                    <XCircle className="h-4 w-4 text-red-500" />
+                  )}
+                  <span>
+                    CLI:{' '}
+                    {smokeTestResult.cli_installed
+                      ? `installed${smokeTestResult.cli_version ? ` (${smokeTestResult.cli_version})` : ''}`
+                      : 'not found'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-sm">
+                  {smokeTestResult.cli_authenticated ? (
+                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                  ) : (
+                    <XCircle className="h-4 w-4 text-red-500" />
+                  )}
+                  <span>
+                    Auth:{' '}
+                    {smokeTestResult.cli_authenticated
+                      ? smokeTestResult.auth_info || 'authenticated'
+                      : 'not authenticated'}
+                  </span>
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Environment: {smokeTestResult.environment === 'sandbox' ? 'sandbox container' : 'host'}
+                </div>
+                {smokeTestResult.setup_hint && (
+                  <Alert variant="destructive" className="mt-2">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription className="text-sm">
+                      {smokeTestResult.setup_hint}
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
+
+            {!smokeTestResult && !smokeTestLoading && (
+              <p className="text-sm text-muted-foreground">
+                Tests the default AI provider (Claude CLI) in the environment
+                where agents will run
+                {enabled ? ' (sandbox container)' : ' (host)'}.
+              </p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Sandbox */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

@@ -42,6 +42,10 @@ export interface DiskSpaceAlertSettings {
 }
 
 export interface AgentSandboxSettings {
+  default_provider: string
+  default_model: string
+  auth_type: string
+  api_key_encrypted?: string | null
   enabled: boolean
   runtime: string
   custom_image: string
@@ -123,6 +127,10 @@ export async function getPlatformSettings(): Promise<PlatformSettings> {
           monitor_path: null,
         },
         agent_sandbox: data.agent_sandbox || {
+          default_provider: 'claude_cli',
+          default_model: '',
+          auth_type: 'subscription',
+          api_key_encrypted: null,
           enabled: false,
           runtime: 'node',
           custom_image: '',
@@ -293,6 +301,10 @@ function getDefaultSettings(): PlatformSettings {
       monitor_path: null,
     },
     agent_sandbox: {
+      default_provider: 'claude_cli',
+      default_model: '',
+      auth_type: 'subscription',
+      api_key_encrypted: null,
       enabled: false,
       runtime: 'node',
       custom_image: '',

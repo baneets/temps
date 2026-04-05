@@ -219,15 +219,35 @@ async fn list_all_runs(
         .await
         .map_err(Problem::from)?;
 
+    // Resolve sandbox status against global setting
+    let global_sandbox_enabled = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("agent_sandbox")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    };
+
     let items = runs
         .into_iter()
         .map(|run| {
             let agent = agents.iter().find(|a| a.id == run.config_id);
+            let sandbox = agent
+                .and_then(|a| a.sandbox_enabled)
+                .unwrap_or(global_sandbox_enabled);
             AgentRunResponse::from_with_agent(
                 run,
                 agent.map(|a| a.slug.clone()),
                 agent.map(|a| a.name.clone()),
-                agent.and_then(|a| a.sandbox_enabled).unwrap_or(false),
+                sandbox,
             )
         })
         .collect();
@@ -288,6 +308,24 @@ async fn list_agent_runs(
         .await
         .map_err(Problem::from)?;
 
+    // Resolve sandbox against global setting
+    let global_sandbox_enabled = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("agent_sandbox")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    };
+    let sandbox = agent.sandbox_enabled.unwrap_or(global_sandbox_enabled);
+
     let items = runs
         .into_iter()
         .map(|run| {
@@ -295,7 +333,7 @@ async fn list_agent_runs(
                 run,
                 Some(agent.slug.clone()),
                 Some(agent.name.clone()),
-                agent.sandbox_enabled.unwrap_or(false),
+                sandbox,
             )
         })
         .collect();
@@ -345,14 +383,32 @@ async fn get_run_with_logs(
         .await
         .map_err(Problem::from)?;
 
+    // Resolve sandbox status against global setting (same logic as executor)
+    let global_sandbox_enabled = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("agent_sandbox")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    };
+    let resolved_sandbox = agent
+        .as_ref()
+        .and_then(|a| a.sandbox_enabled)
+        .unwrap_or(global_sandbox_enabled);
+
     let run_resp = AgentRunResponse::from_with_agent(
         run_with_logs.run,
         agent.as_ref().map(|a| a.slug.clone()),
         agent.as_ref().map(|a| a.name.clone()),
-        agent
-            .as_ref()
-            .and_then(|a| a.sandbox_enabled)
-            .unwrap_or(false),
+        resolved_sandbox,
     );
 
     Ok(Json(AgentRunWithLogsResponse {

@@ -5,34 +5,16 @@ use tokio::process::Command;
 use super::{AiCliProvider, AiCliStatus, AiRunConfig, AiRunResult};
 use crate::error::AgentError;
 
-/// Escape a string for safe use inside a shell command (single-quoted).
-fn shell_escape(s: &str) -> String {
-    // Wrap in single quotes, escaping any embedded single quotes
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Check if a Unix user exists by name.
-fn user_exists(name: &str) -> bool {
-    std::process::Command::new("id")
-        .arg("-u")
-        .arg(name)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-pub struct ClaudeCliProvider;
+pub struct OpenCodeCliProvider;
 
 #[async_trait]
-impl AiCliProvider for ClaudeCliProvider {
+impl AiCliProvider for OpenCodeCliProvider {
     fn name(&self) -> &str {
-        "claude_cli"
+        "opencode"
     }
 
     async fn check_installed(&self) -> bool {
-        Command::new("claude")
+        Command::new("opencode")
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -43,8 +25,7 @@ impl AiCliProvider for ClaudeCliProvider {
     }
 
     async fn get_status(&self) -> AiCliStatus {
-        // Check if installed
-        let version_output = Command::new("claude")
+        let version_output = Command::new("opencode")
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -58,7 +39,7 @@ impl AiCliProvider for ClaudeCliProvider {
             }
             _ => {
                 return AiCliStatus {
-                    provider: "claude_cli".into(),
+                    provider: "opencode".into(),
                     installed: false,
                     version: None,
                     authenticated: false,
@@ -66,57 +47,47 @@ impl AiCliProvider for ClaudeCliProvider {
                     email: None,
                     subscription_type: None,
                     setup_hint: Some(
-                        "Install Claude CLI: npm install -g @anthropic-ai/claude-code".into(),
+                        "Install OpenCode: curl -fsSL https://opencode.ai/install | bash".into(),
                     ),
                 };
             }
         };
 
-        // Check auth status
-        let auth_output = Command::new("claude")
+        // OpenCode uses API keys configured via `opencode auth`
+        // Check if any provider is configured by running `opencode models`
+        let auth_output = Command::new("opencode")
             .args(["auth", "status"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await;
 
-        let (authenticated, auth_method, email, subscription_type, setup_hint) = match auth_output {
+        let (authenticated, setup_hint) = match auth_output {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                    let logged_in = json.get("loggedIn").and_then(|v| v.as_bool()).unwrap_or(false);
-                    if logged_in {
-                        (
-                            true,
-                            json.get("authMethod").and_then(|v| v.as_str()).map(String::from),
-                            json.get("email").and_then(|v| v.as_str()).map(String::from),
-                            json.get("subscriptionType").and_then(|v| v.as_str()).map(String::from),
-                            None,
-                        )
-                    } else {
-                        (false, None, None, None, Some(
-                            "Run 'claude setup-token' on the server to authenticate, or set ANTHROPIC_API_KEY. Configure in Settings > AI Agents.".into(),
-                        ))
-                    }
+                if stdout.contains("No credentials") || stdout.trim().is_empty() {
+                    (
+                        false,
+                        Some("Run 'opencode auth add' to configure an AI provider API key.".into()),
+                    )
                 } else {
-                    (false, None, None, None, Some(
-                        "Run 'claude setup-token' on the server to authenticate.".into(),
-                    ))
+                    (true, None)
                 }
             }
-            _ => (false, None, None, None, Some(
-                "Run 'claude setup-token' on the server to authenticate, or set ANTHROPIC_API_KEY. Configure in Settings > AI Agents.".into(),
-            )),
+            _ => (
+                false,
+                Some("Run 'opencode auth add' to configure an AI provider API key.".into()),
+            ),
         };
 
         AiCliStatus {
-            provider: "claude_cli".into(),
+            provider: "opencode".into(),
             installed,
             version,
             authenticated,
-            auth_method,
-            email,
-            subscription_type,
+            auth_method: None,
+            email: None,
+            subscription_type: None,
             setup_hint,
         }
     }
@@ -124,39 +95,12 @@ impl AiCliProvider for ClaudeCliProvider {
     async fn run(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let is_root = unsafe { libc::geteuid() } == 0;
-
-        // When running as root, Claude CLI refuses --dangerously-skip-permissions.
-        // Use `su` to drop to a non-root user (temps or nobody).
-        let mut cmd = if is_root {
-            let run_user = if user_exists("temps") {
-                "temps"
-            } else {
-                "nobody"
-            };
-            let mut c = Command::new("su");
-            c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
-            // Build the claude command as a single string for su -c
-            let claude_args = format!(
-                "claude --print {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose",
-                shell_escape(&config.prompt),
-                config.max_turns,
-            );
-            c.arg(&claude_args);
-            c
-        } else {
-            let mut c = Command::new("claude");
-            c.arg("--print")
-                .arg(&config.prompt)
-                .arg("--output-format")
-                .arg("stream-json")
-                .arg("--max-turns")
-                .arg(config.max_turns.to_string())
-                .arg("--dangerously-skip-permissions")
-                .arg("--verbose");
-            c
-        };
-        cmd.current_dir(&config.work_dir)
+        let mut cmd = Command::new("opencode");
+        cmd.arg("run")
+            .arg(&config.prompt)
+            .arg("--format")
+            .arg("json")
+            .current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -174,7 +118,6 @@ impl AiCliProvider for ClaudeCliProvider {
             }
         })?;
 
-        // Stream stdout line by line, calling on_event for each JSON line
         let stdout_handle = child.stdout.take().expect("stdout was piped");
         let stderr_handle = child.stderr.take().expect("stderr was piped");
         let on_event = config.on_event.clone();
@@ -188,7 +131,6 @@ impl AiCliProvider for ClaudeCliProvider {
                 all_output.push_str(&line);
                 all_output.push('\n');
 
-                // Call the real-time callback if provided
                 if let Some(ref cb) = on_event {
                     cb(line).await;
                 }
@@ -197,7 +139,6 @@ impl AiCliProvider for ClaudeCliProvider {
             all_output
         });
 
-        // Capture stderr in parallel
         let stderr_task = tokio::spawn(async move {
             let reader = BufReader::new(stderr_handle);
             let mut lines = reader.lines();
@@ -211,7 +152,6 @@ impl AiCliProvider for ClaudeCliProvider {
             all_stderr
         });
 
-        // Wait for process to finish with timeout
         let wait_result = tokio::time::timeout(config.timeout, child.wait()).await;
 
         let status = match wait_result {
@@ -226,14 +166,11 @@ impl AiCliProvider for ClaudeCliProvider {
             }
         };
 
-        // Get the accumulated output from both tasks
         let stdout = stream_task.await.unwrap_or_default();
         let stderr = stderr_task.await.unwrap_or_default();
         let exit_code = status.code().unwrap_or(-1);
 
         if !status.success() {
-            // Include both stderr and stdout in the error — Claude CLI sometimes
-            // prints errors to stdout in stream-json mode
             let error_output = if stderr.trim().is_empty() {
                 stdout.clone()
             } else {
@@ -246,7 +183,8 @@ impl AiCliProvider for ClaudeCliProvider {
             });
         }
 
-        let (tokens_input, tokens_output, model) = parse_claude_output(&stdout);
+        // Parse OpenCode JSON output for token usage
+        let (tokens_input, tokens_output, model) = parse_opencode_output(&stdout);
 
         Ok(AiRunResult {
             output: stdout,
@@ -261,37 +199,13 @@ impl AiCliProvider for ClaudeCliProvider {
     async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let is_root = unsafe { libc::geteuid() } == 0;
-
-        let mut cmd = if is_root {
-            let run_user = if user_exists("temps") {
-                "temps"
-            } else {
-                "nobody"
-            };
-            let mut c = Command::new("su");
-            c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
-            let claude_args = format!(
-                "claude --print --continue {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose",
-                shell_escape(&config.prompt),
-                config.max_turns,
-            );
-            c.arg(&claude_args);
-            c
-        } else {
-            let mut c = Command::new("claude");
-            c.arg("--print")
-                .arg("--continue")
-                .arg(&config.prompt)
-                .arg("--output-format")
-                .arg("stream-json")
-                .arg("--max-turns")
-                .arg(config.max_turns.to_string())
-                .arg("--dangerously-skip-permissions")
-                .arg("--verbose");
-            c
-        };
-        cmd.current_dir(&config.work_dir)
+        let mut cmd = Command::new("opencode");
+        cmd.arg("run")
+            .arg("--continue")
+            .arg(&config.prompt)
+            .arg("--format")
+            .arg("json")
+            .current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -374,7 +288,7 @@ impl AiCliProvider for ClaudeCliProvider {
             });
         }
 
-        let (tokens_input, tokens_output, model) = parse_claude_output(&stdout);
+        let (tokens_input, tokens_output, model) = parse_opencode_output(&stdout);
 
         Ok(AiRunResult {
             output: stdout,
@@ -387,39 +301,35 @@ impl AiCliProvider for ClaudeCliProvider {
     }
 }
 
-/// Parse Claude CLI JSON output for token usage and model information.
-/// Claude CLI may emit JSON objects per line (JSON Lines format).
-pub fn parse_claude_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
-    let mut tokens_input: Option<i32> = None;
-    let mut tokens_output: Option<i32> = None;
-    let mut model: Option<String> = None;
+/// Parse OpenCode JSON output for token usage and model info.
+pub fn parse_opencode_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
+    let mut tokens_input = None;
+    let mut tokens_output = None;
+    let mut model = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with('{') {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            // Look for usage object at top level or nested
-            if let Some(usage) = value.get("usage") {
-                if tokens_input.is_none() {
-                    tokens_input = usage
-                        .get("input_tokens")
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as i32);
-                }
-                if tokens_output.is_none() {
-                    tokens_output = usage
-                        .get("output_tokens")
-                        .and_then(|v| v.as_i64())
-                        .map(|v| v as i32);
-                }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // Look for result/summary event with token usage
+            if let Some(input) = v
+                .get("tokens_input")
+                .or_else(|| v.get("input_tokens"))
+                .and_then(|v| v.as_i64())
+            {
+                tokens_input = Some(input as i32);
+            }
+            if let Some(output) = v
+                .get("tokens_output")
+                .or_else(|| v.get("output_tokens"))
+                .and_then(|v| v.as_i64())
+            {
+                tokens_output = Some(output as i32);
             }
             if model.is_none() {
-                model = value
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                model = v.get("model").and_then(|v| v.as_str()).map(String::from);
             }
         }
     }
@@ -432,27 +342,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_claude_output_with_usage() {
-        let output =
-            r#"{"model":"claude-3-5-sonnet","usage":{"input_tokens":150,"output_tokens":42}}"#;
-        let (input, output_tokens, model) = parse_claude_output(output);
-        assert_eq!(input, Some(150));
-        assert_eq!(output_tokens, Some(42));
-        assert_eq!(model.as_deref(), Some("claude-3-5-sonnet"));
+    fn test_opencode_provider_name() {
+        let provider = OpenCodeCliProvider;
+        assert_eq!(provider.name(), "opencode");
     }
 
     #[test]
-    fn test_parse_claude_output_empty() {
-        let output = "no json here";
-        let (input, output_tokens, model) = parse_claude_output(output);
+    fn test_parse_opencode_output_empty() {
+        let (input, output, model) = parse_opencode_output("");
         assert!(input.is_none());
-        assert!(output_tokens.is_none());
+        assert!(output.is_none());
         assert!(model.is_none());
     }
 
     #[test]
-    fn test_claude_provider_name() {
-        let provider = ClaudeCliProvider;
-        assert_eq!(provider.name(), "claude_cli");
+    fn test_parse_opencode_output_with_usage() {
+        let output = r#"{"type":"message","content":"hello"}
+{"type":"result","tokens_input":1000,"tokens_output":500,"model":"anthropic/claude-sonnet-4-20250514"}"#;
+        let (input, output_tokens, model) = parse_opencode_output(output);
+        assert_eq!(input, Some(1000));
+        assert_eq!(output_tokens, Some(500));
+        assert_eq!(model.as_deref(), Some("anthropic/claude-sonnet-4-20250514"));
     }
 }

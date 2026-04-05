@@ -12,6 +12,8 @@ use crate::services::executor::AgentExecutor;
 use crate::services::run_service::AgentRunService;
 
 pub struct AppState {
+    pub db: Arc<sea_orm::DatabaseConnection>,
+    pub encryption_service: Arc<temps_core::EncryptionService>,
     pub config_service: Arc<AgentConfigService>,
     pub run_service: Arc<AgentRunService>,
     pub executor: Arc<AgentExecutor>,

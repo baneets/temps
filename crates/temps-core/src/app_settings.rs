@@ -71,6 +71,20 @@ pub struct ContainerLogSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct AgentSandboxSettings {
+    /// Default AI provider for agents: "claude_cli", "opencode", or "codex_cli".
+    /// Individual agents can override this.
+    #[schema(example = "claude_cli")]
+    pub default_provider: String,
+    /// Default model for the selected provider (e.g. "claude-sonnet-4-20250514", "gpt-4o", "anthropic/claude-sonnet-4-20250514").
+    /// Empty = use the provider's default model.
+    #[serde(default)]
+    pub default_model: String,
+    /// Auth type: "api_key" (ANTHROPIC_API_KEY/OPENAI_API_KEY) or "subscription" (Claude OAuth token via setup-token).
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String,
+    /// Encrypted credential (API key or OAuth token depending on auth_type).
+    #[serde(default)]
+    pub api_key_encrypted: Option<String>,
     /// Whether sandbox is enabled globally for all agents by default.
     /// Individual agents can override this with their `sandbox_enabled` field.
     pub enabled: bool,
@@ -92,9 +106,17 @@ pub struct AgentSandboxSettings {
     pub network_mode: String,
 }
 
+fn default_auth_type() -> String {
+    "subscription".to_string()
+}
+
 impl Default for AgentSandboxSettings {
     fn default() -> Self {
         Self {
+            default_provider: "claude_cli".to_string(),
+            default_model: String::new(),
+            auth_type: "subscription".to_string(),
+            api_key_encrypted: None,
             enabled: false,
             runtime: "node".to_string(),
             custom_image: String::new(),

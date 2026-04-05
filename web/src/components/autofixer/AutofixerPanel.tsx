@@ -225,6 +225,17 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
   const requestInfo = latestEvent?.data?.request || latestEvent?.data?.sentry?.request
   const environmentInfo = latestEvent?.data?.sentry?.environment || latestEvent?.data?.environment?.environment
 
+  // Check if Claude CLI is ready
+  const { data: cliStatus } = useQuery({
+    queryKey: ['cli-status', project.id],
+    queryFn: async () => {
+      const res = await fetch(`/api/projects/${project.id}/agents/cli-status?provider=claude_cli`)
+      if (!res.ok) return null
+      return res.json()
+    },
+    staleTime: 60_000,
+  })
+
   // Start analysis mutation
   const analyzeMutation = useMutation({
     mutationFn: () => startAnalysis(project.id, groupId),
@@ -477,6 +488,22 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
                     You can review the analysis before generating a fix.
                   </p>
                 </div>
+                {cliStatus && !cliStatus.authenticated && (
+                  <Alert variant="destructive" className="text-sm">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertTitle>
+                      {!cliStatus.installed ? 'Claude CLI not installed' : 'Claude CLI not authenticated'}
+                    </AlertTitle>
+                    <AlertDescription>
+                      {!cliStatus.installed ? (
+                        <span>Install on the server: <code className="bg-black/20 px-1 rounded">npm install -g @anthropic-ai/claude-code</code></span>
+                      ) : (
+                        <span>Run <code className="bg-black/20 px-1 rounded">claude setup-token</code> on the server, or configure in <a href="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Agents</a>.</span>
+                      )}
+                    </AlertDescription>
+                  </Alert>
+                )}
+
                 <textarea
                   placeholder="Add context (optional): e.g., 'This started after the auth migration'"
                   value={contextInput}

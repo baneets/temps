@@ -478,6 +478,8 @@ impl TempsPlugin for AgentsPlugin {
 
             // Store state for route configuration
             let app_state = Arc::new(AppState {
+                db: context.require_service::<sea_orm::DatabaseConnection>(),
+                encryption_service: context.require_service::<temps_core::EncryptionService>(),
                 config_service,
                 run_service,
                 executor,

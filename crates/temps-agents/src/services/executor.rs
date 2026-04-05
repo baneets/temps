@@ -247,6 +247,28 @@ impl AgentExecutor {
                 Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime))
             };
 
+            // Inject auth credentials into sandbox based on auth_type and provider
+            let mut sandbox_env = std::collections::HashMap::new();
+            if let Some(ref encrypted_key) = global_sandbox.api_key_encrypted {
+                if let Ok(key) = self.encryption_service.decrypt_string(encrypted_key) {
+                    if global_sandbox.auth_type == "subscription" {
+                        // Subscription/OAuth token — only CLAUDE_CODE_OAUTH_TOKEN
+                        // Do NOT set ANTHROPIC_API_KEY (API rejects OAuth tokens)
+                        sandbox_env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key);
+                    } else {
+                        // API key — set the right env var for the provider
+                        match global_sandbox.default_provider.as_str() {
+                            "codex_cli" => {
+                                sandbox_env.insert("OPENAI_API_KEY".to_string(), key);
+                            }
+                            _ => {
+                                sandbox_env.insert("ANTHROPIC_API_KEY".to_string(), key);
+                            }
+                        }
+                    }
+                }
+            }
+
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 host_work_dir: work_dir.clone(),
@@ -254,7 +276,7 @@ impl AgentExecutor {
                 cpu_limit: Some(global_sandbox.cpu_limit),
                 memory_limit_mb: Some(global_sandbox.memory_limit_mb),
                 network_mode: Some(global_sandbox.network_mode.clone()),
-                env_vars: std::collections::HashMap::new(),
+                env_vars: sandbox_env,
                 idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
             };
             self.run_service
@@ -358,7 +380,10 @@ impl AgentExecutor {
             prompt
         };
 
-        // Step 9: Decrypt API key (if provided — subscription mode doesn't need one)
+        // Step 9: Resolve API key. Priority:
+        // 1. Per-agent encrypted key (config.api_key_encrypted)
+        // 2. Linked AI provider key (config.ai_provider_key_id → ai_provider_keys table)
+        // 3. Empty (Claude CLI uses ~/.claude auth / subscription mode)
         let api_key = if let Some(ref encrypted) = config.api_key_encrypted {
             self.encryption_service
                 .decrypt_string(encrypted)
@@ -368,6 +393,27 @@ impl AgentExecutor {
                         run.project_id, e
                     ),
                 })?
+        } else if let Some(key_id) = config.ai_provider_key_id {
+            // Look up the shared AI provider key
+            use temps_entities::ai_provider_keys;
+            let key_record = ai_provider_keys::Entity::find_by_id(key_id)
+                .one(self.db.as_ref())
+                .await
+                .map_err(AgentError::Database)?;
+            if let Some(key) = key_record {
+                self.encryption_service
+                    .decrypt_string(&key.api_key_encrypted)
+                    .map_err(|e| AgentError::EncryptionError {
+                        message: format!("Failed to decrypt AI provider key {}: {}", key_id, e),
+                    })?
+            } else {
+                tracing::warn!(
+                    "AI provider key {} not found for agent {}, running without API key",
+                    key_id,
+                    config.slug
+                );
+                String::new()
+            }
         } else {
             String::new()
         };

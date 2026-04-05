@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod opencode;
 
 use async_trait::async_trait;
 use std::future::Future;
@@ -65,6 +66,14 @@ pub fn create_provider(name: &str) -> Option<Box<dyn AiCliProvider>> {
     match name {
         "claude_cli" => Some(Box::new(claude::ClaudeCliProvider)),
         "codex_cli" => Some(Box::new(codex::CodexCliProvider)),
+        "opencode" => Some(Box::new(opencode::OpenCodeCliProvider)),
         _ => None,
     }
 }
+
+/// All supported provider names.
+pub const PROVIDER_NAMES: &[(&str, &str)] = &[
+    ("claude_cli", "Claude Code"),
+    ("opencode", "OpenCode"),
+    ("codex_cli", "Codex"),
+];

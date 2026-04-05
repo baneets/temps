@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Table,
@@ -20,15 +21,18 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Box, Loader2, Pencil, Play, Plus, Sparkles } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Box, Loader2, Pencil, Play, Plus, Sparkles } from 'lucide-react'
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { AgentSettingsDialog } from './AgentSettingsDialog'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
+  getCliStatus,
   listAgents,
   listAllRuns,
   triggerAgent,
+  updateAgent,
   type Agent,
   type AgentRun,
 } from './api'
@@ -87,6 +91,18 @@ function AgentCard({
   const [showTriggerDialog, setShowTriggerDialog] = useState(false)
   const [userContext, setUserContext] = useState('')
 
+  const toggleEnabled = useMutation({
+    mutationFn: () =>
+      updateAgent(projectId, agent.slug, { enabled: !agent.enabled }),
+    onSuccess: () => {
+      toast.success(`${agent.name} ${agent.enabled ? 'disabled' : 'enabled'}`)
+      queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || 'Failed to toggle agent')
+    },
+  })
+
   const trigger = useMutation({
     mutationFn: (context?: string) =>
       triggerAgent(projectId, agent.slug, context ? { user_context: context } : undefined),
@@ -121,18 +137,18 @@ function AgentCard({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <span className={`text-xs px-2 py-0.5 rounded ${agent.enabled ? 'bg-green-500/10 text-green-400' : 'bg-muted text-muted-foreground'}`}>
-              {agent.enabled ? 'Active' : 'Disabled'}
-            </span>
-            {agent.source !== 'yaml' && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onEdit(agent)}
-              >
-                <Pencil className="h-3 w-3" />
-              </Button>
-            )}
+            <Switch
+              checked={agent.enabled}
+              onCheckedChange={() => toggleEnabled.mutate()}
+              disabled={toggleEnabled.isPending}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onEdit(agent)}
+            >
+              <Pencil className="h-3 w-3" />
+            </Button>
             {agent.trigger_config?.manual && (
               <Button
                 variant="ghost"
@@ -219,6 +235,12 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
     queryFn: () => listAgents(project.id),
   })
 
+  const { data: cliStatus } = useQuery({
+    queryKey: ['cli-status', project.id],
+    queryFn: () => getCliStatus(project.id),
+    staleTime: 60_000,
+  })
+
   const {
     data: runsData,
     isLoading: isLoadingRuns,
@@ -289,6 +311,45 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
         projectId={project.id}
         agent={editingAgent}
       />
+
+      {/* AI CLI status banner */}
+      {cliStatus && !cliStatus.authenticated && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>
+            <div className="space-y-2">
+              <p className="font-medium">
+                {!cliStatus.installed
+                  ? 'Claude CLI is not installed'
+                  : 'Claude CLI is not authenticated'}
+              </p>
+              {!cliStatus.installed ? (
+                <p className="text-sm opacity-90">
+                  Install on the server: <code className="bg-black/20 px-1 rounded">npm install -g @anthropic-ai/claude-code</code>
+                </p>
+              ) : (
+                <div className="text-sm opacity-90 space-y-1">
+                  <p>Choose one:</p>
+                  <ol className="list-decimal list-inside space-y-0.5">
+                    <li>Run <code className="bg-black/20 px-1 rounded">claude setup-token</code> on the server to authenticate with your Anthropic account</li>
+                    <li>Configure in <Link to="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Agents</Link></li>
+                  </ol>
+                </div>
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {cliStatus?.authenticated && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+          <span>
+            Claude CLI {cliStatus.version} — {cliStatus.email || cliStatus.auth_method || 'authenticated'}
+            {cliStatus.subscription_type && ` (${cliStatus.subscription_type})`}
+          </span>
+        </div>
+      )}
 
       {/* Agent cards */}
       {agents && agents.length > 0 && (

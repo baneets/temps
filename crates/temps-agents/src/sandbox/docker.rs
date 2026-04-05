@@ -6,7 +6,6 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::{SandboxCreateConfig, SandboxExecResult, SandboxHandle, SandboxProvider};
 use crate::ai_cli::OnEventCallback;
@@ -79,15 +78,6 @@ fn image_name_for_runtime(runtime: &str) -> String {
         "node" | "" => "temps-sandbox-node:latest".to_string(),
         other => format!("temps-sandbox-{other}:latest"),
     }
-}
-
-/// Host path to the Claude CLI config directory (auth tokens, session state).
-/// Bind-mounted read-only into the container so Claude CLI can authenticate
-/// using the host's credentials without exposing them as env vars.
-fn claude_config_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".claude"))
 }
 
 /// Configuration for the Docker sandbox provider.
@@ -379,28 +369,18 @@ impl SandboxProvider for DockerSandboxProvider {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
 
-        // Bind mounts: work dir + Claude config (read-only at staging path)
-        // The host's ~/.claude is mounted read-only at /home/temps/.claude-host.
-        // On first exec, we copy it to /home/temps/.claude so Claude CLI can write
-        // session state, MCP server cache, etc. while preserving auth tokens.
-        let mut binds = vec![format!("{}:{}", host_work_dir, CONTAINER_WORK_DIR)];
-        let has_claude_config = if let Some(claude_dir) = claude_config_dir() {
-            if claude_dir.exists() {
-                binds.push(format!(
-                    "{}:/home/temps/.claude-host:ro",
-                    claude_dir.to_string_lossy()
-                ));
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        // Bind mount: only the work directory. Auth is handled via env vars
+        // (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY) — no host config mounting.
+        let binds = vec![format!("{}:{}", host_work_dir, CONTAINER_WORK_DIR)];
+
+        // tmpfs mount for secrets — in-memory only, never written to disk
+        let mut tmpfs = HashMap::new();
+        tmpfs.insert("/run/secrets".to_string(), "size=1m,mode=0700".to_string());
 
         let host_config = bollard::models::HostConfig {
             binds: Some(binds),
             network_mode: Some(docker_network),
+            tmpfs: Some(tmpfs),
             // Resource limits
             nano_cpus: Some((cpu_limit * 1_000_000_000.0) as i64),
             memory: Some(memory_limit_mb as i64 * 1024 * 1024),
@@ -469,35 +449,6 @@ impl SandboxProvider for DockerSandboxProvider {
             &container.id[..12],
             config.run_id
         );
-
-        // Copy Claude config from read-only mount to writable location.
-        // This allows Claude CLI to write session state and MCP server cache
-        // while preserving the host's auth tokens and settings.json (MCP config).
-        if has_claude_config {
-            let init_cmd = bollard::models::ExecConfig {
-                attach_stdout: Some(true),
-                attach_stderr: Some(true),
-                cmd: Some(vec![
-                    "sh".to_string(),
-                    "-c".to_string(),
-                    "cp -a /home/temps/.claude-host/. /home/temps/.claude/ 2>/dev/null; true"
-                        .to_string(),
-                ]),
-                ..Default::default()
-            };
-            if let Ok(exec) = self.docker.create_exec(&container.id, init_cmd).await {
-                let _ = self
-                    .docker
-                    .start_exec(&exec.id, None::<bollard::exec::StartExecOptions>)
-                    .await;
-                // Brief wait for copy to complete
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            tracing::debug!(
-                "Copied Claude config to writable /home/temps/.claude in container {}",
-                &container.id[..12]
-            );
-        }
 
         Ok(SandboxHandle {
             sandbox_id: container.id,
@@ -755,6 +706,7 @@ impl SandboxProvider for DockerSandboxProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_container_name_format() {

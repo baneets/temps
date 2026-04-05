@@ -266,8 +266,21 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[400px]">
-                  <pre className="text-xs">
-                    {JSON.stringify(latestEvent, null, 2)}
+                  <pre className="text-xs whitespace-pre-wrap break-all">
+                    {(() => {
+                      // Show only meaningful fields, not raw stream-json blobs
+                      const summary: Record<string, unknown> = {
+                        id: latestEvent.id,
+                        timestamp: latestEvent.timestamp,
+                      }
+                      const d = latestEvent.data as Record<string, unknown> | undefined
+                      if (d && typeof d === 'object') {
+                        for (const key of ['message', 'request', 'user', 'tags', 'contexts', 'environment', 'release']) {
+                          if (key in d && d[key]) summary[key] = d[key]
+                        }
+                      }
+                      return JSON.stringify(summary, null, 2)
+                    })()}
                   </pre>
                 </ScrollArea>
               </CardContent>
