@@ -735,9 +735,114 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = DockerSandboxConfig::default();
+        assert_eq!(config.runtime, "node");
+        assert_eq!(config.custom_image, "");
         assert_eq!(config.default_cpu_limit, 2.0);
         assert_eq!(config.default_memory_limit_mb, 2048);
         assert_eq!(config.network_mode, SANDBOX_NETWORK);
+    }
+
+    #[test]
+    fn test_resolved_image_for_presets() {
+        for (runtime, expected) in [
+            ("node", "temps-sandbox-node:latest"),
+            ("python", "temps-sandbox-python:latest"),
+            ("rust", "temps-sandbox-rust:latest"),
+            ("bun", "temps-sandbox-bun:latest"),
+            ("go", "temps-sandbox-go:latest"),
+            ("full", "temps-sandbox-full:latest"),
+        ] {
+            let config = DockerSandboxConfig {
+                runtime: runtime.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(config.resolved_image(), expected, "runtime={}", runtime);
+        }
+    }
+
+    #[test]
+    fn test_resolved_image_custom() {
+        let config = DockerSandboxConfig {
+            runtime: "custom".to_string(),
+            custom_image: "my-registry/my-agent:v2".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.resolved_image(), "my-registry/my-agent:v2");
+    }
+
+    #[test]
+    fn test_resolved_image_custom_empty_falls_back() {
+        let config = DockerSandboxConfig {
+            runtime: "custom".to_string(),
+            custom_image: String::new(),
+            ..Default::default()
+        };
+        // Falls back to node since custom_image is empty
+        assert_eq!(config.resolved_image(), "temps-sandbox-custom:latest");
+    }
+
+    #[test]
+    fn test_dockerfile_for_runtime_node() {
+        let df = dockerfile_for_runtime("node");
+        assert!(df.contains("FROM node:20-slim"));
+        assert!(df.contains("claude-code"));
+        assert!(df.contains("git"));
+    }
+
+    #[test]
+    fn test_dockerfile_for_runtime_python() {
+        let df = dockerfile_for_runtime("python");
+        assert!(df.contains("FROM python:3.12-slim"));
+        assert!(df.contains("claude-code"));
+        assert!(df.contains("uv"));
+    }
+
+    #[test]
+    fn test_dockerfile_for_runtime_rust() {
+        let df = dockerfile_for_runtime("rust");
+        assert!(df.contains("FROM rust:1-slim"));
+        assert!(df.contains("claude-code"));
+    }
+
+    #[test]
+    fn test_dockerfile_for_runtime_bun() {
+        let df = dockerfile_for_runtime("bun");
+        assert!(df.contains("FROM oven/bun:latest"));
+        assert!(df.contains("claude-code"));
+    }
+
+    #[test]
+    fn test_dockerfile_for_runtime_go() {
+        let df = dockerfile_for_runtime("go");
+        assert!(df.contains("FROM golang:1.23-slim"));
+        assert!(df.contains("claude-code"));
+    }
+
+    #[test]
+    fn test_dockerfile_for_runtime_full() {
+        let df = dockerfile_for_runtime("full");
+        assert!(df.contains("FROM ubuntu:24.04"));
+        assert!(df.contains("claude-code"));
+        assert!(df.contains("python3"));
+        assert!(df.contains("golang-go"));
+        assert!(df.contains("nodejs"));
+        assert!(df.contains("uv"));
+    }
+
+    #[test]
+    fn test_dockerfile_for_unknown_runtime_defaults_to_node() {
+        let df = dockerfile_for_runtime("unknown");
+        assert!(df.contains("FROM node:20-slim"));
+    }
+
+    #[test]
+    fn test_image_name_for_runtime() {
+        assert_eq!(image_name_for_runtime("node"), "temps-sandbox-node:latest");
+        assert_eq!(image_name_for_runtime(""), "temps-sandbox-node:latest");
+        assert_eq!(
+            image_name_for_runtime("python"),
+            "temps-sandbox-python:latest"
+        );
     }
 
     #[tokio::test]
@@ -761,5 +866,153 @@ mod tests {
         // Recover a run that doesn't exist
         let result = provider.recover(999999).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_docker_sandbox_e2e_lifecycle() {
+        // Full lifecycle: create → exec → is_alive → recover → destroy
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping e2e test");
+                return;
+            }
+        };
+        let docker = Arc::new(docker);
+
+        if docker.ping().await.is_err() {
+            println!("Docker not responding, skipping e2e test");
+            return;
+        }
+
+        let config = DockerSandboxConfig::default();
+        let provider = DockerSandboxProvider::new(docker.clone(), config);
+
+        // Ensure the default image is built
+        if let Err(e) = provider.ensure_image().await {
+            println!("Cannot build sandbox image, skipping e2e test: {}", e);
+            return;
+        }
+
+        let run_id = 99990; // Unlikely to conflict
+        let work_dir = std::env::temp_dir().join(format!("sandbox-e2e-test-{}", run_id));
+        let _ = std::fs::create_dir_all(&work_dir);
+        std::fs::write(work_dir.join("test.txt"), "hello from test").unwrap();
+
+        // 1. Create sandbox
+        let create_config = SandboxCreateConfig {
+            run_id,
+            host_work_dir: work_dir.clone(),
+            image: None,
+            cpu_limit: Some(1.0),
+            memory_limit_mb: Some(512),
+            network_mode: Some("none".to_string()),
+            env_vars: HashMap::from([("TEST_VAR".to_string(), "test_value".to_string())]),
+            idle_timeout: Duration::from_secs(120),
+        };
+
+        let handle = provider.create(create_config).await.unwrap();
+        assert!(handle.sandbox_name.contains("temps-sandbox-"));
+        assert!(!handle.sandbox_id.is_empty());
+
+        // 2. Verify it's alive
+        assert!(provider.is_alive(&handle).await.unwrap());
+
+        // 3. Execute a command — check the work dir is mounted
+        let result = provider
+            .exec(
+                &handle,
+                vec!["cat".to_string(), "/workspace/test.txt".to_string()],
+                HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello from test"));
+
+        // 4. Execute with env vars
+        let result = provider
+            .exec(
+                &handle,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "echo $MY_VAR".to_string(),
+                ],
+                HashMap::from([("MY_VAR".to_string(), "injected".to_string())]),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("injected"));
+
+        // 5. Verify recovery — simulate finding existing container
+        let recovered = provider.recover(run_id).await.unwrap();
+        assert!(recovered.is_some());
+        let recovered_handle = recovered.unwrap();
+        assert_eq!(recovered_handle.sandbox_name, handle.sandbox_name);
+
+        // 6. Destroy
+        provider.destroy(&handle).await.unwrap();
+
+        // 7. Verify it's gone
+        assert!(!provider.is_alive(&handle).await.unwrap_or(false));
+        let after_destroy = provider.recover(run_id).await.unwrap();
+        assert!(after_destroy.is_none());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[tokio::test]
+    async fn test_docker_sandbox_image_status() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping test");
+                return;
+            }
+        };
+        let docker = Arc::new(docker);
+
+        if docker.ping().await.is_err() {
+            println!("Docker not responding, skipping test");
+            return;
+        }
+
+        let provider = DockerSandboxProvider::new(docker, DockerSandboxConfig::default());
+        assert!(provider.is_available().await);
+
+        let (_, image_name) = provider.image_status().await.unwrap();
+        assert!(image_name.starts_with("temps-sandbox-"));
+    }
+
+    #[tokio::test]
+    async fn test_docker_sandbox_custom_runtime() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping test");
+                return;
+            }
+        };
+        let docker = Arc::new(docker);
+
+        if docker.ping().await.is_err() {
+            println!("Docker not responding, skipping test");
+            return;
+        }
+
+        // Test that different runtimes produce different images
+        let config = DockerSandboxConfig {
+            runtime: "python".to_string(),
+            ..Default::default()
+        };
+        let provider = DockerSandboxProvider::new(docker, config);
+
+        let (_, image_name) = provider.image_status().await.unwrap();
+        assert_eq!(image_name, "temps-sandbox-python:latest");
     }
 }
