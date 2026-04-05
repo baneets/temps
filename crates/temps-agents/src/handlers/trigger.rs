@@ -23,6 +23,8 @@ use crate::handlers::AppState;
 pub struct TriggerAgentRequest {
     pub trigger_source_type: Option<String>,
     pub trigger_source_id: Option<i32>,
+    /// Optional context from the user (e.g. a research topic, bug description, or instructions).
+    pub user_context: Option<String>,
 }
 
 // ── Audit ─────────────────────────────────────────────────────────────────────
@@ -139,6 +141,7 @@ async fn trigger_agent(
             "manual".to_string(),
             request.trigger_source_id,
             request.trigger_source_type.clone(),
+            request.user_context,
         )
         .await
         .map_err(Problem::from)?;

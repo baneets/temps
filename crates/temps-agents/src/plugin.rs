@@ -242,6 +242,7 @@ impl AgentsPlugin {
                                         trigger.trigger_type.clone(),
                                         trigger.trigger_source_id,
                                         trigger.trigger_source_type.clone(),
+                                        None, // No user_context for automated triggers
                                     )
                                     .await
                                 {

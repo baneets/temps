@@ -1,7 +1,16 @@
 import { ProjectResponse } from '@/api/client'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Table,
   TableBody,
@@ -11,7 +20,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Box, Pencil, Play, Plus, Sparkles } from 'lucide-react'
+import { Box, Loader2, Pencil, Play, Plus, Sparkles } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -75,10 +84,16 @@ function AgentCard({
   onEdit: (agent: Agent) => void
   onNavigate: (slug: string) => void
 }) {
+  const [showTriggerDialog, setShowTriggerDialog] = useState(false)
+  const [userContext, setUserContext] = useState('')
+
   const trigger = useMutation({
-    mutationFn: () => triggerAgent(projectId, agent.slug),
+    mutationFn: (context?: string) =>
+      triggerAgent(projectId, agent.slug, context ? { user_context: context } : undefined),
     onSuccess: () => {
       toast.success(`${agent.name} triggered`)
+      setShowTriggerDialog(false)
+      setUserContext('')
       queryClient.invalidateQueries({ queryKey: ['agent-runs', projectId] })
     },
     onError: (error: Error) => {
@@ -90,6 +105,7 @@ function AgentCard({
   const nextRun = nextCronRun(cronSchedule)
 
   return (
+    <>
     <Card className="bg-background">
       <CardContent className="p-4">
         <div className="flex items-center justify-between mb-2">
@@ -121,7 +137,7 @@ function AgentCard({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => trigger.mutate()}
+                onClick={() => setShowTriggerDialog(true)}
                 disabled={trigger.isPending || !agent.enabled}
               >
                 <Play className="h-3 w-3 mr-1" />
@@ -143,6 +159,49 @@ function AgentCard({
         </div>
       </CardContent>
     </Card>
+
+    {/* Trigger dialog with optional context */}
+    <Dialog open={showTriggerDialog} onOpenChange={setShowTriggerDialog}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Run {agent.name}</DialogTitle>
+          <DialogDescription>
+            {agent.description || 'Trigger this agent manually.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <label className="text-sm font-medium">
+            Context <span className="text-muted-foreground font-normal">(optional)</span>
+          </label>
+          <Textarea
+            placeholder="e.g. Research edge caching best practices for Next.js in 2026..."
+            value={userContext}
+            onChange={(e) => setUserContext(e.target.value)}
+            rows={4}
+          />
+          <p className="text-xs text-muted-foreground">
+            Provide additional instructions or a topic for the agent. This is appended to the agent's prompt.
+          </p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setShowTriggerDialog(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => trigger.mutate(userContext || undefined)}
+            disabled={trigger.isPending}
+          >
+            {trigger.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            ) : (
+              <Play className="h-4 w-4 mr-2" />
+            )}
+            Run Agent
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }
 

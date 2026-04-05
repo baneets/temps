@@ -58,6 +58,7 @@ impl AgentRunService {
         trigger_type: String,
         trigger_source_id: Option<i32>,
         trigger_source_type: Option<String>,
+        user_context: Option<String>,
     ) -> Result<agent_runs::Model, AgentError> {
         let active = agent_runs::ActiveModel {
             project_id: Set(project_id),
@@ -66,6 +67,7 @@ impl AgentRunService {
             trigger_type: Set(trigger_type),
             trigger_source_id: Set(trigger_source_id),
             trigger_source_type: Set(trigger_source_type),
+            user_context: Set(user_context),
             status: Set("pending".to_string()),
             tokens_input: Set(0),
             tokens_output: Set(0),

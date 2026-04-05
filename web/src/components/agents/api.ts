@@ -195,7 +195,7 @@ export async function getAgentRun(projectId: number, runId: string): Promise<Age
 
 // ── Triggers ──
 
-export async function triggerAgent(projectId: number, slug: string, data?: { trigger_source_type?: string; trigger_source_id?: number }): Promise<AgentRun> {
+export async function triggerAgent(projectId: number, slug: string, data?: { trigger_source_type?: string; trigger_source_id?: number; user_context?: string }): Promise<AgentRun> {
   const response = await fetch(`/api/projects/${projectId}/agents/${slug}/trigger`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

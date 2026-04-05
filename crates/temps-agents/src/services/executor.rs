@@ -347,6 +347,17 @@ impl AgentExecutor {
             }
         };
 
+        // Append user context if provided (e.g. research topic, bug description)
+        let prompt = if let Some(ref ctx) = run.user_context {
+            if !ctx.is_empty() {
+                format!("{}\n\n---\nUSER CONTEXT:\n{}\n", prompt, ctx)
+            } else {
+                prompt
+            }
+        } else {
+            prompt
+        };
+
         // Step 9: Decrypt API key (if provided — subscription mode doesn't need one)
         let api_key = if let Some(ref encrypted) = config.api_key_encrypted {
             self.encryption_service
