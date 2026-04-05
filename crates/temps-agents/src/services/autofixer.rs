@@ -130,8 +130,11 @@ impl AutofixerService {
             .append_log(run_id, "info", "Cloning repository...", None)
             .await?;
 
-        // Clone the repository
+        // Clone the repository — clean up any leftover work dir from a crashed previous run
         let work_dir = Self::work_dir(run_id);
+        if work_dir.exists() {
+            let _ = fs::remove_dir_all(&work_dir).await;
+        }
         fs::create_dir_all(&work_dir).await?;
 
         let connection_id = project

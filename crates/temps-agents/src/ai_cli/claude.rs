@@ -5,6 +5,24 @@ use tokio::process::Command;
 use super::{AiCliProvider, AiCliStatus, AiRunConfig, AiRunResult};
 use crate::error::AgentError;
 
+/// Escape a string for safe use inside a shell command (single-quoted).
+fn shell_escape(s: &str) -> String {
+    // Wrap in single quotes, escaping any embedded single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Check if a Unix user exists by name.
+fn user_exists(name: &str) -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub struct ClaudeCliProvider;
 
 #[async_trait]
@@ -106,16 +124,39 @@ impl AiCliProvider for ClaudeCliProvider {
     async fn run(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let mut cmd = Command::new("claude");
-        cmd.arg("--print")
-            .arg(&config.prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--max-turns")
-            .arg(config.max_turns.to_string())
-            .arg("--dangerously-skip-permissions")
-            .arg("--verbose")
-            .current_dir(&config.work_dir)
+        let is_root = unsafe { libc::geteuid() } == 0;
+
+        // When running as root, Claude CLI refuses --dangerously-skip-permissions.
+        // Use `su` to drop to a non-root user (temps or nobody).
+        let mut cmd = if is_root {
+            let run_user = if user_exists("temps") {
+                "temps"
+            } else {
+                "nobody"
+            };
+            let mut c = Command::new("su");
+            c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
+            // Build the claude command as a single string for su -c
+            let claude_args = format!(
+                "claude --print {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose",
+                shell_escape(&config.prompt),
+                config.max_turns,
+            );
+            c.arg(&claude_args);
+            c
+        } else {
+            let mut c = Command::new("claude");
+            c.arg("--print")
+                .arg(&config.prompt)
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--max-turns")
+                .arg(config.max_turns.to_string())
+                .arg("--dangerously-skip-permissions")
+                .arg("--verbose");
+            c
+        };
+        cmd.current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -220,17 +261,37 @@ impl AiCliProvider for ClaudeCliProvider {
     async fn continue_conversation(&self, config: AiRunConfig) -> Result<AiRunResult, AgentError> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let mut cmd = Command::new("claude");
-        cmd.arg("--print")
-            .arg("--continue") // Continue the most recent conversation in this directory
-            .arg(&config.prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--max-turns")
-            .arg(config.max_turns.to_string())
-            .arg("--dangerously-skip-permissions")
-            .arg("--verbose")
-            .current_dir(&config.work_dir)
+        let is_root = unsafe { libc::geteuid() } == 0;
+
+        let mut cmd = if is_root {
+            let run_user = if user_exists("temps") {
+                "temps"
+            } else {
+                "nobody"
+            };
+            let mut c = Command::new("su");
+            c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
+            let claude_args = format!(
+                "claude --print --continue {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose",
+                shell_escape(&config.prompt),
+                config.max_turns,
+            );
+            c.arg(&claude_args);
+            c
+        } else {
+            let mut c = Command::new("claude");
+            c.arg("--print")
+                .arg("--continue")
+                .arg(&config.prompt)
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--max-turns")
+                .arg(config.max_turns.to_string())
+                .arg("--dangerously-skip-permissions")
+                .arg("--verbose");
+            c
+        };
+        cmd.current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

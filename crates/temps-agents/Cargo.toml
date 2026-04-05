@@ -37,3 +37,4 @@ bytes = { workspace = true }
 http-body-util = { workspace = true }
 tar = "0.4"
 pulldown-cmark = "0.12"
+libc = { workspace = true }

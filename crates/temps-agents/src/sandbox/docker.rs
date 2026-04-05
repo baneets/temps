@@ -23,43 +23,53 @@ const CONTAINER_WORK_DIR: &str = "/workspace";
 
 /// Generate a Dockerfile for a given runtime preset.
 /// Every image gets git, curl, and Claude CLI installed on top of the base.
+/// A non-root `temps` user is created so Claude CLI accepts --dangerously-skip-permissions.
 fn dockerfile_for_runtime(runtime: &str) -> String {
     let (base, extra_packages, extra_run) = match runtime {
         "bun" => (
             "oven/bun:latest",
-            "git ca-certificates curl",
+            "git ca-certificates curl sudo",
             "npm install -g @anthropic-ai/claude-code",
         ),
         "python" => (
             "python:3.12-slim",
-            "git ca-certificates curl nodejs npm",
+            "git ca-certificates curl nodejs npm sudo",
             "npm install -g @anthropic-ai/claude-code && curl -LsSf https://astral.sh/uv/install.sh | sh",
         ),
         "rust" => (
             "rust:1-slim",
-            "git ca-certificates curl nodejs npm",
+            "git ca-certificates curl nodejs npm sudo",
             "npm install -g @anthropic-ai/claude-code",
         ),
         "go" => (
             "golang:1.23-slim",
-            "git ca-certificates curl nodejs npm",
+            "git ca-certificates curl nodejs npm sudo",
             "npm install -g @anthropic-ai/claude-code",
         ),
         "full" => (
             "ubuntu:24.04",
-            "git ca-certificates curl nodejs npm python3 python3-pip golang-go",
+            "git ca-certificates curl nodejs npm python3 python3-pip golang-go sudo",
             "npm install -g @anthropic-ai/claude-code && curl -LsSf https://astral.sh/uv/install.sh | sh",
         ),
         // "node" or anything else
         _ => (
             "node:20-slim",
-            "git ca-certificates curl",
+            "git ca-certificates curl sudo",
             "npm install -g @anthropic-ai/claude-code",
         ),
     };
 
+    // Install tools as root, then create non-root user with sudo for package installs.
+    // Claude CLI refuses --dangerously-skip-permissions when running as root.
     format!(
-        "FROM {base}\nRUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} && rm -rf /var/lib/apt/lists/*\nRUN {extra_run}\nWORKDIR /workspace\n"
+        r#"FROM {base}
+RUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} && rm -rf /var/lib/apt/lists/*
+RUN {extra_run}
+RUN useradd -m -s /bin/bash temps && echo "temps ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/temps
+RUN mkdir -p /workspace && chown temps:temps /workspace
+USER temps
+WORKDIR /workspace
+"#
     )
 }
 
@@ -370,14 +380,14 @@ impl SandboxProvider for DockerSandboxProvider {
             .collect();
 
         // Bind mounts: work dir + Claude config (read-only at staging path)
-        // The host's ~/.claude is mounted read-only at /root/.claude-host.
-        // On first exec, we copy it to /root/.claude so Claude CLI can write
+        // The host's ~/.claude is mounted read-only at /home/temps/.claude-host.
+        // On first exec, we copy it to /home/temps/.claude so Claude CLI can write
         // session state, MCP server cache, etc. while preserving auth tokens.
         let mut binds = vec![format!("{}:{}", host_work_dir, CONTAINER_WORK_DIR)];
         let has_claude_config = if let Some(claude_dir) = claude_config_dir() {
             if claude_dir.exists() {
                 binds.push(format!(
-                    "{}:/root/.claude-host:ro",
+                    "{}:/home/temps/.claude-host:ro",
                     claude_dir.to_string_lossy()
                 ));
                 true
@@ -470,7 +480,8 @@ impl SandboxProvider for DockerSandboxProvider {
                 cmd: Some(vec![
                     "sh".to_string(),
                     "-c".to_string(),
-                    "cp -a /root/.claude-host/. /root/.claude/ 2>/dev/null; true".to_string(),
+                    "cp -a /home/temps/.claude-host/. /home/temps/.claude/ 2>/dev/null; true"
+                        .to_string(),
                 ]),
                 ..Default::default()
             };
@@ -483,7 +494,7 @@ impl SandboxProvider for DockerSandboxProvider {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             tracing::debug!(
-                "Copied Claude config to writable /root/.claude in container {}",
+                "Copied Claude config to writable /home/temps/.claude in container {}",
                 &container.id[..12]
             );
         }
