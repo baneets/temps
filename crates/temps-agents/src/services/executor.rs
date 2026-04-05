@@ -233,13 +233,19 @@ impl AgentExecutor {
         // Per-agent overrides global: None = use global, Some(true/false) = explicit
         let use_sandbox = config.sandbox_enabled.unwrap_or(global_sandbox.enabled);
         if use_sandbox {
-            // Resolve image from runtime preset or custom image
-            let resolved_image =
-                if global_sandbox.runtime == "custom" && !global_sandbox.custom_image.is_empty() {
-                    Some(global_sandbox.custom_image.clone())
+            // Always resolve the image name from current DB settings so changes
+            // take effect without server restart.
+            let resolved_image = if global_sandbox.runtime == "custom" {
+                if global_sandbox.custom_image.is_empty() {
+                    None
                 } else {
-                    None // SandboxProvider will use its configured runtime
-                };
+                    Some(global_sandbox.custom_image.clone())
+                }
+            } else {
+                // For presets, compute the image name here instead of relying
+                // on the provider's startup-time config.
+                Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime))
+            };
 
             let sandbox_config = SandboxCreateConfig {
                 run_id,
