@@ -106,6 +106,12 @@ impl AgentExecutor {
         }
 
         // Always attempt cleanup: release sandbox first, then temp directory
+        if self.sandbox_registry.has_sandbox(run_id).await {
+            let _ = self
+                .run_service
+                .append_log(run_id, "info", "Destroying sandbox container...", None)
+                .await;
+        }
         let _ = self.sandbox_registry.release(run_id).await;
         if work_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&work_dir).await {
@@ -241,13 +247,35 @@ impl AgentExecutor {
                 env_vars: std::collections::HashMap::new(),
                 idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
             };
-            self.sandbox_registry.get_or_create(sandbox_config).await?;
             self.run_service
                 .append_log(
                     run_id,
                     "info",
                     &format!(
-                        "Sandbox created ({} provider)",
+                        "Creating sandbox: {} CPU, {}MB RAM, network={}{}",
+                        global_sandbox.cpu_limit,
+                        global_sandbox.memory_limit_mb,
+                        global_sandbox.network_mode,
+                        if global_sandbox.image.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", image={}", global_sandbox.image)
+                        }
+                    ),
+                    None,
+                )
+                .await?;
+
+            let sandbox_start = std::time::Instant::now();
+            self.sandbox_registry.get_or_create(sandbox_config).await?;
+
+            self.run_service
+                .append_log(
+                    run_id,
+                    "info",
+                    &format!(
+                        "Sandbox ready in {:.1}s ({})",
+                        sandbox_start.elapsed().as_secs_f64(),
                         self.sandbox_registry.provider_name()
                     ),
                     None,

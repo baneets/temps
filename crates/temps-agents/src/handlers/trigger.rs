@@ -71,6 +71,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/agents/sandbox-status",
             get(get_sandbox_status),
         )
+        // Global sandbox status (for settings page, no project context needed)
+        .route("/settings/sandbox-status", get(get_global_sandbox_status))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -260,6 +262,36 @@ async fn get_sandbox_status(
     let docker_available = provider.is_available().await;
 
     // Check if sandbox image exists
+    let (image_ready, image_name, error) = if docker_available {
+        match provider.image_status().await {
+            Ok((ready, name)) => (ready, name, None),
+            Err(e) => (false, String::new(), Some(e.to_string())),
+        }
+    } else {
+        (
+            false,
+            String::new(),
+            Some("Docker is not available on this server".to_string()),
+        )
+    };
+
+    Ok(Json(SandboxStatusResponse {
+        docker_available,
+        image_ready,
+        image_name,
+        error,
+    }))
+}
+
+async fn get_global_sandbox_status(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let provider = app_state.executor.sandbox_registry().provider();
+    let docker_available = provider.is_available().await;
+
     let (image_ready, image_name, error) = if docker_available {
         match provider.image_status().await {
             Ok((ready, name)) => (ready, name, None),

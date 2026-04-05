@@ -20,22 +20,32 @@ import { Switch } from '@/components/ui/switch'
 import {
   AlertTriangle,
   Bot,
+  CheckCircle2,
   Cpu,
   Globe,
   ImageIcon,
   Loader2,
+  RefreshCw,
   Save,
+  XCircle,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { useSettings, useUpdateSettings } from '@/hooks/useSettings'
 import { usePageTitle } from '@/hooks/usePageTitle'
 
+interface SandboxStatus {
+  docker_available: boolean
+  image_ready: boolean
+  image_name: string
+  error: string | null
+}
+
 const RESOURCE_PRESETS = [
-  { label: 'Light', cpu: 1, memory: 1024, description: 'Simple analysis, reports' },
-  { label: 'Standard', cpu: 2, memory: 2048, description: 'Most agents' },
-  { label: 'Heavy', cpu: 4, memory: 4096, description: 'Large repos, complex tasks' },
-  { label: 'Custom', cpu: 0, memory: 0, description: 'Set your own limits' },
+  { label: 'Light', cpu: 1, memory: 1024 },
+  { label: 'Standard', cpu: 2, memory: 2048 },
+  { label: 'Heavy', cpu: 4, memory: 4096 },
+  { label: 'Custom', cpu: 0, memory: 0 },
 ]
 
 function getPresetLabel(cpu: number, memory: number): string {
@@ -57,6 +67,25 @@ export function AgentSandboxSettings() {
   const [isDirty, setIsDirty] = useState(false)
   const [selectedPreset, setSelectedPreset] = useState('Standard')
 
+  // Docker status
+  const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
+  const [statusLoading, setStatusLoading] = useState(false)
+
+  const fetchSandboxStatus = useCallback(async () => {
+    setStatusLoading(true)
+    try {
+      const response = await fetch('/api/settings/sandbox-status')
+      if (response.ok) {
+        const data = await response.json()
+        setSandboxStatus(data)
+      }
+    } catch {
+      // Ignore — endpoint may not exist on older versions
+    } finally {
+      setStatusLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     if (settings?.agent_sandbox) {
       setEnabled(settings.agent_sandbox.enabled)
@@ -69,6 +98,10 @@ export function AgentSandboxSettings() {
       )
     }
   }, [settings])
+
+  useEffect(() => {
+    fetchSandboxStatus()
+  }, [fetchSandboxStatus])
 
   const handlePresetChange = (preset: string) => {
     setSelectedPreset(preset)
@@ -108,7 +141,7 @@ export function AgentSandboxSettings() {
 
   return (
     <div className="space-y-6">
-      {/* What is sandbox */}
+      {/* Header + Description */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -118,10 +151,69 @@ export function AgentSandboxSettings() {
           <CardDescription>
             When sandbox is enabled, agents run inside isolated Docker
             containers. Code changes are contained and can't affect your server.
-            The container has access to the cloned repository and Claude CLI.
+            The container has access to the cloned repository, Claude CLI, and
+            any MCP servers configured in your project.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {/* Docker status */}
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-medium">Docker Status</h4>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={fetchSandboxStatus}
+                disabled={statusLoading}
+              >
+                {statusLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+              </Button>
+            </div>
+            {sandboxStatus ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm">
+                  {sandboxStatus.docker_available ? (
+                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                  ) : (
+                    <XCircle className="h-4 w-4 text-red-500" />
+                  )}
+                  <span>
+                    Docker:{' '}
+                    {sandboxStatus.docker_available
+                      ? 'connected'
+                      : 'not available'}
+                  </span>
+                </div>
+                {sandboxStatus.docker_available && (
+                  <div className="flex items-center gap-2 text-sm">
+                    {sandboxStatus.image_ready ? (
+                      <CheckCircle2 className="h-4 w-4 text-green-500" />
+                    ) : (
+                      <XCircle className="h-4 w-4 text-amber-500" />
+                    )}
+                    <span>
+                      Image:{' '}
+                      {sandboxStatus.image_ready
+                        ? sandboxStatus.image_name
+                        : 'not built (will build automatically on first run)'}
+                    </span>
+                  </div>
+                )}
+                {sandboxStatus.error && (
+                  <p className="text-xs text-red-400 mt-1">
+                    {sandboxStatus.error}
+                  </p>
+                )}
+              </div>
+            ) : statusLoading ? (
+              <p className="text-sm text-muted-foreground">Checking...</p>
+            ) : null}
+          </div>
+
           {/* Enable toggle */}
           <div className="flex items-center justify-between">
             <div className="space-y-0.5">
@@ -176,9 +268,11 @@ export function AgentSandboxSettings() {
             }}
           />
           <p className="text-xs text-muted-foreground">
-            Custom images must have <code className="text-xs bg-muted px-1 rounded">git</code> and{' '}
-            <code className="text-xs bg-muted px-1 rounded">claude</code> (Claude CLI) installed.
-            The repository is mounted at <code className="text-xs bg-muted px-1 rounded">/workspace</code>.
+            Custom images must have{' '}
+            <code className="text-xs bg-muted px-1 rounded">git</code> and{' '}
+            <code className="text-xs bg-muted px-1 rounded">claude</code>{' '}
+            (Claude CLI) installed. The repository is mounted at{' '}
+            <code className="text-xs bg-muted px-1 rounded">/workspace</code>.
           </p>
         </CardContent>
       </Card>
@@ -195,7 +289,6 @@ export function AgentSandboxSettings() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Presets */}
           <div className="space-y-2">
             <Label>Preset</Label>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -265,8 +358,8 @@ export function AgentSandboxSettings() {
             Network Access
           </CardTitle>
           <CardDescription>
-            Controls whether sandbox containers can access the internet.
-            Agents that use web search or API calls need network access.
+            Controls whether sandbox containers can access the internet. Agents
+            that use web search, MCP servers, or API calls need network access.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -309,8 +402,8 @@ export function AgentSandboxSettings() {
           </Select>
           {networkMode === 'none' && (
             <p className="text-xs text-amber-500 mt-2">
-              Agents won't be able to install packages, use web search, or call
-              external APIs.
+              Agents won't be able to install packages, use web search, run MCP
+              servers, or call external APIs.
             </p>
           )}
         </CardContent>

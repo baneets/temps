@@ -27,6 +27,11 @@ impl SandboxRegistry {
         self.provider.as_ref()
     }
 
+    /// Check if a sandbox exists for this run.
+    pub async fn has_sandbox(&self, run_id: i32) -> bool {
+        self.sandboxes.read().await.contains_key(&run_id)
+    }
+
     /// Get an existing sandbox or create a new one for the given run.
     pub async fn get_or_create(
         &self,

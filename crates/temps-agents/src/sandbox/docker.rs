@@ -6,6 +6,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{SandboxCreateConfig, SandboxExecResult, SandboxHandle, SandboxProvider};
 use crate::ai_cli::OnEventCallback;
@@ -25,7 +26,7 @@ const CONTAINER_WORK_DIR: &str = "/workspace";
 
 /// Dockerfile content for building the sandbox image.
 const SANDBOX_DOCKERFILE: &str = r#"FROM node:20-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @anthropic-ai/claude-code
 WORKDIR /workspace
 "#;
@@ -240,13 +241,24 @@ impl SandboxProvider for DockerSandboxProvider {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
 
-        // Bind mounts: work dir + Claude config (for auth)
+        // Bind mounts: work dir + Claude config (read-only at staging path)
+        // The host's ~/.claude is mounted read-only at /root/.claude-host.
+        // On first exec, we copy it to /root/.claude so Claude CLI can write
+        // session state, MCP server cache, etc. while preserving auth tokens.
         let mut binds = vec![format!("{}:{}", host_work_dir, CONTAINER_WORK_DIR)];
-        if let Some(claude_dir) = claude_config_dir() {
+        let has_claude_config = if let Some(claude_dir) = claude_config_dir() {
             if claude_dir.exists() {
-                binds.push(format!("{}:/root/.claude:ro", claude_dir.to_string_lossy()));
+                binds.push(format!(
+                    "{}:/root/.claude-host:ro",
+                    claude_dir.to_string_lossy()
+                ));
+                true
+            } else {
+                false
             }
-        }
+        } else {
+            false
+        };
 
         let host_config = bollard::models::HostConfig {
             binds: Some(binds),
@@ -319,6 +331,34 @@ impl SandboxProvider for DockerSandboxProvider {
             &container.id[..12],
             config.run_id
         );
+
+        // Copy Claude config from read-only mount to writable location.
+        // This allows Claude CLI to write session state and MCP server cache
+        // while preserving the host's auth tokens and settings.json (MCP config).
+        if has_claude_config {
+            let init_cmd = bollard::models::ExecConfig {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                cmd: Some(vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "cp -a /root/.claude-host/. /root/.claude/ 2>/dev/null; true".to_string(),
+                ]),
+                ..Default::default()
+            };
+            if let Ok(exec) = self.docker.create_exec(&container.id, init_cmd).await {
+                let _ = self
+                    .docker
+                    .start_exec(&exec.id, None::<bollard::exec::StartExecOptions>)
+                    .await;
+                // Brief wait for copy to complete
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            tracing::debug!(
+                "Copied Claude config to writable /root/.claude in container {}",
+                &container.id[..12]
+            );
+        }
 
         Ok(SandboxHandle {
             sandbox_id: container.id,
