@@ -83,4 +83,7 @@ pub trait SandboxProvider: Send + Sync {
     /// Check if the sandbox image is built/available.
     /// Returns (is_ready, image_name).
     async fn image_status(&self) -> Result<(bool, String), AgentError>;
+
+    /// Delete and rebuild the sandbox image. Returns the image name.
+    async fn rebuild_image(&self) -> Result<String, AgentError>;
 }

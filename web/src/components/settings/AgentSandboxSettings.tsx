@@ -116,6 +116,7 @@ export function AgentSandboxSettings() {
 
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
+  const [rebuilding, setRebuilding] = useState(false)
 
   const fetchSandboxStatus = useCallback(async () => {
     setStatusLoading(true)
@@ -147,6 +148,30 @@ export function AgentSandboxSettings() {
   useEffect(() => {
     fetchSandboxStatus()
   }, [fetchSandboxStatus])
+
+  const handleRebuildImage = async () => {
+    setRebuilding(true)
+    try {
+      const response = await fetch('/api/settings/sandbox-rebuild', {
+        method: 'POST',
+      })
+      if (response.ok) {
+        const data = await response.json()
+        if (data.success) {
+          toast.success(`Sandbox image rebuilt: ${data.image_name}`)
+        } else {
+          toast.error(data.error || 'Failed to rebuild image')
+        }
+      } else {
+        toast.error('Failed to rebuild image')
+      }
+      await fetchSandboxStatus()
+    } catch {
+      toast.error('Failed to rebuild image')
+    } finally {
+      setRebuilding(false)
+    }
+  }
 
   const handleResourcePresetChange = (preset: string) => {
     setResourcePreset(preset)
@@ -253,6 +278,22 @@ export function AgentSandboxSettings() {
                   <p className="text-xs text-red-400 mt-1">
                     {sandboxStatus.error}
                   </p>
+                )}
+                {sandboxStatus.docker_available && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleRebuildImage}
+                    disabled={rebuilding}
+                    className="mt-2"
+                  >
+                    {rebuilding ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                    ) : (
+                      <RefreshCw className="h-3.5 w-3.5 mr-2" />
+                    )}
+                    {rebuilding ? 'Rebuilding...' : 'Rebuild Image'}
+                  </Button>
                 )}
               </div>
             ) : statusLoading ? (

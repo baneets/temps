@@ -73,8 +73,9 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/agents/sandbox-status",
             get(get_sandbox_status),
         )
-        // Global sandbox status (for settings page, no project context needed)
+        // Global sandbox status and management (for settings page)
         .route("/settings/sandbox-status", get(get_global_sandbox_status))
+        .route("/settings/sandbox-rebuild", post(rebuild_sandbox_image))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -314,4 +315,33 @@ async fn get_global_sandbox_status(
         image_name,
         error,
     }))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+struct SandboxRebuildResponse {
+    success: bool,
+    image_name: String,
+    error: Option<String>,
+}
+
+async fn rebuild_sandbox_image(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let provider = app_state.executor.sandbox_registry().provider();
+
+    match provider.rebuild_image().await {
+        Ok(image_name) => Ok(Json(SandboxRebuildResponse {
+            success: true,
+            image_name,
+            error: None,
+        })),
+        Err(e) => Ok(Json(SandboxRebuildResponse {
+            success: false,
+            image_name: String::new(),
+            error: Some(e.to_string()),
+        })),
+    }
 }

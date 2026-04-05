@@ -151,6 +151,10 @@ impl SandboxProvider for LocalSandboxProvider {
     async fn image_status(&self) -> Result<(bool, String), AgentError> {
         Ok((true, "local (no container)".to_string()))
     }
+
+    async fn rebuild_image(&self) -> Result<String, AgentError> {
+        Ok("local (no container)".to_string())
+    }
 }
 
 #[cfg(test)]

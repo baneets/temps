@@ -729,6 +729,27 @@ impl SandboxProvider for DockerSandboxProvider {
         let ready = self.docker.inspect_image(&image_name).await.is_ok();
         Ok((ready, image_name))
     }
+
+    async fn rebuild_image(&self) -> Result<String, AgentError> {
+        let image_name = self.config.resolved_image();
+
+        // Remove existing image (force, in case containers reference it)
+        if self.docker.inspect_image(&image_name).await.is_ok() {
+            let opts = bollard::query_parameters::RemoveImageOptionsBuilder::new()
+                .force(true)
+                .build();
+            let _ = self
+                .docker
+                .remove_image(&image_name, Some(opts), None)
+                .await;
+            tracing::info!("Removed old sandbox image {}", image_name);
+        }
+
+        // Rebuild
+        self.ensure_image().await?;
+
+        Ok(image_name)
+    }
 }
 
 #[cfg(test)]
