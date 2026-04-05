@@ -1273,13 +1273,13 @@ mod tests {
             .create_deployment_jobs(deployment.id)
             .await?;
 
-        // Verify jobs were created (nextjs project should create 8 jobs including
-        // persist_static_assets, configure_crons, scan_vulnerabilities, and capture_source_maps)
+        // Verify jobs were created (nextjs project should create 9 jobs including
+        // persist_static_assets, configure_crons, configure_agents, scan_vulnerabilities, and capture_source_maps)
         let job_ids: Vec<String> = jobs.iter().map(|j| j.job_id.clone()).collect();
         assert_eq!(
             jobs.len(),
-            8,
-            "Expected 8 jobs but got {}: {:?}",
+            9,
+            "Expected 9 jobs but got {}: {:?}",
             jobs.len(),
             job_ids
         );
