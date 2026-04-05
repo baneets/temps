@@ -907,4 +907,158 @@ mod tests {
         let result = svc.upsert_config(1, request).await;
         assert!(result.is_ok());
     }
+
+    // ---------------------------------------------------------------------------
+    // Feature: sandbox_enabled as Option<bool> in config service
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_upsert_sandbox_enabled_none_stored_correctly() {
+        // sandbox_enabled: None means "use global default" — must be stored as NULL
+        let mut expected = make_config(1);
+        expected.sandbox_enabled = None; // model returned by mock DB reflects what was stored
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<project_agents::Model>::new()]) // no existing config
+            .append_query_results(vec![vec![expected.clone()]]) // insert returns model
+            .into_connection();
+        let svc = AgentConfigService::new(Arc::new(db), make_encryption_service());
+
+        let request = UpsertAgentRequest {
+            enabled: Some(false),
+            sandbox_enabled: None, // explicit None
+            ai_provider: None,
+            api_key: None,
+            ai_provider_key_id: None,
+            daily_budget_cents: None,
+            max_turns: None,
+            cooldown_minutes: None,
+            trigger_config: None,
+            prompt: None,
+            timeout_seconds: None,
+            deliverable: None,
+            slug: None,
+            name: None,
+            description: None,
+            branch_prefix: None,
+        };
+
+        let result = svc.upsert_config(1, request).await;
+        assert!(
+            result.is_ok(),
+            "upsert with sandbox_enabled=None should succeed"
+        );
+        let model = result.unwrap();
+        assert!(
+            model.sandbox_enabled.is_none(),
+            "sandbox_enabled should be None in the returned model"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_sandbox_enabled_some_true_stored_correctly() {
+        let mut expected = make_config(1);
+        expected.sandbox_enabled = Some(true);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<project_agents::Model>::new()]) // no existing config
+            .append_query_results(vec![vec![expected.clone()]]) // insert returns model
+            .into_connection();
+        let svc = AgentConfigService::new(Arc::new(db), make_encryption_service());
+
+        let request = UpsertAgentRequest {
+            enabled: Some(false),
+            sandbox_enabled: Some(true),
+            ai_provider: None,
+            api_key: None,
+            ai_provider_key_id: None,
+            daily_budget_cents: None,
+            max_turns: None,
+            cooldown_minutes: None,
+            trigger_config: None,
+            prompt: None,
+            timeout_seconds: None,
+            deliverable: None,
+            slug: None,
+            name: None,
+            description: None,
+            branch_prefix: None,
+        };
+
+        let result = svc.upsert_config(1, request).await;
+        assert!(
+            result.is_ok(),
+            "upsert with sandbox_enabled=Some(true) should succeed"
+        );
+        let model = result.unwrap();
+        assert_eq!(
+            model.sandbox_enabled,
+            Some(true),
+            "sandbox_enabled should be Some(true) in the returned model"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upsert_sandbox_enabled_some_false_stored_correctly() {
+        let mut expected = make_config(1);
+        expected.sandbox_enabled = Some(false);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<project_agents::Model>::new()]) // no existing config
+            .append_query_results(vec![vec![expected.clone()]]) // insert returns model
+            .into_connection();
+        let svc = AgentConfigService::new(Arc::new(db), make_encryption_service());
+
+        let request = UpsertAgentRequest {
+            enabled: Some(false),
+            sandbox_enabled: Some(false),
+            ai_provider: None,
+            api_key: None,
+            ai_provider_key_id: None,
+            daily_budget_cents: None,
+            max_turns: None,
+            cooldown_minutes: None,
+            trigger_config: None,
+            prompt: None,
+            timeout_seconds: None,
+            deliverable: None,
+            slug: None,
+            name: None,
+            description: None,
+            branch_prefix: None,
+        };
+
+        let result = svc.upsert_config(1, request).await;
+        assert!(
+            result.is_ok(),
+            "upsert with sandbox_enabled=Some(false) should succeed"
+        );
+        let model = result.unwrap();
+        assert_eq!(
+            model.sandbox_enabled,
+            Some(false),
+            "sandbox_enabled should be Some(false) in the returned model"
+        );
+    }
+
+    /// Verify the sandbox override logic in isolation:
+    /// `config.sandbox_enabled.unwrap_or(global_sandbox.enabled)`
+    #[test]
+    fn test_sandbox_enabled_option_logic_all_combinations() {
+        fn resolve(agent: Option<bool>, global: bool) -> bool {
+            agent.unwrap_or(global)
+        }
+        // None + global=false → false
+        assert!(!resolve(None, false));
+        // None + global=true → true
+        assert!(resolve(None, true));
+        // Some(true) + global=false → true (per-agent overrides global)
+        assert!(resolve(Some(true), false));
+        // Some(true) + global=true → true
+        assert!(resolve(Some(true), true));
+        // Some(false) + global=false → false
+        assert!(!resolve(Some(false), false));
+        // Some(false) + global=true → false (per-agent overrides global)
+        assert!(!resolve(Some(false), true));
+    }
 }

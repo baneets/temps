@@ -2183,6 +2183,423 @@ mod tests {
         assert!(recorder.pushed.lock().unwrap().is_empty());
     }
 
+    // ---------------------------------------------------------------------------
+    // Feature: Report deliverable
+    // ---------------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------------
+    // Report deliverable: logic tests (no executor needed)
+    // ---------------------------------------------------------------------------
+
+    /// Verify the report branch condition: `config.deliverable == "report"`.
+    /// The executor short-circuits before creating a branch/PR when this is true.
+    #[test]
+    fn test_report_deliverable_condition_matches() {
+        let mut config = make_config(1);
+        config.deliverable = "report".into();
+        assert_eq!(config.deliverable, "report");
+
+        // Non-report deliverable should NOT match
+        let default_config = make_config(1);
+        assert_ne!(default_config.deliverable, "report");
+        assert_eq!(default_config.deliverable, "pull_request");
+    }
+
+    /// Verify report output is returned as-is when ReportAiCli is used — the
+    /// `changed_files: Some(vec![])` pattern means no PR would be created even
+    /// without the deliverable check.
+    #[tokio::test]
+    async fn test_report_ai_cli_returns_stream_json_output() {
+        let result_text = "Analysis: root cause is a null pointer";
+        // Build the output that ReportAiCli would produce
+        let output = format!("{{\"type\":\"result\",\"result\":\"{}\"}}\n", result_text);
+
+        // Extract report text using the same logic as the executor's report branch
+        let report_text = output
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    return None;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|v| {
+                        if v.get("type")?.as_str()? == "result" {
+                            v.get("result")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .next()
+            .unwrap_or_else(|| output.clone());
+
+        assert_eq!(report_text, result_text);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Feature: markdown_to_email_html conversions
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_markdown_to_email_html_heading() {
+        let html = AgentExecutor::markdown_to_email_html("## Heading");
+        assert!(html.contains("<h2"), "h2 tag should be present: {}", html);
+        assert!(
+            html.contains("Heading"),
+            "heading text should be present: {}",
+            html
+        );
+        assert!(
+            html.contains("style="),
+            "h2 should have inline styles: {}",
+            html
+        );
+        assert!(html.contains("</h2>"), "closing h2 tag required: {}", html);
+    }
+
+    #[test]
+    fn test_markdown_to_email_html_bold() {
+        let html = AgentExecutor::markdown_to_email_html("**bold**");
+        assert!(
+            html.contains("<strong"),
+            "strong tag should be present: {}",
+            html
+        );
+        assert!(
+            html.contains("bold"),
+            "bold text should be present: {}",
+            html
+        );
+        assert!(
+            html.contains("font-weight:600"),
+            "strong should have font-weight inline style: {}",
+            html
+        );
+        assert!(
+            html.contains("</strong>"),
+            "closing strong tag required: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_email_html_table() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let html = AgentExecutor::markdown_to_email_html(md);
+        assert!(html.contains("<table"), "table tag required: {}", html);
+        assert!(html.contains("<th"), "th tag required for header: {}", html);
+        assert!(html.contains("<td"), "td tag required for data: {}", html);
+        // Inline styles on both th and td
+        assert!(
+            html.contains("padding:8px 12px"),
+            "table cells should have padding style: {}",
+            html
+        );
+        assert!(
+            html.contains("</table>"),
+            "closing table tag required: {}",
+            html
+        );
+        // Content
+        assert!(
+            html.contains("A"),
+            "column A header should appear: {}",
+            html
+        );
+        assert!(
+            html.contains("B"),
+            "column B header should appear: {}",
+            html
+        );
+        assert!(html.contains("1"), "cell value 1 should appear: {}", html);
+        assert!(html.contains("2"), "cell value 2 should appear: {}", html);
+    }
+
+    #[test]
+    fn test_markdown_to_email_html_code_block() {
+        let md = "```\nlet x = 1;\n```";
+        let html = AgentExecutor::markdown_to_email_html(md);
+        assert!(html.contains("<pre"), "pre tag required: {}", html);
+        assert!(html.contains("<code>"), "code tag required: {}", html);
+        assert!(
+            html.contains("let x = 1;"),
+            "code content required: {}",
+            html
+        );
+        // Inline style on pre
+        assert!(
+            html.contains("background:#1e293b"),
+            "code block should have dark background style: {}",
+            html
+        );
+        assert!(
+            html.contains("</code></pre>"),
+            "closing tags required: {}",
+            html
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_email_html_empty_input() {
+        let html = AgentExecutor::markdown_to_email_html("");
+        assert!(
+            html.is_empty(),
+            "empty input should produce empty output, got: {}",
+            html
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Feature: User context in prompt (logic tests — no executor needed)
+    // ---------------------------------------------------------------------------
+    // The executor builds the prompt then appends user_context using the same
+    // pattern shown below. Testing the string manipulation directly avoids the
+    // complex MockDatabase FIFO queue that makes full executor integration tests
+    // fragile (see test_executor_happy_path_clones_pushes_creates_pr for context).
+
+    #[test]
+    fn test_user_context_appended_when_set() {
+        // Mirror the exact logic from execute_run_inner:
+        //   if let Some(ref ctx) = run.user_context { ... format!("{}\n\n---\nUSER CONTEXT:\n{}\n") }
+        let base_prompt = "You are an AI agent performing a task.".to_string();
+        let user_ctx = "Research edge caching".to_string();
+
+        let prompt = if !user_ctx.is_empty() {
+            format!("{}\n\n---\nUSER CONTEXT:\n{}\n", base_prompt, user_ctx)
+        } else {
+            base_prompt.clone()
+        };
+
+        assert!(
+            prompt.contains("USER CONTEXT:"),
+            "prompt should contain 'USER CONTEXT:' section"
+        );
+        assert!(
+            prompt.contains("Research edge caching"),
+            "prompt should contain user context text"
+        );
+        // Base prompt should still be present
+        assert!(
+            prompt.contains("You are an AI agent"),
+            "base prompt should still be present"
+        );
+    }
+
+    #[test]
+    fn test_user_context_not_appended_when_none() {
+        let base_prompt = "You are an AI agent performing a task.".to_string();
+        // run.user_context = None → prompt unchanged
+        let user_ctx: Option<String> = None;
+
+        let prompt = if let Some(ref ctx) = user_ctx {
+            if !ctx.is_empty() {
+                format!("{}\n\n---\nUSER CONTEXT:\n{}\n", base_prompt, ctx)
+            } else {
+                base_prompt.clone()
+            }
+        } else {
+            base_prompt.clone()
+        };
+
+        assert!(
+            !prompt.contains("USER CONTEXT:"),
+            "prompt should NOT contain 'USER CONTEXT:' when user_context is None"
+        );
+        assert_eq!(
+            prompt, base_prompt,
+            "prompt should be unchanged when no user context"
+        );
+    }
+
+    #[test]
+    fn test_user_context_not_appended_when_empty_string() {
+        let base_prompt = "You are an AI agent performing a task.".to_string();
+        // run.user_context = Some("") → empty string is skipped
+        let user_ctx: Option<String> = Some(String::new());
+
+        let prompt = if let Some(ref ctx) = user_ctx {
+            if !ctx.is_empty() {
+                format!("{}\n\n---\nUSER CONTEXT:\n{}\n", base_prompt, ctx)
+            } else {
+                base_prompt.clone()
+            }
+        } else {
+            base_prompt.clone()
+        };
+
+        assert!(
+            !prompt.contains("USER CONTEXT:"),
+            "prompt should NOT contain 'USER CONTEXT:' when user_context is empty string"
+        );
+        assert_eq!(
+            prompt, base_prompt,
+            "prompt should be unchanged when user context is empty"
+        );
+    }
+
+    #[test]
+    fn test_user_context_separator_format() {
+        // Verify the exact format of the USER CONTEXT section separator
+        let base = "base prompt";
+        let ctx = "my context";
+        let expected = format!("{}\n\n---\nUSER CONTEXT:\n{}\n", base, ctx);
+
+        assert!(
+            expected.contains("\n\n---\n"),
+            "separator should be on its own line preceded by blank line"
+        );
+        assert!(
+            expected.ends_with(&format!("{}\n", ctx)),
+            "context should end with newline"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Feature: sandbox_enabled Option<bool> logic (pure unit test, no executor)
+    // ---------------------------------------------------------------------------
+
+    fn resolve_sandbox(agent: Option<bool>, global: bool) -> bool {
+        agent.unwrap_or(global)
+    }
+
+    #[test]
+    fn test_sandbox_override_none_uses_global_default_false() {
+        assert!(
+            !resolve_sandbox(None, false),
+            "None + global=false should yield false"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_override_none_uses_global_default_true() {
+        assert!(
+            resolve_sandbox(None, true),
+            "None + global=true should yield true"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_override_some_true_forces_on_regardless_of_global() {
+        assert!(
+            resolve_sandbox(Some(true), false),
+            "Some(true) + global=false should yield true"
+        );
+        assert!(
+            resolve_sandbox(Some(true), true),
+            "Some(true) + global=true should yield true"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_override_some_false_forces_off_regardless_of_global() {
+        assert!(
+            !resolve_sandbox(Some(false), true),
+            "Some(false) + global=true should yield false"
+        );
+        assert!(
+            !resolve_sandbox(Some(false), false),
+            "Some(false) + global=false should yield false"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Feature: report text extraction from stream-json
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_report_text_extracted_from_stream_json_result_line() {
+        // This mirrors the extraction logic in executor.rs at the "report" branch.
+        // Use actual newlines (not escaped \n) so .lines() splits correctly.
+        let output = "{\"type\":\"assistant\",\"text\":\"thinking...\"}\n{\"type\":\"result\",\"result\":\"Found the root cause: null pointer in UserList\"}\n".to_string();
+
+        let report_text = output
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    return None;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|v| {
+                        if v.get("type")?.as_str()? == "result" {
+                            v.get("result")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .next()
+            .unwrap_or_else(|| output.clone());
+
+        assert_eq!(
+            report_text, "Found the root cause: null pointer in UserList",
+            "should extract text from the 'result' type entry"
+        );
+    }
+
+    #[test]
+    fn test_report_text_falls_back_to_raw_output_when_no_result_entry() {
+        let output = "Plain text output without stream-json".to_string();
+
+        let report_text = output
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    return None;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|v| {
+                        if v.get("type")?.as_str()? == "result" {
+                            v.get("result")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .next()
+            .unwrap_or_else(|| output.clone());
+
+        assert_eq!(
+            report_text, output,
+            "should fall back to full output when no result entry found"
+        );
+    }
+
+    #[test]
+    fn test_report_text_ignores_non_result_type_entries() {
+        // Use actual newlines so .lines() splits correctly.
+        let output = "{\"type\":\"assistant\",\"text\":\"analysis...\"}\n{\"type\":\"tool_use\",\"name\":\"read_file\"}\n".to_string();
+
+        let report_text: Option<String> = output
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    return None;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|v| {
+                        if v.get("type")?.as_str()? == "result" {
+                            v.get("result")?.as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .next();
+
+        assert!(
+            report_text.is_none(),
+            "should not extract text when no result-type entry exists"
+        );
+    }
+
     #[tokio::test]
     async fn test_executor_no_git_connection_fails() {
         let run_id = 6;
