@@ -233,14 +233,18 @@ impl AgentExecutor {
         // Per-agent overrides global: None = use global, Some(true/false) = explicit
         let use_sandbox = config.sandbox_enabled.unwrap_or(global_sandbox.enabled);
         if use_sandbox {
+            // Resolve image from runtime preset or custom image
+            let resolved_image =
+                if global_sandbox.runtime == "custom" && !global_sandbox.custom_image.is_empty() {
+                    Some(global_sandbox.custom_image.clone())
+                } else {
+                    None // SandboxProvider will use its configured runtime
+                };
+
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 host_work_dir: work_dir.clone(),
-                image: if global_sandbox.image.is_empty() {
-                    None
-                } else {
-                    Some(global_sandbox.image.clone())
-                },
+                image: resolved_image,
                 cpu_limit: Some(global_sandbox.cpu_limit),
                 memory_limit_mb: Some(global_sandbox.memory_limit_mb),
                 network_mode: Some(global_sandbox.network_mode.clone()),
@@ -252,15 +256,11 @@ impl AgentExecutor {
                     run_id,
                     "info",
                     &format!(
-                        "Creating sandbox: {} CPU, {}MB RAM, network={}{}",
+                        "Creating sandbox: runtime={}, {} CPU, {}MB RAM, network={}",
+                        global_sandbox.runtime,
                         global_sandbox.cpu_limit,
                         global_sandbox.memory_limit_mb,
                         global_sandbox.network_mode,
-                        if global_sandbox.image.is_empty() {
-                            String::new()
-                        } else {
-                            format!(", image={}", global_sandbox.image)
-                        }
                     ),
                     None,
                 )

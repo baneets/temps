@@ -23,7 +23,6 @@ import {
   CheckCircle2,
   Cpu,
   Globe,
-  ImageIcon,
   Loader2,
   RefreshCw,
   Save,
@@ -41,6 +40,51 @@ interface SandboxStatus {
   error: string | null
 }
 
+const RUNTIME_PRESETS = [
+  {
+    value: 'node',
+    label: 'Node.js',
+    description: 'Node.js 20, npm, npx',
+    stacks: 'Next.js, Vite, Express, any JS/TS',
+  },
+  {
+    value: 'bun',
+    label: 'Bun',
+    description: 'Bun runtime',
+    stacks: 'Bun-based projects',
+  },
+  {
+    value: 'python',
+    label: 'Python',
+    description: 'Python 3.12, pip, uv',
+    stacks: 'Django, FastAPI, Flask',
+  },
+  {
+    value: 'rust',
+    label: 'Rust',
+    description: 'Rust stable, cargo',
+    stacks: 'Rust projects',
+  },
+  {
+    value: 'go',
+    label: 'Go',
+    description: 'Go 1.23',
+    stacks: 'Go projects',
+  },
+  {
+    value: 'full',
+    label: 'Full',
+    description: 'Node, Python, Go, uv',
+    stacks: 'Multi-language projects',
+  },
+  {
+    value: 'custom',
+    label: 'Custom Image',
+    description: 'Your own Docker image',
+    stacks: 'Any stack you pre-build',
+  },
+]
+
 const RESOURCE_PRESETS = [
   { label: 'Light', cpu: 1, memory: 1024 },
   { label: 'Standard', cpu: 2, memory: 2048 },
@@ -48,8 +92,10 @@ const RESOURCE_PRESETS = [
   { label: 'Custom', cpu: 0, memory: 0 },
 ]
 
-function getPresetLabel(cpu: number, memory: number): string {
-  const match = RESOURCE_PRESETS.find((p) => p.cpu === cpu && p.memory === memory)
+function getResourcePresetLabel(cpu: number, memory: number): string {
+  const match = RESOURCE_PRESETS.find(
+    (p) => p.cpu === cpu && p.memory === memory
+  )
   return match ? match.label : 'Custom'
 }
 
@@ -60,14 +106,14 @@ export function AgentSandboxSettings() {
   const updateSettings = useUpdateSettings()
 
   const [enabled, setEnabled] = useState(false)
-  const [image, setImage] = useState('')
+  const [runtime, setRuntime] = useState('node')
+  const [customImage, setCustomImage] = useState('')
   const [cpuLimit, setCpuLimit] = useState(2)
   const [memoryLimitMb, setMemoryLimitMb] = useState(2048)
   const [networkMode, setNetworkMode] = useState('full')
   const [isDirty, setIsDirty] = useState(false)
-  const [selectedPreset, setSelectedPreset] = useState('Standard')
+  const [resourcePreset, setResourcePreset] = useState('Standard')
 
-  // Docker status
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
 
@@ -76,11 +122,10 @@ export function AgentSandboxSettings() {
     try {
       const response = await fetch('/api/settings/sandbox-status')
       if (response.ok) {
-        const data = await response.json()
-        setSandboxStatus(data)
+        setSandboxStatus(await response.json())
       }
     } catch {
-      // Ignore — endpoint may not exist on older versions
+      // Endpoint may not exist on older versions
     } finally {
       setStatusLoading(false)
     }
@@ -88,14 +133,14 @@ export function AgentSandboxSettings() {
 
   useEffect(() => {
     if (settings?.agent_sandbox) {
-      setEnabled(settings.agent_sandbox.enabled)
-      setImage(settings.agent_sandbox.image || '')
-      setCpuLimit(settings.agent_sandbox.cpu_limit)
-      setMemoryLimitMb(settings.agent_sandbox.memory_limit_mb)
-      setNetworkMode(settings.agent_sandbox.network_mode || 'full')
-      setSelectedPreset(
-        getPresetLabel(settings.agent_sandbox.cpu_limit, settings.agent_sandbox.memory_limit_mb)
-      )
+      const s = settings.agent_sandbox
+      setEnabled(s.enabled)
+      setRuntime(s.runtime || 'node')
+      setCustomImage(s.custom_image || '')
+      setCpuLimit(s.cpu_limit)
+      setMemoryLimitMb(s.memory_limit_mb)
+      setNetworkMode(s.network_mode || 'full')
+      setResourcePreset(getResourcePresetLabel(s.cpu_limit, s.memory_limit_mb))
     }
   }, [settings])
 
@@ -103,8 +148,8 @@ export function AgentSandboxSettings() {
     fetchSandboxStatus()
   }, [fetchSandboxStatus])
 
-  const handlePresetChange = (preset: string) => {
-    setSelectedPreset(preset)
+  const handleResourcePresetChange = (preset: string) => {
+    setResourcePreset(preset)
     const p = RESOURCE_PRESETS.find((r) => r.label === preset)
     if (p && p.cpu > 0) {
       setCpuLimit(p.cpu)
@@ -118,7 +163,8 @@ export function AgentSandboxSettings() {
       await updateSettings.mutateAsync({
         agent_sandbox: {
           enabled,
-          image,
+          runtime,
+          custom_image: customImage,
           cpu_limit: cpuLimit,
           memory_limit_mb: memoryLimitMb,
           network_mode: networkMode,
@@ -141,7 +187,7 @@ export function AgentSandboxSettings() {
 
   return (
     <div className="space-y-6">
-      {/* Header + Description */}
+      {/* Header + Docker status */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -245,35 +291,70 @@ export function AgentSandboxSettings() {
         </CardContent>
       </Card>
 
-      {/* Docker image */}
+      {/* Runtime */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <ImageIcon className="h-4 w-4" />
-            Container Image
+            Runtime
           </CardTitle>
           <CardDescription>
-            The Docker image used to run agents. Leave empty to use the built-in
-            image (Node.js 20 + git + Claude CLI). Use a custom image if your
-            project needs Python, Go, or other runtimes.
+            Choose the runtime environment for sandbox containers. Each preset
+            includes the language toolchain, git, and Claude CLI pre-installed.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <Input
-            placeholder="e.g. node:20-slim, python:3.12-slim, or your-registry/custom-agent:latest"
-            value={image}
-            onChange={(e) => {
-              setImage(e.target.value)
-              setIsDirty(true)
-            }}
-          />
-          <p className="text-xs text-muted-foreground">
-            Custom images must have{' '}
-            <code className="text-xs bg-muted px-1 rounded">git</code> and{' '}
-            <code className="text-xs bg-muted px-1 rounded">claude</code>{' '}
-            (Claude CLI) installed. The repository is mounted at{' '}
-            <code className="text-xs bg-muted px-1 rounded">/workspace</code>.
-          </p>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {RUNTIME_PRESETS.map((preset) => (
+              <button
+                key={preset.value}
+                onClick={() => {
+                  setRuntime(preset.value)
+                  setIsDirty(true)
+                }}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  runtime === preset.value
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border hover:border-primary/50'
+                }`}
+              >
+                <p className="text-sm font-medium">{preset.label}</p>
+                <p className="text-xs text-muted-foreground">
+                  {preset.description}
+                </p>
+              </button>
+            ))}
+          </div>
+
+          {runtime === 'custom' && (
+            <div className="space-y-2 pt-2">
+              <Label htmlFor="custom-image">Docker Image</Label>
+              <Input
+                id="custom-image"
+                placeholder="e.g. your-registry/custom-agent:latest"
+                value={customImage}
+                onChange={(e) => {
+                  setCustomImage(e.target.value)
+                  setIsDirty(true)
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Custom images must have{' '}
+                <code className="text-xs bg-muted px-1 rounded">git</code> and{' '}
+                <code className="text-xs bg-muted px-1 rounded">claude</code>{' '}
+                (Claude CLI) installed. The repository is mounted at{' '}
+                <code className="text-xs bg-muted px-1 rounded">
+                  /workspace
+                </code>
+                .
+              </p>
+            </div>
+          )}
+
+          {runtime !== 'custom' && (
+            <p className="text-xs text-muted-foreground">
+              {RUNTIME_PRESETS.find((p) => p.value === runtime)?.stacks}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -295,9 +376,9 @@ export function AgentSandboxSettings() {
               {RESOURCE_PRESETS.map((preset) => (
                 <button
                   key={preset.label}
-                  onClick={() => handlePresetChange(preset.label)}
+                  onClick={() => handleResourcePresetChange(preset.label)}
                   className={`rounded-lg border p-3 text-left transition-colors ${
-                    selectedPreset === preset.label
+                    resourcePreset === preset.label
                       ? 'border-primary bg-primary/5'
                       : 'border-border hover:border-primary/50'
                   }`}
@@ -313,7 +394,7 @@ export function AgentSandboxSettings() {
             </div>
           </div>
 
-          {selectedPreset === 'Custom' && (
+          {resourcePreset === 'Custom' && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
               <div className="space-y-2">
                 <Label htmlFor="cpu-limit">CPU cores</Label>
@@ -375,28 +456,22 @@ export function AgentSandboxSettings() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="full">
-                <div>
-                  <span className="font-medium">Full access</span>
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    — unrestricted internet (recommended)
-                  </span>
-                </div>
+                <span className="font-medium">Full access</span>
+                <span className="text-muted-foreground ml-2 text-xs">
+                  — unrestricted internet
+                </span>
               </SelectItem>
               <SelectItem value="restricted">
-                <div>
-                  <span className="font-medium">Restricted</span>
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    — Temps network only
-                  </span>
-                </div>
+                <span className="font-medium">Restricted</span>
+                <span className="text-muted-foreground ml-2 text-xs">
+                  — Temps network only
+                </span>
               </SelectItem>
               <SelectItem value="none">
-                <div>
-                  <span className="font-medium">No network</span>
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    — fully isolated
-                  </span>
-                </div>
+                <span className="font-medium">No network</span>
+                <span className="text-muted-foreground ml-2 text-xs">
+                  — fully isolated
+                </span>
               </SelectItem>
             </SelectContent>
           </Select>

@@ -15,21 +15,61 @@ use crate::error::AgentError;
 /// Container naming prefix — used for recovery after server restarts.
 const SANDBOX_NAME_PREFIX: &str = "temps-sandbox-";
 
-/// Default sandbox image name.
-const DEFAULT_SANDBOX_IMAGE: &str = "temps-agent-sandbox:latest";
-
 /// Network name for agent sandboxes (isolated from deployment network).
 const SANDBOX_NETWORK: &str = "temps-agent-sandbox";
 
 /// Path inside the container where the repository is mounted.
 const CONTAINER_WORK_DIR: &str = "/workspace";
 
-/// Dockerfile content for building the sandbox image.
-const SANDBOX_DOCKERFILE: &str = r#"FROM node:20-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl && rm -rf /var/lib/apt/lists/*
-RUN npm install -g @anthropic-ai/claude-code
-WORKDIR /workspace
-"#;
+/// Generate a Dockerfile for a given runtime preset.
+/// Every image gets git, curl, and Claude CLI installed on top of the base.
+fn dockerfile_for_runtime(runtime: &str) -> String {
+    let (base, extra_packages, extra_run) = match runtime {
+        "bun" => (
+            "oven/bun:latest",
+            "git ca-certificates curl",
+            "npm install -g @anthropic-ai/claude-code",
+        ),
+        "python" => (
+            "python:3.12-slim",
+            "git ca-certificates curl nodejs npm",
+            "npm install -g @anthropic-ai/claude-code && curl -LsSf https://astral.sh/uv/install.sh | sh",
+        ),
+        "rust" => (
+            "rust:1-slim",
+            "git ca-certificates curl nodejs npm",
+            "npm install -g @anthropic-ai/claude-code",
+        ),
+        "go" => (
+            "golang:1.23-slim",
+            "git ca-certificates curl nodejs npm",
+            "npm install -g @anthropic-ai/claude-code",
+        ),
+        "full" => (
+            "ubuntu:24.04",
+            "git ca-certificates curl nodejs npm python3 python3-pip golang-go",
+            "npm install -g @anthropic-ai/claude-code && curl -LsSf https://astral.sh/uv/install.sh | sh",
+        ),
+        // "node" or anything else
+        _ => (
+            "node:20-slim",
+            "git ca-certificates curl",
+            "npm install -g @anthropic-ai/claude-code",
+        ),
+    };
+
+    format!(
+        "FROM {base}\nRUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} && rm -rf /var/lib/apt/lists/*\nRUN {extra_run}\nWORKDIR /workspace\n"
+    )
+}
+
+/// Image name for a runtime preset.
+fn image_name_for_runtime(runtime: &str) -> String {
+    match runtime {
+        "node" | "" => "temps-sandbox-node:latest".to_string(),
+        other => format!("temps-sandbox-{other}:latest"),
+    }
+}
 
 /// Host path to the Claude CLI config directory (auth tokens, session state).
 /// Bind-mounted read-only into the container so Claude CLI can authenticate
@@ -43,8 +83,10 @@ fn claude_config_dir() -> Option<PathBuf> {
 /// Configuration for the Docker sandbox provider.
 #[derive(Debug, Clone)]
 pub struct DockerSandboxConfig {
-    /// Docker image to use for sandboxes
-    pub image: String,
+    /// Runtime preset: "node", "bun", "python", "rust", "go", "full", or "custom"
+    pub runtime: String,
+    /// Custom Docker image (only used when runtime is "custom")
+    pub custom_image: String,
     /// Default CPU limit in cores
     pub default_cpu_limit: f64,
     /// Default memory limit in MB
@@ -56,11 +98,24 @@ pub struct DockerSandboxConfig {
 impl Default for DockerSandboxConfig {
     fn default() -> Self {
         Self {
-            image: std::env::var("TEMPS_AGENT_SANDBOX_IMAGE")
-                .unwrap_or_else(|_| DEFAULT_SANDBOX_IMAGE.to_string()),
+            runtime: "node".to_string(),
+            custom_image: String::new(),
             default_cpu_limit: 2.0,
             default_memory_limit_mb: 2048,
             network_mode: SANDBOX_NETWORK.to_string(),
+        }
+    }
+}
+
+impl DockerSandboxConfig {
+    /// Resolve the image name for the current configuration.
+    /// For presets, returns `temps-sandbox-{runtime}:latest`.
+    /// For custom, returns the user-provided image.
+    pub fn resolved_image(&self) -> String {
+        if self.runtime == "custom" && !self.custom_image.is_empty() {
+            self.custom_image.clone()
+        } else {
+            image_name_for_runtime(&self.runtime)
         }
     }
 }
@@ -78,18 +133,61 @@ impl DockerSandboxProvider {
     }
 
     /// Build the sandbox image if it doesn't exist.
+    /// For preset runtimes, generates a Dockerfile dynamically.
+    /// For custom images, assumes the image is already available (pull or pre-built).
     pub async fn ensure_image(&self) -> Result<(), AgentError> {
-        // Check if image already exists
-        if self.docker.inspect_image(&self.config.image).await.is_ok() {
-            tracing::debug!("Sandbox image {} already exists", self.config.image);
+        self.ensure_image_for_runtime(&self.config.runtime).await
+    }
+
+    /// Build a sandbox image for a specific runtime preset.
+    async fn ensure_image_for_runtime(&self, runtime: &str) -> Result<(), AgentError> {
+        // Custom images: just check if they exist (user must pull/build them)
+        if runtime == "custom" {
+            let img = &self.config.custom_image;
+            if img.is_empty() {
+                return Err(AgentError::SandboxProviderUnavailable {
+                    provider: "docker".to_string(),
+                    reason: "Custom runtime selected but no image specified".to_string(),
+                });
+            }
+            // Try to pull if not present locally
+            if self.docker.inspect_image(img).await.is_err() {
+                tracing::info!("Pulling custom sandbox image {}...", img);
+                let options = bollard::query_parameters::CreateImageOptionsBuilder::new()
+                    .from_image(img.as_str())
+                    .build();
+                let mut stream = self.docker.create_image(Some(options), None, None);
+                while let Some(result) = stream.next().await {
+                    if let Err(e) = result {
+                        return Err(AgentError::SandboxProviderUnavailable {
+                            provider: "docker".to_string(),
+                            reason: format!("Failed to pull custom image {}: {}", img, e),
+                        });
+                    }
+                }
+            }
             return Ok(());
         }
 
-        tracing::info!("Building sandbox image {}...", self.config.image);
+        let image_name = image_name_for_runtime(runtime);
+
+        // Check if image already exists
+        if self.docker.inspect_image(&image_name).await.is_ok() {
+            tracing::debug!("Sandbox image {} already exists", image_name);
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Building sandbox image {} (runtime: {})...",
+            image_name,
+            runtime
+        );
+
+        let dockerfile_content = dockerfile_for_runtime(runtime);
 
         // Create tar archive with Dockerfile
         let mut header = tar::Header::new_gnu();
-        let dockerfile_bytes = SANDBOX_DOCKERFILE.as_bytes();
+        let dockerfile_bytes = dockerfile_content.as_bytes();
         header.set_size(dockerfile_bytes.len() as u64);
         header
             .set_path("Dockerfile")
@@ -118,7 +216,7 @@ impl DockerSandboxProvider {
         }
 
         let options = bollard::query_parameters::BuildImageOptionsBuilder::new()
-            .t(&self.config.image)
+            .t(&image_name)
             .build();
 
         let body = http_body_util::Full::new(bytes::Bytes::from(tar_buf));
@@ -149,7 +247,7 @@ impl DockerSandboxProvider {
             }
         }
 
-        tracing::info!("Sandbox image {} built successfully", self.config.image);
+        tracing::info!("Sandbox image {} built successfully", image_name);
         Ok(())
     }
 
@@ -211,12 +309,42 @@ impl SandboxProvider for DockerSandboxProvider {
             )
             .await;
 
-        // Use config overrides, fall back to provider defaults
+        // Resolve image: per-run override > provider config
+        let default_image = self.config.resolved_image();
         let image = config
             .image
             .as_deref()
             .filter(|s| !s.is_empty())
-            .unwrap_or(&self.config.image);
+            .unwrap_or(&default_image);
+
+        // Ensure the image exists (build for presets, pull for custom)
+        if self.docker.inspect_image(image).await.is_err() {
+            // If this is a preset image, build it
+            if image.starts_with("temps-sandbox-") {
+                let runtime = image
+                    .strip_prefix("temps-sandbox-")
+                    .and_then(|s| s.strip_suffix(":latest"))
+                    .unwrap_or("node");
+                self.ensure_image_for_runtime(runtime).await?;
+            }
+            // Otherwise it's a custom image — try to pull
+            else {
+                tracing::info!("Pulling sandbox image {}...", image);
+                let options = bollard::query_parameters::CreateImageOptionsBuilder::new()
+                    .from_image(image)
+                    .build();
+                let mut stream = self.docker.create_image(Some(options), None, None);
+                while let Some(result) = stream.next().await {
+                    if let Err(e) = result {
+                        return Err(AgentError::SandboxCreationFailed {
+                            run_id: config.run_id,
+                            provider: "docker".to_string(),
+                            reason: format!("Failed to pull image {}: {}", image, e),
+                        });
+                    }
+                }
+            }
+        }
         let cpu_limit = config.cpu_limit.unwrap_or(self.config.default_cpu_limit);
         let memory_limit_mb = config
             .memory_limit_mb
@@ -586,7 +714,7 @@ impl SandboxProvider for DockerSandboxProvider {
     }
 
     async fn image_status(&self) -> Result<(bool, String), AgentError> {
-        let image_name = self.config.image.clone();
+        let image_name = self.config.resolved_image();
         let ready = self.docker.inspect_image(&image_name).await.is_ok();
         Ok((ready, image_name))
     }

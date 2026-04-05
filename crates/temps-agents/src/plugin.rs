@@ -353,6 +353,22 @@ impl TempsPlugin for AgentsPlugin {
 
             let notification_service = context.require_service::<NotificationService>();
 
+            // Load global sandbox settings to configure the Docker provider
+            let global_sandbox = {
+                use sea_orm::EntityTrait;
+                temps_entities::settings::Entity::find_by_id(1)
+                    .one(db.as_ref())
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| {
+                        s.data.get("agent_sandbox").cloned().and_then(|v| {
+                            serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
+                        })
+                    })
+                    .unwrap_or_default()
+            };
+
             // Set up sandbox provider: try Docker first, fall back to local
             let sandbox_provider: Arc<dyn SandboxProvider> =
                 match bollard::Docker::connect_with_local_defaults() {
@@ -360,7 +376,13 @@ impl TempsPlugin for AgentsPlugin {
                         let docker = Arc::new(docker);
                         match docker.ping().await {
                             Ok(_) => {
-                                let config = DockerSandboxConfig::default();
+                                let config = DockerSandboxConfig {
+                                    runtime: global_sandbox.runtime.clone(),
+                                    custom_image: global_sandbox.custom_image.clone(),
+                                    default_cpu_limit: global_sandbox.cpu_limit,
+                                    default_memory_limit_mb: global_sandbox.memory_limit_mb,
+                                    network_mode: global_sandbox.network_mode.clone(),
+                                };
                                 let provider = DockerSandboxProvider::new(docker, config);
                                 if let Err(e) = provider.ensure_image().await {
                                     tracing::warn!(

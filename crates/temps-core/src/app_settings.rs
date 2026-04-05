@@ -74,10 +74,13 @@ pub struct AgentSandboxSettings {
     /// Whether sandbox is enabled globally for all agents by default.
     /// Individual agents can override this with their `sandbox_enabled` field.
     pub enabled: bool,
-    /// Docker image for sandbox containers (e.g. "node:20-slim", "python:3.12-slim", or a custom image).
-    /// Leave empty to use the built-in default image.
+    /// Runtime preset: "node", "bun", "python", "rust", "go", "full", or "custom"
+    #[schema(example = "node")]
+    pub runtime: String,
+    /// Custom Docker image (only used when runtime is "custom").
+    /// Must have git and claude CLI installed.
     #[schema(example = "")]
-    pub image: String,
+    pub custom_image: String,
     /// CPU limit in cores for sandbox containers
     #[schema(example = 2.0)]
     pub cpu_limit: f64,
@@ -93,7 +96,8 @@ impl Default for AgentSandboxSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            image: String::new(),
+            runtime: "node".to_string(),
+            custom_image: String::new(),
             cpu_limit: 2.0,
             memory_limit_mb: 2048,
             network_mode: "full".to_string(),
