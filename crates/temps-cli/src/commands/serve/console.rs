@@ -1086,13 +1086,10 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     }
 
     // Multi-node: create NodeService, register node routes, and start health check
-    let config_service_for_nodes = service_context
-        .get_service::<temps_config::ConfigService>()
-        .expect("ConfigService must be available for node registration");
+    let config_service_for_nodes = service_context.require_service::<temps_config::ConfigService>();
     let node_service = Arc::new(NodeService::new(db.clone()));
-    let encryption_service_for_nodes = service_context
-        .get_service::<temps_core::EncryptionService>()
-        .expect("EncryptionService must be available for node registration");
+    let encryption_service_for_nodes =
+        service_context.require_service::<temps_core::EncryptionService>();
     let node_app_state = Arc::new(NodeAppState {
         node_service: node_service.clone(),
         db: db.clone(),

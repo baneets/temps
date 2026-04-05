@@ -57,9 +57,9 @@ impl TempsPlugin for SessionReplayPlugin {
 
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         let session_replay_service =
-            context.get_service::<crate::services::SessionReplayService>()?;
-        let audit_service = context.get_service::<dyn temps_core::AuditLogger>()?;
-        let route_table = context.get_service::<temps_routes::CachedPeerTable>()?;
+            context.require_service::<crate::services::SessionReplayService>();
+        let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
+        let route_table = context.require_service::<temps_routes::CachedPeerTable>();
         let routes = crate::handlers::configure_routes().with_state(Arc::new(
             crate::handlers::types::AppState {
                 session_replay_service,
