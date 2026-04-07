@@ -30,6 +30,7 @@ pub mod url_validation;
 pub mod utils;
 pub mod workflow;
 pub mod workflow_executor;
+pub mod workflow_memory;
 // Re-export commonly used types
 pub use audit::*;
 pub use config::*;
@@ -46,7 +47,7 @@ pub use anyhow;
 pub use app_settings::{
     AgentSandboxSettings, AppSettings, ContainerLogSettings, DiskSpaceAlertSettings,
     DnsProviderSettings, DockerRegistrySettings, LetsEncryptSettings, MultiNodeSettings,
-    RateLimitSettings, ScreenshotSettings, SecurityHeadersSettings,
+    PreviewGatewaySettings, RateLimitSettings, ScreenshotSettings, SecurityHeadersSettings,
 };
 pub use async_trait;
 pub use chrono;
@@ -65,6 +66,10 @@ pub use types::*;
 pub use uuid;
 pub use workflow::*;
 pub use workflow_executor::*;
+pub use workflow_memory::{
+    memory_install_command, WorkflowMemoryError, WorkflowMemoryFact, WorkflowMemoryProvider,
+    MEMORY_SCRIPT, MEMORY_SCRIPT_DIR, MEMORY_SCRIPT_PATH,
+};
 
 // Re-export standard datetime type for use across all crates
 pub use types::UtcDateTime;

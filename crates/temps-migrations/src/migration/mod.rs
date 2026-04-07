@@ -62,6 +62,13 @@ mod m20260401_000002_add_autofixer_columns;
 mod m20260401_000002_add_missing_email_events_columns;
 mod m20260403_000001_add_sandbox_enabled;
 mod m20260404_000001_make_sandbox_enabled_nullable;
+mod m20260406_000001_create_workspace_tables;
+mod m20260406_000002_create_workflow_memory;
+mod m20260406_000004_add_workspace_preview_password;
+mod m20260406_000005_add_workspace_base_branch;
+mod m20260407_000001_add_workspace_idle_timeout;
+mod m20260407_000002_add_workspace_session_title;
+mod m20260407_000003_add_workspace_resource_limits;
 
 pub struct Migrator;
 
@@ -131,6 +138,13 @@ impl MigratorTrait for Migrator {
             Box::new(m20260401_000002_add_missing_email_events_columns::Migration),
             Box::new(m20260403_000001_add_sandbox_enabled::Migration),
             Box::new(m20260404_000001_make_sandbox_enabled_nullable::Migration),
+            Box::new(m20260406_000001_create_workspace_tables::Migration),
+            Box::new(m20260406_000002_create_workflow_memory::Migration),
+            Box::new(m20260406_000004_add_workspace_preview_password::Migration),
+            Box::new(m20260406_000005_add_workspace_base_branch::Migration),
+            Box::new(m20260407_000001_add_workspace_idle_timeout::Migration),
+            Box::new(m20260407_000002_add_workspace_session_title::Migration),
+            Box::new(m20260407_000003_add_workspace_resource_limits::Migration),
         ]
     }
 }

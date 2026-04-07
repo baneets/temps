@@ -242,6 +242,26 @@ impl AgentRunService {
         Ok((items, total))
     }
 
+    /// Find the latest run targeting a specific trigger source (e.g. an
+    /// error_group). Returns None if no run exists. Uses the
+    /// `idx_autopilot_runs_trigger_source` index, so this is O(log n) even
+    /// with millions of runs.
+    pub async fn latest_run_for_trigger_source(
+        &self,
+        project_id: i32,
+        trigger_source_type: &str,
+        trigger_source_id: i32,
+    ) -> Result<Option<agent_runs::Model>, AgentError> {
+        agent_runs::Entity::find()
+            .filter(agent_runs::Column::ProjectId.eq(project_id))
+            .filter(agent_runs::Column::TriggerSourceType.eq(trigger_source_type))
+            .filter(agent_runs::Column::TriggerSourceId.eq(trigger_source_id))
+            .order_by(agent_runs::Column::CreatedAt, Order::Desc)
+            .one(self.db.as_ref())
+            .await
+            .map_err(AgentError::Database)
+    }
+
     pub async fn get_run(&self, run_id: i32) -> Result<agent_runs::Model, AgentError> {
         agent_runs::Entity::find_by_id(run_id)
             .one(self.db.as_ref())

@@ -1,14 +1,9 @@
 import {
-  getEnvironmentsOptions,
   getProjectsOptions,
   getTimeBucketStatsOptions,
-  listContainersOptions,
+  getProjectsHealthOptions,
 } from '@/api/client/@tanstack/react-query.gen'
-import {
-  ContainerInfoResponse,
-  EnvironmentResponse,
-  ProjectResponse,
-} from '@/api/client/types.gen'
+import { ProjectResponse } from '@/api/client/types.gen'
 import {
   Card,
   CardContent,
@@ -26,12 +21,8 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import { format, subHours } from 'date-fns'
-import { useCallback, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Line, LineChart, XAxis, YAxis, CartesianGrid } from 'recharts'
-import {
-  EnvironmentMetricsCharts,
-  type AggregatedMetrics,
-} from './EnvironmentMetricsCard'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -40,8 +31,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Activity, Wifi, WifiOff } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
+import {
+  Activity,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  HelpCircle,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 // ── Chart configs ────────────────────────────────────────────────────
 
@@ -67,39 +67,177 @@ const responseTimeChartConfig = {
 
 type TimeRange = '1h' | '6h' | '24h'
 
-type StatusCodeFilter = 'all' | '2xx' | '3xx' | '4xx' | '5xx' | string
+// ── Health status helpers ────────────────────────────────────────────
 
-const STATUS_CODE_OPTIONS: { value: StatusCodeFilter; label: string }[] = [
-  { value: 'all', label: 'All status codes' },
-  { value: '2xx', label: '2xx Success' },
-  { value: '3xx', label: '3xx Redirect' },
-  { value: '4xx', label: '4xx Client Error' },
-  { value: '5xx', label: '5xx Server Error' },
-  { value: '200', label: '200 OK' },
-  { value: '201', label: '201 Created' },
-  { value: '301', label: '301 Moved' },
-  { value: '302', label: '302 Found' },
-  { value: '304', label: '304 Not Modified' },
-  { value: '400', label: '400 Bad Request' },
-  { value: '401', label: '401 Unauthorized' },
-  { value: '403', label: '403 Forbidden' },
-  { value: '404', label: '404 Not Found' },
-  { value: '429', label: '429 Too Many Requests' },
-  { value: '500', label: '500 Internal Server Error' },
-  { value: '502', label: '502 Bad Gateway' },
-  { value: '503', label: '503 Service Unavailable' },
-]
+function getStatusConfig(status: string) {
+  switch (status) {
+    case 'healthy':
+      return {
+        icon: CheckCircle2,
+        color: 'text-green-600',
+        bg: 'bg-green-500/10',
+        border: 'border-green-500/20',
+        label: 'Healthy',
+      }
+    case 'degraded':
+      return {
+        icon: AlertTriangle,
+        color: 'text-yellow-600',
+        bg: 'bg-yellow-500/10',
+        border: 'border-yellow-500/20',
+        label: 'Degraded',
+      }
+    case 'down':
+      return {
+        icon: XCircle,
+        color: 'text-red-600',
+        bg: 'bg-red-500/10',
+        border: 'border-red-500/20',
+        label: 'Down',
+      }
+    default:
+      return {
+        icon: HelpCircle,
+        color: 'text-muted-foreground',
+        bg: 'bg-muted/50',
+        border: 'border-muted',
+        label: 'Unknown',
+      }
+  }
+}
 
-// ── Requests Line Chart ──────────────────────────────────────────────
+// ── Project Health Card ─────────────────────────────────────────────
 
-function RequestsLineChart({
+function ProjectHealthCard({
+  project,
+  health,
+}: {
+  project: ProjectResponse
+  health?: {
+    status: string
+    total_requests: number
+    total_errors: number
+    error_rate: number
+    avg_response_time_ms: number
+  }
+}) {
+  const status = health?.status ?? 'unknown'
+  const config = getStatusConfig(status)
+  const StatusIcon = config.icon
+
+  return (
+    <Card className={cn('transition-colors', config.border)}>
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between mb-3">
+          <div className="min-w-0">
+            <p className="font-medium text-sm truncate">{project.name}</p>
+            {project.preset && (
+              <p className="text-xs text-muted-foreground">{project.preset}</p>
+            )}
+          </div>
+          <div
+            className={cn(
+              'flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
+              config.bg,
+              config.color
+            )}
+          >
+            <StatusIcon className="h-3 w-3" />
+            {config.label}
+          </div>
+        </div>
+
+        {health && health.status !== 'unknown' ? (
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <p className="text-xs text-muted-foreground">Requests</p>
+              <p className="text-sm font-semibold tabular-nums">
+                {health.total_requests.toLocaleString()}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Error Rate</p>
+              <p
+                className={cn(
+                  'text-sm font-semibold tabular-nums',
+                  health.error_rate > 5
+                    ? 'text-red-600'
+                    : health.error_rate > 1
+                      ? 'text-yellow-600'
+                      : ''
+                )}
+              >
+                {health.error_rate.toFixed(1)}%
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Avg Response</p>
+              <p className="text-sm font-semibold tabular-nums">
+                {health.avg_response_time_ms.toFixed(0)}ms
+              </p>
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">No traffic data</p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ── Summary Stat Card ───────────────────────────────────────────────
+
+function SummaryStatCard({
+  label,
+  value,
+  subValue,
+  trend,
+}: {
+  label: string
+  value: string
+  subValue?: string
+  trend?: 'up' | 'down' | 'neutral'
+}) {
+  const TrendIcon =
+    trend === 'up'
+      ? TrendingUp
+      : trend === 'down'
+        ? TrendingDown
+        : Minus
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <p className="text-xs text-muted-foreground mb-1">{label}</p>
+        <div className="flex items-baseline gap-2">
+          <p className="text-2xl font-bold tabular-nums">{value}</p>
+          {trend && (
+            <TrendIcon
+              className={cn(
+                'h-4 w-4',
+                trend === 'up' && 'text-red-500',
+                trend === 'down' && 'text-green-500',
+                trend === 'neutral' && 'text-muted-foreground'
+              )}
+            />
+          )}
+        </div>
+        {subValue && (
+          <p className="text-xs text-muted-foreground mt-0.5">{subValue}</p>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ── Simplified Trend Charts ─────────────────────────────────────────
+
+function TrendCharts({
   projectId,
   timeRange,
-  statusCodeFilter,
 }: {
   projectId?: number
   timeRange: TimeRange
-  statusCodeFilter: StatusCodeFilter
 }) {
   const { startDate, endDate, bucketInterval } = useMemo(() => {
     const end = new Date()
@@ -118,17 +256,6 @@ function RequestsLineChart({
     }
   }, [timeRange])
 
-  const statusCodeQuery = useMemo(() => {
-    if (statusCodeFilter === 'all') return {}
-    if (/^\d{3}$/.test(statusCodeFilter)) {
-      return { status_code: parseInt(statusCodeFilter, 10) }
-    }
-    if (/^\dxx$/.test(statusCodeFilter)) {
-      return { status_code_class: statusCodeFilter }
-    }
-    return {}
-  }, [statusCodeFilter])
-
   const { data, isLoading } = useQuery({
     ...getTimeBucketStatsOptions({
       query: {
@@ -136,7 +263,6 @@ function RequestsLineChart({
         end_time: endDate,
         bucket_interval: bucketInterval,
         project_id: projectId,
-        ...statusCodeQuery,
       },
     }),
     refetchInterval: 30000,
@@ -193,11 +319,11 @@ function RequestsLineChart({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      {/* Requests over time */}
+      {/* Requests & Errors */}
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">Requests</CardTitle>
+            <CardTitle className="text-base">Requests & Errors</CardTitle>
             <div className="flex items-center gap-3 text-sm">
               <span>
                 <span className="font-semibold">
@@ -269,7 +395,7 @@ function RequestsLineChart({
         </CardContent>
       </Card>
 
-      {/* Response time */}
+      {/* Response Time */}
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
@@ -338,176 +464,95 @@ function RequestsLineChart({
   )
 }
 
-// ── Per-environment CPU/Memory charts ────────────────────────────────
-
-function EnvironmentSection({
-  project,
-  environment,
-}: {
-  project: ProjectResponse
-  environment: EnvironmentResponse
-}) {
-  const { data: containerList } = useQuery({
-    ...listContainersOptions({
-      path: {
-        project_id: project.id,
-        environment_id: environment.id,
-      },
-    }),
-    enabled: project.preset !== 'static',
-  })
-
-  const containers: ContainerInfoResponse[] = containerList?.containers ?? []
-
-  const [liveMetrics, setLiveMetrics] = useState<AggregatedMetrics | null>(
-    null
-  )
-
-  const handleMetricsUpdate = useCallback(
-    (metrics: AggregatedMetrics | null) => {
-      setLiveMetrics(metrics)
-    },
-    []
-  )
-
-  const hasRunningContainers = containers.some((c) => c.status === 'running')
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="text-base">
-              {project.name}{' '}
-              <span className="text-muted-foreground font-normal">
-                / {environment.name}
-              </span>
-            </CardTitle>
-          </div>
-          <div className="flex items-center gap-3">
-            {liveMetrics && (
-              <div className="flex items-center gap-3 text-sm">
-                <span>
-                  CPU{' '}
-                  <span className="font-semibold">
-                    {liveMetrics.cpu.toFixed(1)}%
-                  </span>
-                </span>
-                <span>
-                  Mem{' '}
-                  <span className="font-semibold">
-                    {liveMetrics.memoryMb.toFixed(0)} MB
-                  </span>
-                  <span className="text-muted-foreground ml-1">
-                    ({liveMetrics.memoryPercent.toFixed(0)}%)
-                  </span>
-                </span>
-              </div>
-            )}
-            {hasRunningContainers ? (
-              <Badge
-                variant="outline"
-                className="text-green-600 border-green-600/30 gap-1"
-              >
-                <Wifi className="h-3 w-3" />
-                Live
-              </Badge>
-            ) : (
-              <Badge variant="secondary" className="gap-1">
-                <WifiOff className="h-3 w-3" />
-                Offline
-              </Badge>
-            )}
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {project.preset === 'static' ? (
-          <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-            Static projects don't have container metrics
-          </div>
-        ) : (
-          <EnvironmentMetricsCharts
-            projectId={project.id}
-            environment={environment}
-            containers={containers}
-            onMetricsUpdate={handleMetricsUpdate}
-          />
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-function ProjectEnvironments({ project }: { project: ProjectResponse }) {
-  const { data: environments, isLoading } = useQuery({
-    ...getEnvironmentsOptions({
-      path: { project_id: project.id },
-    }),
-  })
-
-  if (isLoading) {
-    return <Skeleton className="h-[300px] w-full" />
-  }
-
-  if (!environments || environments.length === 0) {
-    return null
-  }
-
-  const activeEnvs = environments.filter(
-    (env) => env.current_deployment_id != null
-  )
-
-  if (activeEnvs.length === 0) {
-    return null
-  }
-
-  return (
-    <>
-      {activeEnvs.map((env) => (
-        <EnvironmentSection
-          key={env.id}
-          project={project}
-          environment={env}
-        />
-      ))}
-    </>
-  )
-}
-
 // ── Main page ────────────────────────────────────────────────────────
 
 export function ResourceMonitoring() {
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h')
+  const [timeRange, setTimeRange] = useState<TimeRange>('24h')
   const [selectedProjectId, setSelectedProjectId] = useState<string>('all')
-  const [statusCodeFilter, setStatusCodeFilter] =
-    useState<StatusCodeFilter>('all')
 
   const { data: projectsData, isLoading: projectsLoading } = useQuery({
     ...getProjectsOptions({ query: { page: 1, per_page: 100 } }),
   })
 
   const projects = projectsData?.projects ?? []
-  const serverProjects = useMemo(
-    () => projects.filter((p) => p.preset !== 'static'),
+  const projectIds = useMemo(
+    () => projects.map((p) => p.id),
     [projects]
   )
 
-  const filteredProjects = useMemo(() => {
-    if (selectedProjectId === 'all') return serverProjects
-    return serverProjects.filter(
-      (p) => p.id.toString() === selectedProjectId
+  // Fetch health summary for all projects
+  const { data: healthData } = useQuery({
+    ...getProjectsHealthOptions({
+      query: {
+        project_ids: projectIds.join(','),
+      },
+    }),
+    enabled: projectIds.length > 0,
+    refetchInterval: 30000,
+  })
+
+  const healthMap = healthData?.projects ?? {}
+
+  // Compute overall summary stats
+  const summary = useMemo(() => {
+    const healthEntries = Object.values(healthMap)
+    if (healthEntries.length === 0) {
+      return {
+        totalRequests: 0,
+        totalErrors: 0,
+        avgResponseTime: 0,
+        errorRate: 0,
+        healthyCount: 0,
+        degradedCount: 0,
+        downCount: 0,
+      }
+    }
+
+    const totalRequests = healthEntries.reduce(
+      (sum, h) => sum + h.total_requests,
+      0
     )
-  }, [serverProjects, selectedProjectId])
+    const totalErrors = healthEntries.reduce(
+      (sum, h) => sum + h.total_errors,
+      0
+    )
+    const errorRate =
+      totalRequests > 0 ? (totalErrors / totalRequests) * 100 : 0
+    const withTime = healthEntries.filter((h) => h.avg_response_time_ms > 0)
+    const avgResponseTime =
+      withTime.length > 0
+        ? withTime.reduce((sum, h) => sum + h.avg_response_time_ms, 0) /
+          withTime.length
+        : 0
+
+    return {
+      totalRequests,
+      totalErrors,
+      avgResponseTime,
+      errorRate,
+      healthyCount: healthEntries.filter((h) => h.status === 'healthy').length,
+      degradedCount: healthEntries.filter((h) => h.status === 'degraded')
+        .length,
+      downCount: healthEntries.filter((h) => h.status === 'down').length,
+    }
+  }, [healthMap])
+
+  // Determine overall status for trend indicator
+  const errorTrend: 'up' | 'down' | 'neutral' =
+    summary.errorRate > 5
+      ? 'up'
+      : summary.errorRate > 0
+        ? 'neutral'
+        : 'down'
 
   return (
     <div className="space-y-6">
       {/* Header + Controls */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h3 className="text-lg font-medium">Resource Monitoring</h3>
+          <h3 className="text-lg font-medium">Health Overview</h3>
           <p className="text-sm text-muted-foreground">
-            Requests, CPU, and memory across projects and environments
+            Is everything working? At a glance.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -523,21 +568,6 @@ export function ResourceMonitoring() {
               {projects.map((project) => (
                 <SelectItem key={project.id} value={project.id.toString()}>
                   {project.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select
-            value={statusCodeFilter}
-            onValueChange={setStatusCodeFilter}
-          >
-            <SelectTrigger className="w-[200px]">
-              <SelectValue placeholder="All status codes" />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_CODE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -560,9 +590,13 @@ export function ResourceMonitoring() {
 
       {projectsLoading ? (
         <div className="space-y-6">
-          <Skeleton className="h-[340px] w-full" />
-          <Skeleton className="h-[240px] w-full" />
-          <Skeleton className="h-[500px] w-full" />
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Skeleton className="h-[90px] w-full" />
+            <Skeleton className="h-[90px] w-full" />
+            <Skeleton className="h-[90px] w-full" />
+            <Skeleton className="h-[90px] w-full" />
+          </div>
+          <Skeleton className="h-[300px] w-full" />
         </div>
       ) : projects.length === 0 ? (
         <Card>
@@ -575,21 +609,72 @@ export function ResourceMonitoring() {
         </Card>
       ) : (
         <div className="space-y-6">
-          {/* ── HTTP Requests Charts ── */}
-          <RequestsLineChart
+          {/* ── Summary Stats ── */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <SummaryStatCard
+              label="Total Requests"
+              value={summary.totalRequests.toLocaleString()}
+              subValue="last hour"
+            />
+            <SummaryStatCard
+              label="Error Rate"
+              value={`${summary.errorRate.toFixed(1)}%`}
+              subValue={`${summary.totalErrors.toLocaleString()} errors`}
+              trend={errorTrend}
+            />
+            <SummaryStatCard
+              label="Avg Response Time"
+              value={`${summary.avgResponseTime.toFixed(0)}ms`}
+              trend={
+                summary.avgResponseTime > 500
+                  ? 'up'
+                  : summary.avgResponseTime > 0
+                    ? 'neutral'
+                    : 'down'
+              }
+            />
+            <SummaryStatCard
+              label="Projects Status"
+              value={`${summary.healthyCount}/${projects.length}`}
+              subValue={
+                summary.downCount > 0
+                  ? `${summary.downCount} down`
+                  : summary.degradedCount > 0
+                    ? `${summary.degradedCount} degraded`
+                    : 'all healthy'
+              }
+            />
+          </div>
+
+          {/* ── Project Health Cards ── */}
+          <div>
+            <h4 className="text-sm font-medium mb-3">Project Status</h4>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {projects
+                .filter(
+                  (p) =>
+                    selectedProjectId === 'all' ||
+                    p.id.toString() === selectedProjectId
+                )
+                .map((project) => (
+                  <ProjectHealthCard
+                    key={project.id}
+                    project={project}
+                    health={healthMap[project.id.toString()]}
+                  />
+                ))}
+            </div>
+          </div>
+
+          {/* ── Trend Charts ── */}
+          <TrendCharts
             projectId={
               selectedProjectId !== 'all'
                 ? parseInt(selectedProjectId, 10)
                 : undefined
             }
             timeRange={timeRange}
-            statusCodeFilter={statusCodeFilter}
           />
-
-          {/* ── CPU / Memory per project-environment ── */}
-          {filteredProjects.map((project) => (
-            <ProjectEnvironments key={project.id} project={project} />
-          ))}
         </div>
       )}
     </div>

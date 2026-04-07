@@ -106,14 +106,85 @@ impl SandboxProvider for LocalSandboxProvider {
         Ok(handle.work_dir.exists())
     }
 
-    async fn destroy(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+    async fn write_file(
+        &self,
+        handle: &SandboxHandle,
+        path: &str,
+        contents: &[u8],
+        mode: u32,
+    ) -> Result<(), AgentError> {
+        let target = std::path::Path::new(path);
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AgentError::SandboxExecFailed {
+                    run_id: 0,
+                    sandbox_id: handle.sandbox_id.clone(),
+                    reason: format!("write_file: mkdir {} failed: {}", parent.display(), e),
+                })?;
+        }
+        tokio::fs::write(target, contents)
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("write_file: write {} failed: {}", path, e),
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(mode));
+        }
+        let _ = mode;
+        Ok(())
+    }
+
+    async fn read_file(&self, handle: &SandboxHandle, path: &str) -> Result<Vec<u8>, AgentError> {
+        tokio::fs::read(path)
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("read_file: read {} failed: {}", path, e),
+            })
+    }
+
+    async fn kill_processes(
+        &self,
+        handle: &SandboxHandle,
+        pattern: &str,
+        signal: i32,
+    ) -> Result<(), AgentError> {
+        // Best-effort pkill on the host. Scoped to the current user so we
+        // don't accidentally kill other things.
+        let sig_flag = format!("-{}", signal);
+        let _ = tokio::process::Command::new("pkill")
+            .arg(&sig_flag)
+            .arg("-f")
+            .arg(pattern)
+            .output()
+            .await;
+        tracing::debug!(
+            "LocalSandboxProvider: kill_processes '{}' in {}",
+            pattern,
+            handle.sandbox_name
+        );
+        Ok(())
+    }
+
+    async fn destroy(
+        &self,
+        handle: &SandboxHandle,
+        _purge_volumes: bool,
+    ) -> Result<(), AgentError> {
         tracing::debug!(
             "LocalSandboxProvider: destroying sandbox {} at {:?}",
             handle.sandbox_name,
             handle.work_dir
         );
         // Local provider doesn't own the work_dir lifecycle — the executor/autofixer
-        // handles cleanup of the temp directory separately.
+        // handles cleanup of the temp directory separately. `purge_volumes` has
+        // no effect here because there are no named volumes to purge.
         Ok(())
     }
 
@@ -170,6 +241,7 @@ mod tests {
             image: None,
             cpu_limit: None,
             memory_limit_mb: None,
+            pids_limit: None,
             network_mode: None,
             env_vars: HashMap::new(),
             idle_timeout: Duration::from_secs(3600),

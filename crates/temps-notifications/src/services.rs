@@ -266,8 +266,18 @@ impl NotificationProvider for EmailProvider {
 
         let from = Mailbox::new(self.from_name.clone(), self.from_address.parse()?);
 
-        // Create the HTML body once since it's the same for all recipients
-        let email_body = Self::render_notification_email(notification);
+        // If the notification message is already a full HTML document, send it
+        // as-is. Otherwise wrap it in the standard notification email template.
+        let trimmed = notification.message.trim_start();
+        let is_full_document = trimmed.starts_with("<!DOCTYPE")
+            || trimmed.starts_with("<!doctype")
+            || trimmed.starts_with("<html")
+            || trimmed.starts_with("<HTML");
+        let email_body = if is_full_document {
+            notification.message.clone()
+        } else {
+            Self::render_notification_email(notification)
+        };
 
         // Combine configured addresses and admin emails into a single list
         let mut all_recipients = self.to_addresses.clone();

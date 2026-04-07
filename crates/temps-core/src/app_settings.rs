@@ -43,6 +43,9 @@ pub struct AppSettings {
 
     // Agent sandbox settings (global defaults)
     pub agent_sandbox: AgentSandboxSettings,
+
+    // Workspace preview gateway settings (single shared container per node)
+    pub preview_gateway: PreviewGatewaySettings,
 }
 
 /// Docker container log rotation settings
@@ -96,10 +99,10 @@ pub struct AgentSandboxSettings {
     #[schema(example = "")]
     pub custom_image: String,
     /// CPU limit in cores for sandbox containers
-    #[schema(example = 2.0)]
+    #[schema(example = 4.0)]
     pub cpu_limit: f64,
     /// Memory limit in MB for sandbox containers
-    #[schema(example = 2048)]
+    #[schema(example = 8192)]
     pub memory_limit_mb: u64,
     /// Network access level: "full" (unrestricted), "restricted" (Temps network only), "none" (no network)
     #[schema(example = "full")]
@@ -120,8 +123,8 @@ impl Default for AgentSandboxSettings {
             enabled: false,
             runtime: "node".to_string(),
             custom_image: String::new(),
-            cpu_limit: 2.0,
-            memory_limit_mb: 2048,
+            cpu_limit: 4.0,
+            memory_limit_mb: 8192,
             network_mode: "full".to_string(),
         }
     }
@@ -226,6 +229,42 @@ pub struct MultiNodeSettings {
     pub private_address: Option<String>,
 }
 
+/// Workspace preview gateway settings.
+///
+/// The preview gateway is a single shared Docker container that lives on the
+/// `temps-sandbox-net` network and routes requests to workspace sandbox dev
+/// servers based on the `Host` header (`ws-<sid>-<port>.<preview_domain>`).
+/// `temps serve` reconciles this container on startup; these settings let an
+/// operator override the image, host port, and auto-upgrade behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct PreviewGatewaySettings {
+    /// Docker image reference for the gateway. Pinned per Temps release.
+    /// Operators can override this to test a custom build.
+    #[schema(example = "kfsoftware/temps-preview-gateway:dev")]
+    pub image: String,
+    /// Host port to publish the gateway on (always bound to 127.0.0.1).
+    /// Pingora forwards `ws-*` traffic to this port after authenticating.
+    #[schema(example = 8090)]
+    pub host_port: u16,
+    /// When true (default), the supervisor will pull and apply the image
+    /// pinned in the Temps binary on every startup. When false, the
+    /// currently-running image is left alone — operators upgrade manually
+    /// from the settings UI.
+    #[schema(example = true)]
+    pub auto_upgrade: bool,
+}
+
+impl Default for PreviewGatewaySettings {
+    fn default() -> Self {
+        Self {
+            image: "kfsoftware/temps-preview-gateway:dev".to_string(),
+            host_port: 8090,
+            auto_upgrade: true,
+        }
+    }
+}
+
 const DEFAULT_LOCAL_DOMAIN: &str = "localho.st";
 impl Default for AppSettings {
     fn default() -> Self {
@@ -244,6 +283,7 @@ impl Default for AppSettings {
             container_logs: ContainerLogSettings::default(),
             multi_node: MultiNodeSettings::default(),
             agent_sandbox: AgentSandboxSettings::default(),
+            preview_gateway: PreviewGatewaySettings::default(),
         }
     }
 }

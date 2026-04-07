@@ -32,6 +32,7 @@ axum-macros = { workspace = true }
 http = { workspace = true }
 cron = "0.12"
 temps-error-tracking = { path = "../temps-error-tracking" }
+anyhow = { workspace = true }
 bollard = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }

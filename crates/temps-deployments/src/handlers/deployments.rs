@@ -2036,6 +2036,15 @@ mod tests {
                 "not implemented in test".into(),
             ))
         }
+
+        async fn get_connection_access_token(
+            &self,
+            _connection_id: i32,
+        ) -> Result<(String, String), temps_git::GitProviderManagerError> {
+            Err(temps_git::GitProviderManagerError::Other(
+                "not implemented in test".into(),
+            ))
+        }
     }
 
     struct MockStaticDeployer;

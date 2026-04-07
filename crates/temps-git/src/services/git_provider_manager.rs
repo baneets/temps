@@ -3990,6 +3990,30 @@ impl GitProviderManagerTrait for GitProviderManager {
         Ok(())
     }
 
+    async fn get_connection_access_token(
+        &self,
+        connection_id: i32,
+    ) -> Result<(String, String), super::git_provider_manager_trait::GitProviderManagerError> {
+        use super::git_provider_manager_trait::GitProviderManagerError as TraitError;
+
+        let connection = self
+            .get_connection(connection_id)
+            .await
+            .map_err(|_| TraitError::ConnectionNotFound(connection_id))?;
+
+        let provider = self
+            .get_provider(connection.provider_id)
+            .await
+            .map_err(|_| TraitError::ProviderNotFound(connection.provider_id))?;
+
+        let token = self
+            .get_connection_token(connection_id)
+            .await
+            .map_err(|e| TraitError::DecryptionError(e.to_string()))?;
+
+        Ok((token, provider.provider_type))
+    }
+
     async fn get_repository_info(
         &self,
         connection_id: i32,

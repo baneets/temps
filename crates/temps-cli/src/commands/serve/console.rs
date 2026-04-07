@@ -60,6 +60,7 @@ use temps_static_files::StaticFilesPlugin;
 use temps_status_page::StatusPagePlugin;
 use temps_vulnerability_scanner::VulnerabilityScannerPlugin;
 use temps_webhooks::WebhooksPlugin;
+use temps_workspace::plugin::WorkspacePlugin;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
@@ -796,9 +797,16 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     plugin_manager.register_plugin(agents_plugin);
 
     // 9. DeploymentsPlugin - provides deployment orchestration (depends on deployer, screenshots, and vulnerability scanner)
+    // Must be registered before WorkspacePlugin so WorkspacePlugin can resolve DeploymentTokenService in phase 1.
     debug!("Registering DeploymentsPlugin");
     let deployments_plugin = Box::new(DeploymentsPlugin::new());
     plugin_manager.register_plugin(deployments_plugin);
+
+    // 8.7. WorkspacePlugin - interactive AI workspace sessions.
+    // Registered after AgentsPlugin (sandbox provider) and DeploymentsPlugin (deployment token service).
+    debug!("Registering WorkspacePlugin");
+    let workspace_plugin = Box::new(WorkspacePlugin::new());
+    plugin_manager.register_plugin(workspace_plugin);
 
     // 9.1. LogAggregatorPlugin - structured log collection, storage, search, and streaming
     // Depends on database, Docker (from DeployerPlugin), and AuditLogger (from AuditPlugin)
@@ -1036,12 +1044,13 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             queue_service.clone(),
         ));
 
-        // Start event-driven outage detection (listens to StatusCheckCompleted jobs)
-        let outage_service = Arc::new(OutageDetectionService::new(
-            db.clone(),
-            notification_service,
-            alarm_service.clone(),
-        ));
+        // Start event-driven outage detection (listens to StatusCheckCompleted jobs).
+        // The job queue is attached so monitoring.downtime workflows can be fired
+        // automatically when an outage is detected.
+        let outage_service = Arc::new(
+            OutageDetectionService::new(db.clone(), notification_service, alarm_service.clone())
+                .with_job_queue(queue_service.clone()),
+        );
 
         let job_receiver = queue_service.subscribe();
         tokio::spawn(async move {

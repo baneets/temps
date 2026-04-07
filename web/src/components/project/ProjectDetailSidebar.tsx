@@ -143,11 +143,18 @@ const baseNavItems: NavItem[] = [
     icon: Bot,
   },
 
-  // Agents
+  // Workspace — interactive AI chat with full platform context
   {
-    title: 'Agents',
-    url: 'agents',
+    title: 'Workspace',
+    url: 'workspace',
     icon: Sparkles,
+  },
+
+  // Workflows — event-driven automations (formerly Agents)
+  {
+    title: 'Workflows',
+    url: 'agents',
+    icon: Bot,
   },
 
   // Services (merged: Storage + Services + KV + Blob)

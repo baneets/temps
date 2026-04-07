@@ -107,7 +107,8 @@ impl SandboxRegistry {
         };
 
         if let Some(handle) = handle {
-            if let Err(e) = self.provider.destroy(&handle).await {
+            // Agent runs are ephemeral — purge the home volume too.
+            if let Err(e) = self.provider.destroy(&handle, true).await {
                 tracing::warn!(
                     "Failed to destroy sandbox {} for run {}: {}",
                     handle.sandbox_name,
@@ -175,6 +176,7 @@ mod tests {
             image: None,
             cpu_limit: None,
             memory_limit_mb: None,
+            pids_limit: None,
             network_mode: None,
             env_vars: HashMap::new(),
             idle_timeout: Duration::from_secs(3600),

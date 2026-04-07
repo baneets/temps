@@ -148,12 +148,25 @@ pub struct ListRunsQuery {
     pub page_size: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LatestForSourceQuery {
+    pub trigger_source_type: String,
+    pub trigger_source_id: i32,
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         // All runs for a project (across all agents)
         .route("/projects/{project_id}/agents/runs", get(list_all_runs))
+        // Latest run for a given trigger source (e.g. error_group). Indexed
+        // lookup so it scales to millions of runs — used by the "Fix with AI"
+        // button on error detail pages.
+        .route(
+            "/projects/{project_id}/agents/runs/latest-for-source",
+            get(latest_run_for_source),
+        )
         // All runs for a specific agent
         .route(
             "/projects/{project_id}/agents/{slug}/runs",
@@ -258,6 +271,85 @@ async fn list_all_runs(
         page,
         page_size,
     }))
+}
+
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/projects/{project_id}/agents/runs/latest-for-source",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("trigger_source_type" = String, Query, description = "Trigger source type, e.g. 'error_group'"),
+        ("trigger_source_id" = i32, Query, description = "Trigger source ID"),
+    ),
+    responses(
+        (status = 200, description = "Latest matching run, or null if none", body = Option<AgentRunResponse>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn latest_run_for_source(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(project_id): Path<i32>,
+    Query(query): Query<LatestForSourceQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsRead);
+
+    let run = app_state
+        .run_service
+        .latest_run_for_trigger_source(
+            project_id,
+            &query.trigger_source_type,
+            query.trigger_source_id,
+        )
+        .await
+        .map_err(Problem::from)?;
+
+    let Some(run) = run else {
+        return Ok(Json(serde_json::Value::Null));
+    };
+
+    // Resolve agent slug/name + sandbox status (mirrors list_all_runs)
+    let agents = app_state
+        .config_service
+        .list_agents(project_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let global_sandbox_enabled = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("agent_sandbox")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    };
+
+    let agent = agents.iter().find(|a| a.id == run.config_id);
+    let sandbox = agent
+        .and_then(|a| a.sandbox_enabled)
+        .unwrap_or(global_sandbox_enabled);
+
+    let response = AgentRunResponse::from_with_agent(
+        run,
+        agent.map(|a| a.slug.clone()),
+        agent.map(|a| a.name.clone()),
+        sandbox,
+    );
+
+    Ok(Json(
+        serde_json::to_value(response).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 #[utoipa::path(

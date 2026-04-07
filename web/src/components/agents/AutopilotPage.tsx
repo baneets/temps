@@ -75,6 +75,68 @@ function nextCronRun(cron: string | null | undefined): string | null {
   return `${dayName} at ${time}`
 }
 
+/**
+ * Renders the list of triggers configured for a workflow as visual badges.
+ * Shows which events will fire this workflow.
+ */
+function TriggerBadges({ agent, nextRun }: { agent: Agent; nextRun: string | null }) {
+  const triggers = agent.trigger_config ?? {}
+  const badges: { label: string; color: string; key: string }[] = []
+
+  // Error triggers
+  if (triggers.error?.new_issue) {
+    badges.push({ key: 'error-new', label: 'New errors', color: 'bg-red-500/10 text-red-400 border border-red-500/20' })
+  }
+  if (triggers.error?.regression) {
+    badges.push({ key: 'error-reg', label: 'Error regressions', color: 'bg-red-500/10 text-red-400 border border-red-500/20' })
+  }
+
+  // Deploy triggers
+  if (triggers.deploy?.production) {
+    badges.push({ key: 'deploy-prod', label: 'Production deploys', color: 'bg-purple-500/10 text-purple-400 border border-purple-500/20' })
+  }
+  if (triggers.deploy?.preview) {
+    badges.push({ key: 'deploy-prev', label: 'Preview deploys', color: 'bg-purple-500/10 text-purple-400 border border-purple-500/20' })
+  }
+
+  // Monitoring triggers
+  if (triggers.monitoring?.downtime) {
+    badges.push({ key: 'mon-down', label: 'Downtime', color: 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20' })
+  }
+  if (triggers.monitoring?.latency_spike) {
+    badges.push({ key: 'mon-lat', label: 'Latency spikes', color: 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20' })
+  }
+
+  // Schedule
+  if (nextRun) {
+    badges.push({ key: 'schedule', label: `Schedule: ${nextRun}`, color: 'bg-blue-500/10 text-blue-400 border border-blue-500/20' })
+  }
+
+  // Manual
+  if (triggers.manual) {
+    badges.push({ key: 'manual', label: 'Manual', color: 'bg-muted text-muted-foreground border border-border' })
+  }
+
+  if (badges.length === 0) {
+    return (
+      <div className="text-xs text-muted-foreground mt-2">
+        <span className="opacity-70">No triggers configured</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5 items-center mt-2">
+      <span className="text-xs text-muted-foreground font-medium">Triggers:</span>
+      {badges.map((b) => (
+        <span key={b.key} className={`text-xs px-1.5 py-0.5 rounded ${b.color}`}>
+          {b.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function AgentCard({
   agent,
   projectId,
@@ -99,7 +161,7 @@ function AgentCard({
       queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
     },
     onError: (error: Error) => {
-      toast.error(error.message || 'Failed to toggle agent')
+      toast.error(error.message || 'Failed to toggle workflow')
     },
   })
 
@@ -165,14 +227,11 @@ function AgentCard({
         {agent.description && (
           <p className="text-sm text-muted-foreground mb-2">{agent.description}</p>
         )}
-        <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap gap-2 text-xs text-muted-foreground items-center">
           <span>{agent.ai_provider === 'claude_cli' ? 'Claude' : 'Codex'}</span>
-          {agent.trigger_config?.error?.new_issue && <span className="bg-muted px-1.5 py-0.5 rounded">new errors</span>}
-          {agent.trigger_config?.error?.regression && <span className="bg-muted px-1.5 py-0.5 rounded">regressions</span>}
-          {nextRun && <span className="bg-muted px-1.5 py-0.5 rounded">{nextRun}</span>}
-          {agent.trigger_config?.manual && <span className="bg-muted px-1.5 py-0.5 rounded">manual</span>}
           {agent.sandbox_enabled && <span className="bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded">sandbox</span>}
         </div>
+        <TriggerBadges agent={agent} nextRun={nextRun} />
       </CardContent>
     </Card>
 
@@ -180,9 +239,9 @@ function AgentCard({
     <Dialog open={showTriggerDialog} onOpenChange={setShowTriggerDialog}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Run {agent.name}</DialogTitle>
+          <DialogTitle>Run Workflow: {agent.name}</DialogTitle>
           <DialogDescription>
-            {agent.description || 'Trigger this agent manually.'}
+            {agent.description || 'Trigger this workflow manually.'}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -196,7 +255,7 @@ function AgentCard({
             rows={4}
           />
           <p className="text-xs text-muted-foreground">
-            Provide additional instructions or a topic for the agent. This is appended to the agent's prompt.
+            Provide additional instructions or a topic for the workflow. This is appended to the workflow's prompt.
           </p>
         </div>
         <DialogFooter>
@@ -212,7 +271,7 @@ function AgentCard({
             ) : (
               <Play className="h-4 w-4 mr-2" />
             )}
-            Run Agent
+            Run Workflow
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -266,9 +325,9 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
         <Sparkles className="h-12 w-12 text-muted-foreground mb-4" />
-        <h2 className="text-lg font-semibold mb-2">No agents configured</h2>
+        <h2 className="text-lg font-semibold mb-2">No workflows configured</h2>
         <p className="text-muted-foreground text-sm mb-4 text-center max-w-md">
-          Create agents via the dashboard or add <code className="text-xs bg-muted px-1 py-0.5 rounded">.temps/agents/*.yaml</code> files to your repository.
+          Create workflows via the dashboard or add <code className="text-xs bg-muted px-1 py-0.5 rounded">.temps/workflows/*.yaml</code> files to your repository.
         </p>
         <Button
           onClick={() => {
@@ -277,7 +336,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
           }}
         >
           <Plus className="h-4 w-4 mr-2" />
-          Create Agent
+          Create Workflow
         </Button>
         <AgentSettingsDialog
           open={dialogOpen}
@@ -292,7 +351,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-xl font-semibold">Agents</h1>
+        <h1 className="text-xl font-semibold">Workflows</h1>
         <Button
           size="sm"
           onClick={() => {
@@ -301,7 +360,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
           }}
         >
           <Plus className="h-3 w-3 mr-1" />
-          New Agent
+          New Workflow
         </Button>
       </div>
 
@@ -384,7 +443,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
       ) : runs.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-12">
           <p className="text-muted-foreground text-sm">
-            No runs yet. Agents will run when triggers fire.
+            No runs yet. Workflows will run when triggers fire.
           </p>
         </div>
       ) : (
@@ -394,7 +453,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Status</TableHead>
-                  <TableHead>Agent</TableHead>
+                  <TableHead>Workflow</TableHead>
                   <TableHead>Trigger</TableHead>
                   <TableHead className="hidden md:table-cell">Sandbox</TableHead>
                   <TableHead className="hidden md:table-cell">PR</TableHead>

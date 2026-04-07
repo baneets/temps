@@ -8,7 +8,10 @@ use sea_orm::EntityTrait;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use temps_core::{AgentYamlConfig, JobResult, WorkflowContext, WorkflowError, WorkflowTask};
+use temps_core::{
+    AgentTriggers, AgentYamlConfig, DeployTrigger, ErrorTrigger, JobResult, MonitoringTrigger,
+    ScheduleTrigger, WorkflowContext, WorkflowError, WorkflowTask, WorkflowYamlConfig,
+};
 use temps_database::DbConnection;
 use temps_entities::projects;
 use temps_logs::{LogLevel, LogService};
@@ -143,6 +146,95 @@ impl ConfigureAgentsJob {
 
         agents
     }
+
+    /// Load .temps/workflows/*.yaml files and convert them to AgentYamlConfig
+    /// so they can be synced through the same project_agents table.
+    fn load_workflow_yamls(
+        &self,
+        repo_dir: &Path,
+        project: &projects::Model,
+    ) -> Vec<AgentYamlConfig> {
+        let project_dir = repo_dir.join(&project.directory);
+        let workflows_dir = project_dir.join(".temps").join("workflows");
+        let mut workflows = Vec::new();
+
+        if !workflows_dir.is_dir() {
+            return workflows;
+        }
+
+        let entries = match fs::read_dir(&workflows_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Failed to read .temps/workflows/ directory: {}", e);
+                return workflows;
+            }
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+
+            match fs::read_to_string(&path) {
+                Ok(contents) => match serde_yaml::from_str::<WorkflowYamlConfig>(&contents) {
+                    Ok(workflow) => {
+                        info!("Loaded workflow '{}' from {:?}", workflow.name, path);
+                        workflows.push(workflow_to_agent(workflow));
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse {:?}: {}", path, e);
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to read {:?}: {}", path, e);
+                }
+            }
+        }
+
+        workflows
+    }
+}
+
+/// Convert a WorkflowYamlConfig into an AgentYamlConfig for DB storage.
+/// Workflows and agents share the same `project_agents` table — `AgentTriggers`
+/// has been extended with `deploy` and `monitoring` so all workflow trigger
+/// types map cleanly into the same row.
+fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
+    AgentYamlConfig {
+        name: workflow.name,
+        description: workflow.description,
+        on: AgentTriggers {
+            error: workflow.on.error.map(|e| ErrorTrigger {
+                new_issue: e.new_issue,
+                regression: e.regression,
+            }),
+            deploy: workflow.on.deploy.map(|d| DeployTrigger {
+                production: d.production,
+                preview: d.preview,
+            }),
+            monitoring: workflow.on.monitoring.map(|m| MonitoringTrigger {
+                downtime: m.downtime,
+                latency_spike: m.latency_spike,
+            }),
+            schedule: workflow
+                .on
+                .schedule
+                .map(|s| ScheduleTrigger { cron: s.cron }),
+            manual: workflow.on.manual,
+        },
+        prompt: Some(workflow.prompt),
+        provider: workflow.provider,
+        max_turns: workflow.max_turns,
+        timeout_seconds: workflow.timeout_seconds,
+        daily_budget_cents: workflow.daily_budget_cents,
+        cooldown_minutes: workflow.cooldown_minutes,
+        branch_prefix: "workflows/".to_string(),
+        deliverable: workflow.deliverable,
+        enabled: workflow.enabled,
+        sandbox: None,
+    }
 }
 
 #[async_trait]
@@ -166,8 +258,10 @@ impl WorkflowTask for ConfigureAgentsJob {
     async fn execute(&self, context: WorkflowContext) -> Result<JobResult, WorkflowError> {
         let repo_output = RepositoryOutput::from_context(&context, &self.download_job_id)?;
 
-        self.log("Checking for .temps/agents/*.yaml files...".to_string())
-            .await?;
+        self.log(
+            "Checking for .temps/agents/*.yaml and .temps/workflows/*.yaml files...".to_string(),
+        )
+        .await?;
 
         // Load project
         let project = projects::Entity::find_by_id(self.project_id)
@@ -178,17 +272,26 @@ impl WorkflowTask for ConfigureAgentsJob {
                 WorkflowError::Other(format!("Project {} not found", self.project_id))
             })?;
 
-        // Load agent YAML files
-        let agents = self.load_agent_yamls(&repo_output.repo_dir, &project);
+        // Load agent YAML files (legacy .temps/agents/) and workflow YAML files
+        // (new .temps/workflows/). Both sync into the same project_agents table.
+        let mut agents = self.load_agent_yamls(&repo_output.repo_dir, &project);
+        let workflows = self.load_workflow_yamls(&repo_output.repo_dir, &project);
+
+        let agent_count = agents.len();
+        let workflow_count = workflows.len();
+        agents.extend(workflows);
 
         if agents.is_empty() {
-            self.log("No .temps/agents/*.yaml files found".to_string())
+            self.log("No agent or workflow YAML files found".to_string())
                 .await?;
             return Ok(JobResult::success(context));
         }
 
-        self.log(format!("Found {} agent(s) to sync", agents.len()))
-            .await?;
+        self.log(format!(
+            "Found {} agent(s) and {} workflow(s) to sync",
+            agent_count, workflow_count
+        ))
+        .await?;
 
         // Sync to database
         match self

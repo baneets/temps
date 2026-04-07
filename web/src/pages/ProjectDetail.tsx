@@ -47,6 +47,7 @@ import { AutofixerPanel } from '@/components/autofixer/AutofixerPanel'
 import { AgentDetailPage } from '@/components/agents/AgentDetailPage'
 import { AutopilotPage } from '@/components/agents/AutopilotPage'
 import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
+import { WorkspacePage } from '@/components/workspace/WorkspacePage'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import {
@@ -401,6 +402,10 @@ export function ProjectDetail() {
               <Route
                 path="ai-activity"
                 element={<ProjectAgentActivity projectId={project.id} />}
+              />
+              <Route
+                path="workspace"
+                element={<WorkspacePage project={project} />}
               />
               <Route
                 path="agents"

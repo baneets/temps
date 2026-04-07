@@ -626,7 +626,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             <CardTitle className="text-sm">Report</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-sm prose prose-invert max-w-none">
+            <div className="text-sm prose dark:prose-invert max-w-none">
               {renderMarkdown(run.analysis)}
             </div>
           </CardContent>

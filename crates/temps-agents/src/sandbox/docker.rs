@@ -14,66 +14,170 @@ use crate::error::AgentError;
 /// Container naming prefix — used for recovery after server restarts.
 const SANDBOX_NAME_PREFIX: &str = "temps-sandbox-";
 
-/// Network name for agent sandboxes (isolated from deployment network).
-const SANDBOX_NETWORK: &str = "temps-agent-sandbox";
+/// Single-quote a string for safe embedding in a `sh -c` command line.
+/// Handles embedded single quotes via the `'\''` idiom.
+fn shell_quote(s: &str) -> String {
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
+/// Shared Docker network for all workspace/agent sandboxes AND the preview
+/// gateway. The gateway resolves `temps-sandbox-<sid>:<port>` via Docker's
+/// embedded DNS — both sides must share this user-defined network for that
+/// to work. Keep in sync with
+/// `temps-cli/src/commands/serve/preview_gateway.rs::PREVIEW_GATEWAY_NETWORK`.
+const SANDBOX_NETWORK: &str = "temps-sandbox-net";
 
 /// Path inside the container where the repository is mounted.
 const CONTAINER_WORK_DIR: &str = "/workspace";
 
 /// Generate a Dockerfile for a given runtime preset.
-/// Every image gets git, curl, and Claude CLI installed on top of the base.
-/// A non-root `temps` user is created so Claude CLI accepts --dangerously-skip-permissions.
-fn dockerfile_for_runtime(runtime: &str) -> String {
+///
+/// Every image gets git, curl, jq, sudo, tmux, and the Claude CLI installed
+/// on top of the base. A non-root `temps` user is created (Claude CLI refuses
+/// `--dangerously-skip-permissions` as root).
+///
+/// Claude CLI is installed via the **native installer** (`claude.ai/install.sh`),
+/// not npm. The npm package `@anthropic-ai/claude-code` is deprecated; the
+/// native installer drops a prebuilt binary into `~/.local/bin/claude` and
+/// removes the Node.js runtime requirement, which means runtimes like
+/// python/rust/go/full no longer need `nodejs npm` purely to host Claude.
+///
+/// Important: the native installer must run as the **target user**, not root,
+/// because it installs to `$HOME/.local/bin`. We `su - temps` after creating
+/// the user (see the trailing block) instead of running as root.
+pub fn dockerfile_for_runtime(runtime: &str) -> String {
+    // `jq` is required by the workspace memory script (/workspace/.temps/bin/memory)
+    // — it's used to build/parse JSON for the API calls. Always installed.
+    //
+    // `extra_run` is reserved for runtime-specific extras the base image
+    // doesn't provide (e.g. `uv` for python). Claude itself is installed in
+    // the unified per-user install step at the bottom, not here.
+    // `dtach` is the per-tab PTY supervisor: each workspace terminal tab runs
+    // its CLI (claude/codex/opencode/bash) under `dtach -A /run/temps-pty/{tab}.sock`
+    // so the PTY owner is decoupled from the `docker exec` lifecycle. When the
+    // websocket drops, the dtach client exits but the dtach master keeps the
+    // child alive — reconnects just re-attach. This is how we guarantee
+    // "claude is launched exactly once per sandbox lifetime" across arbitrary
+    // browser refreshes, without losing background-shell state the CLI is
+    // tracking internally. See handlers/sessions.rs::handle_session_terminal.
     let (base, extra_packages, extra_run) = match runtime {
         "bun" => (
             "oven/bun:latest",
-            "git ca-certificates curl sudo",
-            "npm install -g @anthropic-ai/claude-code",
+            "git ca-certificates curl jq sudo unzip dtach",
+            "true",
         ),
         "python" => (
             "python:3.12-slim",
-            "git ca-certificates curl nodejs npm sudo",
-            "npm install -g @anthropic-ai/claude-code && curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "git ca-certificates curl jq sudo unzip dtach",
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
         ),
         "rust" => (
             "rust:1-slim",
-            "git ca-certificates curl nodejs npm sudo",
-            "npm install -g @anthropic-ai/claude-code",
+            "git ca-certificates curl jq sudo unzip dtach",
+            "true",
         ),
         "go" => (
-            "golang:1.23-slim",
-            "git ca-certificates curl nodejs npm sudo",
-            "npm install -g @anthropic-ai/claude-code",
+            // `golang:1.23-slim` was pruned from Docker Hub — use the
+            // debian-based tag which is still published. (Slim variants
+            // for golang don't exist for 1.23+.)
+            "golang:1.23-bookworm",
+            "git ca-certificates curl jq sudo unzip dtach",
+            "true",
         ),
         "full" => (
             "ubuntu:24.04",
-            "git ca-certificates curl nodejs npm python3 python3-pip golang-go sudo",
-            "npm install -g @anthropic-ai/claude-code && curl -LsSf https://astral.sh/uv/install.sh | sh",
+            "git ca-certificates curl jq nodejs npm python3 python3-pip golang-go sudo unzip dtach",
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
         ),
-        // "node" or anything else
+        // "node" or anything else — Ubuntu-based with Node 20 from NodeSource
+        // so users still have npm/npx for their own work. Claude itself no
+        // longer rides on top of npm.
         _ => (
-            "node:20-slim",
-            "git ca-certificates curl sudo",
-            "npm install -g @anthropic-ai/claude-code",
+            "ubuntu:24.04",
+            "git ca-certificates curl jq sudo unzip gnupg dtach",
+            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+                && apt-get install -y --no-install-recommends nodejs",
         ),
     };
 
+    // Install Bun on every non-bun runtime so `bunx @temps-sdk/cli` Just Works
+    // regardless of which base image the user picked.
+    let bun_install = if runtime == "bun" {
+        ""
+    } else {
+        // Install to /usr/local/bun so it's on PATH for all users (including the
+        // non-root `temps` user we create later).
+        r#"RUN curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local/bun bash \
+    && ln -s /usr/local/bun/bin/bun /usr/local/bin/bun \
+    && ln -s /usr/local/bun/bin/bunx /usr/local/bin/bunx
+"#
+    };
+
     // Install tools as root, then create non-root user with sudo for package installs.
-    // Claude CLI refuses --dangerously-skip-permissions when running as root.
+    // Claude CLI refuses --dangerously-skip-permissions when running as root,
+    // and the native installer drops the binary in $HOME/.local/bin — both
+    // reasons we install Claude as the `temps` user, not as root.
+    //
+    // GitHub CLI (gh) and GitLab CLI (glab) are installed from their official
+    // releases so the workspace AI can interact with PRs/MRs, issues, and CI.
+    //
+    // PATH includes /home/temps/.local/bin globally so the binary is visible
+    // from `docker exec`, tmux panes, and login shells alike — without this,
+    // the bare-bash and tmux-wrapped paths would silently miss the installer
+    // location and fall back to "claude not found".
     format!(
         r#"FROM {base}
-RUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} && rm -rf /var/lib/apt/lists/*
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/home/temps/.local/bin:/usr/local/bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} wget tmux && rm -rf /var/lib/apt/lists/*
 RUN {extra_run}
-RUN useradd -m -s /bin/bash temps && echo "temps ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/temps
+{bun_install}# Install GitHub CLI from official apt repo
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*
+# Install GitLab CLI (glab) from official release tarball
+RUN ARCH=$(dpkg --print-architecture) \
+    && case "$ARCH" in amd64) GLAB_ARCH=x86_64 ;; arm64) GLAB_ARCH=arm64 ;; *) GLAB_ARCH=$ARCH ;; esac \
+    && GLAB_VERSION=1.51.0 \
+    && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${{GLAB_VERSION}}/downloads/glab_${{GLAB_VERSION}}_linux_${{GLAB_ARCH}}.tar.gz" -o /tmp/glab.tar.gz \
+    && tar -xzf /tmp/glab.tar.gz -C /tmp \
+    && mv /tmp/bin/glab /usr/local/bin/glab \
+    && chmod +x /usr/local/bin/glab \
+    && rm -rf /tmp/glab.tar.gz /tmp/bin
+RUN EXISTING_USER=$(getent passwd 1000 | cut -d: -f1) \
+    && if [ -n "$EXISTING_USER" ] && [ "$EXISTING_USER" != "temps" ]; then \
+         (userdel -r "$EXISTING_USER" 2>/dev/null || userdel "$EXISTING_USER" 2>/dev/null || true); \
+         (groupdel "$EXISTING_USER" 2>/dev/null || true); \
+       fi \
+    && useradd -m -s /bin/bash -u 1000 temps \
+    && echo "temps ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/temps
 RUN mkdir -p /workspace && chown temps:temps /workspace
+# /run/temps-pty holds one Unix socket per terminal tab (one per {{kind,tab}}
+# pair). dtach creates these sockets on first attach; subsequent reconnects
+# find the existing socket and re-attach instead of respawning the CLI. The
+# directory lives in the container's tmpfs, so it's wiped on container
+# restart — which is exactly the "launch once per sandbox lifetime" boundary
+# we want.
+RUN mkdir -p /run/temps-pty && chown temps:temps /run/temps-pty && chmod 0700 /run/temps-pty
+# Install Claude Code via the official native installer, as the temps user.
+# Must run as the target user — the installer drops files in $HOME/.local/bin
+# and refuses to install system-wide. We also seed PATH in ~/.bashrc so
+# interactive shells (e.g. the tmux-wrapped terminal) find the binary even
+# if the parent env wasn't propagated.
 USER temps
+ENV HOME=/home/temps
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && /home/temps/.local/bin/claude --version \
+    && echo 'export PATH=/home/temps/.local/bin:$PATH' >> /home/temps/.bashrc
 WORKDIR /workspace
 "#
     )
 }
 
 /// Image name for a runtime preset.
-fn image_name_for_runtime(runtime: &str) -> String {
+pub fn image_name_for_runtime(runtime: &str) -> String {
     match runtime {
         "node" | "" => "temps-sandbox-node:latest".to_string(),
         other => format!("temps-sandbox-{other}:latest"),
@@ -100,8 +204,8 @@ impl Default for DockerSandboxConfig {
         Self {
             runtime: "node".to_string(),
             custom_image: String::new(),
-            default_cpu_limit: 2.0,
-            default_memory_limit_mb: 2048,
+            default_cpu_limit: 4.0,
+            default_memory_limit_mb: 8192,
             network_mode: SANDBOX_NETWORK.to_string(),
         }
     }
@@ -353,11 +457,25 @@ impl SandboxProvider for DockerSandboxProvider {
             .network_mode
             .as_deref()
             .unwrap_or(&self.config.network_mode);
-        // Map user-friendly names to Docker network modes
+        // Map user-friendly names to Docker network modes.
+        //
+        // IMPORTANT: "full" used to map to docker `host` mode, which bypassed
+        // container network isolation entirely and prevented sandboxes from
+        // joining the shared `temps-sandbox-net` user-defined network. That
+        // broke workspace preview routing because the preview gateway resolves
+        // sandbox containers via Docker's embedded DNS, which only works on
+        // user-defined networks. We now route "full" through the shared bridge
+        // network (`SANDBOX_NETWORK`) — sandboxes still get full outbound
+        // internet (the network is created with `internal: false`) but they
+        // also get a real container IP and DNS name that the gateway can hit.
+        //
+        // `host` is still accepted as an explicit opt-out for callers that
+        // really need the host stack (e.g. legacy autofixer flows).
         let docker_network = match network {
             "none" => "none".to_string(),
-            "full" | "host" => "host".to_string(),
-            other => other.to_string(), // "restricted" uses the default bridge network
+            "host" => "host".to_string(),
+            "full" | "restricted" => SANDBOX_NETWORK.to_string(),
+            other => other.to_string(),
         };
 
         let host_work_dir = config.host_work_dir.to_string_lossy().to_string();
@@ -371,7 +489,20 @@ impl SandboxProvider for DockerSandboxProvider {
 
         // Bind mount: only the work directory. Auth is handled via env vars
         // (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY) — no host config mounting.
-        let binds = vec![format!("{}:{}", host_work_dir, CONTAINER_WORK_DIR)];
+        //
+        // Named volume for `/home/temps`: persists the sandbox user's home
+        // directory (claude session jsonl, shell history, ~/.claude/projects,
+        // ~/.config/...) across container recreation. Without this, killing
+        // and recreating the sandbox would lose all conversation continuity
+        // even though the work_dir survives via the bind mount above.
+        //
+        // The volume name is keyed on run_id so each session keeps its own
+        // home isolated, and the volume is auto-created on first mount.
+        let home_volume_name = format!("temps-sandbox-home-{}", config.run_id);
+        let binds = vec![
+            format!("{}:{}", host_work_dir, CONTAINER_WORK_DIR),
+            format!("{}:/home/temps", home_volume_name),
+        ];
 
         // tmpfs mount for secrets — in-memory only, never written to disk
         let mut tmpfs = HashMap::new();
@@ -381,13 +512,28 @@ impl SandboxProvider for DockerSandboxProvider {
             binds: Some(binds),
             network_mode: Some(docker_network),
             tmpfs: Some(tmpfs),
-            // Resource limits
+            // Resource limits.
+            //
+            // `memory_swap == memory` disables swap usage for the container.
+            // Without this, Docker's default is `memory_swap = 2 * memory`,
+            // meaning each sandbox can silently page an *additional* full
+            // memory-limit's worth to host swap. With N sandboxes running
+            // dev servers + claude that's a fast path to host swap
+            // exhaustion, terrible latency, and no OOM feedback to the
+            // sandbox itself. Disabling swap turns over-limit into a clean
+            // OOM-kill of the offending process (which is the correct
+            // signal — the user sees `next dev` die instead of the whole
+            // host dragging).
             nano_cpus: Some((cpu_limit * 1_000_000_000.0) as i64),
             memory: Some(memory_limit_mb as i64 * 1024 * 1024),
+            memory_swap: Some(memory_limit_mb as i64 * 1024 * 1024),
             // Security hardening
             cap_drop: Some(vec!["ALL".to_string()]),
+            // CHOWN/FOWNER are needed so the post-start chown of /home/temps
+            // (fixing stale named-volume ownership) can run as root.
+            cap_add: Some(vec!["CHOWN".to_string(), "FOWNER".to_string()]),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
-            pids_limit: Some(512),
+            pids_limit: Some(config.pids_limit.unwrap_or(512)),
             init: Some(true),
             ..Default::default()
         };
@@ -442,6 +588,46 @@ impl SandboxProvider for DockerSandboxProvider {
                 provider: "docker".to_string(),
                 reason: format!("Failed to start container: {}", e),
             })?;
+
+        // Fix /home/temps ownership: the named volume inherits the host's
+        // anonymous-volume root uid on first mount, and stale volumes from
+        // earlier image builds may be owned by a different uid entirely.
+        // Running chown as root (not USER temps) normalizes it every start.
+        {
+            let exec = self
+                .docker
+                .create_exec(
+                    &container.id,
+                    bollard::models::ExecConfig {
+                        user: Some("0:0".to_string()),
+                        cmd: Some(vec![
+                            "chown".to_string(),
+                            "-R".to_string(),
+                            "temps:temps".to_string(),
+                            "/home/temps".to_string(),
+                        ]),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|e| AgentError::SandboxCreationFailed {
+                    run_id: config.run_id,
+                    provider: "docker".to_string(),
+                    reason: format!("Failed to create chown exec: {}", e),
+                })?;
+            let _ = self
+                .docker
+                .start_exec(
+                    &exec.id,
+                    Some(bollard::exec::StartExecOptions {
+                        detach: false,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
 
         tracing::info!(
             "Sandbox container {} ({}) created for run {}",
@@ -508,32 +694,73 @@ impl SandboxProvider for DockerSandboxProvider {
 
         match output {
             StartExecResults::Attached { mut output, .. } => {
-                while let Some(chunk) = output.next().await {
-                    match chunk {
-                        Ok(LogOutput::StdOut { message }) => {
+                // Bollard's exec stream has a known failure mode: if the
+                // underlying process exits without producing output (or the
+                // docker daemon drops the trailing close frame), `output.next()`
+                // parks forever instead of returning `None`. To avoid hanging
+                // the entire workspace executor on a phantom stream, we poll
+                // with an idle timeout: if no chunk arrives within the window
+                // AND the exec is no longer running per `inspect_exec`, we
+                // break out and return whatever we collected.
+                const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+                loop {
+                    match tokio::time::timeout(IDLE_POLL, output.next()).await {
+                        Ok(Some(Ok(LogOutput::StdOut { message }))) => {
                             let text = String::from_utf8_lossy(&message);
-                            // Stream line by line for the callback
                             for line in text.lines() {
                                 all_output.push_str(line);
                                 all_output.push('\n');
-
                                 if let Some(ref cb) = on_output {
                                     cb(line.to_string()).await;
                                 }
                             }
                         }
-                        Ok(LogOutput::StdErr { message }) => {
+                        Ok(Some(Ok(LogOutput::StdErr { message }))) => {
                             let text = String::from_utf8_lossy(&message);
                             all_output.push_str(&text);
                         }
-                        Ok(_) => {}
-                        Err(e) => {
+                        Ok(Some(Ok(_))) => {}
+                        Ok(Some(Err(e))) => {
                             tracing::warn!(
                                 "Sandbox {} exec stream error: {}",
                                 handle.sandbox_name,
                                 e
                             );
                             break;
+                        }
+                        Ok(None) => {
+                            // Stream closed cleanly — exec is done.
+                            break;
+                        }
+                        Err(_) => {
+                            // Idle timeout: check whether the exec is still
+                            // running. If it is, keep waiting (long-running
+                            // claude calls are normal). If it isn't, the
+                            // stream is phantom — bail out.
+                            match self.docker.inspect_exec(&exec.id).await {
+                                Ok(info) if info.running == Some(true) => {
+                                    tracing::debug!(
+                                        "Sandbox {} exec idle (still running), continuing to wait",
+                                        handle.sandbox_name
+                                    );
+                                    continue;
+                                }
+                                Ok(_) => {
+                                    tracing::warn!(
+                                        "Sandbox {} exec stream went idle and the exec is no longer running — bailing out to avoid permanent hang",
+                                        handle.sandbox_name
+                                    );
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Sandbox {} inspect_exec failed during idle check: {} — bailing out",
+                                        handle.sandbox_name,
+                                        e
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -579,7 +806,7 @@ impl SandboxProvider for DockerSandboxProvider {
         }
     }
 
-    async fn destroy(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+    async fn destroy(&self, handle: &SandboxHandle, purge_volumes: bool) -> Result<(), AgentError> {
         tracing::info!(
             "Destroying sandbox container {} ({})",
             handle.sandbox_name,
@@ -613,7 +840,331 @@ impl SandboxProvider for DockerSandboxProvider {
                 reason: format!("Failed to remove container: {}", e),
             })?;
 
+        // Only remove the named home volume when the caller asks for a
+        // full purge (session *delete*, or ephemeral agent runs). On a
+        // plain session *close* the volume must survive so claude auth,
+        // shell history, and ~/.claude/projects are preserved when the
+        // session is reopened.
+        if purge_volumes {
+            if let Some(run_id_str) = handle.sandbox_name.strip_prefix(SANDBOX_NAME_PREFIX) {
+                let home_volume_name = format!("temps-sandbox-home-{}", run_id_str);
+                if let Err(e) = self
+                    .docker
+                    .remove_volume(
+                        &home_volume_name,
+                        None::<bollard::query_parameters::RemoveVolumeOptions>,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to remove sandbox home volume {} (may not exist): {}",
+                        home_volume_name,
+                        e
+                    );
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    async fn stop(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+        tracing::info!("Stopping sandbox container {}", handle.sandbox_name);
+        self.docker
+            .stop_container(
+                &handle.sandbox_id,
+                Some(bollard::query_parameters::StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("Failed to stop container: {}", e),
+            })?;
+        Ok(())
+    }
+
+    async fn start(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+        tracing::info!("Starting sandbox container {}", handle.sandbox_name);
+        self.docker
+            .start_container(
+                &handle.sandbox_id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("Failed to start container: {}", e),
+            })?;
+        Ok(())
+    }
+
+    async fn restart(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+        tracing::info!("Restarting sandbox container {}", handle.sandbox_name);
+        self.docker
+            .restart_container(
+                &handle.sandbox_id,
+                None::<bollard::query_parameters::RestartContainerOptions>,
+            )
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("Failed to restart container: {}", e),
+            })?;
+        Ok(())
+    }
+
+    async fn write_file(
+        &self,
+        handle: &SandboxHandle,
+        path: &str,
+        contents: &[u8],
+        mode: u32,
+    ) -> Result<(), AgentError> {
+        // Split the absolute path into the parent dir (extraction target) and
+        // the file basename (entry name inside the tar). Docker's
+        // upload_to_container extracts the tar at the given `path`.
+        let (parent_dir, file_name) = match path.rsplit_once('/') {
+            Some((p, f)) if !f.is_empty() => {
+                let parent = if p.is_empty() { "/" } else { p };
+                (parent.to_string(), f.to_string())
+            }
+            _ => {
+                return Err(AgentError::SandboxExecFailed {
+                    run_id: 0,
+                    sandbox_id: handle.sandbox_id.clone(),
+                    reason: format!(
+                        "write_file: path '{}' must be absolute with a filename",
+                        path
+                    ),
+                });
+            }
+        };
+
+        // Build an in-memory tar with a single file entry. tar crate is sync,
+        // so we do this on the current thread (cheap for skill/CLAUDE/.env sized files).
+        let tar_bytes = {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(mode);
+            // Files under /home/temps must be owned by the `temps` user (uid 1000)
+            // created in the sandbox Dockerfile, otherwise tight modes like 0600
+            // become unreadable by the container's runtime user.
+            if path.starts_with("/home/temps") {
+                header.set_uid(1000);
+                header.set_gid(1000);
+            }
+            header.set_mtime(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            );
+            header.set_cksum();
+
+            let mut buf: Vec<u8> = Vec::with_capacity(contents.len() + 1024);
+            {
+                let mut builder = tar::Builder::new(&mut buf);
+                builder
+                    .append_data(&mut header, &file_name, contents)
+                    .map_err(|e| AgentError::SandboxExecFailed {
+                        run_id: 0,
+                        sandbox_id: handle.sandbox_id.clone(),
+                        reason: format!("write_file: tar build failed for {}: {}", path, e),
+                    })?;
+                builder
+                    .finish()
+                    .map_err(|e| AgentError::SandboxExecFailed {
+                        run_id: 0,
+                        sandbox_id: handle.sandbox_id.clone(),
+                        reason: format!("write_file: tar finish failed for {}: {}", path, e),
+                    })?;
+            }
+            buf
+        };
+
+        // Ensure parent directory exists. upload_to_container won't create
+        // intermediate dirs — extraction fails if `parent_dir` is missing.
+        // Use a short, well-bounded exec for mkdir (it produces no output but
+        // returns quickly; the polling exec loop handles the phantom case).
+        let mkdir = vec!["mkdir".to_string(), "-p".to_string(), parent_dir.clone()];
+        // Best-effort: if mkdir hangs, the upload below will fail loudly with
+        // a clear "no such directory" error rather than hanging silently.
+        let _ = self.exec(handle, mkdir, HashMap::new(), None).await;
+
+        let options = bollard::query_parameters::UploadToContainerOptionsBuilder::default()
+            .path(&parent_dir)
+            .build();
+
+        let body = bollard::body_full(tar_bytes.into());
+
+        // Hard timeout so we never replicate the phantom-stream hang.
+        let upload = self
+            .docker
+            .upload_to_container(&handle.sandbox_id, Some(options), body);
+
+        match tokio::time::timeout(std::time::Duration::from_secs(30), upload).await {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    "write_file: uploaded {} bytes to {} in container {}",
+                    contents.len(),
+                    path,
+                    handle.sandbox_name
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("write_file: upload to {} failed: {}", path, e),
+            }),
+            Err(_) => Err(AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("write_file: upload to {} timed out after 30s", path),
+            }),
+        }
+    }
+
+    async fn read_file(&self, handle: &SandboxHandle, path: &str) -> Result<Vec<u8>, AgentError> {
+        use futures::StreamExt;
+        use std::io::Read;
+
+        let options = bollard::query_parameters::DownloadFromContainerOptionsBuilder::default()
+            .path(path)
+            .build();
+
+        let stream = self
+            .docker
+            .download_from_container(&handle.sandbox_id, Some(options));
+
+        // Collect tar stream into memory with a hard 30s cap so we never hang.
+        let collect = async {
+            let mut buf: Vec<u8> = Vec::new();
+            let mut s = stream;
+            while let Some(chunk) = s.next().await {
+                match chunk {
+                    Ok(bytes) => buf.extend_from_slice(&bytes),
+                    Err(e) => {
+                        return Err(AgentError::SandboxExecFailed {
+                            run_id: 0,
+                            sandbox_id: handle.sandbox_id.clone(),
+                            reason: format!("read_file: download {} failed: {}", path, e),
+                        });
+                    }
+                }
+            }
+            Ok(buf)
+        };
+
+        let tar_bytes =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), collect).await {
+                Ok(Ok(b)) => b,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(AgentError::SandboxExecFailed {
+                        run_id: 0,
+                        sandbox_id: handle.sandbox_id.clone(),
+                        reason: format!("read_file: download {} timed out after 30s", path),
+                    });
+                }
+            };
+
+        // Extract the single file from the tar. Docker's archive endpoint
+        // returns a tar whose top-level entry is the basename of `path`.
+        let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
+        let mut entries = archive
+            .entries()
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("read_file: tar open for {} failed: {}", path, e),
+            })?;
+
+        for entry in entries.by_ref() {
+            let mut entry = entry.map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("read_file: tar entry for {} failed: {}", path, e),
+            })?;
+            // Skip directories, symlinks, etc. — we want the regular file.
+            if entry.header().entry_type().is_file() {
+                let mut contents = Vec::new();
+                entry
+                    .read_to_end(&mut contents)
+                    .map_err(|e| AgentError::SandboxExecFailed {
+                        run_id: 0,
+                        sandbox_id: handle.sandbox_id.clone(),
+                        reason: format!("read_file: read entry for {} failed: {}", path, e),
+                    })?;
+                return Ok(contents);
+            }
+        }
+
+        Err(AgentError::SandboxExecFailed {
+            run_id: 0,
+            sandbox_id: handle.sandbox_id.clone(),
+            reason: format!("read_file: no regular file entry in tar for {}", path),
+        })
+    }
+
+    async fn kill_processes(
+        &self,
+        handle: &SandboxHandle,
+        pattern: &str,
+        signal: i32,
+    ) -> Result<(), AgentError> {
+        // Fresh exec running pkill. pkill exits 0 if something was killed,
+        // 1 if nothing matched — both are success from our POV. Bounded by
+        // a 10s timeout so we never replicate the phantom-stream hang.
+        //
+        // Use `pgrep` + `kill` instead of `pkill -f` to handle both busybox
+        // and util-linux pkill variants uniformly.
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "pgrep -f {pattern_q} 2>/dev/null | xargs -r kill -{sig} 2>/dev/null; exit 0",
+                pattern_q = shell_quote(pattern),
+                sig = signal,
+            ),
+        ];
+
+        let exec = self.exec(handle, cmd, HashMap::new(), None);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), exec).await {
+            Ok(Ok(_)) => {
+                tracing::debug!(
+                    "kill_processes: sent signal {} to '{}' in {}",
+                    signal,
+                    pattern,
+                    handle.sandbox_name
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                // Don't propagate — kill is best-effort. Log and move on.
+                tracing::warn!(
+                    "kill_processes: exec failed for '{}' in {}: {}",
+                    pattern,
+                    handle.sandbox_name,
+                    e
+                );
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "kill_processes: timed out killing '{}' in {}",
+                    pattern,
+                    handle.sandbox_name
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn recover(&self, run_id: i32) -> Result<Option<SandboxHandle>, AgentError> {
@@ -721,8 +1272,8 @@ mod tests {
         let config = DockerSandboxConfig::default();
         assert_eq!(config.runtime, "node");
         assert_eq!(config.custom_image, "");
-        assert_eq!(config.default_cpu_limit, 2.0);
-        assert_eq!(config.default_memory_limit_mb, 2048);
+        assert_eq!(config.default_cpu_limit, 4.0);
+        assert_eq!(config.default_memory_limit_mb, 8192);
         assert_eq!(config.network_mode, SANDBOX_NETWORK);
     }
 
@@ -771,6 +1322,20 @@ mod tests {
         assert!(df.contains("FROM node:20-slim"));
         assert!(df.contains("claude-code"));
         assert!(df.contains("git"));
+        assert!(df.contains("jq"), "jq must be installed for memory script");
+    }
+
+    #[test]
+    fn test_all_runtimes_install_jq() {
+        // The memory script requires jq. Every runtime preset must install it.
+        for runtime in &["node", "bun", "python", "rust", "go", "full"] {
+            let df = dockerfile_for_runtime(runtime);
+            assert!(
+                df.contains("jq"),
+                "runtime {} dockerfile must install jq",
+                runtime
+            );
+        }
     }
 
     #[test]
@@ -890,6 +1455,7 @@ mod tests {
             image: None,
             cpu_limit: Some(1.0),
             memory_limit_mb: Some(512),
+            pids_limit: None,
             network_mode: Some("none".to_string()),
             env_vars: HashMap::from([("TEST_VAR".to_string(), "test_value".to_string())]),
             idle_timeout: Duration::from_secs(120),
@@ -939,7 +1505,7 @@ mod tests {
         assert_eq!(recovered_handle.sandbox_name, handle.sandbox_name);
 
         // 6. Destroy
-        provider.destroy(&handle).await.unwrap();
+        provider.destroy(&handle, true).await.unwrap();
 
         // 7. Verify it's gone
         assert!(!provider.is_alive(&handle).await.unwrap_or(false));

@@ -796,17 +796,24 @@ impl GitProviderService for GitHubProvider {
     ) -> Result<Vec<Branch>, GitProviderError> {
         let octocrab = self.get_octocrab_client(access_token).await?;
 
-        // Get all branches using Octocrab
-        let branches = octocrab
+        // Fetch the first page with the maximum page size, then walk every
+        // remaining page so callers always see the complete branch list.
+        // GitHub paginates branches at 30 items per page by default; without
+        // `all_pages` we'd silently truncate repos like ours where `main`
+        // sorts past page 1.
+        let first_page = octocrab
             .repos(owner, repo)
             .list_branches()
+            .per_page(100)
             .send()
             .await
             .map_err(|e| GitProviderError::ApiError(format!("Failed to list branches: {}", e)))?;
 
-        // Convert Octocrab branches to our Branch type
-        let branches = branches
-            .items
+        let all = octocrab.all_pages(first_page).await.map_err(|e| {
+            GitProviderError::ApiError(format!("Failed to paginate branches: {}", e))
+        })?;
+
+        let branches = all
             .into_iter()
             .map(|b| Branch {
                 name: b.name,

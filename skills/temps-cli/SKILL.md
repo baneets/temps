@@ -1291,6 +1291,262 @@ bunx @temps-sdk/cli emails stats --json
 bunx @temps-sdk/cli emails validate --email user@example.com --json
 ```
 
+### Sending email from application code
+
+**Default rule for any app deployed on Temps**: send transactional email
+through Temps, not via Resend / SendGrid / Mailgun / Postmark / SES SDK
+directly. Temps already brokers email through configured providers and
+domains, tracks delivery, and exposes a single typed SDK — using a
+third-party SDK in app code duplicates infrastructure and bypasses
+Temps tracking, retries, and the project's verified domains.
+
+#### ALWAYS fetch verified domains first — do not hardcode
+
+The set of verified email domains is **dynamic**: an operator may add or
+remove domains at any time, and a sandbox started before a domain
+existed must still be able to use it once it appears. Never bake a
+domain list into a CLAUDE.md, env file, or generated code. Instead,
+**always fetch the current list at the moment you're about to send**:
+
+```bash
+# Returns every domain known to this Temps instance, including status.
+# Filter to status=="verified" — those are the only ones POST /emails accepts.
+bunx @temps-sdk/cli email-domains list --json
+```
+
+Or via raw HTTP from inside the sandbox / from any deployed app:
+
+```bash
+curl -sS "$TEMPS_API_URL/email-domains" \
+  -H "Authorization: Bearer $TEMPS_DEPLOYMENT_TOKEN" \
+  | jq '[.[] | select(.status == "verified") | .domain]'
+```
+
+Procedure when the user asks the agent (or the running app) to send email:
+
+1. Call `GET /email-domains` and filter to `status == "verified"`.
+2. **If the list is empty**: stop. Tell the user no sender domain is
+   verified yet and that an operator must run
+   `bunx @temps-sdk/cli email-domains create -d <domain> --provider-id <id> -y`
+   followed by `... email-domains verify --id <id>`. Do NOT generate
+   application code that calls `POST /emails` — it will 400 at runtime.
+3. **If the user named a `from` address**: confirm its domain is in the
+   verified list. If not, refuse and surface the available domains.
+4. **If the user did not specify a sender**: default to
+   `noreply@<first-verified-domain>` (or ask if multiple are equally
+   plausible).
+5. Then call `POST /emails` with the chosen `from`.
+
+Application code that runs in long-lived containers should fetch the
+domain list at startup (or per-request, cached briefly) rather than
+hardcoding — same reason. A startup-time fetch is enough for most apps;
+re-fetch on `400 Domain not verified` to recover from a domain that was
+removed mid-process.
+
+**Node / TypeScript** — use `@temps-sdk/node-sdk`:
+
+```bash
+bun add @temps-sdk/node-sdk    # or: npm i / pnpm add / yarn add
+```
+
+```ts
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const temps = new TempsClient({
+  baseUrl: process.env.TEMPS_API_URL!,        // injected into the sandbox automatically
+  apiKey: process.env.TEMPS_DEPLOYMENT_TOKEN!, // session/deployment token, also auto-injected
+});
+
+await temps.email.send({
+  body: {
+    from: 'noreply@example.com',  // domain MUST be a verified email-domain in this project
+    from_name: 'Acme',
+    to: ['user@example.com'],
+    subject: 'Welcome',
+    html: '<p>Hello</p>',
+    text: 'Hello',
+    // optional: cc, bcc, reply_to, headers, tags
+  },
+});
+```
+
+`SendEmailRequestBody` fields (from the typed SDK): `from` (required),
+`subject` (required), `to` (required), `from_name`, `cc`, `bcc`,
+`reply_to`, `html`, `text`, `headers`, `tags`. The sender domain is
+auto-extracted from `from` and looked up against the project's verified
+email domains — sending will 400 if the domain isn't verified, so make
+sure `email-domains create` + `verify` has been run for it first.
+
+**Do NOT** add `resend`, `@sendgrid/mail`, `mailgun.js`, `postmark`,
+`@aws-sdk/client-ses`, or `nodemailer` to a Temps-hosted project unless
+the user explicitly says they want to bypass Temps email. If you see one
+of those packages already in `package.json`, suggest migrating to
+`@temps-sdk/node-sdk` and explain why.
+
+**Other languages — HTTP API**
+
+There's no first-party SDK for Python, Go, Ruby, PHP, Rust, etc. yet,
+so call the REST endpoint directly. Same JSON body shape as the Node
+SDK, same auth header.
+
+- **Endpoint**: `POST {TEMPS_API_URL}/emails`
+- **Auth**: `Authorization: Bearer ${TEMPS_DEPLOYMENT_TOKEN}`
+- **Content-Type**: `application/json`
+- **Success**: `201 Created` with the sent email's id + status
+- **Errors**: `400` (unverified domain / invalid request), `401`
+  (missing/invalid token), `403` (insufficient permission — token needs
+  `emails:send`), `500` (provider failure). Error body is RFC 7807
+  Problem Details JSON.
+
+`curl`:
+
+```bash
+curl -X POST "$TEMPS_API_URL/emails" \
+  -H "Authorization: Bearer $TEMPS_DEPLOYMENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "noreply@example.com",
+    "from_name": "Acme",
+    "to": ["user@example.com"],
+    "subject": "Welcome",
+    "html": "<p>Hello</p>",
+    "text": "Hello",
+    "tags": ["welcome", "onboarding"]
+  }'
+```
+
+**Python** (`requests`):
+
+```python
+import os, requests
+
+resp = requests.post(
+    f"{os.environ['TEMPS_API_URL']}/emails",
+    headers={
+        "Authorization": f"Bearer {os.environ['TEMPS_DEPLOYMENT_TOKEN']}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "from": "noreply@example.com",
+        "to": ["user@example.com"],
+        "subject": "Welcome",
+        "html": "<p>Hello</p>",
+        "text": "Hello",
+    },
+    timeout=10,
+)
+resp.raise_for_status()
+print(resp.json())
+```
+
+**Go** (`net/http`):
+
+```go
+package main
+
+import (
+    "bytes"
+    "encoding/json"
+    "net/http"
+    "os"
+)
+
+func sendEmail() error {
+    body, _ := json.Marshal(map[string]any{
+        "from":    "noreply@example.com",
+        "to":      []string{"user@example.com"},
+        "subject": "Welcome",
+        "html":    "<p>Hello</p>",
+        "text":    "Hello",
+    })
+    req, _ := http.NewRequest("POST", os.Getenv("TEMPS_API_URL")+"/emails", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+os.Getenv("TEMPS_DEPLOYMENT_TOKEN"))
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil { return err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        return &http.ProtocolError{ErrorString: "temps email failed: " + resp.Status}
+    }
+    return nil
+}
+```
+
+**Ruby** (`net/http`):
+
+```ruby
+require 'net/http'
+require 'json'
+require 'uri'
+
+uri = URI("#{ENV.fetch('TEMPS_API_URL')}/emails")
+req = Net::HTTP::Post.new(uri, {
+  'Authorization' => "Bearer #{ENV.fetch('TEMPS_DEPLOYMENT_TOKEN')}",
+  'Content-Type'  => 'application/json',
+})
+req.body = {
+  from: 'noreply@example.com',
+  to: ['user@example.com'],
+  subject: 'Welcome',
+  html: '<p>Hello</p>',
+  text: 'Hello',
+}.to_json
+res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') { |h| h.request(req) }
+raise "temps email failed: #{res.code} #{res.body}" unless res.is_a?(Net::HTTPSuccess)
+```
+
+**PHP** (`curl`):
+
+```php
+<?php
+$ch = curl_init(getenv('TEMPS_API_URL') . '/emails');
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        'Authorization: Bearer ' . getenv('TEMPS_DEPLOYMENT_TOKEN'),
+        'Content-Type: application/json',
+    ],
+    CURLOPT_POSTFIELDS => json_encode([
+        'from' => 'noreply@example.com',
+        'to' => ['user@example.com'],
+        'subject' => 'Welcome',
+        'html' => '<p>Hello</p>',
+        'text' => 'Hello',
+    ]),
+]);
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+if ($status >= 300) { throw new RuntimeException("temps email failed: $status $response"); }
+```
+
+**Rust** (`reqwest`):
+
+```rust
+use serde_json::json;
+
+let client = reqwest::Client::new();
+let resp = client
+    .post(format!("{}/emails", std::env::var("TEMPS_API_URL")?))
+    .bearer_auth(std::env::var("TEMPS_DEPLOYMENT_TOKEN")?)
+    .json(&json!({
+        "from": "noreply@example.com",
+        "to": ["user@example.com"],
+        "subject": "Welcome",
+        "html": "<p>Hello</p>",
+        "text": "Hello",
+    }))
+    .send()
+    .await?
+    .error_for_status()?;
+```
+
+In every case the deployed application reads `TEMPS_API_URL` and
+`TEMPS_DEPLOYMENT_TOKEN` from its environment — Temps injects both
+automatically into deployment containers and workspace sandboxes, so
+the app code itself never needs to hold a long-lived API key.
+
 ---
 
 ## IP Access Control

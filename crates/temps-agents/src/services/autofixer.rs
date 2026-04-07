@@ -194,6 +194,7 @@ impl AutofixerService {
             image: Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime)),
             cpu_limit: Some(global_sandbox.cpu_limit),
             memory_limit_mb: Some(global_sandbox.memory_limit_mb),
+            pids_limit: None,
             network_mode: Some(global_sandbox.network_mode.clone()),
             env_vars: sandbox_env,
             idle_timeout: Duration::from_secs(3600),

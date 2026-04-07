@@ -6,6 +6,7 @@ use temps_core::jobs::AutopilotTriggerJob;
 use temps_core::plugin::{
     PluginContext, PluginError, PluginRoutes, ServiceRegistrationContext, TempsPlugin,
 };
+use temps_core::workflow_memory::WorkflowMemoryProvider;
 use temps_core::{Job, JobQueue, JobReceiver};
 use temps_error_tracking::services::source_map_service::SourceMapService;
 use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
@@ -14,6 +15,7 @@ use temps_notifications::services::NotificationService;
 use temps_deployments::jobs::configure_agents::{
     AgentSyncError, AgentSyncResult, AgentSyncService,
 };
+use temps_deployments::services::deployment_token_service::DeploymentTokenService;
 
 use crate::handlers::AppState;
 use crate::sandbox::docker::{DockerSandboxConfig, DockerSandboxProvider};
@@ -90,6 +92,30 @@ impl AgentsPlugin {
                 .trigger_config
                 .get("error")
                 .and_then(|e| e.get("regression"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "monitoring_downtime" => agent
+                .trigger_config
+                .get("monitoring")
+                .and_then(|m| m.get("downtime"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "monitoring_latency_spike" => agent
+                .trigger_config
+                .get("monitoring")
+                .and_then(|m| m.get("latency_spike"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "deploy_production" => agent
+                .trigger_config
+                .get("deploy")
+                .and_then(|d| d.get("production"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            "deploy_preview" => agent
+                .trigger_config
+                .get("deploy")
+                .and_then(|d| d.get("preview"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             "alarm" => agent
@@ -407,6 +433,11 @@ impl TempsPlugin for AgentsPlugin {
                         Arc::new(LocalSandboxProvider::new())
                     }
                 };
+            // Register the bare sandbox provider as `dyn SandboxProvider` so
+            // other plugins (e.g. workspace) can pick it up via the trait
+            // without depending on temps-agents directly.
+            context.register_service(sandbox_provider.clone());
+
             let sandbox_registry = Arc::new(SandboxRegistry::new(sandbox_provider));
 
             let config_service = Arc::new(AgentConfigService::new(
@@ -485,10 +516,55 @@ impl TempsPlugin for AgentsPlugin {
                 executor,
                 audit_service: context.require_service::<dyn temps_core::AuditLogger>(),
                 autofixer_service,
+                docker: context.require_service::<bollard::Docker>(),
+                platform_config_service: context.require_service::<temps_config::ConfigService>(),
             });
             context.register_plugin_state("agents", app_state);
 
             tracing::debug!("Autopilot plugin services registered successfully");
+            Ok(())
+        })
+    }
+
+    /// Late-binding phase: attach optional dependencies that weren't available
+    /// during `register_services` because the plugins that provide them are
+    /// registered later in the boot order.
+    ///
+    /// Specifically:
+    /// - **WorkflowMemoryProvider** comes from `temps-workspace`, registered after agents
+    /// - **DeploymentTokenService** comes from `temps-deployments`, registered after agents
+    ///
+    /// Both are optional — if not present, the executor degrades gracefully:
+    /// runs work as before but without memory injection.
+    fn initialize_plugin_services<'a>(
+        &'a self,
+        context: &'a PluginContext,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
+        Box::pin(async move {
+            let executor = context.require_service::<AgentExecutor>();
+
+            if let Some(memory_provider) = context.get_service::<dyn WorkflowMemoryProvider>() {
+                executor.attach_memory_provider(memory_provider).await;
+                tracing::info!("Agents plugin: workflow memory provider attached");
+            } else {
+                tracing::debug!(
+                    "Agents plugin: no workflow memory provider available; \
+                     workflow runs will execute without memory injection"
+                );
+            }
+
+            if let Some(token_service) = context.get_service::<DeploymentTokenService>() {
+                executor
+                    .attach_deployment_token_service(token_service)
+                    .await;
+                tracing::info!("Agents plugin: deployment token service attached");
+            } else {
+                tracing::debug!(
+                    "Agents plugin: no deployment token service available; \
+                     workflow run sandboxes will not be able to authenticate to the API"
+                );
+            }
+
             Ok(())
         })
     }

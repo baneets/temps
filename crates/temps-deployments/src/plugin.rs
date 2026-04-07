@@ -87,6 +87,8 @@ impl TempsPlugin for DeploymentsPlugin {
                     encryption_service.clone(),
                 ),
             );
+            // Register so other plugins (e.g. workspace) can resolve it via the service registry.
+            context.register_service(deployment_token_service.clone());
 
             // Create DatabaseCronConfigService to manage cron jobs
             let database_cron_service = Arc::new(crate::services::DatabaseCronConfigService::new(

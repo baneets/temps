@@ -8,7 +8,13 @@ use tokio::fs;
 use tokio::process::Command;
 
 use temps_core::jobs::GitPushEventJob;
+use temps_core::workflow_memory::{
+    memory_install_command, WorkflowMemoryFact, WorkflowMemoryProvider,
+};
 use temps_core::{EncryptionService, Job, JobQueue};
+use temps_deployments::services::deployment_token_service::{
+    CreateDeploymentTokenRequest, DeploymentTokenService,
+};
 use temps_entities::{error_events, error_groups, projects, settings};
 use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_notifications::services::NotificationService;
@@ -36,6 +42,27 @@ pub struct AgentExecutor {
     ai_provider_override: Option<Arc<dyn AiCliProvider>>,
     /// Sandbox registry for running AI CLI inside isolated containers.
     sandbox_registry: Arc<SandboxRegistry>,
+    /// Optional workflow memory provider. When set, the executor:
+    ///   1. Installs the `memory` script in the sandbox so the AI can write
+    ///      facts back via curl.
+    ///   2. Pre-loads relevant memory facts into the prompt before spawning
+    ///      the harness, so the AI starts with what previous runs learned.
+    ///
+    /// When unset, workflow runs work exactly as before — no memory features.
+    ///
+    /// Wrapped in `RwLock<Option<...>>` so it can be set late by the plugin
+    /// system after the executor has already been registered as an Arc'd
+    /// service. The workspace plugin registers the memory provider after the
+    /// agents plugin registers the executor, so we can't pass it via the
+    /// constructor.
+    memory_provider: tokio::sync::RwLock<Option<Arc<dyn WorkflowMemoryProvider>>>,
+    /// Optional deployment token issuer. Used to mint a project-scoped token
+    /// that the sandbox can use as `TEMPS_API_TOKEN` to call back to the API
+    /// (memory script, future CLI commands, etc.).
+    /// If unset, the script is still installed but memory writes will fail
+    /// at the curl level since the token env var won't be set.
+    /// Same RwLock pattern as memory_provider — set late by plugin init.
+    deployment_token_service: tokio::sync::RwLock<Option<Arc<DeploymentTokenService>>>,
 }
 
 impl AgentExecutor {
@@ -60,7 +87,25 @@ impl AgentExecutor {
             notification_service,
             ai_provider_override: None,
             sandbox_registry,
+            memory_provider: tokio::sync::RwLock::new(None),
+            deployment_token_service: tokio::sync::RwLock::new(None),
         }
+    }
+
+    /// Attach a workflow memory provider so the executor pre-loads memory
+    /// into prompts and installs the memory script in run sandboxes.
+    /// Safe to call after the executor has been registered as a service —
+    /// uses interior mutability so it works with `Arc<AgentExecutor>`.
+    pub async fn attach_memory_provider(&self, provider: Arc<dyn WorkflowMemoryProvider>) {
+        *self.memory_provider.write().await = Some(provider);
+    }
+
+    /// Attach a deployment token service so the executor can mint a
+    /// short-lived project-scoped token for the sandbox to use as
+    /// `TEMPS_API_TOKEN` when calling back to the Temps API.
+    /// Safe to call after the executor has been registered as a service.
+    pub async fn attach_deployment_token_service(&self, svc: Arc<DeploymentTokenService>) {
+        *self.deployment_token_service.write().await = Some(svc);
     }
 
     /// Access the sandbox registry (for status checks).
@@ -72,6 +117,105 @@ impl AgentExecutor {
     pub fn with_ai_provider(mut self, provider: Arc<dyn AiCliProvider>) -> Self {
         self.ai_provider_override = Some(provider);
         self
+    }
+
+    // ── Memory helpers ──────────────────────────────────────────────────────
+
+    /// Build the list of tags used to filter memory for a run. Encodes
+    /// trigger context (error_group_id, etc.) so that future runs hitting
+    /// the same trigger source see the relevant facts.
+    pub(crate) fn build_memory_tags(
+        trigger_source_type: Option<&str>,
+        trigger_source_id: Option<i32>,
+    ) -> Vec<String> {
+        let mut tags = Vec::new();
+        if let (Some(t), Some(id)) = (trigger_source_type, trigger_source_id) {
+            tags.push(format!("{}:{}", t, id));
+        }
+        tags
+    }
+
+    /// Load relevant memory facts for a run from the configured provider.
+    /// Returns an empty vec on any failure (memory is best-effort and must
+    /// never block a run).
+    pub(crate) async fn load_memory_facts(
+        &self,
+        project_id: i32,
+        agent_id: i32,
+        trigger_source_type: Option<&str>,
+        trigger_source_id: Option<i32>,
+    ) -> Vec<WorkflowMemoryFact> {
+        let provider = {
+            let guard = self.memory_provider.read().await;
+            match guard.as_ref() {
+                Some(p) => p.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let tags = Self::build_memory_tags(trigger_source_type, trigger_source_id);
+        match provider
+            .load_for_trigger(project_id, agent_id, tags, 20)
+            .await
+        {
+            Ok(facts) => facts,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load workflow memory for agent {}: {}. Continuing without memory.",
+                    agent_id,
+                    e
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Render a memory section to prepend to a workflow prompt. Returns
+    /// an empty string when there's no memory provider or no facts to render.
+    pub(crate) async fn render_memory_section(&self, facts: &[WorkflowMemoryFact]) -> String {
+        let guard = self.memory_provider.read().await;
+        match guard.as_ref() {
+            Some(p) => p.render_for_prompt(facts),
+            None => String::new(),
+        }
+    }
+
+    /// Issue a project-scoped deployment token for a workflow run sandbox.
+    /// Returns `None` if no token service is configured (in which case the
+    /// memory script will fail at the curl level — that's fine, the run
+    /// itself still proceeds).
+    pub(crate) async fn issue_run_token(
+        &self,
+        project_id: i32,
+        run_id: i32,
+        agent_slug: &str,
+    ) -> Option<String> {
+        let svc = {
+            let guard = self.deployment_token_service.read().await;
+            match guard.as_ref() {
+                Some(s) => s.clone(),
+                None => return None,
+            }
+        };
+        let request = CreateDeploymentTokenRequest {
+            name: format!("workflow-run-{}-{}", agent_slug, run_id),
+            environment_id: None,
+            deployment_id: None,
+            permissions: Some(vec!["*".to_string()]),
+            expires_at: None,
+        };
+        match svc.create_token(project_id, None, request).await {
+            Ok(response) => Some(response.token),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to issue workflow run token (project={}, run={}): {}. \
+                     Memory writes from this run will fail.",
+                    project_id,
+                    run_id,
+                    e
+                );
+                None
+            }
+        }
     }
 
     /// Execute a single autopilot run. Handles the full lifecycle from cloning to PR creation.
@@ -269,12 +413,41 @@ impl AgentExecutor {
                 }
             }
 
+            // Inject workflow memory env vars so the `memory` script (installed
+            // below after the sandbox starts) knows how to call back to the
+            // Temps API. The script reads all four of these at runtime.
+            sandbox_env.insert("TEMPS_PROJECT_ID".to_string(), run.project_id.to_string());
+            sandbox_env.insert("TEMPS_WORKFLOW_SLUG".to_string(), config.slug.clone());
+            sandbox_env.insert(
+                "TEMPS_API_URL".to_string(),
+                std::env::var("TEMPS_INTERNAL_API_URL")
+                    .unwrap_or_else(|_| "http://host.docker.internal:3000".to_string()),
+            );
+            // Put the memory script dir on PATH so the AI can type
+            // `memory write "..."` instead of the full /workspace/.temps/bin/memory.
+            sandbox_env.insert(
+                "PATH".to_string(),
+                "/workspace/.temps/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    .to_string(),
+            );
+
+            // Mint a project-scoped deployment token for this run. Best-effort:
+            // if it fails, the script is still installed but memory writes will
+            // error at the curl level. The actual run still proceeds.
+            if let Some(token) = self
+                .issue_run_token(run.project_id, run_id, &config.slug)
+                .await
+            {
+                sandbox_env.insert("TEMPS_API_TOKEN".to_string(), token);
+            }
+
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 host_work_dir: work_dir.clone(),
                 image: resolved_image,
                 cpu_limit: Some(global_sandbox.cpu_limit),
                 memory_limit_mb: Some(global_sandbox.memory_limit_mb),
+                pids_limit: None,
                 network_mode: Some(global_sandbox.network_mode.clone()),
                 env_vars: sandbox_env,
                 idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
@@ -309,6 +482,29 @@ impl AgentExecutor {
                     None,
                 )
                 .await?;
+
+            // Install the workflow memory script. Best-effort: if it fails
+            // (e.g. jq not present in a custom image), we log a warning and
+            // continue — the run itself doesn't depend on memory.
+            if let Err(e) = self
+                .sandbox_registry
+                .exec(
+                    run_id,
+                    memory_install_command(),
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to install memory script for run {}: {}. \
+                     Memory writes from this run will not work.",
+                    run_id,
+                    e
+                );
+            } else {
+                tracing::debug!("Installed memory script for run {}", run_id);
+            }
         }
 
         // Step 7: Update status → "analyzing"
@@ -378,6 +574,38 @@ impl AgentExecutor {
             }
         } else {
             prompt
+        };
+
+        // Step 8b: Pre-load workflow memory and prepend it to the prompt.
+        // This is the **push** half of memory: even if the AI never calls
+        // `memory search`, it always sees the most relevant facts at the top
+        // of the prompt. Best-effort — failures degrade silently.
+        let prompt = {
+            let memory_facts = self
+                .load_memory_facts(
+                    run.project_id,
+                    config.id,
+                    run.trigger_source_type.as_deref(),
+                    run.trigger_source_id,
+                )
+                .await;
+            let memory_section = self.render_memory_section(&memory_facts).await;
+            if memory_section.is_empty() {
+                prompt
+            } else {
+                self.run_service
+                    .append_log(
+                        run_id,
+                        "info",
+                        &format!(
+                            "Pre-loaded {} fact(s) from workflow memory",
+                            memory_facts.len()
+                        ),
+                        None,
+                    )
+                    .await?;
+                format!("{}{}", memory_section, prompt)
+            }
         };
 
         // Step 9: Resolve API key. Priority:
@@ -1430,6 +1658,13 @@ mod tests {
 
     #[async_trait]
     impl GitProviderManagerTrait for FakeGitProvider {
+        async fn get_connection_access_token(
+            &self,
+            _connection_id: i32,
+        ) -> Result<(String, String), GitProviderManagerError> {
+            Ok(("fake-token".to_string(), "github".to_string()))
+        }
+
         async fn clone_repository(
             &self,
             connection_id: i32,
@@ -2727,5 +2962,237 @@ mod tests {
         // Clone should not even have been attempted
         assert!(recorder.cloned.lock().unwrap().is_empty());
         assert!(recorder.pushed.lock().unwrap().is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Feature: workflow memory wiring on AgentExecutor
+    // ---------------------------------------------------------------------------
+
+    use temps_core::workflow_memory::{
+        WorkflowMemoryError, WorkflowMemoryFact, WorkflowMemoryProvider,
+    };
+
+    /// Fake memory provider for executor unit tests. Records calls and
+    /// returns whatever facts/errors the test set up.
+    struct FakeMemoryProvider {
+        facts: Vec<WorkflowMemoryFact>,
+        load_calls: Mutex<Vec<(i32, i32, Vec<String>)>>,
+        force_error: bool,
+    }
+
+    impl FakeMemoryProvider {
+        fn new(facts: Vec<WorkflowMemoryFact>) -> Self {
+            Self {
+                facts,
+                load_calls: Mutex::new(Vec::new()),
+                force_error: false,
+            }
+        }
+
+        fn with_error() -> Self {
+            Self {
+                facts: vec![],
+                load_calls: Mutex::new(Vec::new()),
+                force_error: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowMemoryProvider for FakeMemoryProvider {
+        async fn load_for_trigger(
+            &self,
+            project_id: i32,
+            agent_id: i32,
+            relevant_tags: Vec<String>,
+            _limit: usize,
+        ) -> Result<Vec<WorkflowMemoryFact>, WorkflowMemoryError> {
+            self.load_calls
+                .lock()
+                .unwrap()
+                .push((project_id, agent_id, relevant_tags));
+            if self.force_error {
+                Err(WorkflowMemoryError::new("forced failure"))
+            } else {
+                Ok(self.facts.clone())
+            }
+        }
+
+        fn render_for_prompt(&self, facts: &[WorkflowMemoryFact]) -> String {
+            if facts.is_empty() {
+                String::new()
+            } else {
+                let body: String = facts.iter().map(|f| format!("- {}\n", f.fact)).collect();
+                format!("## MEMORY\n{}\n", body)
+            }
+        }
+    }
+
+    fn fact(id: i64, text: &str, confidence: f32) -> WorkflowMemoryFact {
+        WorkflowMemoryFact {
+            id,
+            fact: text.to_string(),
+            confidence,
+            times_used: 0,
+        }
+    }
+
+    fn make_executor_for_memory_tests() -> AgentExecutor {
+        // Build a minimal executor — we only call the memory helpers, which
+        // don't touch the DB or git provider.
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let enc = make_encryption_service();
+        let recorder = Arc::new(GitRecorder::default());
+        let git: Arc<dyn GitProviderManagerTrait> = Arc::new(FakeGitProvider {
+            recorder,
+            clone_should_fail: false,
+        });
+        let queue: Arc<dyn JobQueue> = Arc::new(FakeJobQueue {
+            sent: Mutex::new(vec![]),
+        });
+        let run_svc = Arc::new(AgentRunService::new(db.clone()));
+        let config_svc = Arc::new(AgentConfigService::new(db.clone(), enc.clone()));
+        AgentExecutor::new(
+            db.clone(),
+            git,
+            enc,
+            queue,
+            run_svc,
+            config_svc,
+            make_notification_service(db),
+            make_sandbox_registry(),
+        )
+    }
+
+    #[test]
+    fn test_build_memory_tags_with_source() {
+        let tags = AgentExecutor::build_memory_tags(Some("error_group"), Some(42));
+        assert_eq!(tags, vec!["error_group:42".to_string()]);
+    }
+
+    #[test]
+    fn test_build_memory_tags_no_source() {
+        let tags = AgentExecutor::build_memory_tags(None, None);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_build_memory_tags_partial_source_returns_empty() {
+        // Both must be present to form a tag — having only one is not enough.
+        let tags = AgentExecutor::build_memory_tags(Some("error_group"), None);
+        assert!(tags.is_empty());
+        let tags = AgentExecutor::build_memory_tags(None, Some(42));
+        assert!(tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_memory_facts_no_provider_returns_empty() {
+        let executor = make_executor_for_memory_tests();
+        let facts = executor
+            .load_memory_facts(10, 5, Some("error_group"), Some(42))
+            .await;
+        assert!(facts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_memory_facts_with_provider_returns_facts() {
+        let executor = make_executor_for_memory_tests();
+        let provider = Arc::new(FakeMemoryProvider::new(vec![
+            fact(1, "OAuth state cookie missing", 0.9),
+            fact(2, "Tests don't cover callback", 0.7),
+        ]));
+        executor.attach_memory_provider(provider.clone()).await;
+
+        let facts = executor
+            .load_memory_facts(10, 5, Some("error_group"), Some(42))
+            .await;
+
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].fact, "OAuth state cookie missing");
+
+        // Verify the call was scoped correctly
+        let calls = provider.load_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, 10); // project_id
+        assert_eq!(calls[0].1, 5); // agent_id
+        assert_eq!(calls[0].2, vec!["error_group:42".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_load_memory_facts_provider_error_returns_empty() {
+        // Memory failures must NEVER block a run.
+        let executor = make_executor_for_memory_tests();
+        let provider = Arc::new(FakeMemoryProvider::with_error());
+        executor.attach_memory_provider(provider).await;
+
+        let facts = executor
+            .load_memory_facts(10, 5, Some("error_group"), Some(42))
+            .await;
+
+        assert!(facts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_render_memory_section_no_provider_returns_empty() {
+        let executor = make_executor_for_memory_tests();
+        let rendered = executor
+            .render_memory_section(&[fact(1, "ignored", 0.9)])
+            .await;
+        assert_eq!(rendered, "");
+    }
+
+    #[tokio::test]
+    async fn test_render_memory_section_empty_facts_returns_empty() {
+        let executor = make_executor_for_memory_tests();
+        let provider = Arc::new(FakeMemoryProvider::new(vec![]));
+        executor.attach_memory_provider(provider).await;
+
+        let rendered = executor.render_memory_section(&[]).await;
+        assert_eq!(rendered, "");
+    }
+
+    #[tokio::test]
+    async fn test_render_memory_section_with_facts_uses_provider() {
+        let executor = make_executor_for_memory_tests();
+        let provider = Arc::new(FakeMemoryProvider::new(vec![]));
+        executor.attach_memory_provider(provider).await;
+
+        let rendered = executor
+            .render_memory_section(&[
+                fact(1, "first finding", 0.9),
+                fact(2, "second finding", 0.8),
+            ])
+            .await;
+
+        assert!(rendered.contains("## MEMORY"));
+        assert!(rendered.contains("first finding"));
+        assert!(rendered.contains("second finding"));
+    }
+
+    #[tokio::test]
+    async fn test_attach_memory_provider_late_binding() {
+        // The plugin system attaches the memory provider after the executor
+        // is already an Arc. This test verifies the lock-based approach works.
+        let executor = Arc::new(make_executor_for_memory_tests());
+
+        // No provider initially
+        let facts = executor.load_memory_facts(1, 1, None, None).await;
+        assert!(facts.is_empty());
+
+        // Attach via Arc clone — exercises the interior mutability path
+        let provider = Arc::new(FakeMemoryProvider::new(vec![fact(1, "late", 0.9)]));
+        executor.attach_memory_provider(provider).await;
+
+        // Now it sees the provider's facts
+        let facts = executor.load_memory_facts(1, 1, None, None).await;
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].fact, "late");
+    }
+
+    #[tokio::test]
+    async fn test_issue_run_token_no_service_returns_none() {
+        let executor = make_executor_for_memory_tests();
+        let token = executor.issue_run_token(10, 1, "error-autofix").await;
+        assert!(token.is_none());
     }
 }

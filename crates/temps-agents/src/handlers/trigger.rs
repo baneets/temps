@@ -466,6 +466,7 @@ async fn smoke_test_agent(
             image: Some(image),
             cpu_limit: Some(1.0),
             memory_limit_mb: Some(512),
+            pids_limit: None,
             network_mode: Some("host".to_string()),
             env_vars: test_env,
             idle_timeout: std::time::Duration::from_secs(60),

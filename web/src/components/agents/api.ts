@@ -10,6 +10,8 @@ export interface Agent {
   enabled: boolean
   trigger_config: {
     error?: { new_issue?: boolean; regression?: boolean }
+    deploy?: { production?: boolean; preview?: boolean }
+    monitoring?: { downtime?: boolean; latency_spike?: boolean }
     schedule?: { cron?: string | null }
     manual?: boolean
   }

@@ -33,6 +33,9 @@ pub struct SandboxCreateConfig {
     pub cpu_limit: Option<f64>,
     /// Memory limit in megabytes
     pub memory_limit_mb: Option<u64>,
+    /// Maximum number of processes / threads (PID cgroup limit). When None
+    /// the provider default applies.
+    pub pids_limit: Option<i64>,
     /// Network access: "full", "restricted", "none"
     pub network_mode: Option<String>,
     /// Environment variables to inject (ANTHROPIC_API_KEY, etc.)
@@ -67,8 +70,90 @@ pub trait SandboxProvider: Send + Sync {
     /// Check if a sandbox is still alive and usable.
     async fn is_alive(&self, handle: &SandboxHandle) -> Result<bool, AgentError>;
 
-    /// Destroy sandbox and clean up all resources.
-    async fn destroy(&self, handle: &SandboxHandle) -> Result<(), AgentError>;
+    /// Write a file directly into the sandbox at an absolute path.
+    ///
+    /// Implementations should NOT use `bash -c "cat > ... << EOF"` heredocs —
+    /// those go through the exec stream, which has a known phantom-stream
+    /// hang on silent processes that produce no output. Use a tar stream
+    /// (Docker `put_archive`) or equivalent native API instead.
+    ///
+    /// `mode` is a Unix mode (e.g. 0o600 for secrets, 0o644 for skill files).
+    async fn write_file(
+        &self,
+        handle: &SandboxHandle,
+        path: &str,
+        contents: &[u8],
+        mode: u32,
+    ) -> Result<(), AgentError>;
+
+    /// Read a file from inside the sandbox. Returns the raw bytes.
+    ///
+    /// Like `write_file`, implementations must NOT go through `bash -c cat`
+    /// exec — that path is subject to the bollard phantom-stream hang on
+    /// silent processes. Use a native tar download (`download_from_container`)
+    /// or equivalent API.
+    ///
+    /// Returns an error if the file does not exist.
+    async fn read_file(&self, handle: &SandboxHandle, path: &str) -> Result<Vec<u8>, AgentError>;
+
+    /// Kill processes inside the sandbox matching a pgrep/pkill pattern.
+    ///
+    /// `signal` is a Unix signal number (15 = SIGTERM, 9 = SIGKILL).
+    /// `pattern` is passed to `pkill -f` — it matches against the full
+    /// command line, so prefer anchored patterns like `^claude ` to avoid
+    /// killing unrelated processes.
+    ///
+    /// Returns Ok(()) whether or not anything was actually killed — the
+    /// operation is inherently best-effort.
+    async fn kill_processes(
+        &self,
+        handle: &SandboxHandle,
+        pattern: &str,
+        signal: i32,
+    ) -> Result<(), AgentError>;
+
+    /// Destroy sandbox and clean up its container.
+    ///
+    /// When `purge_volumes` is true, the provider also removes any per-run
+    /// persistent volumes (e.g. the `/home/temps` named volume for Docker).
+    /// When false, volumes are left in place so a subsequent `create` with
+    /// the same run_id resumes the previous home directory — the workspace
+    /// uses this to preserve Claude auth / shell history across a session
+    /// close+reopen cycle.
+    async fn destroy(&self, handle: &SandboxHandle, purge_volumes: bool) -> Result<(), AgentError>;
+
+    /// Stop a running sandbox without removing it. Default implementation
+    /// reports the operation as unsupported so non-Docker backends compile
+    /// unchanged. Docker-backed providers override this with a real stop.
+    async fn stop(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+        Err(AgentError::SandboxExecFailed {
+            run_id: 0,
+            sandbox_id: handle.sandbox_id.clone(),
+            reason: format!(
+                "stop() is not supported by sandbox provider '{}'",
+                self.name()
+            ),
+        })
+    }
+
+    /// Start a stopped sandbox. Same default-unsupported policy as `stop`.
+    async fn start(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+        Err(AgentError::SandboxExecFailed {
+            run_id: 0,
+            sandbox_id: handle.sandbox_id.clone(),
+            reason: format!(
+                "start() is not supported by sandbox provider '{}'",
+                self.name()
+            ),
+        })
+    }
+
+    /// Restart a sandbox in place. Default impl chains `stop` then `start`,
+    /// so any backend that overrides those automatically gets restart for free.
+    async fn restart(&self, handle: &SandboxHandle) -> Result<(), AgentError> {
+        self.stop(handle).await?;
+        self.start(handle).await
+    }
 
     /// Attempt to recover a sandbox after server restart (by naming convention).
     /// Returns `None` if no recoverable sandbox exists for this run.

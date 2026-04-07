@@ -108,4 +108,11 @@ pub mod vulnerability_scans;
 pub mod log_chunks;
 pub mod log_events;
 
+// Workspace entities
+pub mod workspace_messages;
+pub mod workspace_sessions;
+
+// Workflow memory
+pub mod workflow_memory;
+
 pub mod prelude;

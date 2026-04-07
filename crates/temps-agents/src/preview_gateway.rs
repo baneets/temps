@@ -1,0 +1,568 @@
+//! Preview gateway supervisor.
+//!
+//! Reconciles a single shared `temps-preview-gateway` container on the local
+//! Docker host. Called from `temps serve` startup, but always runs in a
+//! background task — the proxy server (80/443) MUST NOT be blocked on this.
+//!
+//! What it guarantees, in order:
+//! 1. The shared sandbox network exists (so workspace sandboxes and the
+//!    gateway can resolve each other by container name via Docker DNS).
+//! 2. The pinned gateway image is present locally (pulled if missing).
+//! 3. A container named `temps-preview-gateway` is running, attached to that
+//!    network, with the right image and the right host-port publish on
+//!    `127.0.0.1:<port>`. Any drift causes a recreate.
+//!
+//! Failure mode: log loudly, return Err. The caller will log the error and
+//! continue serving. The workspace preview feature is degraded until the
+//! gateway is up, but the rest of Temps keeps running.
+
+use anyhow::{anyhow, Context, Result};
+use bollard::models::{
+    ContainerCreateBody, HostConfig, NetworkCreateRequest, PortBinding, RestartPolicy,
+    RestartPolicyNameEnum,
+};
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, CreateImageOptions, InspectContainerOptions,
+    ListContainersOptions, ListNetworksOptions, LogsOptions, RemoveContainerOptions,
+    StartContainerOptions,
+};
+use bollard::Docker;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use sea_orm::{DatabaseConnection, EntityTrait};
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Arc;
+use temps_core::PreviewGatewaySettings;
+use tracing::{debug, info, warn};
+
+/// Pinned image reference. Bumped per release. Never `:latest`.
+pub const PREVIEW_GATEWAY_IMAGE: &str = "kfsoftware/temps-preview-gateway:dev";
+
+/// Container name for the singleton gateway on this host.
+pub const PREVIEW_GATEWAY_CONTAINER: &str = "temps-preview-gateway";
+
+/// Shared docker network used for sandbox <-> gateway DNS resolution.
+pub const PREVIEW_GATEWAY_NETWORK: &str = "temps-sandbox-net";
+
+/// Default host port the gateway publishes to. Bound on 127.0.0.1 only —
+/// the host-side Pingora reaches it via this port after authenticating.
+pub const DEFAULT_PREVIEW_GATEWAY_HOST_PORT: u16 = 8090;
+
+/// Internal port the gateway listens on inside its container.
+const GATEWAY_CONTAINER_PORT: u16 = 8080;
+
+#[derive(Debug, Clone)]
+pub struct PreviewGatewaySpec {
+    pub image: String,
+    pub container_name: String,
+    pub network: String,
+    pub host_port: u16,
+}
+
+impl Default for PreviewGatewaySpec {
+    fn default() -> Self {
+        Self {
+            image: PREVIEW_GATEWAY_IMAGE.to_string(),
+            container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
+            network: PREVIEW_GATEWAY_NETWORK.to_string(),
+            host_port: DEFAULT_PREVIEW_GATEWAY_HOST_PORT,
+        }
+    }
+}
+
+impl PreviewGatewaySpec {
+    /// Build a spec from persisted settings, falling back to compile-time
+    /// constants for any field that hasn't been customised. Does NOT enforce
+    /// `auto_upgrade` semantics — that's the caller's job.
+    pub fn from_settings(settings: &PreviewGatewaySettings) -> Self {
+        let image = if settings.image.trim().is_empty() {
+            PREVIEW_GATEWAY_IMAGE.to_string()
+        } else {
+            settings.image.clone()
+        };
+        let host_port = if settings.host_port == 0 {
+            DEFAULT_PREVIEW_GATEWAY_HOST_PORT
+        } else {
+            settings.host_port
+        };
+        Self {
+            image,
+            container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
+            network: PREVIEW_GATEWAY_NETWORK.to_string(),
+            host_port,
+        }
+    }
+}
+
+/// Read the persisted `preview_gateway` settings from the DB. Falls back to
+/// defaults if the row or field is missing — never errors.
+pub async fn load_settings(db: &DatabaseConnection) -> PreviewGatewaySettings {
+    let row = match temps_entities::settings::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return PreviewGatewaySettings::default(),
+        Err(e) => {
+            warn!("failed to load preview gateway settings: {}", e);
+            return PreviewGatewaySettings::default();
+        }
+    };
+    row.data
+        .get("preview_gateway")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<PreviewGatewaySettings>(v).ok())
+        .unwrap_or_default()
+}
+
+/// Reconcile the gateway to match `spec`. Idempotent.
+pub async fn reconcile(docker: Arc<Docker>, spec: PreviewGatewaySpec) -> Result<()> {
+    info!(
+        image = %spec.image,
+        container = %spec.container_name,
+        network = %spec.network,
+        host_port = spec.host_port,
+        "reconciling preview gateway"
+    );
+
+    ensure_network(&docker, &spec.network).await?;
+    ensure_image(&docker, &spec.image).await?;
+
+    match inspect(&docker, &spec.container_name).await? {
+        Some(existing) if container_matches(&existing, &spec) && existing.running => {
+            debug!("preview gateway already running with desired spec");
+        }
+        Some(existing) => {
+            info!(
+                running = existing.running,
+                image_match = existing.image == spec.image,
+                "preview gateway drift detected — recreating"
+            );
+            remove(&docker, &spec.container_name).await?;
+            create_and_start(&docker, &spec).await?;
+        }
+        None => {
+            info!("preview gateway not present — creating");
+            create_and_start(&docker, &spec).await?;
+        }
+    }
+
+    info!(
+        "preview gateway ready on 127.0.0.1:{} → {}:{}",
+        spec.host_port, spec.container_name, GATEWAY_CONTAINER_PORT
+    );
+    Ok(())
+}
+
+async fn ensure_network(docker: &Docker, name: &str) -> Result<()> {
+    let networks = docker
+        .list_networks(None::<ListNetworksOptions>)
+        .await
+        .context("failed to list docker networks")?;
+    if networks.iter().any(|n| n.name.as_deref() == Some(name)) {
+        return Ok(());
+    }
+    info!(network = %name, "creating shared sandbox network");
+    docker
+        .create_network(NetworkCreateRequest {
+            name: name.to_string(),
+            driver: Some("bridge".to_string()),
+            ..Default::default()
+        })
+        .await
+        .with_context(|| format!("failed to create network {}", name))?;
+    Ok(())
+}
+
+async fn ensure_image(docker: &Docker, image: &str) -> Result<()> {
+    // Locally-built dev tag — don't try to pull, the registry copy may not
+    // exist yet. The operator is expected to have built it.
+    if image.ends_with(":dev") {
+        debug!(image = %image, "skipping pull for :dev tag");
+        return Ok(());
+    }
+    info!(image = %image, "pulling preview gateway image (if needed)");
+    let mut stream = docker.create_image(
+        Some(CreateImageOptions {
+            from_image: Some(image.to_string()),
+            ..Default::default()
+        }),
+        None,
+        None,
+    );
+    while let Some(item) = stream.next().await {
+        if let Err(e) = item {
+            return Err(anyhow!("failed to pull image {}: {}", image, e));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ExistingContainer {
+    image: String,
+    running: bool,
+    host_port_binding: Option<(String, String)>, // (host_ip, host_port)
+    network_attached: bool,
+}
+
+async fn inspect(docker: &Docker, name: &str) -> Result<Option<ExistingContainer>> {
+    // list_containers with `all=true` and a name filter — we need stopped
+    // containers too so we can recreate them with the right config.
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("name".to_string(), vec![format!("^/{}$", name)]);
+    let listed = docker
+        .list_containers(Some(ListContainersOptions {
+            all: true,
+            filters: Some(filters),
+            ..Default::default()
+        }))
+        .await
+        .context("failed to list containers for preview gateway lookup")?;
+    if listed.is_empty() {
+        return Ok(None);
+    }
+
+    let inspected = docker
+        .inspect_container(name, None::<InspectContainerOptions>)
+        .await
+        .context("failed to inspect preview gateway container")?;
+
+    let image = inspected
+        .config
+        .as_ref()
+        .and_then(|c| c.image.clone())
+        .unwrap_or_default();
+    let running = inspected
+        .state
+        .as_ref()
+        .and_then(|s| s.running)
+        .unwrap_or(false);
+
+    let host_port_binding = inspected
+        .host_config
+        .as_ref()
+        .and_then(|h| h.port_bindings.as_ref())
+        .and_then(|pb| pb.get(&format!("{}/tcp", GATEWAY_CONTAINER_PORT)).cloned())
+        .and_then(|bindings| bindings.into_iter().flatten().next())
+        .and_then(|b| match (b.host_ip, b.host_port) {
+            (Some(ip), Some(port)) => Some((ip, port)),
+            _ => None,
+        });
+
+    let network_attached = inspected
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref())
+        .map(|nets| nets.contains_key(PREVIEW_GATEWAY_NETWORK))
+        .unwrap_or(false);
+
+    Ok(Some(ExistingContainer {
+        image,
+        running,
+        host_port_binding,
+        network_attached,
+    }))
+}
+
+fn container_matches(existing: &ExistingContainer, spec: &PreviewGatewaySpec) -> bool {
+    if existing.image != spec.image {
+        return false;
+    }
+    if !existing.network_attached {
+        return false;
+    }
+    match &existing.host_port_binding {
+        Some((ip, port)) => ip == "127.0.0.1" && port == &spec.host_port.to_string(),
+        None => false,
+    }
+}
+
+async fn remove(docker: &Docker, name: &str) -> Result<()> {
+    docker
+        .remove_container(
+            name,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .with_context(|| format!("failed to remove existing container {}", name))?;
+    Ok(())
+}
+
+async fn create_and_start(docker: &Docker, spec: &PreviewGatewaySpec) -> Result<()> {
+    let container_port_key = format!("{}/tcp", GATEWAY_CONTAINER_PORT);
+
+    let exposed_ports: Vec<String> = vec![container_port_key.clone()];
+
+    let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+    port_bindings.insert(
+        container_port_key,
+        Some(vec![PortBinding {
+            host_ip: Some("127.0.0.1".to_string()),
+            host_port: Some(spec.host_port.to_string()),
+        }]),
+    );
+
+    let host_config = HostConfig {
+        port_bindings: Some(port_bindings),
+        network_mode: Some(spec.network.clone()),
+        restart_policy: Some(RestartPolicy {
+            name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+            maximum_retry_count: None,
+        }),
+        ..Default::default()
+    };
+
+    let body = ContainerCreateBody {
+        image: Some(spec.image.clone()),
+        exposed_ports: Some(exposed_ports),
+        host_config: Some(host_config),
+        env: Some(vec![
+            // Inside the container we MUST bind 0.0.0.0 — the host loopback
+            // restriction is enforced by the `-p 127.0.0.1:…` publish above.
+            format!("LISTEN_ADDR=0.0.0.0:{}", GATEWAY_CONTAINER_PORT),
+            "RUST_LOG=info".to_string(),
+        ]),
+        ..Default::default()
+    };
+
+    docker
+        .create_container(
+            Some(
+                CreateContainerOptionsBuilder::new()
+                    .name(&spec.container_name)
+                    .build(),
+            ),
+            body,
+        )
+        .await
+        .with_context(|| format!("failed to create container {}", spec.container_name))?;
+
+    docker
+        .start_container(&spec.container_name, None::<StartContainerOptions>)
+        .await
+        .with_context(|| format!("failed to start container {}", spec.container_name))?;
+
+    Ok(())
+}
+
+/// Spawn the reconciler on the given runtime. Logs failures but never panics.
+/// Returns immediately — the actual reconcile runs in the background so the
+/// caller (the proxy server bootstrap) is never blocked.
+///
+/// Behavior:
+/// - Reads PreviewGatewaySettings from the DB (or defaults if missing).
+/// - If `auto_upgrade = true` (default), applies the settings image directly.
+/// - If `auto_upgrade = false`, leaves the *image* of an existing container
+///   alone but still ensures the container is running on the desired
+///   host_port and network. New installs (no container yet) always use the
+///   settings image — there's nothing to preserve.
+pub fn spawn_reconcile(
+    rt: &tokio::runtime::Runtime,
+    docker: Arc<Docker>,
+    db: Arc<DatabaseConnection>,
+) {
+    rt.spawn(async move {
+        let settings = load_settings(&db).await;
+        let mut spec = PreviewGatewaySpec::from_settings(&settings);
+
+        if !settings.auto_upgrade {
+            // Honor whatever image is currently running. Falls back to the
+            // settings image if the container doesn't exist yet.
+            if let Ok(Some(existing)) = inspect(&docker, &spec.container_name).await {
+                if !existing.image.is_empty() {
+                    debug!(
+                        running_image = %existing.image,
+                        settings_image = %spec.image,
+                        "auto_upgrade=false — keeping running image"
+                    );
+                    spec.image = existing.image;
+                }
+            }
+        }
+
+        match reconcile(docker, spec).await {
+            Ok(()) => {
+                info!("✅ preview gateway reconciled");
+            }
+            Err(e) => {
+                warn!(
+                    "❌ preview gateway reconcile failed: {} \
+                     — workspace preview URLs will not work until this is fixed. \
+                     Other Temps functionality is unaffected.",
+                    e
+                );
+            }
+        }
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Status + logs helpers used by the settings UI handlers
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Detailed gateway container status surfaced to the settings UI.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct GatewayStatus {
+    /// Whether the container exists at all.
+    pub present: bool,
+    /// Whether the container is currently running.
+    pub running: bool,
+    /// Image reference the container was created with (e.g.
+    /// `kfsoftware/temps-preview-gateway:dev`).
+    pub image: Option<String>,
+    /// Image digest if available (e.g. `sha256:…`).
+    pub image_digest: Option<String>,
+    /// Container name.
+    pub container_name: String,
+    /// Network the container is attached to (should be `temps-sandbox-net`).
+    pub network: Option<String>,
+    /// Host port that the container's :8080 is published on.
+    pub host_port: Option<u16>,
+    /// ISO 8601 timestamp the container was started at, if running.
+    pub started_at: Option<String>,
+    /// Number of times Docker has restarted the container.
+    pub restart_count: Option<i64>,
+    /// The image the supervisor *expects* (from settings/constant). If this
+    /// differs from `image`, the UI shows a "drift" badge.
+    pub expected_image: String,
+    /// True when `image != expected_image` and the container is present.
+    pub drift: bool,
+    /// True if `auto_upgrade` is enabled in settings.
+    pub auto_upgrade: bool,
+}
+
+/// Gather a complete status snapshot for the gateway container.
+pub async fn inspect_status(
+    docker: &Docker,
+    settings: &PreviewGatewaySettings,
+) -> Result<GatewayStatus> {
+    let expected_image = if settings.image.trim().is_empty() {
+        PREVIEW_GATEWAY_IMAGE.to_string()
+    } else {
+        settings.image.clone()
+    };
+
+    let inspected = docker
+        .inspect_container(PREVIEW_GATEWAY_CONTAINER, None::<InspectContainerOptions>)
+        .await;
+
+    let inspected = match inspected {
+        Ok(c) => c,
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
+            return Ok(GatewayStatus {
+                present: false,
+                running: false,
+                image: None,
+                image_digest: None,
+                container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
+                network: None,
+                host_port: None,
+                started_at: None,
+                restart_count: None,
+                expected_image,
+                drift: false,
+                auto_upgrade: settings.auto_upgrade,
+            });
+        }
+        Err(e) => return Err(anyhow!("docker inspect failed: {}", e)),
+    };
+
+    let image = inspected.config.as_ref().and_then(|c| c.image.clone());
+    let image_digest = inspected.image.clone();
+    let running = inspected
+        .state
+        .as_ref()
+        .and_then(|s| s.running)
+        .unwrap_or(false);
+    let started_at = inspected
+        .state
+        .as_ref()
+        .and_then(|s| s.started_at.clone())
+        .filter(|s| !s.is_empty() && s != "0001-01-01T00:00:00Z");
+    let restart_count = inspected.restart_count;
+
+    let network = inspected
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref())
+        .and_then(|nets| nets.keys().next().cloned());
+
+    let host_port = inspected
+        .host_config
+        .as_ref()
+        .and_then(|h| h.port_bindings.as_ref())
+        .and_then(|pb| pb.get(&format!("{}/tcp", GATEWAY_CONTAINER_PORT)).cloned())
+        .and_then(|bindings| bindings.into_iter().flatten().next())
+        .and_then(|b| b.host_port.and_then(|p| p.parse::<u16>().ok()));
+
+    let drift = image
+        .as_deref()
+        .map(|img| img != expected_image)
+        .unwrap_or(false);
+
+    Ok(GatewayStatus {
+        present: true,
+        running,
+        image,
+        image_digest,
+        container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
+        network,
+        host_port,
+        started_at,
+        restart_count,
+        expected_image,
+        drift,
+        auto_upgrade: settings.auto_upgrade,
+    })
+}
+
+/// Force-restart the gateway: ensures network/image, then removes any
+/// existing container and recreates it fresh. Unlike `reconcile`, this
+/// always replaces the container even if it already matches the spec.
+pub async fn force_restart(docker: Arc<Docker>, spec: PreviewGatewaySpec) -> Result<()> {
+    info!(
+        image = %spec.image,
+        container = %spec.container_name,
+        "force-restarting preview gateway"
+    );
+    ensure_network(&docker, &spec.network).await?;
+    ensure_image(&docker, &spec.image).await?;
+
+    if inspect(&docker, &spec.container_name).await?.is_some() {
+        remove(&docker, &spec.container_name).await?;
+    }
+    create_and_start(&docker, &spec).await?;
+    info!("preview gateway restarted");
+    Ok(())
+}
+
+/// Tail the gateway container's stdout+stderr. `tail` caps the number of
+/// lines returned (e.g. 200). Returns lines newest-last.
+pub async fn tail_logs(docker: &Docker, tail: usize) -> Result<Vec<String>> {
+    let stream = docker.logs(
+        PREVIEW_GATEWAY_CONTAINER,
+        Some(LogsOptions {
+            stdout: true,
+            stderr: true,
+            tail: tail.to_string(),
+            timestamps: false,
+            ..Default::default()
+        }),
+    );
+
+    let chunks: Vec<_> = stream
+        .map(|chunk| chunk.map(|c| String::from_utf8_lossy(&c.into_bytes()).to_string()))
+        .try_collect()
+        .await
+        .map_err(|e| anyhow!("failed to tail gateway logs: {}", e))?;
+
+    let joined = chunks.join("");
+    Ok(joined.lines().map(|l| l.to_string()).collect())
+}

@@ -34,6 +34,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { useSettings, useUpdateSettings } from '@/hooks/useSettings'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { PreviewGatewayCard } from './PreviewGatewayCard'
 
 interface SandboxStatus {
   docker_available: boolean
@@ -88,9 +89,9 @@ const RUNTIME_PRESETS = [
 ]
 
 const RESOURCE_PRESETS = [
-  { label: 'Light', cpu: 1, memory: 1024 },
-  { label: 'Standard', cpu: 2, memory: 2048 },
-  { label: 'Heavy', cpu: 4, memory: 4096 },
+  { label: 'Light', cpu: 2, memory: 4096 },
+  { label: 'Standard', cpu: 4, memory: 8192 },
+  { label: 'Heavy', cpu: 8, memory: 16384 },
   { label: 'Custom', cpu: 0, memory: 0 },
 ]
 
@@ -116,8 +117,8 @@ export function AgentSandboxSettings() {
   const [enabled, setEnabled] = useState(false)
   const [runtime, setRuntime] = useState('node')
   const [customImage, setCustomImage] = useState('')
-  const [cpuLimit, setCpuLimit] = useState(2)
-  const [memoryLimitMb, setMemoryLimitMb] = useState(2048)
+  const [cpuLimit, setCpuLimit] = useState(4)
+  const [memoryLimitMb, setMemoryLimitMb] = useState(8192)
   const [networkMode, setNetworkMode] = useState('full')
   const [isDirty, setIsDirty] = useState(false)
   const [resourcePreset, setResourcePreset] = useState('Standard')
@@ -690,6 +691,9 @@ export function AgentSandboxSettings() {
         </CardContent>
       </Card>
 
+      {/* Workspace Preview Gateway */}
+      <PreviewGatewayCard />
+
       {/* Runtime */}
       <Card>
         <CardHeader>
@@ -816,11 +820,11 @@ export function AgentSandboxSettings() {
                   id="memory-limit"
                   type="number"
                   min={256}
-                  max={16384}
+                  max={32768}
                   step={256}
                   value={memoryLimitMb}
                   onChange={(e) => {
-                    setMemoryLimitMb(parseInt(e.target.value) || 2048)
+                    setMemoryLimitMb(parseInt(e.target.value) || 8192)
                     setIsDirty(true)
                   }}
                 />

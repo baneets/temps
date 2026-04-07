@@ -28,6 +28,10 @@ pub struct TempsConfig {
     /// Agent configurations (alternative to .temps/agents/*.yaml files)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<Vec<AgentYamlConfig>>,
+
+    /// Workflow configurations (alternative to .temps/workflows/*.yaml files)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<Vec<WorkflowYamlConfig>>,
 }
 
 /// Cron job configuration
@@ -151,6 +155,10 @@ pub struct AgentTriggers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorTrigger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<DeployTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring: Option<MonitoringTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<ScheduleTrigger>,
     #[serde(default = "default_true")]
     pub manual: bool,
@@ -202,6 +210,14 @@ impl AgentYamlConfig {
                 "new_issue": e.new_issue,
                 "regression": e.regression,
             })),
+            "deploy": self.on.deploy.as_ref().map(|d| serde_json::json!({
+                "production": d.production,
+                "preview": d.preview,
+            })),
+            "monitoring": self.on.monitoring.as_ref().map(|m| serde_json::json!({
+                "downtime": m.downtime,
+                "latency_spike": m.latency_spike,
+            })),
             "schedule": self.on.schedule.as_ref().map(|s| serde_json::json!({
                 "cron": s.cron,
             })),
@@ -217,6 +233,128 @@ impl AgentYamlConfig {
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
             .collect()
+    }
+}
+
+// ── Workflow YAML config ──────────────────────────────────────────────────────
+
+/// Workflow YAML configuration from .temps/workflows/*.yaml
+///
+/// All workflows are AI-powered. The `prompt` field IS the workflow logic.
+/// The AI harness (Claude/Codex/OpenCode) is the workflow engine.
+/// Template variables ({{error_type}}, {{deployment_id}}) inject event context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowYamlConfig {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub on: WorkflowTriggers,
+    /// The prompt IS the workflow. Template variables are injected by Temps
+    /// based on the trigger type.
+    pub prompt: String,
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    #[serde(default = "default_max_turns")]
+    pub max_turns: i32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: i32,
+    #[serde(default = "default_budget")]
+    pub daily_budget_cents: i32,
+    #[serde(default = "default_cooldown")]
+    pub cooldown_minutes: i32,
+    /// "pull_request", "report", or "none"
+    #[serde(default = "default_deliverable")]
+    pub deliverable: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// All possible workflow triggers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowTriggers {
+    /// Trigger on error events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorTrigger>,
+    /// Trigger on deployments
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<DeployTrigger>,
+    /// Trigger on monitoring events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring: Option<MonitoringTrigger>,
+    /// Trigger on a cron schedule
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleTrigger>,
+    /// Allow manual triggering
+    #[serde(default = "default_true")]
+    pub manual: bool,
+}
+
+impl Default for WorkflowTriggers {
+    fn default() -> Self {
+        Self {
+            error: None,
+            deploy: None,
+            monitoring: None,
+            schedule: None,
+            manual: true,
+        }
+    }
+}
+
+/// Trigger when a deployment completes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployTrigger {
+    /// Trigger on production deployments
+    #[serde(default)]
+    pub production: bool,
+    /// Trigger on preview deployments
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// Trigger on monitoring events (uptime, latency).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitoringTrigger {
+    /// Trigger when a monitor goes down
+    #[serde(default)]
+    pub downtime: bool,
+    /// Trigger on latency spikes
+    #[serde(default)]
+    pub latency_spike: bool,
+}
+
+impl WorkflowYamlConfig {
+    /// Derive a slug from the workflow name (lowercase, hyphens).
+    pub fn slug(&self) -> String {
+        self.name
+            .to_lowercase()
+            .replace(' ', "-")
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect()
+    }
+
+    /// Convert the `on:` triggers to a JSON value for DB storage.
+    pub fn trigger_config_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": self.on.error.as_ref().map(|e| serde_json::json!({
+                "new_issue": e.new_issue,
+                "regression": e.regression,
+            })),
+            "deploy": self.on.deploy.as_ref().map(|d| serde_json::json!({
+                "production": d.production,
+                "preview": d.preview,
+            })),
+            "monitoring": self.on.monitoring.as_ref().map(|m| serde_json::json!({
+                "downtime": m.downtime,
+                "latency_spike": m.latency_spike,
+            })),
+            "schedule": self.on.schedule.as_ref().map(|s| serde_json::json!({
+                "cron": s.cron,
+            })),
+            "manual": self.on.manual,
+        })
     }
 }
 
@@ -371,6 +509,7 @@ build:
             env: None,
             health: None,
             agents: None,
+            workflows: None,
         };
 
         let yaml = config.to_yaml().unwrap();
@@ -431,6 +570,104 @@ max_turns: 25
         let yaml = "name: My Cool Agent!\n";
         let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(agent.slug(), "my-cool-agent");
+    }
+
+    #[test]
+    fn test_workflow_yaml_parsing() {
+        let yaml = r#"
+name: Error Autofix
+description: Investigates and fixes new production errors
+on:
+  error:
+    new_issue: true
+    regression: true
+  manual: true
+prompt: |
+  A production error was detected:
+  Type: {{error_type}}
+  Message: {{error_message}}
+provider: claude_cli
+max_turns: 25
+deliverable: pull_request
+"#;
+        let workflow: WorkflowYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(workflow.name, "Error Autofix");
+        assert_eq!(workflow.slug(), "error-autofix");
+        assert!(workflow.on.error.as_ref().unwrap().new_issue);
+        assert!(workflow.prompt.contains("{{error_type}}"));
+        assert_eq!(workflow.deliverable, "pull_request");
+    }
+
+    #[test]
+    fn test_workflow_deploy_trigger() {
+        let yaml = r#"
+name: Deploy Guardian
+on:
+  deploy:
+    production: true
+    preview: false
+prompt: Watch this deploy for regressions
+deliverable: report
+"#;
+        let workflow: WorkflowYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let deploy = workflow.on.deploy.as_ref().unwrap();
+        assert!(deploy.production);
+        assert!(!deploy.preview);
+        assert_eq!(workflow.deliverable, "report");
+    }
+
+    #[test]
+    fn test_workflow_monitoring_trigger() {
+        let yaml = r#"
+name: Downtime Investigator
+on:
+  monitoring:
+    downtime: true
+    latency_spike: false
+prompt: Investigate the downtime
+deliverable: report
+"#;
+        let workflow: WorkflowYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let monitoring = workflow.on.monitoring.as_ref().unwrap();
+        assert!(monitoring.downtime);
+        assert!(!monitoring.latency_spike);
+    }
+
+    #[test]
+    fn test_workflow_trigger_config_json() {
+        let yaml = r#"
+name: test-workflow
+on:
+  error:
+    new_issue: true
+    regression: false
+  deploy:
+    production: true
+  schedule:
+    cron: "0 */6 * * *"
+  manual: false
+prompt: Do something
+"#;
+        let workflow: WorkflowYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let json = workflow.trigger_config_json();
+        assert_eq!(json["manual"], false);
+        assert_eq!(json["error"]["new_issue"], true);
+        assert_eq!(json["deploy"]["production"], true);
+        assert_eq!(json["schedule"]["cron"], "0 */6 * * *");
+    }
+
+    #[test]
+    fn test_workflow_defaults() {
+        let yaml = r#"
+name: minimal
+prompt: do something
+"#;
+        let workflow: WorkflowYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(workflow.provider, "claude_cli");
+        assert_eq!(workflow.max_turns, 25);
+        assert_eq!(workflow.timeout_seconds, 600);
+        assert!(workflow.enabled);
+        assert!(workflow.on.manual);
     }
 
     #[test]

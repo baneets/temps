@@ -739,6 +739,13 @@ mod tests {
 
     #[async_trait]
     impl GitProviderManagerTrait for MockGitProviderManager {
+        async fn get_connection_access_token(
+            &self,
+            _connection_id: i32,
+        ) -> Result<(String, String), GitProviderManagerError> {
+            Ok(("mock-token".to_string(), "github".to_string()))
+        }
+
         async fn clone_repository(
             &self,
             _connection_id: i32,

@@ -770,9 +770,9 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
                     event.tool === 'Grep' ? (input.pattern as string) || '' :
                     JSON.stringify(input).slice(0, 120)
                   return (
-                    <div key={i} className="flex items-start gap-2 rounded-md bg-blue-500/5 border border-blue-500/10 px-3 py-2 min-w-0 overflow-hidden">
+                    <div key={i} className="flex items-start gap-2 rounded-md bg-blue-500/5 border border-blue-500/10 px-3 py-2 min-w-0">
                       <span className="text-xs font-mono font-medium text-blue-400 whitespace-nowrap flex-shrink-0">{event.tool}</span>
-                      <span className="text-xs font-mono text-muted-foreground truncate min-w-0">{preview}</span>
+                      <span className="text-xs font-mono text-muted-foreground min-w-0 break-all whitespace-pre-wrap">{preview}</span>
                     </div>
                   )
                 }
@@ -780,7 +780,7 @@ export function AutofixerPanel({ project }: AutofixerPanelProps) {
                   const text = event.toolResult || ''
                   if (text.length < 3) return null
                   return (
-                    <pre key={i} className="text-xs font-mono bg-muted/50 p-2 rounded overflow-x-auto max-h-24 overflow-y-auto text-muted-foreground">
+                    <pre key={i} className="text-xs font-mono bg-muted/50 p-2 rounded max-h-24 overflow-y-auto text-muted-foreground whitespace-pre-wrap break-all">
                       {text.length > 300 ? text.slice(0, 300) + '...' : text}
                     </pre>
                   )

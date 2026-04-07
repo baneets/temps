@@ -1,5 +1,6 @@
 pub mod autofixer;
 pub mod config;
+pub mod preview_gateway;
 pub mod runs;
 pub mod trigger;
 
@@ -19,12 +20,18 @@ pub struct AppState {
     pub executor: Arc<AgentExecutor>,
     pub audit_service: Arc<dyn temps_core::AuditLogger>,
     pub autofixer_service: Arc<AutofixerService>,
+    /// Docker client used by the preview gateway supervisor handlers.
+    pub docker: Arc<bollard::Docker>,
+    /// Platform settings service used by the preview gateway handlers to
+    /// persist image / auto-upgrade changes.
+    pub platform_config_service: Arc<temps_config::ConfigService>,
 }
 
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(autofixer::routes())
         .merge(config::routes())
+        .merge(preview_gateway::routes())
         .merge(runs::routes())
         .merge(trigger::routes())
 }

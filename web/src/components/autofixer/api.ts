@@ -99,17 +99,20 @@ export async function getLatestRunForError(
   projectId: number,
   errorGroupId: number
 ): Promise<AutofixerRun | null> {
-  // Fetch recent autofixer runs and find the latest for this error group
-  const response = await fetch(`/api/projects/${projectId}/agents/runs?page=1&page_size=50`)
+  // Server-side indexed lookup. Matches any run targeting this error group
+  // regardless of trigger_type — manual ("autofixer") OR auto-fired
+  // ("new_issue" / "regression") — because the link is the (trigger_source_type,
+  // trigger_source_id) pair, which is the same for all of them.
+  const params = new URLSearchParams({
+    trigger_source_type: 'error_group',
+    trigger_source_id: String(errorGroupId),
+  })
+  const response = await fetch(
+    `/api/projects/${projectId}/agents/runs/latest-for-source?${params.toString()}`
+  )
   if (!response.ok) return null
   const data = await response.json()
-  const runs = data.items || data || []
-  const match = runs.find(
-    (r: any) =>
-      r.trigger_type === 'autofixer' &&
-      r.trigger_source_id === errorGroupId
-  )
-  return match || null
+  return data || null
 }
 
 export async function reAnalyze(projectId: number, runId: number): Promise<void> {

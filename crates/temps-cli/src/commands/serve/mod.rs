@@ -185,9 +185,13 @@ impl ServeCommand {
             }
         });
 
-        // Create OnDemandManager early so it can be shared with both console API
-        // (for wake/sleep REST endpoints) and the proxy (for wake-on-request).
-        let on_demand_manager: Option<Arc<temps_proxy::on_demand::OnDemandManager>> = {
+        // Connect to Docker once and share the handle between:
+        //   1. OnDemandManager (wake-on-request scale-to-zero)
+        //   2. Preview gateway reconciler (workspace preview routing)
+        //
+        // Both are non-fatal — if Docker is unavailable we log and continue.
+        // The proxy server (80/443) MUST come up regardless.
+        let docker_handle: Option<Arc<bollard::Docker>> = {
             let docker_rt = tokio::runtime::Runtime::new()?;
             match docker_rt.block_on(async {
                 let docker = bollard::Docker::connect_with_defaults()
@@ -198,26 +202,41 @@ impl ServeCommand {
                     .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
                 Ok::<_, anyhow::Error>(docker)
             }) {
-                Ok(docker) => {
-                    let docker_runtime = temps_deployer::docker::DockerRuntime::new(
-                        Arc::new(docker),
-                        true,
-                        "temps".to_string(),
-                    );
-                    let adapter = proxy::ContainerLifecycleAdapter::new(
-                        Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
-                    );
-                    Some(Arc::new(temps_proxy::on_demand::OnDemandManager::new(
-                        db.clone(),
-                        Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
-                    )))
-                }
+                Ok(docker) => Some(Arc::new(docker)),
                 Err(e) => {
-                    warn!("Docker not available for on-demand scale-to-zero: {}", e);
+                    warn!(
+                        "Docker not available — on-demand scale-to-zero and workspace \
+                         preview gateway will be disabled: {}",
+                        e
+                    );
                     None
                 }
             }
         };
+
+        let on_demand_manager: Option<Arc<temps_proxy::on_demand::OnDemandManager>> =
+            docker_handle.as_ref().map(|docker| {
+                let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                    docker.clone(),
+                    true,
+                    "temps".to_string(),
+                );
+                let adapter = proxy::ContainerLifecycleAdapter::new(
+                    Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
+                );
+                Arc::new(temps_proxy::on_demand::OnDemandManager::new(
+                    db.clone(),
+                    Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
+                ))
+            });
+
+        // Kick off preview gateway reconciliation in the background. This pulls
+        // the image (if needed), creates the shared sandbox network, and starts
+        // the gateway container. It MUST NOT block proxy startup — workspace
+        // previews are a non-critical subsystem.
+        if let Some(docker) = docker_handle.clone() {
+            temps_agents::preview_gateway::spawn_reconcile(&rt, docker, db.clone());
+        }
 
         // Start console API server in background (non-blocking).
         // The proxy does NOT wait for the console to be ready. This ensures that

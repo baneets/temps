@@ -18,6 +18,13 @@ pub enum GitOpsError {
         repo_path: String,
         reason: String,
     },
+
+    #[error("Failed to create branch '{branch_name}' in {repo_path}: {reason}")]
+    CreateBranchFailed {
+        branch_name: String,
+        repo_path: String,
+        reason: String,
+    },
 }
 
 /// Clone a repository (public, no auth) into `target_dir`.
@@ -111,6 +118,68 @@ pub fn clone_repo_with_credentials(
             url: url.to_string(),
             reason: e.message().to_string(),
         })
+}
+
+/// Create a new local branch at HEAD and check it out. Equivalent to
+/// `git checkout -b <branch_name>`. Used by workspace sessions to fork a
+/// new branch off a base branch (typically `main`) without touching the
+/// remote — the branch is purely local until something pushes it.
+///
+/// Fails if a branch with the same name already exists locally.
+pub fn create_and_checkout_branch(repo: &Repository, branch_name: &str) -> Result<(), GitOpsError> {
+    let repo_path = repo
+        .path()
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    // Resolve HEAD to a commit
+    let head = repo.head().map_err(|e| GitOpsError::CreateBranchFailed {
+        branch_name: branch_name.to_string(),
+        repo_path: repo_path.clone(),
+        reason: format!("could not resolve HEAD: {}", e.message()),
+    })?;
+    let commit = head
+        .peel_to_commit()
+        .map_err(|e| GitOpsError::CreateBranchFailed {
+            branch_name: branch_name.to_string(),
+            repo_path: repo_path.clone(),
+            reason: format!("HEAD does not point to a commit: {}", e.message()),
+        })?;
+
+    // Create the branch (force=false: error if it already exists)
+    repo.branch(branch_name, &commit, false)
+        .map_err(|e| GitOpsError::CreateBranchFailed {
+            branch_name: branch_name.to_string(),
+            repo_path: repo_path.clone(),
+            reason: e.message().to_string(),
+        })?;
+
+    // Point HEAD at the new branch
+    let ref_name = format!("refs/heads/{}", branch_name);
+    repo.set_head(&ref_name)
+        .map_err(|e| GitOpsError::CreateBranchFailed {
+            branch_name: branch_name.to_string(),
+            repo_path: repo_path.clone(),
+            reason: format!("could not set HEAD to new branch: {}", e.message()),
+        })?;
+
+    Ok(())
+}
+
+/// Convenience wrapper: open the repo at `repo_path` and create+checkout
+/// a new local branch off HEAD. This avoids callers having to depend on
+/// `git2` directly.
+pub fn create_and_checkout_branch_at(
+    repo_path: &Path,
+    branch_name: &str,
+) -> Result<(), GitOpsError> {
+    let repo = Repository::open(repo_path).map_err(|e| GitOpsError::CreateBranchFailed {
+        branch_name: branch_name.to_string(),
+        repo_path: repo_path.display().to_string(),
+        reason: format!("could not open repo: {}", e.message()),
+    })?;
+    create_and_checkout_branch(&repo, branch_name)
 }
 
 /// Checkout a specific ref (branch, tag, or commit SHA) in an existing repository.

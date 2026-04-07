@@ -127,6 +127,30 @@ impl AgentConfigService {
                         .and_then(|e| e.get("regression"))
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false),
+                    "monitoring_downtime" => a
+                        .trigger_config
+                        .get("monitoring")
+                        .and_then(|m| m.get("downtime"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    "monitoring_latency_spike" => a
+                        .trigger_config
+                        .get("monitoring")
+                        .and_then(|m| m.get("latency_spike"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    "deploy_production" => a
+                        .trigger_config
+                        .get("deploy")
+                        .and_then(|d| d.get("production"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    "deploy_preview" => a
+                        .trigger_config
+                        .get("deploy")
+                        .and_then(|d| d.get("preview"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     "manual" => a
                         .trigger_config
                         .get("manual")

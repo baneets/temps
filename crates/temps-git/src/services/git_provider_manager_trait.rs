@@ -108,6 +108,15 @@ pub trait GitProviderManagerTrait: Send + Sync {
     /// # Returns
     /// * `Ok(PullRequest)` - The created pull request
     /// * `Err(GitProviderManagerError)` - If the push or PR creation fails
+    /// Get the (refreshed) access token for a git provider connection,
+    /// along with the provider type (e.g. "github" or "gitlab"). Used by
+    /// callers that need to inject credentials into a sandbox / shell so
+    /// that tools like `gh` and `glab` can authenticate.
+    async fn get_connection_access_token(
+        &self,
+        connection_id: i32,
+    ) -> Result<(String, String), GitProviderManagerError>;
+
     async fn push_files_and_create_pr(
         &self,
         connection_id: i32,
