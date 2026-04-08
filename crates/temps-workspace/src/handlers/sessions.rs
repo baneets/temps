@@ -1012,6 +1012,14 @@ async fn session_terminal_ws(
     }
 
     let state_for_task = app_state.clone();
+    // Cap per-frame and per-message sizes so an authenticated user can't
+    // flood the PTY stdin with 64 MiB axum-default frames. 1 MiB / frame
+    // comfortably covers multi-megabyte pastes; 4 MiB per aggregated
+    // message covers the fragmented-upload case. Anything larger is
+    // rejected by axum before we ever read it.
+    let ws = ws
+        .max_frame_size(1024 * 1024)
+        .max_message_size(4 * 1024 * 1024);
     Ok(ws.on_upgrade(move |socket| {
         handle_session_terminal(
             socket,
@@ -1321,10 +1329,41 @@ fi"#,
     // Idle timeout is intentionally generous: a tmux-attached terminal where
     // the user is reading CLI output may sit silent for a long time.
     let idle_timeout = tokio::time::Duration::from_secs(60 * 60);
+
+    // Token-bucket rate limit on stdin: 2 MiB/s sustained, 8 MiB burst.
+    // Large pastes (up to 8 MiB instantly) pass through unthrottled; a
+    // sustained flood gets the excess frames dropped rather than
+    // disconnected, so pathological input never wedges the PTY or
+    // saturates the Docker API stream.
+    const RATE_BYTES_PER_SEC: u64 = 2 * 1024 * 1024;
+    const BUCKET_CAPACITY: u64 = 8 * 1024 * 1024;
+    let mut bucket_tokens: u64 = BUCKET_CAPACITY;
+    let mut last_refill = std::time::Instant::now();
+    let refill_bucket = |tokens: &mut u64, last: &mut std::time::Instant| {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(*last).as_secs_f64();
+        if elapsed > 0.0 {
+            let add = (elapsed * RATE_BYTES_PER_SEC as f64) as u64;
+            *tokens = (*tokens).saturating_add(add).min(BUCKET_CAPACITY);
+            *last = now;
+        }
+    };
     loop {
         let msg = tokio::time::timeout(idle_timeout, ws_receiver.next()).await;
         match msg {
             Ok(Some(Ok(Message::Binary(data)))) => {
+                refill_bucket(&mut bucket_tokens, &mut last_refill);
+                let needed = data.len() as u64;
+                if needed > bucket_tokens {
+                    tracing::warn!(
+                        "Terminal stdin rate limit exceeded for session {} ({} bytes, {} available) — dropping frame",
+                        session_id,
+                        needed,
+                        bucket_tokens
+                    );
+                    continue;
+                }
+                bucket_tokens -= needed;
                 if pty_input.write_all(&data).await.is_err() {
                     break;
                 }
@@ -1352,10 +1391,22 @@ fi"#,
                         }
                         "input" => {
                             if let Some(data) = ctrl.data {
-                                if pty_input.write_all(data.as_bytes()).await.is_err() {
-                                    break;
+                                refill_bucket(&mut bucket_tokens, &mut last_refill);
+                                let needed = data.len() as u64;
+                                if needed > bucket_tokens {
+                                    tracing::warn!(
+                                        "Terminal stdin rate limit exceeded for session {} ({} bytes, {} available) — dropping input",
+                                        session_id,
+                                        needed,
+                                        bucket_tokens
+                                    );
+                                } else {
+                                    bucket_tokens -= needed;
+                                    if pty_input.write_all(data.as_bytes()).await.is_err() {
+                                        break;
+                                    }
+                                    let _ = pty_input.flush().await;
                                 }
-                                let _ = pty_input.flush().await;
                             }
                         }
                         _ => {}

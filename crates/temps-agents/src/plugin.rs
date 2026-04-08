@@ -59,6 +59,32 @@ impl AgentSyncService for AgentConfigSyncAdapter {
 /// Maximum number of simultaneous active runs per project.
 const MAX_CONCURRENT_RUNS_PER_PROJECT: u64 = 5;
 
+/// Guarded constructor for `LocalSandboxProvider`. The local provider runs
+/// agent-executed commands **directly on the host** with no namespace
+/// isolation, no resource limits, and no capability dropping — it is safe
+/// only for single-developer machines. We require an explicit opt-in via
+/// `TEMPS_ALLOW_LOCAL_SANDBOX=1` so production deployments that temporarily
+/// lose Docker don't silently fall through to executing untrusted agent
+/// code as the `temps` service user.
+fn ensure_local_sandbox_allowed() -> Result<Arc<dyn SandboxProvider>, PluginError> {
+    let allowed = std::env::var("TEMPS_ALLOW_LOCAL_SANDBOX")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !allowed {
+        return Err(PluginError::InitializationFailed(
+            "agents: Docker sandbox unavailable and TEMPS_ALLOW_LOCAL_SANDBOX is not set. \
+             Refusing to run agents directly on the host — set the env var to '1' to accept \
+             the risk on a dev machine, or fix Docker in production."
+                .to_string(),
+        ));
+    }
+    tracing::warn!(
+        "⚠️  TEMPS_ALLOW_LOCAL_SANDBOX=1 — agents will execute on the host with no isolation. \
+         This is INSECURE and intended for development only."
+    );
+    Ok(Arc::new(LocalSandboxProvider::new()))
+}
+
 pub struct AgentsPlugin;
 
 impl AgentsPlugin {
@@ -416,7 +442,7 @@ impl TempsPlugin for AgentsPlugin {
                                         "Failed to build sandbox image, using local fallback: {}",
                                         e
                                     );
-                                    Arc::new(LocalSandboxProvider::new())
+                                    ensure_local_sandbox_allowed()?
                                 } else {
                                     tracing::info!("Docker sandbox provider initialized");
                                     Arc::new(provider)
@@ -424,13 +450,13 @@ impl TempsPlugin for AgentsPlugin {
                             }
                             Err(e) => {
                                 tracing::warn!("Docker not responding, using local sandbox: {}", e);
-                                Arc::new(LocalSandboxProvider::new())
+                                ensure_local_sandbox_allowed()?
                             }
                         }
                     }
                     Err(e) => {
                         tracing::warn!("Docker not available, using local sandbox: {}", e);
-                        Arc::new(LocalSandboxProvider::new())
+                        ensure_local_sandbox_allowed()?
                     }
                 };
             // Register the bare sandbox provider as `dyn SandboxProvider` so

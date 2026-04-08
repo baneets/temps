@@ -98,12 +98,20 @@ pub enum PreviewAuthOutcome {
     NotFound { host: PreviewHost },
 }
 
-/// First 12 chars of the argon2 hash. Folded into the cookie payload so
-/// rotating the password (which changes the hash) immediately invalidates
-/// every live cookie for that session — no revocation table required.
-fn hash_fingerprint(hash: &str) -> &str {
-    let end = hash.len().min(12);
-    &hash[..end]
+/// SHA-256 of the full argon2 PHC hash, truncated to 16 hex chars. Folded
+/// into the cookie payload so rotating the password (which changes the
+/// argon2 hash) immediately invalidates every live cookie for that session.
+///
+/// Previous implementation took `&hash[..12]`, which is always the literal
+/// prefix `$argon2id$v=` for every argon2id hash and therefore could not
+/// distinguish two different passwords. Rotating the password did not
+/// revoke existing cookies. Using a digest of the full hash fixes that.
+fn hash_fingerprint(hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(hash.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8]) // 16 hex chars
 }
 
 /// Encode a fresh preview cookie value: `sid|fingerprint|expires_unix`,
@@ -348,6 +356,21 @@ pub async fn check_preview_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_fingerprint_differs_for_different_hashes() {
+        // Two argon2id hashes share the literal `$argon2id$v=` prefix, so
+        // any prefix-based fingerprint would collide. The SHA-256-derived
+        // fingerprint must actually distinguish them — otherwise password
+        // rotation silently fails to revoke existing cookies.
+        let hash_a = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let hash_b = "$argon2id$v=19$m=19456,t=2,p=1$BBBBBBBBBBBBBBBBBBBBBB$BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        assert_ne!(hash_fingerprint(hash_a), hash_fingerprint(hash_b));
+        // Deterministic on repeated calls.
+        assert_eq!(hash_fingerprint(hash_a), hash_fingerprint(hash_a));
+        // Exactly 16 hex chars.
+        assert_eq!(hash_fingerprint(hash_a).len(), 16);
+    }
 
     #[test]
     fn parse_preview_host_basic() {
