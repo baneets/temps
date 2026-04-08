@@ -37,6 +37,7 @@ bollard = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }
 tar = "0.4"
+walkdir = { workspace = true }
 pulldown-cmark = "0.12"
 libc = { workspace = true }
 rand = { workspace = true }

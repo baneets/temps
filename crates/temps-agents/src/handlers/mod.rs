@@ -2,6 +2,7 @@ pub mod autofixer;
 pub mod config;
 pub mod preview_gateway;
 pub mod runs;
+pub mod secrets;
 pub mod trigger;
 
 use axum::Router;
@@ -11,6 +12,7 @@ use crate::services::autofixer::AutofixerService;
 use crate::services::config_service::AgentConfigService;
 use crate::services::executor::AgentExecutor;
 use crate::services::run_service::AgentRunService;
+use crate::services::secret_service::SecretService;
 
 pub struct AppState {
     pub db: Arc<sea_orm::DatabaseConnection>,
@@ -20,6 +22,7 @@ pub struct AppState {
     pub executor: Arc<AgentExecutor>,
     pub audit_service: Arc<dyn temps_core::AuditLogger>,
     pub autofixer_service: Arc<AutofixerService>,
+    pub secret_service: Arc<SecretService>,
     /// Docker client used by the preview gateway supervisor handlers.
     pub docker: Arc<bollard::Docker>,
     /// Platform settings service used by the preview gateway handlers to
@@ -33,5 +36,6 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .merge(config::routes())
         .merge(preview_gateway::routes())
         .merge(runs::routes())
+        .merge(secrets::routes())
         .merge(trigger::routes())
 }

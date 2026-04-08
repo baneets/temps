@@ -148,6 +148,14 @@ pub struct AgentYamlConfig {
     /// None = use global sandbox setting, Some(true) = force on, Some(false) = force off
     #[serde(default)]
     pub sandbox: Option<bool>,
+    /// Private config repo containing `.claude/` directory (skills, MCP servers, settings).
+    /// Format: "owner/repo" (e.g. "myorg/claude-config"). Cloned at runtime and
+    /// overlaid into the sandbox's `/workspace/.claude/` directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_repo: Option<String>,
+    /// Branch of the config repo to use (default: "main").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_repo_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -688,5 +696,28 @@ on:
         assert_eq!(json["error"]["new_issue"], true);
         assert_eq!(json["error"]["regression"], false);
         assert_eq!(json["schedule"]["cron"], "0 9 * * 1");
+    }
+
+    #[test]
+    fn test_agent_yaml_with_config_repo() {
+        let yaml = r#"
+name: error-fixer
+on:
+  error:
+    new_issue: true
+config_repo: myorg/claude-config
+config_repo_branch: develop
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.config_repo.as_deref(), Some("myorg/claude-config"));
+        assert_eq!(agent.config_repo_branch.as_deref(), Some("develop"));
+    }
+
+    #[test]
+    fn test_agent_yaml_without_config_repo_defaults_to_none() {
+        let yaml = "name: minimal-agent\n";
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(agent.config_repo.is_none());
+        assert!(agent.config_repo_branch.is_none());
     }
 }

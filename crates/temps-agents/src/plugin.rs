@@ -27,6 +27,7 @@ use crate::services::cron_scheduler::AgentCronScheduler;
 use crate::services::executor::AgentExecutor;
 use crate::services::run_service::AgentRunService;
 use crate::services::sandbox_registry::SandboxRegistry;
+use crate::services::secret_service::SecretService;
 
 use temps_entities::project_agents;
 
@@ -472,6 +473,9 @@ impl TempsPlugin for AgentsPlugin {
             ));
             context.register_service(config_service.clone());
 
+            let secret_service =
+                Arc::new(SecretService::new(db.clone(), encryption_service.clone()));
+
             // Register the sync adapter so the deployment pipeline can sync agents from YAML
             let sync_adapter: Arc<dyn AgentSyncService> = Arc::new(AgentConfigSyncAdapter {
                 config_service: config_service.clone(),
@@ -542,6 +546,7 @@ impl TempsPlugin for AgentsPlugin {
                 executor,
                 audit_service: context.require_service::<dyn temps_core::AuditLogger>(),
                 autofixer_service,
+                secret_service,
                 docker: context.require_service::<bollard::Docker>(),
                 platform_config_service: context.require_service::<temps_config::ConfigService>(),
             });
@@ -653,6 +658,8 @@ mod tests {
             branch_prefix: String::new(),
             deliverable: "pull_request".to_string(),
             sandbox_enabled: None,
+            config_repo_url: None,
+            config_repo_branch: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

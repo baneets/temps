@@ -934,6 +934,15 @@ mod tests {
             Ok(())
         }
 
+        async fn write_directory(
+            &self,
+            _handle: &SandboxHandle,
+            _local_dir: &std::path::Path,
+            _target_path: &str,
+        ) -> Result<(), AgentError> {
+            Ok(())
+        }
+
         async fn read_file(
             &self,
             _handle: &SandboxHandle,

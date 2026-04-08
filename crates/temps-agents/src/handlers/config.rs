@@ -90,6 +90,9 @@ impl From<AgentError> for Problem {
                     .with_title("Sandbox Provider Unavailable")
                     .with_detail(error.to_string())
             }
+            AgentError::SecretNotFound { .. } => problemdetails::new(StatusCode::NOT_FOUND)
+                .with_title("Secret Not Found")
+                .with_detail(error.to_string()),
         }
     }
 }
@@ -202,6 +205,10 @@ pub struct AgentConfigResponse {
     pub deliverable: String,
     /// None = use global sandbox setting, true = force on, false = force off
     pub sandbox_enabled: Option<bool>,
+    /// Private config repo containing .claude/ directory (skills, MCP, plugins).
+    pub config_repo_url: Option<String>,
+    /// Branch of the config repo to use.
+    pub config_repo_branch: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -228,6 +235,8 @@ impl From<project_agents::Model> for AgentConfigResponse {
             branch_prefix: model.branch_prefix,
             deliverable: model.deliverable,
             sandbox_enabled: model.sandbox_enabled,
+            config_repo_url: model.config_repo_url,
+            config_repo_branch: model.config_repo_branch,
             created_at: model.created_at.to_rfc3339(),
             updated_at: model.updated_at.to_rfc3339(),
         }

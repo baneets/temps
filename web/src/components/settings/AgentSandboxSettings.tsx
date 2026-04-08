@@ -35,6 +35,7 @@ import { toast } from 'sonner'
 import { useSettings, useUpdateSettings } from '@/hooks/useSettings'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { PreviewGatewayCard } from './PreviewGatewayCard'
+import { AgentSecrets } from '@/components/agents/ProjectSecrets'
 
 interface SandboxStatus {
   docker_available: boolean
@@ -122,11 +123,14 @@ export function AgentSandboxSettings() {
   const [networkMode, setNetworkMode] = useState('full')
   const [isDirty, setIsDirty] = useState(false)
   const [resourcePreset, setResourcePreset] = useState('Standard')
+  const [globalConfigRepo, setGlobalConfigRepo] = useState('')
+  const [globalConfigRepoBranch, setGlobalConfigRepoBranch] = useState('main')
 
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
+  const [buildLog, setBuildLog] = useState<string[]>([])
   const [smokeTestLoading, setSmokeTestLoading] = useState(false)
   const [smokeTestResult, setSmokeTestResult] = useState<{
     passed: boolean
@@ -168,6 +172,10 @@ export function AgentSandboxSettings() {
       setNetworkMode(s.network_mode || 'full')
       setResourcePreset(getResourcePresetLabel(s.cpu_limit, s.memory_limit_mb))
     }
+    if (settings?.ai_config) {
+      setGlobalConfigRepo(settings.ai_config.config_repo || '')
+      setGlobalConfigRepoBranch(settings.ai_config.config_repo_branch || 'main')
+    }
   }, [settings])
 
   useEffect(() => {
@@ -183,19 +191,49 @@ export function AgentSandboxSettings() {
 
   const handleRebuildImage = async () => {
     setRebuilding(true)
+    setBuildLog([])
     try {
       const response = await fetch('/api/settings/sandbox-rebuild', {
         method: 'POST',
       })
-      if (response.ok) {
-        const data = await response.json()
-        if (data.success) {
-          toast.success(`Sandbox image rebuilt: ${data.image_name}`)
-        } else {
-          toast.error(data.error || 'Failed to rebuild image')
+      if (!response.ok || !response.body) {
+        toast.error('Failed to start image rebuild')
+        setRebuilding(false)
+        return
+      }
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        // Parse SSE lines
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            const data = line.slice(5).trim()
+            if (!data) continue
+            // Check if this is the final "done" JSON message
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.type === 'done') {
+                if (parsed.success) {
+                  toast.success(`Image rebuilt: ${parsed.image_name}`)
+                } else {
+                  toast.error(parsed.error || 'Build failed')
+                }
+                continue
+              }
+            } catch {
+              // Not JSON — it's a plain build log line
+            }
+            setBuildLog((prev) => [...prev, data])
+          }
         }
-      } else {
-        toast.error('Failed to rebuild image')
       }
       await fetchSandboxStatus()
     } catch {
@@ -278,6 +316,10 @@ export function AgentSandboxSettings() {
           cpu_limit: cpuLimit,
           memory_limit_mb: memoryLimitMb,
           network_mode: networkMode,
+        },
+        ai_config: {
+          config_repo: globalConfigRepo,
+          config_repo_branch: globalConfigRepoBranch,
         },
       })
       setIsDirty(false)
@@ -639,20 +681,31 @@ export function AgentSandboxSettings() {
                   </p>
                 )}
                 {sandboxStatus.docker_available && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleRebuildImage}
-                    disabled={rebuilding}
-                    className="mt-2"
-                  >
-                    {rebuilding ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
-                    ) : (
-                      <RefreshCw className="h-3.5 w-3.5 mr-2" />
+                  <div className="space-y-2 mt-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleRebuildImage}
+                      disabled={rebuilding}
+                    >
+                      {rebuilding ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5 mr-2" />
+                      )}
+                      {rebuilding ? 'Rebuilding...' : 'Rebuild Image'}
+                    </Button>
+                    {buildLog.length > 0 && (
+                      <div className="max-h-60 overflow-y-auto rounded border bg-black/80 p-3 font-mono text-xs text-green-400 space-y-0.5">
+                        {buildLog.map((line, i) => (
+                          <div key={i}>{line}</div>
+                        ))}
+                        {rebuilding && (
+                          <div className="animate-pulse text-green-300">...</div>
+                        )}
+                      </div>
                     )}
-                    {rebuilding ? 'Rebuilding...' : 'Rebuild Image'}
-                  </Button>
+                  </div>
                 )}
               </div>
             ) : statusLoading ? (
@@ -886,6 +939,54 @@ export function AgentSandboxSettings() {
           )}
         </CardContent>
       </Card>
+
+      {/* Global Config Repository */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            Global Config Repository
+          </CardTitle>
+          <CardDescription>
+            A shared config repository applied to all agent runs. Contains a{' '}
+            <code className="text-xs bg-muted px-1 rounded">.claude/</code>{' '}
+            directory with skills, MCP servers, and settings. Per-agent config
+            repos override conflicting files.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="global-config-repo">Repository</Label>
+            <Input
+              id="global-config-repo"
+              placeholder="org/claude-config"
+              value={globalConfigRepo}
+              onChange={(e) => {
+                setGlobalConfigRepo(e.target.value)
+                setIsDirty(true)
+              }}
+            />
+            <p className="text-xs text-muted-foreground">
+              GitHub repo path. The repo must be accessible via the project's git
+              provider connection. Leave empty to disable.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="global-config-branch">Branch</Label>
+            <Input
+              id="global-config-branch"
+              placeholder="main"
+              value={globalConfigRepoBranch}
+              onChange={(e) => {
+                setGlobalConfigRepoBranch(e.target.value)
+                setIsDirty(true)
+              }}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Global Secrets */}
+      <AgentSecrets />
 
       {/* Save */}
       <div className="flex justify-end">

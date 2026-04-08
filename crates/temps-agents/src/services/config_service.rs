@@ -35,6 +35,10 @@ pub struct UpsertAgentRequest {
     pub deliverable: Option<String>,
     pub branch_prefix: Option<String>,
     pub sandbox_enabled: Option<bool>,
+    /// Private config repo containing .claude/ directory (skills, MCP, plugins).
+    pub config_repo_url: Option<String>,
+    /// Branch of the config repo to use (default: "main").
+    pub config_repo_branch: Option<String>,
 }
 
 pub struct AgentConfigService {
@@ -289,6 +293,12 @@ impl AgentConfigService {
             if let Some(sandbox_enabled) = request.sandbox_enabled {
                 active.sandbox_enabled = Set(Some(sandbox_enabled));
             }
+            if let Some(ref config_repo_url) = request.config_repo_url {
+                active.config_repo_url = Set(Some(config_repo_url.clone()));
+            }
+            if let Some(ref config_repo_branch) = request.config_repo_branch {
+                active.config_repo_branch = Set(Some(config_repo_branch.clone()));
+            }
 
             let model = active
                 .update(self.db.as_ref())
@@ -327,6 +337,8 @@ impl AgentConfigService {
                     .deliverable
                     .unwrap_or_else(|| "pull_request".to_string())),
                 sandbox_enabled: Set(request.sandbox_enabled),
+                config_repo_url: Set(request.config_repo_url),
+                config_repo_branch: Set(request.config_repo_branch),
                 ..Default::default()
             };
 
@@ -461,6 +473,8 @@ impl AgentConfigService {
                 .deliverable
                 .unwrap_or_else(|| "pull_request".to_string())),
             sandbox_enabled: Set(request.sandbox_enabled),
+            config_repo_url: Set(request.config_repo_url),
+            config_repo_branch: Set(request.config_repo_branch),
             ..Default::default()
         };
 
@@ -597,6 +611,12 @@ impl AgentConfigService {
         if let Some(sandbox_enabled) = request.sandbox_enabled {
             active.sandbox_enabled = Set(Some(sandbox_enabled));
         }
+        if let Some(ref config_repo_url) = request.config_repo_url {
+            active.config_repo_url = Set(Some(config_repo_url.clone()));
+        }
+        if let Some(ref config_repo_branch) = request.config_repo_branch {
+            active.config_repo_branch = Set(Some(config_repo_branch.clone()));
+        }
 
         let model = active
             .update(self.db.as_ref())
@@ -666,6 +686,8 @@ impl AgentConfigService {
                 active.branch_prefix = Set(yaml_agent.branch_prefix.clone());
                 active.deliverable = Set(yaml_agent.deliverable.clone());
                 active.sandbox_enabled = Set(yaml_agent.sandbox);
+                active.config_repo_url = Set(yaml_agent.config_repo.clone());
+                active.config_repo_branch = Set(yaml_agent.config_repo_branch.clone());
                 active.enabled = Set(yaml_agent.enabled);
                 active
                     .update(self.db.as_ref())
@@ -691,6 +713,8 @@ impl AgentConfigService {
                     branch_prefix: Set(yaml_agent.branch_prefix.clone()),
                     deliverable: Set(yaml_agent.deliverable.clone()),
                     sandbox_enabled: Set(yaml_agent.sandbox),
+                    config_repo_url: Set(yaml_agent.config_repo.clone()),
+                    config_repo_branch: Set(yaml_agent.config_repo_branch.clone()),
                     ..Default::default()
                 };
                 active
@@ -750,6 +774,8 @@ mod tests {
             branch_prefix: String::new(),
             deliverable: "pull_request".to_string(),
             sandbox_enabled: None,
+            config_repo_url: None,
+            config_repo_branch: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -855,6 +881,8 @@ mod tests {
             description: None,
             branch_prefix: None,
             sandbox_enabled: None,
+            config_repo_url: None,
+            config_repo_branch: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -886,6 +914,8 @@ mod tests {
             description: None,
             branch_prefix: None,
             sandbox_enabled: None,
+            config_repo_url: None,
+            config_repo_branch: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -926,6 +956,8 @@ mod tests {
             description: None,
             branch_prefix: None,
             sandbox_enabled: None,
+            config_repo_url: None,
+            config_repo_branch: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -965,6 +997,8 @@ mod tests {
             name: None,
             description: None,
             branch_prefix: None,
+            config_repo_url: None,
+            config_repo_branch: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -1007,6 +1041,8 @@ mod tests {
             name: None,
             description: None,
             branch_prefix: None,
+            config_repo_url: None,
+            config_repo_branch: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -1050,6 +1086,8 @@ mod tests {
             name: None,
             description: None,
             branch_prefix: None,
+            config_repo_url: None,
+            config_repo_branch: None,
         };
 
         let result = svc.upsert_config(1, request).await;

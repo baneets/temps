@@ -27,6 +27,12 @@ impl SandboxRegistry {
         self.provider.as_ref()
     }
 
+    /// Get a cloneable Arc to the underlying sandbox provider.
+    /// Needed when the provider must outlive a borrow (e.g. spawned tasks).
+    pub fn provider_arc(&self) -> Arc<dyn SandboxProvider> {
+        self.provider.clone()
+    }
+
     /// Check if a sandbox exists for this run.
     pub async fn has_sandbox(&self, run_id: i32) -> bool {
         self.sandboxes.read().await.contains_key(&run_id)
@@ -85,6 +91,39 @@ impl SandboxRegistry {
         }
 
         Ok(handle.clone())
+    }
+
+    /// Write a file into a run's sandbox at the given absolute path.
+    pub async fn write_file(
+        &self,
+        run_id: i32,
+        path: &str,
+        contents: &[u8],
+        mode: u32,
+    ) -> Result<(), AgentError> {
+        let handle = self.get(run_id).await?;
+        self.provider
+            .write_file(&handle, path, contents, mode)
+            .await
+    }
+
+    /// Read a file from a run's sandbox at the given absolute path.
+    pub async fn read_file(&self, run_id: i32, path: &str) -> Result<Vec<u8>, AgentError> {
+        let handle = self.get(run_id).await?;
+        self.provider.read_file(&handle, path).await
+    }
+
+    /// Write an entire local directory tree into a run's sandbox.
+    pub async fn write_directory(
+        &self,
+        run_id: i32,
+        local_dir: &std::path::Path,
+        target_path: &str,
+    ) -> Result<(), AgentError> {
+        let handle = self.get(run_id).await?;
+        self.provider
+            .write_directory(&handle, local_dir, target_path)
+            .await
     }
 
     /// Execute a command in a run's sandbox.

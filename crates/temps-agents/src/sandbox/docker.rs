@@ -175,6 +175,12 @@ ENV HOME=/home/temps
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && /home/temps/.local/bin/claude --version \
     && echo 'export PATH=/home/temps/.local/bin:$PATH' >> /home/temps/.bashrc
+# Backup Claude CLI to a path outside /home/temps so named-volume mounts
+# (which overlay the entire home dir) don't mask the binary. The container
+# start-up hook restores from here when the volume is stale.
+USER root
+RUN cp -a /home/temps/.local /opt/claude-backup
+USER temps
 WORKDIR /workspace
 "#
     )
@@ -260,6 +266,23 @@ impl DockerSandboxProvider {
 
     /// Build a sandbox image for a specific runtime preset.
     async fn ensure_image_for_runtime(&self, runtime: &str) -> Result<(), AgentError> {
+        self.ensure_image_for_runtime_with_progress(runtime, None)
+            .await
+    }
+
+    /// Build a sandbox image, optionally streaming progress via a channel.
+    async fn ensure_image_for_runtime_with_progress(
+        &self,
+        runtime: &str,
+        progress: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<(), AgentError> {
+        // Helper to send progress if a channel is provided.
+        let send = |msg: String| async {
+            if let Some(tx) = progress {
+                let _ = tx.send(msg).await;
+            }
+        };
+
         // Custom images: just check if they exist (user must pull/build them)
         if runtime == "custom" {
             let img = &self.config.custom_image;
@@ -302,6 +325,7 @@ impl DockerSandboxProvider {
         // If the pull fails (rate limit, no internet, image not published yet)
         // we fall back to a local build — fail-safe, never blocks startup.
         let hub_image = hub_image_for_runtime(runtime);
+        send(format!("Pulling {} from Docker Hub...", hub_image)).await;
         tracing::info!(
             "Trying to pull sandbox image {} from Docker Hub...",
             hub_image
@@ -313,6 +337,7 @@ impl DockerSandboxProvider {
                     hub_image,
                     image_name
                 );
+                send(format!("Pulled {} — done.", hub_image)).await;
                 return Ok(());
             }
             Err(reason) => {
@@ -321,6 +346,7 @@ impl DockerSandboxProvider {
                     hub_image,
                     reason
                 );
+                send(format!("Pull failed ({}), building locally...", reason)).await;
             }
         }
 
@@ -329,6 +355,7 @@ impl DockerSandboxProvider {
             image_name,
             runtime
         );
+        send(format!("Building {} (runtime: {})...", image_name, runtime)).await;
 
         let dockerfile_content = dockerfile_for_runtime(runtime);
 
@@ -379,13 +406,22 @@ impl DockerSandboxProvider {
                             .message
                             .as_deref()
                             .unwrap_or("unknown build error");
+                        send(format!("ERROR: {}", msg)).await;
                         return Err(AgentError::SandboxProviderUnavailable {
                             provider: "docker".to_string(),
                             reason: format!("Image build error: {}", msg),
                         });
                     }
+                    // Forward build log lines
+                    if let Some(ref line) = info.stream {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            send(trimmed.to_string()).await;
+                        }
+                    }
                 }
                 Err(e) => {
+                    send(format!("ERROR: {}", e)).await;
                     return Err(AgentError::SandboxProviderUnavailable {
                         provider: "docker".to_string(),
                         reason: format!("Image build failed: {}", e),
@@ -395,6 +431,109 @@ impl DockerSandboxProvider {
         }
 
         tracing::info!("Sandbox image {} built successfully", image_name);
+        send(format!("Image {} built successfully.", image_name)).await;
+        Ok(())
+    }
+
+    /// Build a sandbox image locally from the generated Dockerfile.
+    /// Used by explicit rebuild operations that should never pull from Hub.
+    async fn build_image_locally(
+        &self,
+        runtime: &str,
+        progress: Option<&tokio::sync::mpsc::Sender<String>>,
+    ) -> Result<(), AgentError> {
+        let send = |msg: String| async {
+            if let Some(tx) = progress {
+                let _ = tx.send(msg).await;
+            }
+        };
+
+        let image_name = image_name_for_runtime(runtime);
+
+        tracing::info!(
+            "Building sandbox image {} locally (runtime: {})...",
+            image_name,
+            runtime
+        );
+        send(format!(
+            "Building {} locally (runtime: {})...",
+            image_name, runtime
+        ))
+        .await;
+
+        let dockerfile_content = dockerfile_for_runtime(runtime);
+
+        let mut header = tar::Header::new_gnu();
+        let dockerfile_bytes = dockerfile_content.as_bytes();
+        header.set_size(dockerfile_bytes.len() as u64);
+        header
+            .set_path("Dockerfile")
+            .map_err(|e| AgentError::SandboxProviderUnavailable {
+                provider: "docker".to_string(),
+                reason: format!("Failed to create tar header: {}", e),
+            })?;
+        header.set_mode(0o644);
+        header.set_cksum();
+
+        let mut tar_buf = Vec::new();
+        {
+            let mut tar_builder = tar::Builder::new(&mut tar_buf);
+            tar_builder.append(&header, dockerfile_bytes).map_err(|e| {
+                AgentError::SandboxProviderUnavailable {
+                    provider: "docker".to_string(),
+                    reason: format!("Failed to build tar: {}", e),
+                }
+            })?;
+            tar_builder
+                .finish()
+                .map_err(|e| AgentError::SandboxProviderUnavailable {
+                    provider: "docker".to_string(),
+                    reason: format!("Failed to finish tar: {}", e),
+                })?;
+        }
+
+        let options = bollard::query_parameters::BuildImageOptionsBuilder::new()
+            .t(&image_name)
+            .build();
+
+        let body = http_body_util::Full::new(bytes::Bytes::from(tar_buf));
+        let mut stream =
+            self.docker
+                .build_image(options, None, Some(http_body_util::Either::Left(body)));
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(info) => {
+                    if let Some(ref error_detail) = info.error_detail {
+                        let msg = error_detail
+                            .message
+                            .as_deref()
+                            .unwrap_or("unknown build error");
+                        send(format!("ERROR: {}", msg)).await;
+                        return Err(AgentError::SandboxProviderUnavailable {
+                            provider: "docker".to_string(),
+                            reason: format!("Image build error: {}", msg),
+                        });
+                    }
+                    if let Some(ref line) = info.stream {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            send(trimmed.to_string()).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    send(format!("ERROR: {}", e)).await;
+                    return Err(AgentError::SandboxProviderUnavailable {
+                        provider: "docker".to_string(),
+                        reason: format!("Image build failed: {}", e),
+                    });
+                }
+            }
+        }
+
+        tracing::info!("Sandbox image {} built successfully", image_name);
+        send(format!("Image {} built successfully.", image_name)).await;
         Ok(())
     }
 
@@ -689,6 +828,55 @@ impl SandboxProvider for DockerSandboxProvider {
                     run_id: config.run_id,
                     provider: "docker".to_string(),
                     reason: format!("Failed to create chown exec: {}", e),
+                })?;
+            let _ = self
+                .docker
+                .start_exec(
+                    &exec.id,
+                    Some(bollard::exec::StartExecOptions {
+                        detach: false,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
+
+        // Ensure Claude CLI is present in the home volume. Named volumes
+        // persist across image rebuilds and mask the image's /home/temps.
+        // Strategy: try /opt/claude-backup first (local builds), fall back
+        // to running the installer if Claude is still missing.
+        {
+            let exec = self
+                .docker
+                .create_exec(
+                    &container.id,
+                    bollard::models::ExecConfig {
+                        user: Some("0:0".to_string()),
+                        cmd: Some(vec![
+                            "sh".to_string(),
+                            "-c".to_string(),
+                            concat!(
+                                "if [ -x /home/temps/.local/bin/claude ]; then exit 0; fi; ",
+                                "echo 'Claude CLI missing in home volume, restoring...'; ",
+                                "if [ -d /opt/claude-backup ]; then ",
+                                "  cp -a /opt/claude-backup/* /home/temps/.local/ && ",
+                                "  chown -R temps:temps /home/temps/.local; ",
+                                "elif command -v curl >/dev/null 2>&1; then ",
+                                "  su - temps -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>&1; ",
+                                "fi"
+                            )
+                            .to_string(),
+                        ]),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|e| AgentError::SandboxCreationFailed {
+                    run_id: config.run_id,
+                    provider: "docker".to_string(),
+                    reason: format!("Failed to create claude-fix exec: {}", e),
                 })?;
             let _ = self
                 .docker
@@ -1186,6 +1374,132 @@ impl SandboxProvider for DockerSandboxProvider {
         })
     }
 
+    async fn write_directory(
+        &self,
+        handle: &SandboxHandle,
+        local_dir: &std::path::Path,
+        target_path: &str,
+    ) -> Result<(), AgentError> {
+        use walkdir::WalkDir;
+
+        // Build an in-memory tar containing all files from local_dir,
+        // preserving relative paths.
+        let tar_bytes = {
+            let mut buf: Vec<u8> = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut buf);
+
+                for entry in WalkDir::new(local_dir)
+                    .follow_links(true)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    let relative = path.strip_prefix(local_dir).unwrap_or(path);
+
+                    if entry.file_type().is_dir() {
+                        continue; // dirs are created implicitly by tar entries
+                    }
+
+                    if entry.file_type().is_file() {
+                        let contents =
+                            std::fs::read(path).map_err(|e| AgentError::SandboxExecFailed {
+                                run_id: 0,
+                                sandbox_id: handle.sandbox_id.clone(),
+                                reason: format!(
+                                    "write_directory: failed to read {}: {}",
+                                    path.display(),
+                                    e
+                                ),
+                            })?;
+
+                        let mut header = tar::Header::new_gnu();
+                        header.set_size(contents.len() as u64);
+                        header.set_mode(0o644);
+                        // Set ownership for /home/temps paths
+                        let full_target = format!("{}/{}", target_path, relative.display());
+                        if full_target.starts_with("/home/temps") {
+                            header.set_uid(1000);
+                            header.set_gid(1000);
+                        }
+                        header.set_mtime(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        );
+                        header.set_cksum();
+
+                        builder
+                            .append_data(&mut header, relative, std::io::Cursor::new(&contents))
+                            .map_err(|e| AgentError::SandboxExecFailed {
+                                run_id: 0,
+                                sandbox_id: handle.sandbox_id.clone(),
+                                reason: format!(
+                                    "write_directory: tar append failed for {}: {}",
+                                    relative.display(),
+                                    e
+                                ),
+                            })?;
+                    }
+                }
+
+                builder
+                    .finish()
+                    .map_err(|e| AgentError::SandboxExecFailed {
+                        run_id: 0,
+                        sandbox_id: handle.sandbox_id.clone(),
+                        reason: format!("write_directory: tar finish failed: {}", e),
+                    })?;
+            }
+            buf
+        };
+
+        // Ensure target directory exists
+        let mkdir = vec![
+            "mkdir".to_string(),
+            "-p".to_string(),
+            target_path.to_string(),
+        ];
+        let _ = self.exec(handle, mkdir, HashMap::new(), None).await;
+
+        let options = bollard::query_parameters::UploadToContainerOptionsBuilder::default()
+            .path(target_path)
+            .build();
+
+        let body = bollard::body_full(tar_bytes.into());
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            self.docker
+                .upload_to_container(&handle.sandbox_id, Some(options), body),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    "write_directory: uploaded {} to container {}",
+                    target_path,
+                    handle.sandbox_name
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("write_directory: upload to {} failed: {}", target_path, e),
+            }),
+            Err(_) => Err(AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!(
+                    "write_directory: upload to {} timed out after 60s",
+                    target_path
+                ),
+            }),
+        }
+    }
+
     async fn kill_processes(
         &self,
         handle: &SandboxHandle,
@@ -1321,8 +1635,38 @@ impl SandboxProvider for DockerSandboxProvider {
             tracing::info!("Removed old sandbox image {}", image_name);
         }
 
-        // Rebuild
-        self.ensure_image().await?;
+        // Rebuild locally — explicit rebuilds always build from the
+        // generated Dockerfile so local changes (Claude backup, custom
+        // packages, etc.) are picked up. Never pull from Hub here.
+        self.build_image_locally(&self.config.runtime, None).await?;
+
+        Ok(image_name)
+    }
+
+    async fn rebuild_image_with_progress(
+        &self,
+        on_progress: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<String, AgentError> {
+        let image_name = self.config.resolved_image();
+
+        // Remove existing image
+        if self.docker.inspect_image(&image_name).await.is_ok() {
+            let _ = on_progress
+                .send(format!("Removing old image {}...", image_name))
+                .await;
+            let opts = bollard::query_parameters::RemoveImageOptionsBuilder::new()
+                .force(true)
+                .build();
+            let _ = self
+                .docker
+                .remove_image(&image_name, Some(opts), None)
+                .await;
+            tracing::info!("Removed old sandbox image {}", image_name);
+        }
+
+        // Rebuild locally with progress — never pull from Hub on explicit rebuild.
+        self.build_image_locally(&self.config.runtime, Some(&on_progress))
+            .await?;
 
         Ok(image_name)
     }

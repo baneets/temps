@@ -69,6 +69,8 @@ mod m20260406_000005_add_workspace_base_branch;
 mod m20260407_000001_add_workspace_idle_timeout;
 mod m20260407_000002_add_workspace_session_title;
 mod m20260407_000003_add_workspace_resource_limits;
+mod m20260408_000001_add_agent_skills_and_mcp;
+mod m20260408_000002_make_secrets_global;
 
 pub struct Migrator;
 
@@ -145,6 +147,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260407_000001_add_workspace_idle_timeout::Migration),
             Box::new(m20260407_000002_add_workspace_session_title::Migration),
             Box::new(m20260407_000003_add_workspace_resource_limits::Migration),
+            Box::new(m20260408_000001_add_agent_skills_and_mcp::Migration),
+            Box::new(m20260408_000002_make_secrets_global::Migration),
         ]
     }
 }

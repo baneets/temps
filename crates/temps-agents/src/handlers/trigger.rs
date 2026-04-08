@@ -1,10 +1,14 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     routing::{get, post},
     Extension, Json, Router,
 };
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -339,33 +343,53 @@ async fn get_global_sandbox_status(
     }))
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-struct SandboxRebuildResponse {
-    success: bool,
-    image_name: String,
-    error: Option<String>,
-}
-
 async fn rebuild_sandbox_image(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, Problem> {
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, Problem> {
     permission_guard!(auth, SettingsWrite);
 
-    let provider = app_state.executor.sandbox_registry().provider();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
 
-    match provider.rebuild_image().await {
-        Ok(image_name) => Ok(Json(SandboxRebuildResponse {
-            success: true,
-            image_name,
-            error: None,
-        })),
-        Err(e) => Ok(Json(SandboxRebuildResponse {
-            success: false,
-            image_name: String::new(),
-            error: Some(e.to_string()),
-        })),
-    }
+    // Spawn the build in the background, sending progress to the channel.
+    let provider = app_state.executor.sandbox_registry().provider_arc();
+    tokio::spawn(async move {
+        let result = provider.rebuild_image_with_progress(tx.clone()).await;
+        match result {
+            Ok(name) => {
+                let _ = tx
+                    .send(
+                        serde_json::json!({
+                            "type": "done",
+                            "success": true,
+                            "image_name": name,
+                        })
+                        .to_string(),
+                    )
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx
+                    .send(
+                        serde_json::json!({
+                            "type": "done",
+                            "success": false,
+                            "error": e.to_string(),
+                        })
+                        .to_string(),
+                    )
+                    .await;
+            }
+        }
+    });
+
+    let stream = async_stream::stream! {
+        while let Some(msg) = rx.recv().await {
+            yield Ok(Event::default().data(msg));
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 // ── Smoke Test ───────────────────────────────────────────────────────────────

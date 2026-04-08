@@ -57,6 +57,8 @@ export function AgentSettingsDialog({
   const [branchPrefix, setBranchPrefix] = useState(agent?.branch_prefix ?? 'agents/')
   const [deliverable, setDeliverable] = useState(agent?.deliverable ?? 'pull_request')
   const [sandboxEnabled, setSandboxEnabled] = useState<boolean | null>(agent?.sandbox_enabled ?? null)
+  const [configRepoUrl, setConfigRepoUrl] = useState(agent?.config_repo_url ?? '')
+  const [configRepoBranch, setConfigRepoBranch] = useState(agent?.config_repo_branch ?? '')
 
   // Triggers
   const [triggerNewIssue, setTriggerNewIssue] = useState(
@@ -87,6 +89,8 @@ export function AgentSettingsDialog({
     setBranchPrefix(agent?.branch_prefix ?? 'agents/')
     setDeliverable(agent?.deliverable ?? 'pull_request')
     setSandboxEnabled(agent?.sandbox_enabled ?? null)
+    setConfigRepoUrl(agent?.config_repo_url ?? '')
+    setConfigRepoBranch(agent?.config_repo_branch ?? '')
     setTriggerNewIssue(agent?.trigger_config?.error?.new_issue ?? true)
     setTriggerRegression(agent?.trigger_config?.error?.regression ?? true)
     setTriggerManual(agent?.trigger_config?.manual ?? true)
@@ -148,6 +152,8 @@ export function AgentSettingsDialog({
         branch_prefix: branchPrefix,
         deliverable,
         sandbox_enabled: sandboxEnabled ?? undefined,
+        config_repo_url: configRepoUrl || null,
+        config_repo_branch: configRepoBranch || null,
       })
     } else {
       if (!slug.trim()) {
@@ -173,6 +179,8 @@ export function AgentSettingsDialog({
         branch_prefix: branchPrefix,
         deliverable,
         sandbox_enabled: sandboxEnabled ?? undefined,
+        config_repo_url: configRepoUrl || undefined,
+        config_repo_branch: configRepoBranch || undefined,
       })
     }
   }
@@ -416,6 +424,37 @@ export function AgentSettingsDialog({
               <p className="text-xs text-muted-foreground">
                 "Use global setting" follows the sandbox default from Settings.
               </p>
+            </div>
+          </div>
+
+          {/* Config Repo */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">Config Repository</h3>
+            <p className="text-xs text-muted-foreground">
+              A private repository containing a <code className="bg-muted px-1 rounded">.claude/</code> directory
+              with skills, MCP servers, and settings. Overlaid into the sandbox at runtime.
+            </p>
+            <div className="space-y-1.5">
+              <Label htmlFor="config-repo-url">Repository</Label>
+              <Input
+                id="config-repo-url"
+                value={configRepoUrl}
+                onChange={(e) => setConfigRepoUrl(e.target.value)}
+                placeholder="org/my-claude-config"
+              />
+              <p className="text-xs text-muted-foreground">
+                GitHub repo path (e.g. <code className="bg-muted px-1 rounded">org/claude-skills</code>).
+                Leave empty to use global config only.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="config-repo-branch">Branch</Label>
+              <Input
+                id="config-repo-branch"
+                value={configRepoBranch}
+                onChange={(e) => setConfigRepoBranch(e.target.value)}
+                placeholder="main"
+              />
             </div>
           </div>
 

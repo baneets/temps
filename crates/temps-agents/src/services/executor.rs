@@ -224,6 +224,47 @@ impl AgentExecutor {
         }
     }
 
+    /// Inject config repos and secrets into the sandbox.
+    ///
+    /// Overlay order: repo's own `.claude/` → global config repo → per-agent config repo.
+    /// For `settings.json`, MCP servers are deep-merged (not overwritten).
+    /// Secrets are resolved from `${TEMPS_SECRET:name}` placeholders.
+    ///
+    /// This is a best-effort operation — if config repos are not configured
+    /// or cloning fails, the agent run continues without them.
+    async fn inject_config_repos_and_secrets(
+        &self,
+        run_id: i32,
+        config: &temps_entities::project_agents::Model,
+        _project_id: i32,
+        _connection_id: Option<i32>,
+    ) -> Result<(), AgentError> {
+        // TODO: Phase 2 — clone global and per-agent config repos via
+        // GitProviderManager.clone_repository(), overlay .claude/ directory
+        // into sandbox via write_directory(), deep-merge settings.json mcpServers.
+        //
+        // TODO: Phase 3 — load agent_secrets (global), decrypt, inject env vars
+        // and files, resolve ${TEMPS_SECRET:name} placeholders in config files.
+
+        let has_config_repo = config.config_repo_url.is_some();
+        if has_config_repo {
+            self.run_service
+                .append_log(
+                    run_id,
+                    "info",
+                    &format!(
+                        "Config repo configured: {} (branch: {}). Injection not yet implemented.",
+                        config.config_repo_url.as_deref().unwrap_or(""),
+                        config.config_repo_branch.as_deref().unwrap_or("main"),
+                    ),
+                    None,
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Execute a single autopilot run. Handles the full lifecycle from cloning to PR creation.
     pub async fn execute_run(&self, run_id: i32) {
         tracing::info!("Starting autopilot run {}", run_id);
@@ -463,8 +504,9 @@ impl AgentExecutor {
                     run_id,
                     "info",
                     &format!(
-                        "Creating sandbox: runtime={}, {} CPU, {}MB RAM, network={}",
+                        "Creating sandbox: runtime={}, image={}, {} CPU, {}MB RAM, network={}",
                         global_sandbox.runtime,
+                        crate::sandbox::docker::image_name_for_runtime(&global_sandbox.runtime),
                         global_sandbox.cpu_limit,
                         global_sandbox.memory_limit_mb,
                         global_sandbox.network_mode,
@@ -474,16 +516,18 @@ impl AgentExecutor {
                 .await?;
 
             let sandbox_start = std::time::Instant::now();
-            self.sandbox_registry.get_or_create(sandbox_config).await?;
+            let handle = self.sandbox_registry.get_or_create(sandbox_config).await?;
 
             self.run_service
                 .append_log(
                     run_id,
                     "info",
                     &format!(
-                        "Sandbox ready in {:.1}s ({})",
+                        "Sandbox ready in {:.1}s ({}) — container={}, id={}",
                         sandbox_start.elapsed().as_secs_f64(),
-                        self.sandbox_registry.provider_name()
+                        self.sandbox_registry.provider_name(),
+                        handle.sandbox_name,
+                        &handle.sandbox_id[..12.min(handle.sandbox_id.len())],
                     ),
                     None,
                 )
@@ -510,6 +554,34 @@ impl AgentExecutor {
                 );
             } else {
                 tracing::debug!("Installed memory script for run {}", run_id);
+            }
+
+            // Step 6c: Inject config repos and secrets into the sandbox
+            if let Err(e) = self
+                .inject_config_repos_and_secrets(
+                    run_id,
+                    &config,
+                    run.project_id,
+                    project.git_provider_connection_id,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to inject config repos/secrets for run {}: {}. Continuing without them.",
+                    run_id,
+                    e
+                );
+                self.run_service
+                    .append_log(
+                        run_id,
+                        "warning",
+                        &format!(
+                            "Config repo/secrets injection failed: {}. Agent will run without them.",
+                            e
+                        ),
+                        None,
+                    )
+                    .await?;
             }
         }
 
@@ -1470,7 +1542,12 @@ pub fn build_claude_cmd(
 ) -> Vec<String> {
     match provider_name {
         "claude_cli" => {
-            let mut cmd = vec!["claude".to_string(), "--print".to_string()];
+            // Use full path — Docker exec may not resolve PATH correctly
+            // when the binary lives in a named-volume-mounted home directory.
+            let mut cmd = vec![
+                "/home/temps/.local/bin/claude".to_string(),
+                "--print".to_string(),
+            ];
             if continue_conversation {
                 cmd.push("--continue".to_string());
             }
@@ -1821,6 +1898,8 @@ mod tests {
             branch_prefix: "autopilot/".into(),
             deliverable: "pull_request".into(),
             sandbox_enabled: None,
+            config_repo_url: None,
+            config_repo_branch: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -149,6 +149,52 @@ impl SandboxProvider for LocalSandboxProvider {
             })
     }
 
+    async fn write_directory(
+        &self,
+        _handle: &SandboxHandle,
+        local_dir: &std::path::Path,
+        target_path: &str,
+    ) -> Result<(), AgentError> {
+        let target = std::path::Path::new(target_path);
+        tokio::fs::create_dir_all(target)
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: String::new(),
+                reason: format!(
+                    "write_directory: create_dir_all {} failed: {}",
+                    target_path, e
+                ),
+            })?;
+
+        // Recursive copy using cp -a (preserves symlinks and permissions)
+        let output = tokio::process::Command::new("cp")
+            .args(["-a"])
+            .arg(format!("{}/.", local_dir.display()))
+            .arg(target_path)
+            .output()
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: String::new(),
+                reason: format!("write_directory: cp failed: {}", e),
+            })?;
+
+        if !output.status.success() {
+            return Err(AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: String::new(),
+                reason: format!(
+                    "write_directory: cp failed with exit {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     async fn kill_processes(
         &self,
         handle: &SandboxHandle,

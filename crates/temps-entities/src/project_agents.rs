@@ -36,6 +36,11 @@ pub struct Model {
     /// Whether to run this agent inside an isolated sandbox container.
     /// None = use global default, Some(true) = force on, Some(false) = force off.
     pub sandbox_enabled: Option<bool>,
+    /// Private config repo containing .claude/ directory (skills, MCP, plugins).
+    /// Format: "owner/repo" (e.g. "myorg/claude-config").
+    pub config_repo_url: Option<String>,
+    /// Branch of the config repo to use (default: "main").
+    pub config_repo_branch: Option<String>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

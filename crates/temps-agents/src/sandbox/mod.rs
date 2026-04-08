@@ -120,6 +120,19 @@ pub trait SandboxProvider: Send + Sync {
     /// Returns an error if the file does not exist.
     async fn read_file(&self, handle: &SandboxHandle, path: &str) -> Result<Vec<u8>, AgentError>;
 
+    /// Write an entire local directory tree into the sandbox at `target_path`.
+    ///
+    /// Builds a single tar archive from `local_dir` and uploads in one shot,
+    /// which is much more efficient than calling `write_file` for each entry.
+    /// The directory structure under `local_dir` is preserved relative to
+    /// `target_path`.
+    async fn write_directory(
+        &self,
+        handle: &SandboxHandle,
+        local_dir: &std::path::Path,
+        target_path: &str,
+    ) -> Result<(), AgentError>;
+
     /// Kill processes inside the sandbox matching a pgrep/pkill pattern.
     ///
     /// `signal` is constrained to [`KillSignal`] — only SIGTERM/SIGKILL are
@@ -195,6 +208,26 @@ pub trait SandboxProvider: Send + Sync {
 
     /// Delete and rebuild the sandbox image. Returns the image name.
     async fn rebuild_image(&self) -> Result<String, AgentError>;
+
+    /// Rebuild the image with progress reporting. Each build log line is sent
+    /// via `on_progress`. Default implementation delegates to `rebuild_image`
+    /// with a single "done" message.
+    async fn rebuild_image_with_progress(
+        &self,
+        on_progress: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<String, AgentError> {
+        let _ = on_progress.send("Building image...".to_string()).await;
+        let result = self.rebuild_image().await;
+        match &result {
+            Ok(name) => {
+                let _ = on_progress.send(format!("Image built: {}", name)).await;
+            }
+            Err(e) => {
+                let _ = on_progress.send(format!("Build failed: {}", e)).await;
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]

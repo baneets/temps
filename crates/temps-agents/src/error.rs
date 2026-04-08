@@ -74,6 +74,9 @@ pub enum AgentError {
 
     #[error("Sandbox provider '{provider}' unavailable: {reason}")]
     SandboxProviderUnavailable { provider: String, reason: String },
+
+    #[error("Secret '{name}' not found")]
+    SecretNotFound { name: String },
 }
 
 impl From<sea_orm::DbErr> for AgentError {

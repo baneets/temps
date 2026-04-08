@@ -46,6 +46,9 @@ pub struct AppSettings {
 
     // Workspace preview gateway settings (single shared container per node)
     pub preview_gateway: PreviewGatewaySettings,
+
+    // AI configuration settings (global config repo for skills, MCP servers, etc.)
+    pub ai_config: AiConfigSettings,
 }
 
 /// Docker container log rotation settings
@@ -107,6 +110,30 @@ pub struct AgentSandboxSettings {
     /// Network access level: "full" (unrestricted), "restricted" (Temps network only), "none" (no network)
     #[schema(example = "full")]
     pub network_mode: String,
+}
+
+/// Global AI configuration settings. Controls the default config repo
+/// containing `.claude/` directory (skills, MCP servers, plugins) that
+/// gets overlaid into every agent sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct AiConfigSettings {
+    /// Global config repo URL in "owner/repo" format (e.g. "myorg/claude-config").
+    /// Cloned at agent run time and overlaid into the sandbox's `.claude/` directory.
+    #[schema(example = "")]
+    pub config_repo: String,
+    /// Branch of the config repo to use.
+    #[schema(example = "main")]
+    pub config_repo_branch: String,
+}
+
+impl Default for AiConfigSettings {
+    fn default() -> Self {
+        Self {
+            config_repo: String::new(),
+            config_repo_branch: "main".to_string(),
+        }
+    }
 }
 
 fn default_auth_type() -> String {
@@ -284,6 +311,7 @@ impl Default for AppSettings {
             multi_node: MultiNodeSettings::default(),
             agent_sandbox: AgentSandboxSettings::default(),
             preview_gateway: PreviewGatewaySettings::default(),
+            ai_config: AiConfigSettings::default(),
         }
     }
 }

@@ -234,6 +234,8 @@ fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
         deliverable: workflow.deliverable,
         enabled: workflow.enabled,
         sandbox: None,
+        config_repo: None,
+        config_repo_branch: None,
     }
 }
 

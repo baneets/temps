@@ -26,6 +26,8 @@ export interface Agent {
   branch_prefix: string
   deliverable: string
   sandbox_enabled: boolean | null
+  config_repo_url: string | null
+  config_repo_branch: string | null
   created_at: string
   updated_at: string
 }
@@ -91,6 +93,8 @@ export interface CreateAgentRequest {
   branch_prefix?: string
   deliverable?: string
   sandbox_enabled?: boolean
+  config_repo_url?: string
+  config_repo_branch?: string
 }
 
 export interface UpdateAgentRequest {
@@ -108,6 +112,8 @@ export interface UpdateAgentRequest {
   branch_prefix?: string
   deliverable?: string
   sandbox_enabled?: boolean
+  config_repo_url?: string | null
+  config_repo_branch?: string | null
 }
 
 export interface PaginatedRuns {
@@ -211,4 +217,47 @@ export async function triggerAgent(projectId: number, slug: string, data?: { tri
 export async function getCliStatus(projectId: number, provider = 'claude_cli'): Promise<AiCliStatus> {
   const response = await fetch(`/api/projects/${projectId}/agents/cli-status?provider=${provider}`)
   return handleResponse<AiCliStatus>(response)
+}
+
+// ── Secrets ──
+
+export interface AgentSecret {
+  id: number
+  name: string
+  secret_type: 'env' | 'file'
+  mount_path: string | null
+  description: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateSecretRequest {
+  name: string
+  secret_type: 'env' | 'file'
+  value: string
+  mount_path?: string
+  description?: string
+}
+
+export async function listSecrets(): Promise<AgentSecret[]> {
+  const response = await fetch('/api/settings/secrets')
+  const data = await handleResponse<{ items: AgentSecret[] } | AgentSecret[]>(response)
+  return Array.isArray(data) ? data : data.items
+}
+
+export async function createSecret(data: CreateSecretRequest): Promise<AgentSecret> {
+  const response = await fetch('/api/settings/secrets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<AgentSecret>(response)
+}
+
+export async function deleteSecret(name: string): Promise<void> {
+  const response = await fetch(`/api/settings/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(text || `Request failed with status ${response.status}`)
+  }
 }

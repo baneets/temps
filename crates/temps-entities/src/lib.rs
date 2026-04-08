@@ -7,7 +7,9 @@ pub mod alarms;
 // Agent entities (renamed from autopilot)
 pub mod agent_run_logs;
 pub mod agent_runs;
+pub mod agent_secrets;
 pub mod project_agents;
+pub mod project_secrets;
 // Legacy autopilot entities (kept for migration compatibility)
 pub mod api_keys;
 pub mod audit_logs;

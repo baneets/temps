@@ -54,6 +54,11 @@ export interface AgentSandboxSettings {
   network_mode: string
 }
 
+export interface AiConfigSettings {
+  config_repo: string
+  config_repo_branch: string
+}
+
 // Re-export the types from the API for consistency
 export interface PlatformSettings extends AppSettings {
   dns_provider: DnsProviderSettings
@@ -65,6 +70,7 @@ export interface PlatformSettings extends AppSettings {
   rate_limiting: RateLimitSettings
   disk_space_alert: DiskSpaceAlertSettings
   agent_sandbox: AgentSandboxSettings
+  ai_config: AiConfigSettings
   attack_mode?: boolean
 }
 
@@ -82,6 +88,7 @@ export async function getPlatformSettings(): Promise<PlatformSettings> {
       const data = response.data as typeof response.data & {
         disk_space_alert?: DiskSpaceAlertSettings
         agent_sandbox?: AgentSandboxSettings
+        ai_config?: AiConfigSettings
         attack_mode?: boolean
       }
       // Ensure all required fields have defaults
@@ -138,6 +145,10 @@ export async function getPlatformSettings(): Promise<PlatformSettings> {
           memory_limit_mb: 2048,
           network_mode: 'full',
         },
+        ai_config: data.ai_config || {
+          config_repo: '',
+          config_repo_branch: 'main',
+        },
         attack_mode: data.attack_mode || false,
       }
 
@@ -190,6 +201,7 @@ export async function updatePlatformSettings(
       rate_limiting: updated.rate_limiting,
       disk_space_alert: updated.disk_space_alert,
       agent_sandbox: updated.agent_sandbox,
+      ai_config: updated.ai_config,
       attack_mode: updated.attack_mode,
     }
     const response = await updateSettings({ body })
@@ -311,6 +323,10 @@ function getDefaultSettings(): PlatformSettings {
       cpu_limit: 2.0,
       memory_limit_mb: 2048,
       network_mode: 'full',
+    },
+    ai_config: {
+      config_repo: '',
+      config_repo_branch: 'main',
     },
     attack_mode: false,
   }
