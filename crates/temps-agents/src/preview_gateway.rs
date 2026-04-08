@@ -39,6 +39,81 @@ use tracing::{debug, info, warn};
 /// Pinned image reference. Bumped per release. Never `:latest`.
 pub const PREVIEW_GATEWAY_IMAGE: &str = "kfsoftware/temps-preview-gateway:dev";
 
+/// Filename inside `TEMPS_DATA_DIR` that holds the gateway shared secret.
+/// The file is created with 0600 perms on first boot if missing; the same
+/// value is then injected into (a) the gateway container env and (b) the
+/// `PREVIEW_GATEWAY_SHARED_SECRET` env of the current process so the
+/// host-side Pingora can pick it up and inject the `X-Temps-Preview-Token`
+/// header on every forwarded preview request.
+const PREVIEW_GATEWAY_SECRET_FILE: &str = "preview_gateway.secret";
+
+/// Ensure a shared-secret file exists under `data_dir`, generating a fresh
+/// 32-byte random secret (hex-encoded) if missing. Sets restrictive perms on
+/// first write. Returns the secret as a hex string.
+///
+/// Also exports the secret into `PREVIEW_GATEWAY_SHARED_SECRET` for the
+/// current process so in-process subsystems (notably the Pingora proxy's
+/// preview route) can read it via `std::env::var` without plumbing state.
+pub fn ensure_shared_secret(data_dir: &std::path::Path) -> Result<String> {
+    let path = data_dir.join(PREVIEW_GATEWAY_SECRET_FILE);
+
+    let secret = match std::fs::read_to_string(&path) {
+        Ok(existing) => {
+            let trimmed = existing.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(anyhow!(
+                    "preview gateway secret file {} is empty",
+                    path.display()
+                ));
+            }
+            trimmed
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Generate a fresh 32-byte random secret.
+            use rand::RngCore;
+            let mut bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let hex = hex::encode(bytes);
+
+            // Make sure the parent dir exists.
+            if !data_dir.exists() {
+                std::fs::create_dir_all(data_dir)
+                    .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+            }
+            std::fs::write(&path, &hex)
+                .with_context(|| format!("failed to write {}", path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            info!(
+                path = %path.display(),
+                "generated new preview gateway shared secret"
+            );
+            hex
+        }
+        Err(e) => {
+            return Err(anyhow!(
+                "failed to read preview gateway secret file {}: {}",
+                path.display(),
+                e
+            ));
+        }
+    };
+
+    // Export for the in-process proxy to pick up at request time.
+    // SAFETY: set_var is marked unsafe on newer Rust due to multi-threaded
+    // env races. We call this only during single-threaded startup before
+    // the proxy begins serving, so it is safe in practice.
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("PREVIEW_GATEWAY_SHARED_SECRET", &secret);
+    }
+
+    Ok(secret)
+}
+
 /// Container name for the singleton gateway on this host.
 pub const PREVIEW_GATEWAY_CONTAINER: &str = "temps-preview-gateway";
 
@@ -58,6 +133,10 @@ pub struct PreviewGatewaySpec {
     pub container_name: String,
     pub network: String,
     pub host_port: u16,
+    /// Shared secret the gateway will require on every request via the
+    /// `X-Temps-Preview-Token` header. When empty, the gateway is started
+    /// in legacy open mode — callers SHOULD always pass a non-empty value.
+    pub shared_secret: String,
 }
 
 impl Default for PreviewGatewaySpec {
@@ -67,6 +146,7 @@ impl Default for PreviewGatewaySpec {
             container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
             network: PREVIEW_GATEWAY_NETWORK.to_string(),
             host_port: DEFAULT_PREVIEW_GATEWAY_HOST_PORT,
+            shared_secret: String::new(),
         }
     }
 }
@@ -91,6 +171,7 @@ impl PreviewGatewaySpec {
             container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
             network: PREVIEW_GATEWAY_NETWORK.to_string(),
             host_port,
+            shared_secret: String::new(),
         }
     }
 }
@@ -321,12 +402,21 @@ async fn create_and_start(docker: &Docker, spec: &PreviewGatewaySpec) -> Result<
         image: Some(spec.image.clone()),
         exposed_ports: Some(exposed_ports),
         host_config: Some(host_config),
-        env: Some(vec![
-            // Inside the container we MUST bind 0.0.0.0 — the host loopback
-            // restriction is enforced by the `-p 127.0.0.1:…` publish above.
-            format!("LISTEN_ADDR=0.0.0.0:{}", GATEWAY_CONTAINER_PORT),
-            "RUST_LOG=info".to_string(),
-        ]),
+        env: Some({
+            let mut e = vec![
+                // Inside the container we MUST bind 0.0.0.0 — the host loopback
+                // restriction is enforced by the `-p 127.0.0.1:…` publish above.
+                format!("LISTEN_ADDR=0.0.0.0:{}", GATEWAY_CONTAINER_PORT),
+                "RUST_LOG=info".to_string(),
+            ];
+            if !spec.shared_secret.is_empty() {
+                e.push(format!(
+                    "PREVIEW_GATEWAY_SHARED_SECRET={}",
+                    spec.shared_secret
+                ));
+            }
+            e
+        }),
         ..Default::default()
     };
 
@@ -365,10 +455,29 @@ pub fn spawn_reconcile(
     rt: &tokio::runtime::Runtime,
     docker: Arc<Docker>,
     db: Arc<DatabaseConnection>,
+    data_dir: std::path::PathBuf,
 ) {
+    // Ensure the shared secret exists BEFORE spawning the reconciler so that
+    // the proxy (which reads the env var at request time) sees it even if the
+    // reconcile task hasn't run yet. A reconcile failure should not leave the
+    // proxy open — but secret-generation errors MUST not crash the server, so
+    // we log loudly and continue (the gateway container will then refuse to
+    // start and preview URLs just stay down).
+    let shared_secret = match ensure_shared_secret(&data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "❌ failed to ensure preview gateway shared secret: {} — workspace previews disabled",
+                e
+            );
+            String::new()
+        }
+    };
+
     rt.spawn(async move {
         let settings = load_settings(&db).await;
         let mut spec = PreviewGatewaySpec::from_settings(&settings);
+        spec.shared_secret = shared_secret;
 
         if !settings.auto_upgrade {
             // Honor whatever image is currently running. Falls back to the

@@ -1516,12 +1516,23 @@ impl MessageExecutor {
             }
         }
 
+        // Token lifetime: 6 hours. Long enough for a realistic interactive
+        // Claude/agent session, short enough that a leaked env-var token
+        // stops being useful within one work session. The stale-token
+        // cleanup above (delete_token on name collision) reissues on every
+        // new session, so users don't hit expiry mid-session in practice.
+        //
+        // Permissions: still FullAccess (`*`) because the memory and
+        // workspace handlers gate on the admin Permission enum, not on
+        // granular deployment-token permissions. Fine-grained scoping is
+        // tracked as Phase 2 of the security hardening plan.
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(6);
         let request = CreateDeploymentTokenRequest {
             name: token_name,
             environment_id: None,
             deployment_id: None,
             permissions: Some(vec!["*".to_string()]),
-            expires_at: None,
+            expires_at: Some(expires_at),
         };
 
         let response = self

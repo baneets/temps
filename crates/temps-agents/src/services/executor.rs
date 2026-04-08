@@ -196,12 +196,18 @@ impl AgentExecutor {
                 None => return None,
             }
         };
+        // Token lifetime: 2 hours. Autopilot runs have an internal timeout
+        // well under this, so any token still usable after 2h belongs to a
+        // run that has already completed or died — we'd rather the token
+        // expire than linger. See Phase 2 of the security plan for
+        // fine-grained permission scoping beyond expiry.
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
         let request = CreateDeploymentTokenRequest {
             name: format!("workflow-run-{}-{}", agent_slug, run_id),
             environment_id: None,
             deployment_id: None,
             permissions: Some(vec!["*".to_string()]),
-            expires_at: None,
+            expires_at: Some(expires_at),
         };
         match svc.create_token(project_id, None, request).await {
             Ok(response) => Some(response.token),

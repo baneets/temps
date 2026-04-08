@@ -235,7 +235,16 @@ impl ServeCommand {
         // the gateway container. It MUST NOT block proxy startup — workspace
         // previews are a non-critical subsystem.
         if let Some(docker) = docker_handle.clone() {
-            temps_agents::preview_gateway::spawn_reconcile(&rt, docker, db.clone());
+            let data_dir = self
+                .data_dir
+                .clone()
+                .or_else(|| std::env::var("TEMPS_DATA_DIR").ok().map(PathBuf::from))
+                .unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(".temps")
+                });
+            temps_agents::preview_gateway::spawn_reconcile(&rt, docker, db.clone(), data_dir);
         }
 
         // Start console API server in background (non-blocking).

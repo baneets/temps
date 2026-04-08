@@ -101,16 +101,22 @@ impl Config {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_MAX_HEADER_BYTES);
 
+        // Require PREVIEW_GATEWAY_SHARED_SECRET. Without it, any local process
+        // or other container on the shared bridge network can reach the gateway
+        // and proxy traffic to any sandbox, bypassing the host-side preview
+        // password wall. We fail fast so misconfigurations are loud.
         let shared_secret = std::env::var("PREVIEW_GATEWAY_SHARED_SECRET")
             .ok()
-            .filter(|s| !s.is_empty());
-        if shared_secret.is_none() {
-            warn!(
-                "PREVIEW_GATEWAY_SHARED_SECRET is unset — gateway will accept \
-                 unauthenticated requests. Set it in production so only the \
-                 host-side Pingora can talk to the gateway."
-            );
-        }
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "PREVIEW_GATEWAY_SHARED_SECRET is unset or empty. The gateway refuses \
+                     to start without a shared secret; the host-side Temps control plane \
+                     auto-generates one under TEMPS_DATA_DIR/preview_gateway.secret and \
+                     injects it on container creation."
+                )
+            })?;
+        let shared_secret = Some(shared_secret);
 
         Ok(Self {
             listen_addr,

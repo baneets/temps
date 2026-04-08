@@ -152,7 +152,12 @@ RUN EXISTING_USER=$(getent passwd 1000 | cut -d: -f1) \
          (groupdel "$EXISTING_USER" 2>/dev/null || true); \
        fi \
     && useradd -m -s /bin/bash -u 1000 temps \
-    && echo "temps ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/temps
+    && echo '# temps sandbox: scoped sudo for package install only.' > /etc/sudoers.d/temps \
+    && echo 'Cmnd_Alias TEMPS_PKG = /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/pip, /usr/bin/pip3, /usr/local/bin/uv, /usr/bin/npm, /usr/local/bin/bun' >> /etc/sudoers.d/temps \
+    && echo 'temps ALL=(ALL) NOPASSWD: TEMPS_PKG' >> /etc/sudoers.d/temps \
+    && echo 'Defaults:temps !requiretty, !log_input, !log_output' >> /etc/sudoers.d/temps \
+    && chmod 0440 /etc/sudoers.d/temps \
+    && visudo -c -f /etc/sudoers.d/temps
 RUN mkdir -p /workspace && chown temps:temps /workspace
 # /run/temps-pty holds one Unix socket per terminal tab (one per {{kind,tab}}
 # pair). dtach creates these sockets on first attach; subsequent reconnects
