@@ -1122,7 +1122,7 @@ impl SandboxProvider for DockerSandboxProvider {
         &self,
         handle: &SandboxHandle,
         pattern: &str,
-        signal: i32,
+        signal: super::KillSignal,
     ) -> Result<(), AgentError> {
         // Fresh exec running pkill. pkill exits 0 if something was killed,
         // 1 if nothing matched — both are success from our POV. Bounded by
@@ -1130,13 +1130,14 @@ impl SandboxProvider for DockerSandboxProvider {
         //
         // Use `pgrep` + `kill` instead of `pkill -f` to handle both busybox
         // and util-linux pkill variants uniformly.
+        let sig_num = signal.as_number();
         let cmd = vec![
             "sh".to_string(),
             "-c".to_string(),
             format!(
                 "pgrep -f {pattern_q} 2>/dev/null | xargs -r kill -{sig} 2>/dev/null; exit 0",
                 pattern_q = shell_quote(pattern),
-                sig = signal,
+                sig = sig_num,
             ),
         ];
 
@@ -1145,7 +1146,7 @@ impl SandboxProvider for DockerSandboxProvider {
             Ok(Ok(_)) => {
                 tracing::debug!(
                     "kill_processes: sent signal {} to '{}' in {}",
-                    signal,
+                    sig_num,
                     pattern,
                     handle.sandbox_name
                 );

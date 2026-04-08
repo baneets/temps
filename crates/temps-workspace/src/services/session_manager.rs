@@ -228,7 +228,12 @@ impl WorkspaceSessionManager {
 
     /// Kill processes inside the session's sandbox matching a pattern.
     /// Best-effort: never returns a hard error, just logs.
-    pub async fn kill_session_processes(&self, session_id: i32, pattern: &str, signal: i32) {
+    pub async fn kill_session_processes(
+        &self,
+        session_id: i32,
+        pattern: &str,
+        signal: temps_agents::sandbox::KillSignal,
+    ) {
         let sessions = self.sessions.read().await;
         if let Some(live) = sessions.get(&session_id) {
             let _ = self
@@ -941,7 +946,7 @@ mod tests {
             &self,
             _handle: &SandboxHandle,
             _pattern: &str,
-            _signal: i32,
+            _signal: temps_agents::sandbox::KillSignal,
         ) -> Result<(), AgentError> {
             Ok(())
         }

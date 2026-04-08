@@ -9,6 +9,30 @@ use std::time::Duration;
 use crate::ai_cli::OnEventCallback;
 use crate::error::AgentError;
 
+/// Unix signal to send to processes inside a sandbox. Constrained on purpose
+/// — the only two signals the workspace ever needs are SIGTERM (graceful
+/// shutdown, give the CLI a chance to flush state) and SIGKILL (hard kill
+/// after a grace period). Passing arbitrary integers across the provider
+/// boundary would invite untrusted callers to stuff anything from SIGSTOP
+/// to SIGUSR1 into the sandbox exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillSignal {
+    /// SIGTERM (15) — graceful termination. The process may trap it.
+    Term,
+    /// SIGKILL (9) — immediate kill. Cannot be trapped.
+    Kill,
+}
+
+impl KillSignal {
+    /// Unix signal number used by `kill(1)` / `pkill -<n>`.
+    pub fn as_number(self) -> i32 {
+        match self {
+            KillSignal::Term => 15,
+            KillSignal::Kill => 9,
+        }
+    }
+}
+
 /// A handle to an active sandbox. Opaque to callers — the internal fields
 /// are provider-specific (Docker container ID, Vercel sandbox ID, etc.).
 #[derive(Debug, Clone)]
@@ -98,10 +122,10 @@ pub trait SandboxProvider: Send + Sync {
 
     /// Kill processes inside the sandbox matching a pgrep/pkill pattern.
     ///
-    /// `signal` is a Unix signal number (15 = SIGTERM, 9 = SIGKILL).
-    /// `pattern` is passed to `pkill -f` — it matches against the full
-    /// command line, so prefer anchored patterns like `^claude ` to avoid
-    /// killing unrelated processes.
+    /// `signal` is constrained to [`KillSignal`] — only SIGTERM/SIGKILL are
+    /// valid. `pattern` is passed to `pkill -f` — it matches against the
+    /// full command line, so prefer anchored patterns like `^claude ` to
+    /// avoid killing unrelated processes.
     ///
     /// Returns Ok(()) whether or not anything was actually killed — the
     /// operation is inherently best-effort.
@@ -109,7 +133,7 @@ pub trait SandboxProvider: Send + Sync {
         &self,
         handle: &SandboxHandle,
         pattern: &str,
-        signal: i32,
+        signal: KillSignal,
     ) -> Result<(), AgentError>;
 
     /// Destroy sandbox and clean up its container.
@@ -171,4 +195,29 @@ pub trait SandboxProvider: Send + Sync {
 
     /// Delete and rebuild the sandbox image. Returns the image name.
     async fn rebuild_image(&self) -> Result<String, AgentError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_signal_term_is_15() {
+        assert_eq!(KillSignal::Term.as_number(), 15);
+    }
+
+    #[test]
+    fn kill_signal_kill_is_9() {
+        assert_eq!(KillSignal::Kill.as_number(), 9);
+    }
+
+    #[test]
+    fn kill_signal_is_copy() {
+        // Guards that KillSignal stays cheap to pass — if someone adds a
+        // String payload later, this stops compiling and forces a review.
+        let s = KillSignal::Term;
+        let a = s;
+        let b = s;
+        assert_eq!(a.as_number(), b.as_number());
+    }
 }

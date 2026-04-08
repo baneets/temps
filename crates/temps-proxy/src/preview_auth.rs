@@ -206,6 +206,12 @@ struct FailureState {
     window_start: Option<Instant>,
 }
 
+/// Hard cap on distinct (ip, session_id) pairs tracked concurrently.
+/// An attacker spraying unique IPs/session_ids can no longer grow this map
+/// without bound — at the cap we sweep expired entries, and if that fails
+/// to free space we drop the oldest entry.
+const MAX_TRACKED_ENTRIES: usize = 65_536;
+
 /// In-memory rate limiter for preview auth failures.
 #[derive(Debug, Default)]
 pub struct PreviewAuthLimiter {
@@ -231,6 +237,27 @@ impl PreviewAuthLimiter {
     }
 
     pub fn record_failure(&self, ip: IpAddr, session_id: i32) {
+        // Cap enforcement: opportunistically evict before insert so the map
+        // cannot be weaponized as an unbounded memory sink.
+        if !self.failures.contains_key(&(ip, session_id))
+            && self.failures.len() >= MAX_TRACKED_ENTRIES
+        {
+            self.evict_expired();
+            if self.failures.len() >= MAX_TRACKED_ENTRIES {
+                // Still full after sweep — drop the single oldest entry.
+                // Picking *an* entry is fine; under attack the whole map
+                // turns over quickly and legit users are re-inserted.
+                if let Some(victim) = self
+                    .failures
+                    .iter()
+                    .min_by_key(|e| e.value().window_start)
+                    .map(|e| *e.key())
+                {
+                    self.failures.remove(&victim);
+                }
+            }
+        }
+
         let mut entry = self.failures.entry((ip, session_id)).or_default();
         let now = Instant::now();
         match entry.window_start {
@@ -246,6 +273,15 @@ impl PreviewAuthLimiter {
 
     pub fn record_success(&self, ip: IpAddr, session_id: i32) {
         self.failures.remove(&(ip, session_id));
+    }
+
+    /// Drop all entries whose window has expired. O(n), but only called when
+    /// we hit the cap — amortized cost is negligible under normal load.
+    fn evict_expired(&self) {
+        self.failures.retain(|_, state| match state.window_start {
+            Some(start) => start.elapsed() <= RATE_LIMIT_WINDOW,
+            None => false,
+        });
     }
 }
 
@@ -436,5 +472,31 @@ mod tests {
         assert!(limiter.is_blocked(ip, 2));
         limiter.record_success(ip, 2);
         assert!(!limiter.is_blocked(ip, 2));
+    }
+
+    #[test]
+    fn rate_limiter_is_bounded_under_flood() {
+        // Spray far more unique (ip, session) pairs than the cap allows.
+        // The map must never exceed MAX_TRACKED_ENTRIES — this is the
+        // whole point of the eviction logic: an attacker can't use
+        // record_failure to OOM the proxy.
+        let limiter = PreviewAuthLimiter::new();
+        let attacker_count = MAX_TRACKED_ENTRIES + 5_000;
+        for i in 0..attacker_count {
+            // Synthesize distinct IPv4 addrs across the /8, cycling session_id
+            // so each key is unique.
+            let octet_a = ((i >> 16) & 0xff) as u8;
+            let octet_b = ((i >> 8) & 0xff) as u8;
+            let octet_c = (i & 0xff) as u8;
+            let ip: IpAddr = format!("10.{}.{}.{}", octet_a, octet_b, octet_c)
+                .parse()
+                .unwrap();
+            limiter.record_failure(ip, (i % 1024) as i32);
+        }
+        assert!(
+            limiter.failures.len() <= MAX_TRACKED_ENTRIES,
+            "limiter grew beyond cap: {}",
+            limiter.failures.len()
+        );
     }
 }

@@ -109,13 +109,22 @@ impl MessageExecutor {
         self.dirty_sessions.write().await.insert(session_id);
         // SIGTERM first — give claude ~2s to flush the current turn to jsonl.
         self.session_manager
-            .kill_session_processes(session_id, "^claude ", 15)
+            .kill_session_processes(
+                session_id,
+                "^claude ",
+                temps_agents::sandbox::KillSignal::Term,
+            )
             .await;
         // Spawn the escalation-to-SIGKILL so we don't block the handler.
         let sm = self.session_manager.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            sm.kill_session_processes(session_id, "^claude ", 9).await;
+            sm.kill_session_processes(
+                session_id,
+                "^claude ",
+                temps_agents::sandbox::KillSignal::Kill,
+            )
+            .await;
         });
     }
 
@@ -710,7 +719,11 @@ impl MessageExecutor {
         //    claudes writing to the same jsonl corrupt it. This is always
         //    safe — if there's nothing to kill, pkill is a no-op.
         self.session_manager
-            .kill_session_processes(session_id, "^claude ", 9)
+            .kill_session_processes(
+                session_id,
+                "^claude ",
+                temps_agents::sandbox::KillSignal::Kill,
+            )
             .await;
 
         // 2. Repair pass: if this session is marked dirty (prior cancel or
@@ -922,12 +935,12 @@ impl MessageExecutor {
                 Err(_) => {
                     self.dirty_sessions.write().await.insert(session_id);
                     self.session_manager
-                        .kill_session_processes(session_id, "^claude ", 15)
+                        .kill_session_processes(session_id, "^claude ", temps_agents::sandbox::KillSignal::Term)
                         .await;
                     let sm = self.session_manager.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        sm.kill_session_processes(session_id, "^claude ", 9).await;
+                        sm.kill_session_processes(session_id, "^claude ", temps_agents::sandbox::KillSignal::Kill).await;
                     });
                     Err(WorkspaceError::AiCliFailed {
                         session_id,
@@ -1014,7 +1027,11 @@ impl MessageExecutor {
         // Nuke every .jsonl in the claude projects dir for this sandbox.
         // We don't know the exact filename, so shotgun-delete them all.
         self.session_manager
-            .kill_session_processes(session_id, "^claude ", 9)
+            .kill_session_processes(
+                session_id,
+                "^claude ",
+                temps_agents::sandbox::KillSignal::Kill,
+            )
             .await;
         let delete_cmd = vec![
             "sh".to_string(),

@@ -153,11 +153,11 @@ impl SandboxProvider for LocalSandboxProvider {
         &self,
         handle: &SandboxHandle,
         pattern: &str,
-        signal: i32,
+        signal: super::KillSignal,
     ) -> Result<(), AgentError> {
         // Best-effort pkill on the host. Scoped to the current user so we
         // don't accidentally kill other things.
-        let sig_flag = format!("-{}", signal);
+        let sig_flag = format!("-{}", signal.as_number());
         let _ = tokio::process::Command::new("pkill")
             .arg(&sig_flag)
             .arg("-f")
