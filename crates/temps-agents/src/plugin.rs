@@ -439,14 +439,14 @@ impl TempsPlugin for AgentsPlugin {
                                 let provider = DockerSandboxProvider::new(docker, config);
                                 if let Err(e) = provider.ensure_image().await {
                                     tracing::warn!(
-                                        "Failed to build sandbox image, using local fallback: {}",
+                                        "Failed to pre-build sandbox image: {} — \
+                                         Docker is available so the provider is still \
+                                         usable; image will be rebuilt on first agent run",
                                         e
                                     );
-                                    ensure_local_sandbox_allowed()?
-                                } else {
-                                    tracing::info!("Docker sandbox provider initialized");
-                                    Arc::new(provider)
                                 }
+                                tracing::info!("Docker sandbox provider initialized");
+                                Arc::new(provider)
                             }
                             Err(e) => {
                                 tracing::warn!("Docker not responding, using local sandbox: {}", e);

@@ -138,9 +138,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | t
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh && rm -rf /var/lib/apt/lists/*
 # Install GitLab CLI (glab) from official release tarball
-RUN ARCH=$(dpkg --print-architecture) \
-    && case "$ARCH" in amd64) GLAB_ARCH=x86_64 ;; arm64) GLAB_ARCH=arm64 ;; *) GLAB_ARCH=$ARCH ;; esac \
-    && GLAB_VERSION=1.51.0 \
+RUN GLAB_ARCH=$(dpkg --print-architecture) \
+    && GLAB_VERSION=1.91.0 \
     && curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${{GLAB_VERSION}}/downloads/glab_${{GLAB_VERSION}}_linux_${{GLAB_ARCH}}.tar.gz" -o /tmp/glab.tar.gz \
     && tar -xzf /tmp/glab.tar.gz -C /tmp \
     && mv /tmp/bin/glab /usr/local/bin/glab \
@@ -1394,10 +1393,17 @@ mod tests {
     #[test]
     fn test_dockerfile_for_runtime_node() {
         let df = dockerfile_for_runtime("node");
-        assert!(df.contains("FROM node:20-slim"));
-        assert!(df.contains("claude-code"));
+        assert!(df.contains("FROM ubuntu:24.04"));
+        assert!(
+            df.contains("claude.ai/install.sh"),
+            "must use native Claude installer"
+        );
         assert!(df.contains("git"));
         assert!(df.contains("jq"), "jq must be installed for memory script");
+        assert!(
+            df.contains("nodesource"),
+            "node runtime must install Node.js via NodeSource"
+        );
     }
 
     #[test]
@@ -1417,7 +1423,7 @@ mod tests {
     fn test_dockerfile_for_runtime_python() {
         let df = dockerfile_for_runtime("python");
         assert!(df.contains("FROM python:3.12-slim"));
-        assert!(df.contains("claude-code"));
+        assert!(df.contains("claude.ai/install.sh"));
         assert!(df.contains("uv"));
     }
 
@@ -1425,28 +1431,28 @@ mod tests {
     fn test_dockerfile_for_runtime_rust() {
         let df = dockerfile_for_runtime("rust");
         assert!(df.contains("FROM rust:1-slim"));
-        assert!(df.contains("claude-code"));
+        assert!(df.contains("claude.ai/install.sh"));
     }
 
     #[test]
     fn test_dockerfile_for_runtime_bun() {
         let df = dockerfile_for_runtime("bun");
         assert!(df.contains("FROM oven/bun:latest"));
-        assert!(df.contains("claude-code"));
+        assert!(df.contains("claude.ai/install.sh"));
     }
 
     #[test]
     fn test_dockerfile_for_runtime_go() {
         let df = dockerfile_for_runtime("go");
-        assert!(df.contains("FROM golang:1.23-slim"));
-        assert!(df.contains("claude-code"));
+        assert!(df.contains("FROM golang:1.23-bookworm"));
+        assert!(df.contains("claude.ai/install.sh"));
     }
 
     #[test]
     fn test_dockerfile_for_runtime_full() {
         let df = dockerfile_for_runtime("full");
         assert!(df.contains("FROM ubuntu:24.04"));
-        assert!(df.contains("claude-code"));
+        assert!(df.contains("claude.ai/install.sh"));
         assert!(df.contains("python3"));
         assert!(df.contains("golang-go"));
         assert!(df.contains("nodejs"));
@@ -1456,7 +1462,7 @@ mod tests {
     #[test]
     fn test_dockerfile_for_unknown_runtime_defaults_to_node() {
         let df = dockerfile_for_runtime("unknown");
-        assert!(df.contains("FROM node:20-slim"));
+        assert!(df.contains("FROM ubuntu:24.04"));
     }
 
     #[test]
