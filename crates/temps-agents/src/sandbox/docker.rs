@@ -181,12 +181,23 @@ WORKDIR /workspace
     )
 }
 
-/// Image name for a runtime preset.
+/// Local image name for a runtime preset.
 pub fn image_name_for_runtime(runtime: &str) -> String {
     match runtime {
         "node" | "" => "temps-sandbox-node:latest".to_string(),
         other => format!("temps-sandbox-{other}:latest"),
     }
+}
+
+/// Docker Hub image name for a runtime preset. Used as a pull-cache:
+/// `ensure_image_for_runtime` tries to pull this first, then falls back
+/// to building locally if the Hub image isn't available.
+fn hub_image_for_runtime(runtime: &str) -> String {
+    let name = match runtime {
+        "node" | "" => "temps-sandbox-node",
+        other => return format!("gotempsh/temps-sandbox-{other}:latest"),
+    };
+    format!("gotempsh/{name}:latest")
 }
 
 /// Configuration for the Docker sandbox provider.
@@ -280,10 +291,38 @@ impl DockerSandboxProvider {
 
         let image_name = image_name_for_runtime(runtime);
 
-        // Check if image already exists
+        // Check if image already exists locally
         if self.docker.inspect_image(&image_name).await.is_ok() {
             tracing::debug!("Sandbox image {} already exists", image_name);
             return Ok(());
+        }
+
+        // Try pulling a prebuilt image from Docker Hub first. This is much
+        // faster than building locally (~seconds vs ~minutes) because the
+        // hub image is a fully baked layer including Claude CLI, bun, gh, etc.
+        // If the pull fails (rate limit, no internet, image not published yet)
+        // we fall back to a local build — fail-safe, never blocks startup.
+        let hub_image = hub_image_for_runtime(runtime);
+        tracing::info!(
+            "Trying to pull sandbox image {} from Docker Hub...",
+            hub_image
+        );
+        match self.try_pull_and_tag(&hub_image, &image_name).await {
+            Ok(()) => {
+                tracing::info!(
+                    "Pulled {} and tagged as {} — skipping local build",
+                    hub_image,
+                    image_name
+                );
+                return Ok(());
+            }
+            Err(reason) => {
+                tracing::info!(
+                    "Pull of {} failed ({}), falling back to local build",
+                    hub_image,
+                    reason
+                );
+            }
         }
 
         tracing::info!(
@@ -357,6 +396,36 @@ impl DockerSandboxProvider {
         }
 
         tracing::info!("Sandbox image {} built successfully", image_name);
+        Ok(())
+    }
+
+    /// Pull `hub_image` from Docker Hub and tag it as `local_name`.
+    /// Returns `Ok(())` on success, `Err(reason)` on any failure — callers
+    /// should treat failure as non-fatal and fall back to a local build.
+    async fn try_pull_and_tag(&self, hub_image: &str, local_name: &str) -> Result<(), String> {
+        let options = bollard::query_parameters::CreateImageOptionsBuilder::new()
+            .from_image(hub_image)
+            .build();
+        let mut stream = self.docker.create_image(Some(options), None, None);
+        while let Some(result) = stream.next().await {
+            if let Err(e) = result {
+                return Err(format!("{}", e));
+            }
+        }
+
+        // Tag the pulled image with the local name so the rest of the code
+        // can reference it without the registry prefix.
+        self.docker
+            .tag_image(
+                hub_image,
+                Some(bollard::query_parameters::TagImageOptions {
+                    repo: Some(local_name.to_string()),
+                    tag: None,
+                }),
+            )
+            .await
+            .map_err(|e| format!("tag failed: {}", e))?;
+
         Ok(())
     }
 
@@ -1570,5 +1639,284 @@ mod tests {
 
         let (_, image_name) = provider.image_status().await.unwrap();
         assert_eq!(image_name, "temps-sandbox-python:latest");
+    }
+
+    #[test]
+    fn test_hub_image_for_runtime() {
+        assert_eq!(
+            hub_image_for_runtime("node"),
+            "gotempsh/temps-sandbox-node:latest"
+        );
+        assert_eq!(
+            hub_image_for_runtime(""),
+            "gotempsh/temps-sandbox-node:latest"
+        );
+        assert_eq!(
+            hub_image_for_runtime("python"),
+            "gotempsh/temps-sandbox-python:latest"
+        );
+        assert_eq!(
+            hub_image_for_runtime("bun"),
+            "gotempsh/temps-sandbox-bun:latest"
+        );
+        assert_eq!(
+            hub_image_for_runtime("full"),
+            "gotempsh/temps-sandbox-full:latest"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pull_fallback_on_missing_hub_image() {
+        // Verify that ensure_image_for_runtime succeeds even when the
+        // Docker Hub image doesn't exist — it should fall back to a
+        // local build. We test by pointing at a non-existent hub image
+        // (which is the normal case until images are published).
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping test");
+                return;
+            }
+        };
+        let docker = Arc::new(docker);
+        if docker.ping().await.is_err() {
+            println!("Docker not responding, skipping test");
+            return;
+        }
+
+        let provider = DockerSandboxProvider::new(docker.clone(), DockerSandboxConfig::default());
+
+        // Delete the local image first (if any) so we exercise the
+        // pull→fail→build path. Ignore errors if it doesn't exist.
+        let _ = docker
+            .remove_image(
+                "temps-sandbox-node:latest",
+                None::<bollard::query_parameters::RemoveImageOptions>,
+                None,
+            )
+            .await;
+
+        // This should succeed via fallback build even though
+        // gotempsh/temps-sandbox-node:latest likely doesn't exist on Hub yet.
+        let result = provider.ensure_image_for_runtime("node").await;
+        assert!(
+            result.is_ok(),
+            "ensure_image should succeed via fallback build: {:?}",
+            result.err()
+        );
+
+        // Image should now exist locally
+        assert!(docker
+            .inspect_image("temps-sandbox-node:latest")
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_kill_processes_term_and_kill() {
+        // Integration test: create a sandbox, spawn a `sleep` process,
+        // kill it with SIGTERM, verify it's gone. Then spawn another,
+        // kill with SIGKILL, verify it's gone.
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping test");
+                return;
+            }
+        };
+        let docker = Arc::new(docker);
+        if docker.ping().await.is_err() {
+            println!("Docker not responding, skipping test");
+            return;
+        }
+
+        // If `temps serve` is running, it periodically cleans up sandbox
+        // containers whose run_id isn't in the database. That kills our
+        // test containers within ~1s. Skip the test to avoid flakes.
+        let containers = docker
+            .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+                all: false,
+                filters: Some(HashMap::from([(
+                    "name".to_string(),
+                    vec!["temps-sandbox-".to_string()],
+                )])),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_default();
+        if !containers.is_empty() {
+            println!(
+                "temps serve is managing {} sandbox(es) — skipping kill_processes test to avoid flakes",
+                containers.len()
+            );
+            return;
+        }
+
+        let config = DockerSandboxConfig::default();
+        let provider = DockerSandboxProvider::new(docker.clone(), config);
+
+        if let Err(e) = provider.ensure_image().await {
+            println!("Cannot build sandbox image, skipping: {}", e);
+            return;
+        }
+
+        let run_id = 99992;
+        let work_dir = std::env::temp_dir().join(format!("sandbox-kill-test-{}", run_id));
+        let _ = std::fs::create_dir_all(&work_dir);
+
+        let create_config = SandboxCreateConfig {
+            run_id,
+            host_work_dir: work_dir.clone(),
+            image: None,
+            cpu_limit: Some(1.0),
+            memory_limit_mb: Some(256),
+            pids_limit: None,
+            network_mode: Some("none".to_string()),
+            env_vars: HashMap::new(),
+            idle_timeout: Duration::from_secs(60),
+        };
+
+        let handle = provider.create(create_config).await.unwrap();
+
+        // Verify the sandbox is actually alive before proceeding.
+        // If `temps serve` is running, it may kill test containers whose
+        // run_id isn't in the database — skip gracefully rather than fail.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if !provider.is_alive(&handle).await.unwrap_or(false) {
+            println!("Container exited immediately after create — skipping kill_processes test");
+            let _ = provider.destroy(&handle, true).await;
+            let _ = std::fs::remove_dir_all(&work_dir);
+            return;
+        }
+
+        // --- SIGTERM test ---
+        // Write a script that daemonizes itself (double-fork pattern) so
+        // the sleep outlives the Docker exec session.
+        if let Err(e) = provider
+            .write_file(
+                &handle,
+                "/tmp/spawn_sleep.sh",
+                b"#!/bin/sh\n(sleep 9999 &)\nexit 0\n",
+                0o755,
+            )
+            .await
+        {
+            println!(
+                "Container died before write_file (temps serve cleanup?) — skipping: {}",
+                e
+            );
+            let _ = provider.destroy(&handle, true).await;
+            let _ = std::fs::remove_dir_all(&work_dir);
+            return;
+        }
+
+        let _ = provider
+            .exec(
+                &handle,
+                vec!["/tmp/spawn_sleep.sh".to_string()],
+                HashMap::new(),
+                None,
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Verify sleep is running
+        let result = provider
+            .exec(
+                &handle,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "pgrep -x sleep | wc -l".to_string(),
+                ],
+                HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let count: i32 = result.stdout.trim().parse().unwrap_or(0);
+        assert!(count > 0, "sleep should be running before kill");
+
+        // Kill with SIGTERM via our typed enum.
+        // Use the exact binary name "sleep" rather than a full-command
+        // pattern to avoid matching pgrep itself.
+        provider
+            .kill_processes(&handle, "sleep", crate::sandbox::KillSignal::Term)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Verify sleep is gone
+        let result = provider
+            .exec(
+                &handle,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "pgrep -x sleep | wc -l".to_string(),
+                ],
+                HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let count: i32 = result.stdout.trim().parse().unwrap_or(0);
+        assert_eq!(count, 0, "sleep should be gone after SIGTERM");
+
+        // --- SIGKILL test ---
+        // Spawn a new sleep for the SIGKILL test.
+        let _ = provider
+            .exec(
+                &handle,
+                vec!["/tmp/spawn_sleep.sh".to_string()],
+                HashMap::new(),
+                None,
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Verify it started
+        let result = provider
+            .exec(
+                &handle,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "pgrep -x sleep | wc -l".to_string(),
+                ],
+                HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let count: i32 = result.stdout.trim().parse().unwrap_or(0);
+        assert!(count > 0, "sleep should be running before SIGKILL");
+
+        // SIGKILL — cannot be trapped
+        provider
+            .kill_processes(&handle, "sleep", crate::sandbox::KillSignal::Kill)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let result = provider
+            .exec(
+                &handle,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "pgrep -x sleep | wc -l".to_string(),
+                ],
+                HashMap::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        let count: i32 = result.stdout.trim().parse().unwrap_or(0);
+        assert_eq!(count, 0, "sleep should be gone after SIGKILL");
+
+        // Cleanup
+        provider.destroy(&handle, true).await.unwrap();
+        let _ = std::fs::remove_dir_all(&work_dir);
     }
 }

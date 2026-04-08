@@ -41,3 +41,6 @@ pulldown-cmark = "0.12"
 libc = { workspace = true }
 rand = { workspace = true }
 hex = "0.4"
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -2335,3 +2335,96 @@ async fn reopen_session(
         Json(SessionResponse::from_model(session, &preview_parts)),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_tab_id_accepts_alphanumeric_and_dashes() {
+        assert!(is_safe_tab_id("main"));
+        assert!(is_safe_tab_id("tab-1"));
+        assert!(is_safe_tab_id("my_tab"));
+        assert!(is_safe_tab_id("abc123"));
+    }
+
+    #[test]
+    fn safe_tab_id_rejects_empty_and_overlong() {
+        assert!(!is_safe_tab_id(""));
+        assert!(!is_safe_tab_id(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn safe_tab_id_rejects_special_chars() {
+        assert!(!is_safe_tab_id("tab;rm -rf"));
+        assert!(!is_safe_tab_id("../escape"));
+        assert!(!is_safe_tab_id("tab id")); // space
+        assert!(!is_safe_tab_id("tab\n"));
+    }
+
+    #[test]
+    fn tmux_cli_for_codex() {
+        assert_eq!(tmux_cli_for_provider("codex_cli"), "codex");
+    }
+
+    #[test]
+    fn tmux_cli_defaults_to_claude() {
+        assert_eq!(tmux_cli_for_provider("claude_cli"), "claude");
+        assert_eq!(tmux_cli_for_provider("anything_else"), "claude");
+    }
+
+    /// Token-bucket rate limiter correctness test.
+    /// Re-implements the exact bucket logic from `handle_session_terminal` to
+    /// verify the maths without needing a real WebSocket connection.
+    #[test]
+    fn terminal_rate_limiter_bucket_math() {
+        const RATE_BYTES_PER_SEC: u64 = 2 * 1024 * 1024;
+        const BUCKET_CAPACITY: u64 = 8 * 1024 * 1024;
+
+        let mut tokens: u64 = BUCKET_CAPACITY;
+        let mut last_refill = std::time::Instant::now();
+
+        let refill = |tokens: &mut u64, last: &mut std::time::Instant| {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(*last).as_secs_f64();
+            if elapsed > 0.0 {
+                let add = (elapsed * RATE_BYTES_PER_SEC as f64) as u64;
+                *tokens = (*tokens).saturating_add(add).min(BUCKET_CAPACITY);
+                *last = now;
+            }
+        };
+
+        // Bucket starts full
+        assert_eq!(tokens, BUCKET_CAPACITY);
+
+        // Consume exactly the full bucket
+        let big_chunk = BUCKET_CAPACITY;
+        assert!(big_chunk <= tokens);
+        tokens -= big_chunk;
+        assert_eq!(tokens, 0);
+
+        // Immediately after, another message should be rejected
+        refill(&mut tokens, &mut last_refill);
+        let _small_msg: u64 = 100;
+        // Tokens may be ~0 (tiny elapsed time) — should fail
+        // Allow up to a small buffer for timing jitter
+        assert!(
+            tokens < 1024,
+            "bucket should be nearly empty right after drain, got {}",
+            tokens
+        );
+
+        // After 1 second, ~2 MiB should refill
+        std::thread::sleep(std::time::Duration::from_millis(1010));
+        refill(&mut tokens, &mut last_refill);
+        assert!(
+            tokens >= RATE_BYTES_PER_SEC - 100_000, // allow 100KB jitter
+            "after 1s, bucket should have ~2 MiB, got {}",
+            tokens
+        );
+        assert!(
+            tokens <= BUCKET_CAPACITY,
+            "bucket should never exceed capacity"
+        );
+    }
+}

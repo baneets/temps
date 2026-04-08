@@ -675,3 +675,58 @@ pub async fn tail_logs(docker: &Docker, tail: usize) -> Result<Vec<String>> {
     let joined = chunks.join("");
     Ok(joined.lines().map(|l| l.to_string()).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ensure_shared_secret_creates_file_on_first_call() {
+        let dir = TempDir::new().unwrap();
+        let secret = ensure_shared_secret(dir.path()).unwrap();
+        // 32 random bytes → 64 hex chars
+        assert_eq!(secret.len(), 64, "secret should be 64 hex chars");
+        // File should exist with the same content
+        let on_disk =
+            std::fs::read_to_string(dir.path().join(PREVIEW_GATEWAY_SECRET_FILE)).unwrap();
+        assert_eq!(on_disk, secret);
+    }
+
+    #[test]
+    fn ensure_shared_secret_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let first = ensure_shared_secret(dir.path()).unwrap();
+        let second = ensure_shared_secret(dir.path()).unwrap();
+        assert_eq!(first, second, "second call should return the same secret");
+    }
+
+    #[test]
+    fn ensure_shared_secret_rejects_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(PREVIEW_GATEWAY_SECRET_FILE);
+        std::fs::write(&path, "").unwrap();
+        let result = ensure_shared_secret(dir.path());
+        assert!(result.is_err(), "empty secret file should be an error");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_shared_secret_sets_restrictive_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let _ = ensure_shared_secret(dir.path()).unwrap();
+        let meta = std::fs::metadata(dir.path().join(PREVIEW_GATEWAY_SECRET_FILE)).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secret file should be 0600, got {:o}", mode);
+    }
+
+    #[test]
+    fn ensure_shared_secret_creates_parent_dirs() {
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+        let secret = ensure_shared_secret(&nested).unwrap();
+        assert_eq!(secret.len(), 64);
+        assert!(nested.join(PREVIEW_GATEWAY_SECRET_FILE).exists());
+    }
+}
