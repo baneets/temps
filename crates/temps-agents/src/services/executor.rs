@@ -24,6 +24,7 @@ use crate::ai_cli::{AiCliProvider, AiRunConfig, AiRunResult, OnEventCallback};
 use crate::error::AgentError;
 use crate::sandbox::SandboxCreateConfig;
 use crate::services::sandbox_registry::SandboxRegistry;
+use crate::services::secret_service::{SecretService, SecretType};
 
 use crate::services::config_service::AgentConfigService;
 use crate::services::prompt_builder::PromptBuilder;
@@ -42,6 +43,8 @@ pub struct AgentExecutor {
     ai_provider_override: Option<Arc<dyn AiCliProvider>>,
     /// Sandbox registry for running AI CLI inside isolated containers.
     sandbox_registry: Arc<SandboxRegistry>,
+    /// Secret service for resolving encrypted secrets to inject into sandboxes.
+    secret_service: Arc<SecretService>,
     /// Optional workflow memory provider. When set, the executor:
     ///   1. Installs the `memory` script in the sandbox so the AI can write
     ///      facts back via curl.
@@ -76,6 +79,7 @@ impl AgentExecutor {
         config_service: Arc<AgentConfigService>,
         notification_service: Arc<NotificationService>,
         sandbox_registry: Arc<SandboxRegistry>,
+        secret_service: Arc<SecretService>,
     ) -> Self {
         Self {
             db,
@@ -87,6 +91,7 @@ impl AgentExecutor {
             notification_service,
             ai_provider_override: None,
             sandbox_registry,
+            secret_service,
             memory_provider: tokio::sync::RwLock::new(None),
             deployment_token_service: tokio::sync::RwLock::new(None),
         }
@@ -237,25 +242,137 @@ impl AgentExecutor {
         run_id: i32,
         config: &temps_entities::project_agents::Model,
         _project_id: i32,
-        _connection_id: Option<i32>,
+        connection_id: Option<i32>,
     ) -> Result<(), AgentError> {
-        // TODO: Phase 2 — clone global and per-agent config repos via
-        // GitProviderManager.clone_repository(), overlay .claude/ directory
-        // into sandbox via write_directory(), deep-merge settings.json mcpServers.
-        //
-        // TODO: Phase 3 — load agent_secrets (global), decrypt, inject env vars
-        // and files, resolve ${TEMPS_SECRET:name} placeholders in config files.
+        // Load global AI config settings (config repo URL + branch)
+        let ai_config = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("ai_config")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value::<temps_core::AiConfigSettings>(v).ok())
+            })
+            .unwrap_or_default();
 
-        let has_config_repo = config.config_repo_url.is_some();
-        if has_config_repo {
+        // Collect all secrets up front — needed for placeholder resolution in config files
+        let secrets = self.secret_service.resolve_secrets().await?;
+        let secret_map: std::collections::HashMap<String, String> = secrets
+            .iter()
+            .map(|s| (s.name.clone(), s.value.clone()))
+            .collect();
+
+        // ── Phase 1: Clone and overlay global config repo ──────────────────
+        if !ai_config.config_repo.is_empty() {
+            if let Some(conn_id) = connection_id {
+                self.inject_config_repo(
+                    run_id,
+                    conn_id,
+                    &ai_config.config_repo,
+                    &ai_config.config_repo_branch,
+                    "global",
+                    &secret_map,
+                )
+                .await?;
+            } else {
+                self.run_service
+                    .append_log(
+                        run_id,
+                        "warning",
+                        "Global config repo configured but no git provider connection available",
+                        None,
+                    )
+                    .await?;
+            }
+        }
+
+        // ── Phase 2: Clone and overlay per-agent config repo (overrides global) ──
+        if let Some(ref repo_url) = config.config_repo_url {
+            if !repo_url.is_empty() {
+                if let Some(conn_id) = connection_id {
+                    let branch = config.config_repo_branch.as_deref().unwrap_or("main");
+                    self.inject_config_repo(
+                        run_id,
+                        conn_id,
+                        repo_url,
+                        branch,
+                        "per-agent",
+                        &secret_map,
+                    )
+                    .await?;
+                } else {
+                    self.run_service
+                        .append_log(
+                            run_id,
+                            "warning",
+                            &format!(
+                                "Per-agent config repo '{}' configured but no git provider connection",
+                                repo_url
+                            ),
+                            None,
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        // ── Phase 3: Inject secrets ────────────────────────────────────────
+        if !secrets.is_empty() {
+            let mut env_count = 0;
+            let mut file_count = 0;
+
+            for secret in &secrets {
+                match secret.secret_type {
+                    SecretType::Env => {
+                        // Env-type secrets: write a small script that exports them,
+                        // or inject via a .env file that the sandbox reads
+                        env_count += 1;
+                    }
+                    SecretType::File => {
+                        if let Some(ref mount_path) = secret.mount_path {
+                            self.sandbox_registry
+                                .write_file(run_id, mount_path, secret.value.as_bytes(), 0o600)
+                                .await?;
+                            file_count += 1;
+                        }
+                    }
+                }
+            }
+
+            // Write env-type secrets as a sourceable file in the sandbox
+            let env_secrets: Vec<_> = secrets
+                .iter()
+                .filter(|s| s.secret_type == SecretType::Env)
+                .collect();
+            if !env_secrets.is_empty() {
+                let mut env_content = String::new();
+                for s in &env_secrets {
+                    // Shell-safe: single-quote the value, escape embedded single quotes
+                    let escaped = s.value.replace('\'', "'\\''");
+                    env_content.push_str(&format!("export {}='{}'\n", s.name, escaped));
+                }
+                self.sandbox_registry
+                    .write_file(
+                        run_id,
+                        "/workspace/.temps/secrets.env",
+                        env_content.as_bytes(),
+                        0o600,
+                    )
+                    .await?;
+            }
+
             self.run_service
                 .append_log(
                     run_id,
                     "info",
                     &format!(
-                        "Config repo configured: {} (branch: {}). Injection not yet implemented.",
-                        config.config_repo_url.as_deref().unwrap_or(""),
-                        config.config_repo_branch.as_deref().unwrap_or("main"),
+                        "Injected {} secret(s) ({} env, {} file)",
+                        secrets.len(),
+                        env_count,
+                        file_count,
                     ),
                     None,
                 )
@@ -263,6 +380,141 @@ impl AgentExecutor {
         }
 
         Ok(())
+    }
+
+    /// Clone a config repo and overlay its `.claude/` directory into the sandbox.
+    /// Resolves `${TEMPS_SECRET:name}` placeholders in any `.json` files.
+    async fn inject_config_repo(
+        &self,
+        run_id: i32,
+        connection_id: i32,
+        repo_path: &str,
+        branch: &str,
+        label: &str,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Result<(), AgentError> {
+        // Parse "owner/repo" format
+        let parts: Vec<&str> = repo_path.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            self.run_service
+                .append_log(
+                    run_id,
+                    "warning",
+                    &format!(
+                        "Invalid {} config repo path '{}' — expected 'owner/repo' format",
+                        label, repo_path
+                    ),
+                    None,
+                )
+                .await?;
+            return Ok(());
+        }
+        let (owner, repo) = (parts[0], parts[1]);
+
+        let clone_dir = std::env::temp_dir().join(format!(
+            "temps-config-{}-{}-{}",
+            label,
+            run_id,
+            repo.replace('/', "-")
+        ));
+
+        // Clean up any leftover from a previous run
+        let _ = fs::remove_dir_all(&clone_dir).await;
+        fs::create_dir_all(&clone_dir)
+            .await
+            .map_err(|e| AgentError::GitError {
+                message: format!("Failed to create temp dir for config repo: {}", e),
+            })?;
+
+        self.run_service
+            .append_log(
+                run_id,
+                "info",
+                &format!(
+                    "Cloning {} config repo {}/{} (branch: {})",
+                    label, owner, repo, branch
+                ),
+                None,
+            )
+            .await?;
+
+        // Clone the config repo
+        self.git_provider_manager
+            .clone_repository(connection_id, owner, repo, &clone_dir, Some(branch))
+            .await
+            .map_err(|e| AgentError::GitError {
+                message: format!(
+                    "Failed to clone {} config repo {}/{}: {}",
+                    label, owner, repo, e
+                ),
+            })?;
+
+        // Check if .claude/ directory exists in the cloned repo
+        let claude_dir = clone_dir.join(".claude");
+        if !claude_dir.exists() {
+            self.run_service
+                .append_log(
+                    run_id,
+                    "warning",
+                    &format!(
+                        "{} config repo {}/{} has no .claude/ directory — skipping overlay",
+                        label, owner, repo
+                    ),
+                    None,
+                )
+                .await?;
+            let _ = fs::remove_dir_all(&clone_dir).await;
+            return Ok(());
+        }
+
+        // Resolve ${TEMPS_SECRET:name} placeholders in .json files before uploading
+        if !secrets.is_empty() {
+            Self::resolve_secrets_in_dir(&claude_dir, secrets).await;
+        }
+
+        // Upload the .claude/ directory into the sandbox
+        self.sandbox_registry
+            .write_directory(run_id, &claude_dir, "/workspace/.claude")
+            .await?;
+
+        self.run_service
+            .append_log(
+                run_id,
+                "info",
+                &format!("Overlaid {} config repo .claude/ into sandbox", label),
+                None,
+            )
+            .await?;
+
+        // Clean up temp clone
+        let _ = fs::remove_dir_all(&clone_dir).await;
+
+        Ok(())
+    }
+
+    /// Recursively resolve `${TEMPS_SECRET:name}` placeholders in all `.json`
+    /// files within a directory. Modifies files in place.
+    async fn resolve_secrets_in_dir(
+        dir: &std::path::Path,
+        secrets: &std::collections::HashMap<String, String>,
+    ) {
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.is_dir() {
+                Box::pin(Self::resolve_secrets_in_dir(&path, secrets)).await;
+            } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Ok(content) = fs::read_to_string(&path).await {
+                    if content.contains("${TEMPS_SECRET:") {
+                        let resolved = SecretService::resolve_placeholders(&content, secrets);
+                        let _ = fs::write(&path, resolved).await;
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a single autopilot run. Handles the full lifecycle from cloning to PR creation.
@@ -2007,6 +2259,10 @@ mod tests {
         Arc::new(SandboxRegistry::new(Arc::new(LocalSandboxProvider::new())))
     }
 
+    fn make_secret_service(db: Arc<sea_orm::DatabaseConnection>) -> Arc<SecretService> {
+        Arc::new(SecretService::new(db, make_encryption_service()))
+    }
+
     /// Build a MockDatabase for the happy path.
     ///
     /// Sea-ORM MockDatabase serves query results as a single FIFO queue.
@@ -2088,8 +2344,9 @@ mod tests {
             queue.clone(),
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
         .with_ai_provider(ai);
 
@@ -2225,8 +2482,9 @@ mod tests {
             queue.clone(),
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
         .with_ai_provider(ai);
 
@@ -2347,8 +2605,9 @@ mod tests {
             queue.clone(),
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
         .with_ai_provider(ai);
 
@@ -2435,8 +2694,9 @@ mod tests {
             queue.clone(),
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
         .with_ai_provider(ai);
 
@@ -2538,8 +2798,9 @@ mod tests {
             queue.clone(),
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
         .with_ai_provider(ai);
 
@@ -3037,8 +3298,9 @@ mod tests {
             queue.clone(),
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
         .with_ai_provider(ai);
 
@@ -3144,8 +3406,9 @@ mod tests {
             queue,
             run_svc,
             config_svc,
-            make_notification_service(db),
+            make_notification_service(db.clone()),
             make_sandbox_registry(),
+            make_secret_service(db),
         )
     }
 

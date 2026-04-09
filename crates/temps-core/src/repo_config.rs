@@ -120,34 +120,81 @@ fn default_health_retries() -> u32 {
 // ── Agent YAML config ─────────────────────────────────────────────────────────
 
 /// Agent YAML configuration from .temps/agents/*.yaml
+///
+/// Field naming follows Claude Managed Agents conventions where possible:
+/// - `model` = AI model to use (maps to `provider` internally)
+/// - `system` = system prompt (alias for `prompt`)
+/// - `tools` = inline tool definitions (web_search, file_search, etc.)
+///
+/// Example:
+/// ```yaml
+/// name: error-fixer
+/// description: Fixes production errors automatically
+/// model: claude_cli               # or: opencode, codex_cli
+/// system: |
+///   You are a production error fixer.
+///   Analyze the error and create a fix.
+/// on:
+///   error:
+///     new_issue: true
+/// tools:
+///   - type: web_search
+///   - type: file_search
+/// deliverable: pull_request
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentYamlConfig {
+    /// Required. Human-readable name for the agent.
     pub name: String,
+    /// A description of what the agent does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Trigger configuration — when this agent runs.
     #[serde(default)]
     pub on: AgentTriggers,
+    /// System prompt that defines the agent's behavior and persona.
+    /// Supports template variables like `{{error_type}}`, `{{error_message}}`.
+    /// Alias: `prompt` (for backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// Legacy alias for `system`. If both are set, `system` takes precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// AI model/provider to use. Values: `claude_cli` (default), `opencode`, `codex_cli`.
+    /// Alias: `provider` (for backward compatibility). If `model` is set, it takes precedence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Legacy alias for `model`.
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// Maximum number of AI turns before the agent stops.
     #[serde(default = "default_max_turns")]
     pub max_turns: i32,
+    /// Maximum execution time in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_seconds: i32,
+    /// Daily budget limit in cents.
     #[serde(default = "default_budget")]
     pub daily_budget_cents: i32,
+    /// Cooldown between runs in minutes.
     #[serde(default = "default_cooldown")]
     pub cooldown_minutes: i32,
+    /// Git branch prefix for agent-created branches.
     #[serde(default = "default_branch_prefix")]
     pub branch_prefix: String,
+    /// What the agent produces: `pull_request`, `commit`, `analysis`, `log_only`.
     #[serde(default = "default_deliverable")]
     pub deliverable: String,
+    /// Whether this agent is active.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// None = use global sandbox setting, Some(true) = force on, Some(false) = force off
+    /// Sandbox override. None = use global setting, Some(true) = force on, Some(false) = force off.
     #[serde(default)]
     pub sandbox: Option<bool>,
+    /// Inline tool definitions available to the agent. Each tool has a `type` field
+    /// and optional configuration. Tools are written to `.claude/settings.json` in the sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<AgentToolConfig>>,
     /// Private config repo containing `.claude/` directory (skills, MCP servers, settings).
     /// Format: "owner/repo" (e.g. "myorg/claude-config"). Cloned at runtime and
     /// overlaid into the sandbox's `/workspace/.claude/` directory.
@@ -156,6 +203,17 @@ pub struct AgentYamlConfig {
     /// Branch of the config repo to use (default: "main").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_repo_branch: Option<String>,
+}
+
+/// Inline tool configuration for agents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentToolConfig {
+    /// Tool type identifier (e.g. "web_search", "file_search", "bash", "mcp").
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    /// Optional tool-specific configuration.
+    #[serde(flatten)]
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -211,6 +269,40 @@ fn default_true() -> bool {
 }
 
 impl AgentYamlConfig {
+    /// Resolved provider: `model` takes precedence over `provider`.
+    pub fn resolved_provider(&self) -> &str {
+        self.model.as_deref().unwrap_or(&self.provider)
+    }
+
+    /// Resolved system prompt: `system` takes precedence over `prompt`.
+    pub fn resolved_prompt(&self) -> Option<&str> {
+        self.system.as_deref().or(self.prompt.as_deref())
+    }
+
+    /// Convert inline tools to a JSON value for DB storage.
+    pub fn tools_config_json(&self) -> Option<serde_json::Value> {
+        self.tools.as_ref().map(|tools| {
+            serde_json::Value::Array(
+                tools
+                    .iter()
+                    .map(|t| {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert(
+                            "type".to_string(),
+                            serde_json::Value::String(t.tool_type.clone()),
+                        );
+                        if let serde_json::Value::Object(extra) = &t.config {
+                            for (k, v) in extra {
+                                obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                        serde_json::Value::Object(obj)
+                    })
+                    .collect(),
+            )
+        })
+    }
+
     /// Convert the `on:` triggers to a JSON value for DB storage
     pub fn trigger_config_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -719,5 +811,100 @@ config_repo_branch: develop
         let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(agent.config_repo.is_none());
         assert!(agent.config_repo_branch.is_none());
+    }
+
+    #[test]
+    fn test_agent_yaml_model_alias_takes_precedence_over_provider() {
+        let yaml = r#"
+name: test-agent
+model: opencode
+provider: claude_cli
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.resolved_provider(), "opencode");
+    }
+
+    #[test]
+    fn test_agent_yaml_system_alias_takes_precedence_over_prompt() {
+        let yaml = r#"
+name: test-agent
+system: You are a system prompt
+prompt: You are a prompt
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.resolved_prompt(), Some("You are a system prompt"));
+    }
+
+    #[test]
+    fn test_agent_yaml_prompt_used_when_no_system() {
+        let yaml = r#"
+name: test-agent
+prompt: You are a prompt
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.resolved_prompt(), Some("You are a prompt"));
+    }
+
+    #[test]
+    fn test_agent_yaml_model_falls_back_to_provider() {
+        let yaml = "name: test-agent\n";
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.resolved_provider(), "claude_cli");
+    }
+
+    #[test]
+    fn test_agent_yaml_with_tools() {
+        let yaml = r#"
+name: test-agent
+model: claude_cli
+system: Fix errors
+tools:
+  - type: web_search
+  - type: mcp
+    server: my-server
+    url: http://localhost:8080
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        let tools = agent.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].tool_type, "web_search");
+        assert_eq!(tools[1].tool_type, "mcp");
+
+        let json = agent.tools_config_json().unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "web_search");
+        assert_eq!(arr[1]["type"], "mcp");
+        assert_eq!(arr[1]["server"], "my-server");
+    }
+
+    #[test]
+    fn test_agent_yaml_claude_managed_style() {
+        // Full Claude Managed Agents-style YAML
+        let yaml = r#"
+name: Coding Assistant
+description: Fixes production errors and creates PRs
+model: claude_cli
+system: |
+  You are a helpful coding agent. Analyze errors and create fixes.
+  Always write tests for your changes.
+on:
+  error:
+    new_issue: true
+  manual: true
+tools:
+  - type: web_search
+deliverable: pull_request
+max_turns: 30
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(agent.name, "Coding Assistant");
+        assert_eq!(agent.resolved_provider(), "claude_cli");
+        assert!(agent
+            .resolved_prompt()
+            .unwrap()
+            .contains("helpful coding agent"));
+        assert_eq!(agent.tools.as_ref().unwrap().len(), 1);
+        assert_eq!(agent.deliverable, "pull_request");
+        assert_eq!(agent.max_turns, 30);
     }
 }

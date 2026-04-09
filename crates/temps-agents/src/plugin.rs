@@ -499,6 +499,7 @@ impl TempsPlugin for AgentsPlugin {
                 config_service.clone(),
                 notification_service,
                 sandbox_registry.clone(),
+                secret_service.clone(),
             ));
             context.register_service(executor.clone());
 

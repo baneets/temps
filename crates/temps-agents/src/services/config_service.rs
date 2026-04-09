@@ -677,8 +677,8 @@ impl AgentConfigService {
                 active.name = Set(yaml_agent.name.clone());
                 active.description = Set(yaml_agent.description.clone());
                 active.trigger_config = Set(yaml_agent.trigger_config_json());
-                active.prompt = Set(yaml_agent.prompt.clone());
-                active.ai_provider = Set(yaml_agent.provider.clone());
+                active.prompt = Set(yaml_agent.resolved_prompt().map(|s| s.to_string()));
+                active.ai_provider = Set(yaml_agent.resolved_provider().to_string());
                 active.max_turns = Set(yaml_agent.max_turns);
                 active.timeout_seconds = Set(yaml_agent.timeout_seconds);
                 active.daily_budget_cents = Set(yaml_agent.daily_budget_cents);
@@ -704,8 +704,8 @@ impl AgentConfigService {
                     source: Set("yaml".to_string()),
                     enabled: Set(yaml_agent.enabled),
                     trigger_config: Set(yaml_agent.trigger_config_json()),
-                    prompt: Set(yaml_agent.prompt.clone()),
-                    ai_provider: Set(yaml_agent.provider.clone()),
+                    prompt: Set(yaml_agent.resolved_prompt().map(|s| s.to_string())),
+                    ai_provider: Set(yaml_agent.resolved_provider().to_string()),
                     max_turns: Set(yaml_agent.max_turns),
                     timeout_seconds: Set(yaml_agent.timeout_seconds),
                     daily_budget_cents: Set(yaml_agent.daily_budget_cents),

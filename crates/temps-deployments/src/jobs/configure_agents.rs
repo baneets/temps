@@ -224,7 +224,9 @@ fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
                 .map(|s| ScheduleTrigger { cron: s.cron }),
             manual: workflow.on.manual,
         },
+        system: None,
         prompt: Some(workflow.prompt),
+        model: None,
         provider: workflow.provider,
         max_turns: workflow.max_turns,
         timeout_seconds: workflow.timeout_seconds,
@@ -234,6 +236,7 @@ fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
         deliverable: workflow.deliverable,
         enabled: workflow.enabled,
         sandbox: None,
+        tools: None,
         config_repo: None,
         config_repo_branch: None,
     }
