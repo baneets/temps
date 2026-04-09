@@ -237,6 +237,8 @@ fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
         enabled: workflow.enabled,
         sandbox: None,
         tools: None,
+        mcp_servers: None,
+        skills: None,
         config_repo: None,
         config_repo_branch: None,
     }

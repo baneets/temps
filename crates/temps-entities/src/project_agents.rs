@@ -36,6 +36,15 @@ pub struct Model {
     /// Whether to run this agent inside an isolated sandbox container.
     /// None = use global default, Some(true) = force on, Some(false) = force off.
     pub sandbox_enabled: Option<bool>,
+    /// MCP servers config as JSON — Claude Code settings.json mcpServers format.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub mcp_servers_config: Option<serde_json::Value>,
+    /// Skills config as JSON array.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub skills_config: Option<serde_json::Value>,
+    /// Tools config as JSON array.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub tools_config: Option<serde_json::Value>,
     /// Private config repo containing .claude/ directory (skills, MCP, plugins).
     /// Format: "owner/repo" (e.g. "myorg/claude-config").
     pub config_repo_url: Option<String>,

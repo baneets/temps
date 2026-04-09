@@ -39,6 +39,12 @@ pub struct UpsertAgentRequest {
     pub config_repo_url: Option<String>,
     /// Branch of the config repo to use (default: "main").
     pub config_repo_branch: Option<String>,
+    /// MCP servers config (Claude Code settings.json mcpServers format).
+    pub mcp_servers_config: Option<serde_json::Value>,
+    /// Skills config as JSON array.
+    pub skills_config: Option<serde_json::Value>,
+    /// Tools config as JSON array.
+    pub tools_config: Option<serde_json::Value>,
 }
 
 pub struct AgentConfigService {
@@ -475,6 +481,9 @@ impl AgentConfigService {
             sandbox_enabled: Set(request.sandbox_enabled),
             config_repo_url: Set(request.config_repo_url),
             config_repo_branch: Set(request.config_repo_branch),
+            mcp_servers_config: Set(request.mcp_servers_config),
+            skills_config: Set(request.skills_config),
+            tools_config: Set(request.tools_config),
             ..Default::default()
         };
 
@@ -617,6 +626,15 @@ impl AgentConfigService {
         if let Some(ref config_repo_branch) = request.config_repo_branch {
             active.config_repo_branch = Set(Some(config_repo_branch.clone()));
         }
+        if let Some(mcp) = request.mcp_servers_config {
+            active.mcp_servers_config = Set(Some(mcp));
+        }
+        if let Some(skills) = request.skills_config {
+            active.skills_config = Set(Some(skills));
+        }
+        if let Some(tools) = request.tools_config {
+            active.tools_config = Set(Some(tools));
+        }
 
         let model = active
             .update(self.db.as_ref())
@@ -686,6 +704,9 @@ impl AgentConfigService {
                 active.branch_prefix = Set(yaml_agent.branch_prefix.clone());
                 active.deliverable = Set(yaml_agent.deliverable.clone());
                 active.sandbox_enabled = Set(yaml_agent.sandbox);
+                active.mcp_servers_config = Set(yaml_agent.mcp_servers_json());
+                active.skills_config = Set(yaml_agent.skills_config_json());
+                active.tools_config = Set(yaml_agent.tools_config_json());
                 active.config_repo_url = Set(yaml_agent.config_repo.clone());
                 active.config_repo_branch = Set(yaml_agent.config_repo_branch.clone());
                 active.enabled = Set(yaml_agent.enabled);
@@ -713,6 +734,9 @@ impl AgentConfigService {
                     branch_prefix: Set(yaml_agent.branch_prefix.clone()),
                     deliverable: Set(yaml_agent.deliverable.clone()),
                     sandbox_enabled: Set(yaml_agent.sandbox),
+                    mcp_servers_config: Set(yaml_agent.mcp_servers_json()),
+                    skills_config: Set(yaml_agent.skills_config_json()),
+                    tools_config: Set(yaml_agent.tools_config_json()),
                     config_repo_url: Set(yaml_agent.config_repo.clone()),
                     config_repo_branch: Set(yaml_agent.config_repo_branch.clone()),
                     ..Default::default()
@@ -776,6 +800,9 @@ mod tests {
             sandbox_enabled: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -883,6 +910,9 @@ mod tests {
             sandbox_enabled: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -916,6 +946,9 @@ mod tests {
             sandbox_enabled: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -958,6 +991,9 @@ mod tests {
             sandbox_enabled: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -999,6 +1035,9 @@ mod tests {
             branch_prefix: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -1043,6 +1082,9 @@ mod tests {
             branch_prefix: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
         };
 
         let result = svc.upsert_config(1, request).await;
@@ -1088,6 +1130,9 @@ mod tests {
             branch_prefix: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
         };
 
         let result = svc.upsert_config(1, request).await;

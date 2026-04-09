@@ -209,6 +209,12 @@ pub struct AgentConfigResponse {
     pub config_repo_url: Option<String>,
     /// Branch of the config repo to use.
     pub config_repo_branch: Option<String>,
+    /// MCP servers config (Claude Code settings.json mcpServers format).
+    pub mcp_servers_config: Option<serde_json::Value>,
+    /// Skills config as JSON array.
+    pub skills_config: Option<serde_json::Value>,
+    /// Tools config as JSON array.
+    pub tools_config: Option<serde_json::Value>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -237,6 +243,9 @@ impl From<project_agents::Model> for AgentConfigResponse {
             sandbox_enabled: model.sandbox_enabled,
             config_repo_url: model.config_repo_url,
             config_repo_branch: model.config_repo_branch,
+            mcp_servers_config: model.mcp_servers_config.map(|v| mask_mcp_env_values(&v)),
+            skills_config: model.skills_config,
+            tools_config: model.tools_config,
             created_at: model.created_at.to_rfc3339(),
             updated_at: model.updated_at.to_rfc3339(),
         }
@@ -247,6 +256,31 @@ impl From<project_agents::Model> for AgentConfigResponse {
 pub struct ListAgentsResponse {
     pub items: Vec<AgentConfigResponse>,
     pub total: usize,
+}
+
+/// Mask env var values in MCP server configs to avoid leaking secrets in API responses.
+/// Preserves keys and structure but replaces values with "***".
+fn mask_mcp_env_values(config: &serde_json::Value) -> serde_json::Value {
+    let Some(servers) = config.as_object() else {
+        return config.clone();
+    };
+    let mut masked = serde_json::Map::new();
+    for (server_name, server_config) in servers {
+        let Some(obj) = server_config.as_object() else {
+            masked.insert(server_name.clone(), server_config.clone());
+            continue;
+        };
+        let mut server = obj.clone();
+        if let Some(env) = server.get("env").and_then(|v| v.as_object()) {
+            let masked_env: serde_json::Map<String, serde_json::Value> = env
+                .keys()
+                .map(|k| (k.clone(), serde_json::Value::String("***".to_string())))
+                .collect();
+            server.insert("env".to_string(), serde_json::Value::Object(masked_env));
+        }
+        masked.insert(server_name.clone(), serde_json::Value::Object(server));
+    }
+    serde_json::Value::Object(masked)
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────

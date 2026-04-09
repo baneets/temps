@@ -10459,6 +10459,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tempfile",
+ "temps-agents-mcp-proxy",
  "temps-auth",
  "temps-config",
  "temps-core",
@@ -10473,6 +10474,14 @@ dependencies = [
  "tracing",
  "utoipa",
  "walkdir",
+]
+
+[[package]]
+name = "temps-agents-mcp-proxy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

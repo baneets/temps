@@ -661,6 +661,9 @@ mod tests {
             sandbox_enabled: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

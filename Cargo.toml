@@ -62,6 +62,7 @@ members = [
     "crates/temps-wireguard",
     "crates/temps-ai-gateway",
     "crates/temps-agents",
+    "crates/temps-agents-mcp-proxy",
     "crates/temps-workspace",
     "crates/temps-agent",
     "crates/temps-edge",

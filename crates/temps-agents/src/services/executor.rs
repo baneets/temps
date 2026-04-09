@@ -379,7 +379,319 @@ impl AgentExecutor {
                 .await?;
         }
 
+        // ── Phase 4: Inject inline MCP servers and skills from agent record ──
+        self.inject_inline_mcp_and_skills(run_id, config, &secret_map)
+            .await?;
+
         Ok(())
+    }
+
+    /// Inject MCP servers and skills stored directly on the agent record
+    /// (as opposed to those coming from config repos).
+    ///
+    /// - `mcp_servers_config`: merged into `/workspace/.claude/settings.json` under `mcpServers`
+    /// - `skills_config`: each skill written as `/workspace/.claude/skills/{name}.md`
+    async fn inject_inline_mcp_and_skills(
+        &self,
+        run_id: i32,
+        config: &temps_entities::project_agents::Model,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Result<(), AgentError> {
+        let has_mcp = config
+            .mcp_servers_config
+            .as_ref()
+            .is_some_and(|v| !v.is_null() && v.as_object().is_some_and(|o| !o.is_empty()));
+        let has_skills = config
+            .skills_config
+            .as_ref()
+            .is_some_and(|v| !v.is_null() && v.as_array().is_some_and(|a| !a.is_empty()));
+
+        // Extract custom tools from tools_config (type == "custom" with webhook_url)
+        let custom_tools = Self::extract_custom_tools(config);
+        let has_custom_tools = !custom_tools.is_empty();
+
+        if !has_mcp && !has_skills && !has_custom_tools {
+            return Ok(());
+        }
+
+        // Ensure .claude directory exists in sandbox (needed by MCP, skills, and custom tools)
+        if has_mcp || has_custom_tools || has_skills {
+            let _ = self
+                .sandbox_registry
+                .exec(
+                    run_id,
+                    vec![
+                        "mkdir".to_string(),
+                        "-p".to_string(),
+                        "/workspace/.claude".to_string(),
+                    ],
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await;
+        }
+
+        // ── Custom tools: install MCP proxy script and config ──
+        if has_custom_tools {
+            // Ensure the bin directory exists
+            let _ = self
+                .sandbox_registry
+                .exec(
+                    run_id,
+                    vec![
+                        "mkdir".to_string(),
+                        "-p".to_string(),
+                        "/workspace/.temps/bin".to_string(),
+                    ],
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await;
+
+            // Write the proxy script
+            self.sandbox_registry
+                .write_file(
+                    run_id,
+                    temps_agents_mcp_proxy::PROXY_SCRIPT_PATH,
+                    temps_agents_mcp_proxy::PROXY_SCRIPT.as_bytes(),
+                    0o755,
+                )
+                .await?;
+
+            // Build and write the proxy config (resolve secret placeholders in headers)
+            let proxy_config = temps_agents_mcp_proxy::ProxyConfig {
+                tools: custom_tools.clone(),
+            };
+            let mut config_json = serde_json::to_string_pretty(&proxy_config).unwrap_or_default();
+            if !secrets.is_empty() && config_json.contains("${TEMPS_SECRET:") {
+                config_json = crate::services::secret_service::SecretService::resolve_placeholders(
+                    &config_json,
+                    secrets,
+                );
+            }
+            self.sandbox_registry
+                .write_file(
+                    run_id,
+                    temps_agents_mcp_proxy::PROXY_CONFIG_PATH,
+                    config_json.as_bytes(),
+                    0o644,
+                )
+                .await?;
+
+            self.run_service
+                .append_log(
+                    run_id,
+                    "info",
+                    &format!(
+                        "Installed MCP proxy with {} custom tool(s): {}",
+                        custom_tools.len(),
+                        custom_tools
+                            .iter()
+                            .map(|t| t.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None,
+                )
+                .await?;
+        }
+
+        // ── MCP servers + custom tools proxy: merge into .claude/settings.json ──
+        if has_mcp || has_custom_tools {
+            // Try to read existing settings.json from the sandbox (may have been
+            // written by a config repo overlay in Phase 1/2)
+            let existing_settings = self
+                .sandbox_registry
+                .read_file(run_id, "/workspace/.claude/settings.json")
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            let mut settings = existing_settings;
+
+            // Get or create mcpServers object
+            let mcp_servers = settings
+                .get("mcpServers")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let mut merged = mcp_servers;
+
+            // Merge inline MCP servers
+            if has_mcp {
+                if let Some(new_servers) = config
+                    .mcp_servers_config
+                    .as_ref()
+                    .and_then(|v| v.as_object())
+                {
+                    for (k, v) in new_servers {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+
+            // Add the custom tools proxy MCP server entry
+            if has_custom_tools {
+                let proxy_entry = temps_agents_mcp_proxy::mcp_server_entry();
+                if let Some(proxy_servers) = proxy_entry.as_object() {
+                    for (k, v) in proxy_servers {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+
+            settings["mcpServers"] = serde_json::Value::Object(merged.clone());
+
+            // Resolve ${TEMPS_SECRET:name} placeholders in the final JSON
+            let mut settings_str = serde_json::to_string_pretty(&settings).unwrap_or_default();
+            if !secrets.is_empty() && settings_str.contains("${TEMPS_SECRET:") {
+                settings_str = crate::services::secret_service::SecretService::resolve_placeholders(
+                    &settings_str,
+                    secrets,
+                );
+            }
+
+            self.sandbox_registry
+                .write_file(
+                    run_id,
+                    "/workspace/.claude/settings.json",
+                    settings_str.as_bytes(),
+                    0o644,
+                )
+                .await?;
+
+            let total_servers = merged.len();
+            self.run_service
+                .append_log(
+                    run_id,
+                    "info",
+                    &format!(
+                        "Wrote .claude/settings.json with {} MCP server(s){}",
+                        total_servers,
+                        if has_custom_tools {
+                            " (including custom tools proxy)"
+                        } else {
+                            ""
+                        }
+                    ),
+                    None,
+                )
+                .await?;
+        }
+
+        // ── Skills: write each as .claude/skills/{name}.md ──
+        if has_skills {
+            let skills = config.skills_config.as_ref().unwrap();
+            if let Some(skills_arr) = skills.as_array() {
+                // Ensure skills directory exists
+                let _ = self
+                    .sandbox_registry
+                    .exec(
+                        run_id,
+                        vec![
+                            "mkdir".to_string(),
+                            "-p".to_string(),
+                            "/workspace/.claude/skills".to_string(),
+                        ],
+                        std::collections::HashMap::new(),
+                        None,
+                    )
+                    .await;
+
+                let mut count = 0;
+                for skill in skills_arr {
+                    let name = skill
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unnamed");
+                    let content = skill.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+                    if content.is_empty() {
+                        continue;
+                    }
+
+                    // Sanitize name for filesystem use
+                    let safe_name: String = name
+                        .chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || c == '-' || c == '_' {
+                                c
+                            } else {
+                                '-'
+                            }
+                        })
+                        .collect();
+
+                    let path = format!("/workspace/.claude/skills/{}.md", safe_name);
+                    self.sandbox_registry
+                        .write_file(run_id, &path, content.as_bytes(), 0o644)
+                        .await?;
+                    count += 1;
+                }
+
+                if count > 0 {
+                    self.run_service
+                        .append_log(
+                            run_id,
+                            "info",
+                            &format!("Injected {} skill file(s) into .claude/skills/", count),
+                            None,
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract custom tools (type == "custom" with webhook_url) from tools_config.
+    fn extract_custom_tools(
+        config: &temps_entities::project_agents::Model,
+    ) -> Vec<temps_agents_mcp_proxy::CustomToolDef> {
+        let Some(tools_val) = config.tools_config.as_ref() else {
+            return Vec::new();
+        };
+        let Some(tools_arr) = tools_val.as_array() else {
+            return Vec::new();
+        };
+
+        tools_arr
+            .iter()
+            .filter_map(|tool| {
+                let tool_type = tool.get("type")?.as_str()?;
+                if tool_type != "custom" {
+                    return None;
+                }
+                let name = tool.get("name")?.as_str()?.to_string();
+                let webhook_url = tool.get("webhook_url")?.as_str()?.to_string();
+                let description = tool
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input_schema = tool
+                    .get("input_schema")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+                let headers = tool.get("headers").and_then(|v| {
+                    v.as_object().map(|obj| {
+                        obj.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
+                });
+
+                Some(temps_agents_mcp_proxy::CustomToolDef {
+                    name,
+                    description,
+                    input_schema,
+                    webhook_url,
+                    headers,
+                })
+            })
+            .collect()
     }
 
     /// Clone a config repo and overlay its `.claude/` directory into the sandbox.
@@ -2152,6 +2464,9 @@ mod tests {
             sandbox_enabled: None,
             config_repo_url: None,
             config_repo_branch: None,
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
