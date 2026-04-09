@@ -36,6 +36,7 @@ import { useSettings, useUpdateSettings } from '@/hooks/useSettings'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { PreviewGatewayCard } from './PreviewGatewayCard'
 import { AgentSecrets } from '@/components/agents/ProjectSecrets'
+import { AiQuickstart } from './AiQuickstart'
 
 interface SandboxStatus {
   docker_available: boolean
@@ -339,6 +340,14 @@ export function AgentSandboxSettings() {
 
   return (
     <div className="space-y-6">
+      {/* Quick Setup Guide */}
+      <AiQuickstart
+        provider={defaultProvider}
+        authType={authType}
+        tokenSaved={tokenSaved}
+        sandboxEnabled={enabled}
+      />
+
       {/* AI Provider */}
       <Card>
         <CardHeader>
