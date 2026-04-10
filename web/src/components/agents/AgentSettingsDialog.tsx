@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -17,11 +18,13 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
   createAgent,
+  listMcpDefinitions,
+  listSkillDefinitions,
   updateAgent,
   type Agent,
   type CreateAgentRequest,
@@ -60,6 +63,14 @@ export function AgentSettingsDialog({
   const [configRepoUrl, setConfigRepoUrl] = useState(agent?.config_repo_url ?? '')
   const [configRepoBranch, setConfigRepoBranch] = useState(agent?.config_repo_branch ?? '')
 
+  // Skills & MCP (slug arrays referencing project-level definitions)
+  const [selectedSkills, setSelectedSkills] = useState<string[]>(
+    agent?.skills_config ?? [],
+  )
+  const [selectedMcps, setSelectedMcps] = useState<string[]>(
+    agent?.mcp_servers_config ?? [],
+  )
+
   // Triggers
   const [triggerNewIssue, setTriggerNewIssue] = useState(
     agent?.trigger_config?.error?.new_issue ?? true,
@@ -91,6 +102,8 @@ export function AgentSettingsDialog({
     setSandboxEnabled(agent?.sandbox_enabled ?? null)
     setConfigRepoUrl(agent?.config_repo_url ?? '')
     setConfigRepoBranch(agent?.config_repo_branch ?? '')
+    setSelectedSkills(agent?.skills_config ?? [])
+    setSelectedMcps(agent?.mcp_servers_config ?? [])
     setTriggerNewIssue(agent?.trigger_config?.error?.new_issue ?? true)
     setTriggerRegression(agent?.trigger_config?.error?.regression ?? true)
     setTriggerManual(agent?.trigger_config?.manual ?? true)
@@ -101,15 +114,40 @@ export function AgentSettingsDialog({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { resetForm() }, [agent?.id, open])
 
+  // Fetch available project-level definitions for slug pickers
+  const { data: availableSkills = [] } = useQuery({
+    queryKey: ['skill-definitions', projectId],
+    queryFn: () => listSkillDefinitions(projectId),
+    enabled: open,
+  })
+
+  const { data: availableMcps = [] } = useQuery({
+    queryKey: ['mcp-definitions', projectId],
+    queryFn: () => listMcpDefinitions(projectId),
+    enabled: open,
+  })
+
+  const toggleSkill = (slug: string) => {
+    setSelectedSkills((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
+    )
+  }
+
+  const toggleMcp = (slug: string) => {
+    setSelectedMcps((prev) =>
+      prev.includes(slug) ? prev.filter((s) => s !== slug) : [...prev, slug],
+    )
+  }
+
   const createMutation = useMutation({
     mutationFn: (data: CreateAgentRequest) => createAgent(projectId, data),
     onSuccess: () => {
-      toast.success('Agent created')
+      toast.success('Workflow created')
       queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
       onOpenChange(false)
     },
     onError: (error: Error) => {
-      toast.error(error.message || 'Failed to create agent')
+      toast.error(error.message || 'Failed to create workflow')
     },
   })
 
@@ -117,12 +155,12 @@ export function AgentSettingsDialog({
     mutationFn: (data: UpdateAgentRequest) =>
       updateAgent(projectId, agent!.slug, data),
     onSuccess: () => {
-      toast.success('Agent updated')
+      toast.success('Workflow updated')
       queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
       onOpenChange(false)
     },
     onError: (error: Error) => {
-      toast.error(error.message || 'Failed to update agent')
+      toast.error(error.message || 'Failed to update workflow')
     },
   })
 
@@ -154,6 +192,8 @@ export function AgentSettingsDialog({
         sandbox_enabled: sandboxEnabled ?? undefined,
         config_repo_url: configRepoUrl || null,
         config_repo_branch: configRepoBranch || null,
+        mcp_servers_config: selectedMcps.length > 0 ? selectedMcps : null,
+        skills_config: selectedSkills.length > 0 ? selectedSkills : null,
       })
     } else {
       if (!slug.trim()) {
@@ -181,6 +221,8 @@ export function AgentSettingsDialog({
         sandbox_enabled: sandboxEnabled ?? undefined,
         config_repo_url: configRepoUrl || undefined,
         config_repo_branch: configRepoBranch || undefined,
+        mcp_servers_config: selectedMcps.length > 0 ? selectedMcps : undefined,
+        skills_config: selectedSkills.length > 0 ? selectedSkills : undefined,
       })
     }
   }
@@ -195,7 +237,7 @@ export function AgentSettingsDialog({
     >
       <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{isEdit ? 'Edit Agent' : 'Create Agent'}</DialogTitle>
+          <DialogTitle>{isEdit ? 'Edit Workflow' : 'Create Workflow'}</DialogTitle>
         </DialogHeader>
 
         <form onSubmit={(e) => { e.preventDefault(); handleSubmit() }} className="space-y-6 py-4">
@@ -306,8 +348,8 @@ export function AgentSettingsDialog({
             </Select>
             <p className="text-xs text-muted-foreground">
               {deliverable === 'report'
-                ? 'Agent produces a report — no branch, PR, or deployment.'
-                : 'Agent pushes a branch, creates a PR, and triggers a preview deployment.'}
+                ? 'Workflow produces a report — no branch, PR, or deployment.'
+                : 'Workflow pushes a branch, creates a PR, and triggers a preview deployment.'}
             </p>
           </div>
 
@@ -458,6 +500,76 @@ export function AgentSettingsDialog({
             </div>
           </div>
 
+          {/* Skills */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">Skills</h3>
+            <p className="text-xs text-muted-foreground">
+              Select project-level skills to make available to this workflow.
+              Skills are injected as <code className="bg-muted px-1 rounded">.claude/skills/</code> files in the sandbox.
+            </p>
+            {availableSkills.length > 0 ? (
+              <div className="space-y-2">
+                {availableSkills.map((skill) => (
+                  <label
+                    key={skill.slug}
+                    className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50"
+                  >
+                    <Checkbox
+                      checked={selectedSkills.includes(skill.slug)}
+                      onCheckedChange={() => toggleSkill(skill.slug)}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium">{skill.name}</div>
+                      <div className="text-xs text-muted-foreground truncate">
+                        {skill.description || skill.slug}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground italic">
+                No skills defined for this project. Create skills in Settings to use them here.
+              </p>
+            )}
+          </div>
+
+          {/* MCP Servers */}
+          <div className="space-y-3">
+            <h3 className="text-sm font-medium">MCP Servers</h3>
+            <p className="text-xs text-muted-foreground">
+              Select MCP servers to make available to this workflow.
+              Configs are merged into <code className="bg-muted px-1 rounded">.claude/settings.json</code> at runtime.
+            </p>
+            {availableMcps.length > 0 ? (
+              <div className="space-y-2">
+                {availableMcps.map((mcp) => (
+                  <label
+                    key={mcp.slug}
+                    className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-muted/50"
+                  >
+                    <Checkbox
+                      checked={selectedMcps.includes(mcp.slug)}
+                      onCheckedChange={() => toggleMcp(mcp.slug)}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium">{mcp.name}</div>
+                      <div className="text-xs text-muted-foreground truncate">
+                        {mcp.description || mcp.slug}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground italic">
+                No MCP servers defined for this project. Create MCP servers in Settings to use them here.
+              </p>
+            )}
+          </div>
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
@@ -469,7 +581,7 @@ export function AgentSettingsDialog({
                   : 'Creating...'
                 : isEdit
                   ? 'Save'
-                  : 'Create Agent'}
+                  : 'Create Workflow'}
             </Button>
           </DialogFooter>
         </form>

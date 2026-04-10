@@ -193,6 +193,8 @@ impl AiCliProvider for OpenCodeCliProvider {
             tokens_output,
             model,
             changed_files: None,
+            session_id: None,
+            is_max_turns_error: false,
         })
     }
 
@@ -297,6 +299,8 @@ impl AiCliProvider for OpenCodeCliProvider {
             tokens_output,
             model,
             changed_files: None,
+            session_id: None,
+            is_max_turns_error: false,
         })
     }
 }

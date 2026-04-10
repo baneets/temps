@@ -34,8 +34,8 @@ impl MonitorStatus {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "operational" => Self::Operational,
-            "degraded" => Self::Degraded,
-            "down" => Self::Down,
+            "degraded" | "partial_outage" => Self::Degraded,
+            "down" | "major_outage" => Self::Down,
             _ => Self::Operational,
         }
     }
@@ -154,7 +154,7 @@ impl OutageDetectionService {
             alarm_service,
             job_queue: None,
             monitor_states: RwLock::new(HashMap::new()),
-            failure_threshold: 2, // Alert after 2 consecutive failures
+            failure_threshold: 1, // Alert on first failure
             alert_cooldown: Duration::minutes(5),
         }
     }
@@ -253,17 +253,34 @@ impl OutageDetectionService {
             }
             None => {
                 // First check for this monitor - initialize state
+                let is_down = status.is_outage();
                 states.insert(
                     monitor_id,
                     MonitorState {
                         status,
                         active_incident_id: None,
-                        consecutive_failures: if status.is_outage() { 1 } else { 0 },
+                        consecutive_failures: if is_down { 1 } else { 0 },
                     },
                 );
 
-                // Don't alert on first check even if it's down
-                (false, None)
+                // Alert immediately if monitor is down on first check
+                let event = if is_down {
+                    Some(OutageEvent {
+                        monitor_id,
+                        monitor_name: monitor.name.clone(),
+                        project_id: monitor.project_id,
+                        environment_id: monitor.environment_id,
+                        previous_status: MonitorStatus::Operational,
+                        current_status: status,
+                        error_message: error_message.clone(),
+                        incident_id: None,
+                        occurred_at: now,
+                    })
+                } else {
+                    None
+                };
+
+                (is_down, event)
             }
         };
 
@@ -845,7 +862,12 @@ mod tests {
             MonitorStatus::Operational
         );
         assert_eq!(MonitorStatus::from_str("degraded"), MonitorStatus::Degraded);
+        assert_eq!(
+            MonitorStatus::from_str("partial_outage"),
+            MonitorStatus::Degraded
+        );
         assert_eq!(MonitorStatus::from_str("down"), MonitorStatus::Down);
+        assert_eq!(MonitorStatus::from_str("major_outage"), MonitorStatus::Down);
         assert_eq!(
             MonitorStatus::from_str("OPERATIONAL"),
             MonitorStatus::Operational

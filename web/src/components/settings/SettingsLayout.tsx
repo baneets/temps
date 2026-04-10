@@ -59,7 +59,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
       { title: 'Email', url: '/settings/email', icon: Mail },
       { title: 'AI Gateway', url: '/settings/ai-gateway', icon: Sparkles },
       {
-        title: 'AI Agents',
+        title: 'AI Workflows',
         url: '/settings/agent-sandbox',
         icon: Bot,
       },

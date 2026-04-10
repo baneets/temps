@@ -161,7 +161,7 @@ function AgentCard({
       queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
     },
     onError: (error: Error) => {
-      toast.error(error.message || 'Failed to toggle workflow')
+      toast.error(error.message || 'Failed to toggle')
     },
   })
 
@@ -391,7 +391,7 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
                   <p>Choose one:</p>
                   <ol className="list-decimal list-inside space-y-0.5">
                     <li>Run <code className="bg-black/20 px-1 rounded">claude setup-token</code> on the server to authenticate with your Anthropic account</li>
-                    <li>Configure in <Link to="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Agents</Link></li>
+                    <li>Configure in <Link to="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Workflows</Link></li>
                   </ol>
                 </div>
               )}

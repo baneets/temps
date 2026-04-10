@@ -136,10 +136,10 @@ const baseNavItems: NavItem[] = [
     kbd: 'L',
   },
 
-  // AI Activity
+  // AI Gateway
   {
-    title: 'AI Activity',
-    url: 'ai-activity',
+    title: 'AI Gateway',
+    url: 'ai-gateway',
     icon: Bot,
   },
 

@@ -15,7 +15,10 @@ use temps_core::{EncryptionService, Job, JobQueue};
 use temps_deployments::services::deployment_token_service::{
     CreateDeploymentTokenRequest, DeploymentTokenService,
 };
-use temps_entities::{error_events, error_groups, projects, settings};
+use temps_entities::{
+    agent_runs, deployment_containers, deployments, error_events, error_groups, projects, settings,
+    status_checks, status_monitors,
+};
 use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_notifications::services::NotificationService;
 use temps_notifications::types::{Notification, NotificationPriority};
@@ -45,6 +48,8 @@ pub struct AgentExecutor {
     sandbox_registry: Arc<SandboxRegistry>,
     /// Secret service for resolving encrypted secrets to inject into sandboxes.
     secret_service: Arc<SecretService>,
+    /// Definition service for resolving skill/MCP slugs from project definitions.
+    definition_service: Arc<super::definition_service::DefinitionService>,
     /// Optional workflow memory provider. When set, the executor:
     ///   1. Installs the `memory` script in the sandbox so the AI can write
     ///      facts back via curl.
@@ -80,6 +85,7 @@ impl AgentExecutor {
         notification_service: Arc<NotificationService>,
         sandbox_registry: Arc<SandboxRegistry>,
         secret_service: Arc<SecretService>,
+        definition_service: Arc<super::definition_service::DefinitionService>,
     ) -> Self {
         Self {
             db,
@@ -92,6 +98,7 @@ impl AgentExecutor {
             ai_provider_override: None,
             sandbox_registry,
             secret_service,
+            definition_service,
             memory_provider: tokio::sync::RwLock::new(None),
             deployment_token_service: tokio::sync::RwLock::new(None),
         }
@@ -387,24 +394,43 @@ impl AgentExecutor {
     }
 
     /// Inject MCP servers and skills stored directly on the agent record
-    /// (as opposed to those coming from config repos).
+    /// Inject MCP servers and skills into the sandbox by resolving slug references
+    /// from project-level definitions tables.
     ///
-    /// - `mcp_servers_config`: merged into `/workspace/.claude/settings.json` under `mcpServers`
-    /// - `skills_config`: each skill written as `/workspace/.claude/skills/{name}.md`
+    /// - `mcp_servers_config`: JSON array of slug strings → resolved from `project_mcp_definitions`
+    /// - `skills_config`: JSON array of slug strings → resolved from `project_skill_definitions`
+    /// - Custom tools from `tools_config` are still handled inline (webhook proxy).
     async fn inject_inline_mcp_and_skills(
         &self,
         run_id: i32,
         config: &temps_entities::project_agents::Model,
         secrets: &std::collections::HashMap<String, String>,
     ) -> Result<(), AgentError> {
-        let has_mcp = config
+        // Parse slug arrays from JSONB columns
+        let mcp_slugs: Vec<String> = config
             .mcp_servers_config
             .as_ref()
-            .is_some_and(|v| !v.is_null() && v.as_object().is_some_and(|o| !o.is_empty()));
-        let has_skills = config
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let skill_slugs: Vec<String> = config
             .skills_config
             .as_ref()
-            .is_some_and(|v| !v.is_null() && v.as_array().is_some_and(|a| !a.is_empty()));
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let has_mcp = !mcp_slugs.is_empty();
+        let has_skills = !skill_slugs.is_empty();
 
         // Extract custom tools from tools_config (type == "custom" with webhook_url)
         let custom_tools = Self::extract_custom_tools(config);
@@ -414,26 +440,23 @@ impl AgentExecutor {
             return Ok(());
         }
 
-        // Ensure .claude directory exists in sandbox (needed by MCP, skills, and custom tools)
-        if has_mcp || has_custom_tools || has_skills {
-            let _ = self
-                .sandbox_registry
-                .exec(
-                    run_id,
-                    vec![
-                        "mkdir".to_string(),
-                        "-p".to_string(),
-                        "/workspace/.claude".to_string(),
-                    ],
-                    std::collections::HashMap::new(),
-                    None,
-                )
-                .await;
-        }
+        // Ensure .claude directory exists in sandbox
+        let _ = self
+            .sandbox_registry
+            .exec(
+                run_id,
+                vec![
+                    "mkdir".to_string(),
+                    "-p".to_string(),
+                    "/workspace/.claude".to_string(),
+                ],
+                std::collections::HashMap::new(),
+                None,
+            )
+            .await;
 
         // ── Custom tools: install MCP proxy script and config ──
         if has_custom_tools {
-            // Ensure the bin directory exists
             let _ = self
                 .sandbox_registry
                 .exec(
@@ -448,7 +471,6 @@ impl AgentExecutor {
                 )
                 .await;
 
-            // Write the proxy script
             self.sandbox_registry
                 .write_file(
                     run_id,
@@ -458,7 +480,6 @@ impl AgentExecutor {
                 )
                 .await?;
 
-            // Build and write the proxy config (resolve secret placeholders in headers)
             let proxy_config = temps_agents_mcp_proxy::ProxyConfig {
                 tools: custom_tools.clone(),
             };
@@ -496,10 +517,8 @@ impl AgentExecutor {
                 .await?;
         }
 
-        // ── MCP servers + custom tools proxy: merge into .claude/settings.json ──
+        // ── MCP servers: resolve slugs from project definitions and merge into settings.json ──
         if has_mcp || has_custom_tools {
-            // Try to read existing settings.json from the sandbox (may have been
-            // written by a config repo overlay in Phase 1/2)
             let existing_settings = self
                 .sandbox_registry
                 .read_file(run_id, "/workspace/.claude/settings.json")
@@ -509,24 +528,36 @@ impl AgentExecutor {
                 .unwrap_or_else(|| serde_json::json!({}));
 
             let mut settings = existing_settings;
-
-            // Get or create mcpServers object
-            let mcp_servers = settings
+            let mut merged = settings
                 .get("mcpServers")
                 .and_then(|v| v.as_object())
                 .cloned()
                 .unwrap_or_default();
-            let mut merged = mcp_servers;
 
-            // Merge inline MCP servers
+            // Resolve MCP slugs from project definitions
             if has_mcp {
-                if let Some(new_servers) = config
-                    .mcp_servers_config
-                    .as_ref()
-                    .and_then(|v| v.as_object())
-                {
-                    for (k, v) in new_servers {
-                        merged.insert(k.clone(), v.clone());
+                let mcp_defs = self
+                    .definition_service
+                    .get_mcps_by_slugs(config.project_id, &mcp_slugs)
+                    .await?;
+
+                for def in &mcp_defs {
+                    merged.insert(def.slug.clone(), def.config.clone());
+                }
+
+                // Warn about unresolved slugs
+                let resolved: std::collections::HashSet<&str> =
+                    mcp_defs.iter().map(|d| d.slug.as_str()).collect();
+                for slug in &mcp_slugs {
+                    if !resolved.contains(slug.as_str()) {
+                        self.run_service
+                            .append_log(
+                                run_id,
+                                "warning",
+                                &format!("MCP server definition '{}' not found — skipped", slug),
+                                None,
+                            )
+                            .await?;
                     }
                 }
             }
@@ -543,7 +574,6 @@ impl AgentExecutor {
 
             settings["mcpServers"] = serde_json::Value::Object(merged.clone());
 
-            // Resolve ${TEMPS_SECRET:name} placeholders in the final JSON
             let mut settings_str = serde_json::to_string_pretty(&settings).unwrap_or_default();
             if !secrets.is_empty() && settings_str.contains("${TEMPS_SECRET:") {
                 settings_str = crate::services::secret_service::SecretService::resolve_placeholders(
@@ -561,14 +591,13 @@ impl AgentExecutor {
                 )
                 .await?;
 
-            let total_servers = merged.len();
             self.run_service
                 .append_log(
                     run_id,
                     "info",
                     &format!(
                         "Wrote .claude/settings.json with {} MCP server(s){}",
-                        total_servers,
+                        merged.len(),
                         if has_custom_tools {
                             " (including custom tools proxy)"
                         } else {
@@ -580,66 +609,61 @@ impl AgentExecutor {
                 .await?;
         }
 
-        // ── Skills: write each as .claude/skills/{name}.md ──
+        // ── Skills: resolve slugs from project definitions, write as .claude/skills/{slug}.md ──
         if has_skills {
-            let skills = config.skills_config.as_ref().unwrap();
-            if let Some(skills_arr) = skills.as_array() {
-                // Ensure skills directory exists
-                let _ = self
-                    .sandbox_registry
-                    .exec(
-                        run_id,
-                        vec![
-                            "mkdir".to_string(),
-                            "-p".to_string(),
-                            "/workspace/.claude/skills".to_string(),
-                        ],
-                        std::collections::HashMap::new(),
-                        None,
-                    )
-                    .await;
+            let _ = self
+                .sandbox_registry
+                .exec(
+                    run_id,
+                    vec![
+                        "mkdir".to_string(),
+                        "-p".to_string(),
+                        "/workspace/.claude/skills".to_string(),
+                    ],
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await;
 
-                let mut count = 0;
-                for skill in skills_arr {
-                    let name = skill
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unnamed");
-                    let content = skill.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let skill_defs = self
+                .definition_service
+                .get_skills_by_slugs(config.project_id, &skill_slugs)
+                .await?;
 
-                    if content.is_empty() {
-                        continue;
-                    }
+            let mut count = 0;
+            for def in &skill_defs {
+                let path = format!("/workspace/.claude/skills/{}.md", def.slug);
+                self.sandbox_registry
+                    .write_file(run_id, &path, def.content.as_bytes(), 0o644)
+                    .await?;
+                count += 1;
+            }
 
-                    // Sanitize name for filesystem use
-                    let safe_name: String = name
-                        .chars()
-                        .map(|c| {
-                            if c.is_alphanumeric() || c == '-' || c == '_' {
-                                c
-                            } else {
-                                '-'
-                            }
-                        })
-                        .collect();
-
-                    let path = format!("/workspace/.claude/skills/{}.md", safe_name);
-                    self.sandbox_registry
-                        .write_file(run_id, &path, content.as_bytes(), 0o644)
-                        .await?;
-                    count += 1;
-                }
-
-                if count > 0 {
+            // Warn about unresolved slugs
+            let resolved: std::collections::HashSet<&str> =
+                skill_defs.iter().map(|d| d.slug.as_str()).collect();
+            for slug in &skill_slugs {
+                if !resolved.contains(slug.as_str()) {
                     self.run_service
                         .append_log(
                             run_id,
-                            "info",
-                            &format!("Injected {} skill file(s) into .claude/skills/", count),
+                            "warning",
+                            &format!("Skill definition '{}' not found — skipped", slug),
                             None,
                         )
                         .await?;
                 }
+            }
+
+            if count > 0 {
+                self.run_service
+                    .append_log(
+                        run_id,
+                        "info",
+                        &format!("Injected {} skill file(s) into .claude/skills/", count),
+                        None,
+                    )
+                    .await?;
             }
         }
 
@@ -829,6 +853,125 @@ impl AgentExecutor {
         }
     }
 
+    /// Extract Claude CLI session files from the sandbox so that a workspace
+    /// can later resume the conversation via `claude --resume <session_id>`.
+    ///
+    /// Saves to `~/.temps/agent-sessions/{run_id}/` on the host. Best-effort:
+    /// failures are logged but never block the run from completing.
+    async fn extract_session_files(&self, run_id: i32) {
+        // Load the run to get the session_id
+        let run = match self.run_service.get_run(run_id).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let session_id = match &run.ai_session_id {
+            Some(id) => id.clone(),
+            None => return, // No session to extract
+        };
+
+        let data_dir = std::env::var("TEMPS_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| PathBuf::from(h).join(".temps"))
+                    .unwrap_or_else(|_| PathBuf::from("/tmp/.temps"))
+            });
+        let host_dir = data_dir.join("agent-sessions").join(run_id.to_string());
+
+        if let Err(e) = fs::create_dir_all(&host_dir).await {
+            tracing::warn!("Failed to create session dir for run {}: {}", run_id, e);
+            return;
+        }
+
+        // Claude stores sessions under ~/.claude/projects/{encoded-cwd}/{session_id}.jsonl
+        // In the sandbox CWD is /workspace → encoded as "-workspace".
+        // Try multiple possible paths in case the encoding differs.
+        let candidate_paths = [
+            format!(
+                "/home/temps/.claude/projects/-workspace/{}.jsonl",
+                session_id
+            ),
+            format!(
+                "/home/temps/.claude/projects/-home-temps-workspace/{}.jsonl",
+                session_id
+            ),
+        ];
+
+        // Also try to discover the actual path via find
+        let mut session_data: Option<Vec<u8>> = None;
+        for path in &candidate_paths {
+            match self.sandbox_registry.read_file(run_id, path).await {
+                Ok(data) if !data.is_empty() => {
+                    tracing::info!(
+                        "Found Claude session file at {} for run {} ({} bytes)",
+                        path,
+                        run_id,
+                        data.len()
+                    );
+                    session_data = Some(data);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        // Fallback: search for the session file anywhere under .claude/projects/
+        if session_data.is_none() {
+            let find_cmd = format!(
+                "find /home/temps/.claude/projects -name '{}.jsonl' 2>/dev/null | head -1",
+                session_id
+            );
+            if let Ok(output) = self
+                .sandbox_registry
+                .exec(
+                    run_id,
+                    vec!["sh".to_string(), "-c".to_string(), find_cmd],
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await
+            {
+                let found_path = output.stdout.trim().to_string();
+                if !found_path.is_empty() {
+                    tracing::info!(
+                        "Discovered session file at {} for run {} (not at expected path)",
+                        found_path,
+                        run_id
+                    );
+                    if let Ok(data) = self.sandbox_registry.read_file(run_id, &found_path).await {
+                        if !data.is_empty() {
+                            session_data = Some(data);
+                        }
+                    }
+                }
+            }
+        }
+
+        match session_data {
+            Some(data) => {
+                let dest = host_dir.join(format!("{}.jsonl", session_id));
+                if let Err(e) = fs::write(&dest, &data).await {
+                    tracing::warn!("Failed to write session file for run {}: {}", run_id, e);
+                } else {
+                    tracing::info!(
+                        "Extracted Claude session {} for run {} ({} bytes)",
+                        session_id,
+                        run_id,
+                        data.len()
+                    );
+                }
+            }
+            None => {
+                tracing::warn!(
+                    "Session file for {} not found in sandbox for run {} (tried {} paths + find)",
+                    session_id,
+                    run_id,
+                    candidate_paths.len()
+                );
+            }
+        }
+    }
+
     /// Execute a single autopilot run. Handles the full lifecycle from cloning to PR creation.
     pub async fn execute_run(&self, run_id: i32) {
         tracing::info!("Starting autopilot run {}", run_id);
@@ -857,7 +1000,16 @@ impl AgentExecutor {
                     .run_service
                     .append_log(run_id, "error", &format!("Run failed: {}", e), None)
                     .await;
+
+                // Send failure notification (best-effort — load context from DB)
+                self.send_failure_notification(run_id, &e).await;
             }
+        }
+
+        // Extract Claude session files before destroying the sandbox so that
+        // "Open in Workspace" can resume the conversation via `--resume`.
+        if self.sandbox_registry.has_sandbox(run_id).await {
+            self.extract_session_files(run_id).await;
         }
 
         // Always attempt cleanup: release sandbox first, then temp directory
@@ -1170,20 +1322,25 @@ impl AgentExecutor {
         tracing::info!("Run {}: analyzing error", run_id);
 
         // Step 8: Build the prompt
+        // First, build a rich trigger context block with all available info.
+        // This is prepended to the prompt so the YAML doesn't need template variables.
         let first_seen = run.created_at.to_rfc3339();
+        let trigger_context = self
+            .build_trigger_context(
+                &run,
+                &project,
+                &error_type,
+                &error_message,
+                &stack_trace,
+                environment_name.as_deref(),
+            )
+            .await;
+
         let prompt = if let Some(ref custom_prompt) = config.prompt {
-            // Agent has a custom prompt — substitute template variables
-            // Agent has a custom prompt — use it as-is (no template injection)
-            // Append error context as structured data if this is an error trigger
-            if run.trigger_source_type.as_deref() == Some("error_group") {
-                format!(
-                    "{}\n\n---\nERROR CONTEXT (provided by trigger):\nType: {}\nMessage: {}\nEnvironment: {}\nFirst seen: {}\n\nStack trace:\n{}\n",
-                    custom_prompt, error_type, error_message,
-                    environment_name.as_deref().unwrap_or("unknown"),
-                    first_seen, stack_trace
-                )
-            } else {
+            if trigger_context.is_empty() {
                 custom_prompt.clone()
+            } else {
+                format!("{}\n\n{}", trigger_context, custom_prompt)
             }
         } else {
             // No custom prompt — use built-in error fix prompt for error triggers,
@@ -1198,11 +1355,17 @@ impl AgentExecutor {
                     &first_seen,
                     environment_name.as_deref(),
                 )
-            } else {
+            } else if trigger_context.is_empty() {
                 format!(
                     "You are an AI agent running on the {} project. \
                      Perform the task described in your agent configuration.",
                     project.name
+                )
+            } else {
+                format!(
+                    "{}\n\nYou are an AI agent running on the {} project. \
+                     Perform the task described in your agent configuration.",
+                    trigger_context, project.name
                 )
             }
         };
@@ -1340,7 +1503,7 @@ impl AgentExecutor {
 
             let mut env = std::collections::HashMap::new();
             if !api_key.is_empty() {
-                env.insert("ANTHROPIC_API_KEY".to_string(), api_key);
+                env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
             }
 
             let exec_result = tokio::time::timeout(
@@ -1361,16 +1524,17 @@ impl AgentExecutor {
                 });
             }
 
-            let (tokens_input, tokens_output, model) =
-                crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+            let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
 
             AiRunResult {
                 output: exec_result.stdout,
                 exit_code: exec_result.exit_code,
-                tokens_input,
-                tokens_output,
-                model,
+                tokens_input: parsed.tokens_input,
+                tokens_output: parsed.tokens_output,
+                model: parsed.model,
                 changed_files: None,
+                session_id: parsed.session_id,
+                is_max_turns_error: parsed.is_max_turns_error,
             }
         } else {
             // Direct path: run AI CLI on host (no sandbox)
@@ -1388,13 +1552,137 @@ impl AgentExecutor {
             let ai_config = AiRunConfig {
                 work_dir: work_dir.clone(),
                 prompt,
-                api_key,
+                api_key: api_key.clone(),
                 max_turns: config.max_turns,
                 timeout: Duration::from_secs(config.timeout_seconds as u64),
                 on_event: Some(on_event),
             };
             provider.run(ai_config).await?
         };
+
+        // Step 12b: Auto-continue if the CLI hit the max turns limit.
+        // Re-runs with --continue up to 2 more times so the agent can finish its work.
+        let mut ai_result = ai_result;
+        const MAX_CONTINUATIONS: usize = 2;
+        let mut continuation = 0;
+        while ai_result.is_max_turns_error && continuation < MAX_CONTINUATIONS {
+            continuation += 1;
+            tracing::warn!(
+                "Run {}: AI CLI hit max_turns limit, auto-continuing ({}/{})",
+                run_id,
+                continuation,
+                MAX_CONTINUATIONS
+            );
+            self.run_service
+                .append_log(
+                    run_id,
+                    "warning",
+                    &format!(
+                        "Workflow hit the turn limit. Auto-continuing ({}/{})...",
+                        continuation, MAX_CONTINUATIONS
+                    ),
+                    None,
+                )
+                .await?;
+
+            let continue_prompt = "Continue where you left off. Complete the task.".to_string();
+            let run_service_for_stream = self.run_service.clone();
+            let stream_run_id = run_id;
+            let on_event: OnEventCallback = Arc::new(move |line: String| {
+                let svc = run_service_for_stream.clone();
+                let rid = stream_run_id;
+                Box::pin(async move {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        return;
+                    }
+                    let _ = svc.append_log(rid, "ai_event", trimmed, None).await;
+                })
+            });
+
+            let cont_result = if let Some(ref override_provider) = self.ai_provider_override {
+                let ai_config = AiRunConfig {
+                    work_dir: work_dir.clone(),
+                    prompt: continue_prompt,
+                    api_key: api_key.clone(),
+                    max_turns: config.max_turns,
+                    timeout: Duration::from_secs(config.timeout_seconds as u64),
+                    on_event: Some(on_event),
+                };
+                override_provider.continue_conversation(ai_config).await?
+            } else if use_sandbox {
+                let cmd = build_claude_cmd(
+                    &config.ai_provider,
+                    &continue_prompt,
+                    config.max_turns,
+                    true,
+                );
+                let mut env = std::collections::HashMap::new();
+                if !api_key.is_empty() {
+                    env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
+                }
+                let exec_result = tokio::time::timeout(
+                    Duration::from_secs(config.timeout_seconds as u64),
+                    self.sandbox_registry.exec(run_id, cmd, env, Some(on_event)),
+                )
+                .await
+                .map_err(|_| AgentError::AiCliTimeout {
+                    provider: config.ai_provider.clone(),
+                    timeout_secs: config.timeout_seconds as u64,
+                })??;
+
+                if exec_result.exit_code != 0 {
+                    break;
+                }
+
+                let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+                AiRunResult {
+                    output: exec_result.stdout,
+                    exit_code: exec_result.exit_code,
+                    tokens_input: parsed.tokens_input,
+                    tokens_output: parsed.tokens_output,
+                    model: parsed.model,
+                    changed_files: None,
+                    session_id: parsed.session_id,
+                    is_max_turns_error: parsed.is_max_turns_error,
+                }
+            } else {
+                let provider =
+                    crate::ai_cli::create_provider(&config.ai_provider).ok_or_else(|| {
+                        AgentError::AiCliNotInstalled {
+                            provider: config.ai_provider.clone(),
+                        }
+                    })?;
+                let ai_config = AiRunConfig {
+                    work_dir: work_dir.clone(),
+                    prompt: continue_prompt,
+                    api_key: api_key.clone(),
+                    max_turns: config.max_turns,
+                    timeout: Duration::from_secs(config.timeout_seconds as u64),
+                    on_event: Some(on_event),
+                };
+                provider.continue_conversation(ai_config).await?
+            };
+
+            // Merge: append new output, accumulate tokens, keep latest model/session
+            ai_result.output.push('\n');
+            ai_result.output.push_str(&cont_result.output);
+            ai_result.tokens_input = match (ai_result.tokens_input, cont_result.tokens_input) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, b) => a.or(b),
+            };
+            ai_result.tokens_output = match (ai_result.tokens_output, cont_result.tokens_output) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, b) => a.or(b),
+            };
+            if cont_result.model.is_some() {
+                ai_result.model = cont_result.model;
+            }
+            if cont_result.session_id.is_some() {
+                ai_result.session_id = cont_result.session_id;
+            }
+            ai_result.is_max_turns_error = cont_result.is_max_turns_error;
+        }
 
         // Step 13: Save AI output immediately (so it's preserved even if push fails later)
         self.run_service
@@ -1405,48 +1693,101 @@ impl AgentExecutor {
                     ai_model: ai_result.model.clone(),
                     tokens_input: ai_result.tokens_input,
                     tokens_output: ai_result.tokens_output,
+                    ai_session_id: ai_result.session_id.clone(),
                     ..Default::default()
                 },
             )
             .await?;
-        self.run_service
-            .append_log(
-                run_id,
-                "info",
-                "AI CLI completed",
-                Some(serde_json::json!({
-                    "exit_code": ai_result.exit_code,
-                    "tokens_input": ai_result.tokens_input,
-                    "tokens_output": ai_result.tokens_output,
-                    "model": ai_result.model,
-                })),
-            )
-            .await?;
+        if ai_result.is_max_turns_error {
+            self.run_service
+                .append_log(
+                    run_id,
+                    "warning",
+                    &format!(
+                        "AI CLI exhausted all turns (max_turns={}, continuations={}). Output may be incomplete.",
+                        config.max_turns, continuation
+                    ),
+                    Some(serde_json::json!({
+                        "exit_code": ai_result.exit_code,
+                        "tokens_input": ai_result.tokens_input,
+                        "tokens_output": ai_result.tokens_output,
+                        "model": ai_result.model,
+                        "is_max_turns_error": true,
+                        "continuations": continuation,
+                    })),
+                )
+                .await?;
+        } else {
+            self.run_service
+                .append_log(
+                    run_id,
+                    "info",
+                    "AI CLI completed",
+                    Some(serde_json::json!({
+                        "exit_code": ai_result.exit_code,
+                        "tokens_input": ai_result.tokens_input,
+                        "tokens_output": ai_result.tokens_output,
+                        "model": ai_result.model,
+                    })),
+                )
+                .await?;
+        }
 
         // Report deliverable: store the AI output as the report and complete.
         // No branch, no PR, no deployment.
         if config.deliverable == "report" {
-            // Extract the result text from stream-json output
-            let report_text = ai_result
-                .output
-                .lines()
-                .filter_map(|line| {
-                    let trimmed = line.trim();
-                    if !trimmed.starts_with('{') {
-                        return None;
-                    }
-                    serde_json::from_str::<serde_json::Value>(trimmed)
-                        .ok()
-                        .and_then(|v| {
-                            if v.get("type")?.as_str()? == "result" {
-                                v.get("result")?.as_str().map(String::from)
-                            } else {
-                                None
+            // Extract all assistant text blocks from stream-json output to build the full report.
+            // The "result" event only contains a brief summary — the actual report content
+            // is in the assistant message text blocks throughout the conversation.
+            let mut assistant_texts: Vec<String> = Vec::new();
+            for line in ai_result.output.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with('{') {
+                    continue;
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    if v.get("type").and_then(|t| t.as_str()) == Some("assistant") {
+                        if let Some(content) = v
+                            .get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_array())
+                        {
+                            for block in content {
+                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                        assistant_texts.push(text.to_string());
+                                    }
+                                }
                             }
-                        })
-                })
-                .next()
-                .unwrap_or_else(|| ai_result.output.clone());
+                        }
+                    }
+                }
+            }
+            let report_text = if assistant_texts.is_empty() {
+                // Fallback: try the result summary, then raw output
+                ai_result
+                    .output
+                    .lines()
+                    .filter_map(|line| {
+                        let trimmed = line.trim();
+                        if !trimmed.starts_with('{') {
+                            return None;
+                        }
+                        serde_json::from_str::<serde_json::Value>(trimmed)
+                            .ok()
+                            .and_then(|v| {
+                                if v.get("type")?.as_str()? == "result" {
+                                    v.get("result")?.as_str().map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                    })
+                    .next()
+                    .unwrap_or_else(|| ai_result.output.clone())
+            } else {
+                assistant_texts.join("\n\n")
+            };
 
             self.run_service
                 .update_status(
@@ -1477,8 +1818,9 @@ impl AgentExecutor {
                 run_id,
                 &config.name,
                 &project.name,
+                &project.slug,
                 &format!(
-                    "Agent **{}** completed run #{} for **{}**.\n\n{}",
+                    "Workflow **{}** completed run #{} for **{}**.\n\n{}",
                     config.name, run_id, project.name, report_preview
                 ),
                 &config.deliverable,
@@ -1578,6 +1920,20 @@ impl AgentExecutor {
                     None,
                 )
                 .await?;
+
+            self.send_completion_notification(
+                run_id,
+                &config.name,
+                &project.name,
+                &project.slug,
+                &format!(
+                    "Workflow **{}** completed run #{} for **{}** but made no code changes.\n\nThe AI analyzed the issue but didn't produce a fix. You can review the AI output in the run details or open it in a workspace to continue interactively.",
+                    config.name, run_id, project.name
+                ),
+                &config.deliverable,
+            )
+            .await;
+
             return Ok(());
         }
 
@@ -1773,8 +2129,9 @@ impl AgentExecutor {
             run_id,
             &config.name,
             &project.name,
+            &project.slug,
             &format!(
-                "Agent **{}** created PR #{} to fix '{}' in **{}**. Review and merge: {}",
+                "Workflow **{}** created PR #{} to fix '{}' in **{}**. Review and merge: {}",
                 config.name, pr.number, error_message, project.name, pr.url
             ),
             &config.deliverable,
@@ -1782,6 +2139,163 @@ impl AgentExecutor {
         .await;
 
         Ok(())
+    }
+
+    /// Build a rich context block from the trigger source. This is prepended
+    /// to the agent's prompt so the YAML doesn't need template variables —
+    /// Temps always provides all available context and the prompt just
+    /// describes what to do with it.
+    ///
+    /// Returns an empty string if no meaningful context is available (e.g.
+    /// manual triggers with no source).
+    async fn build_trigger_context(
+        &self,
+        run: &agent_runs::Model,
+        project: &projects::Model,
+        error_type: &str,
+        error_message: &str,
+        stack_trace: &str,
+        environment_name: Option<&str>,
+    ) -> String {
+        let mut ctx = String::new();
+        ctx.push_str("## Trigger Context\n\n");
+        ctx.push_str(&format!("- **Project:** {}\n", project.name));
+        ctx.push_str(&format!("- **Trigger type:** {}\n", run.trigger_type));
+        ctx.push_str(&format!(
+            "- **Triggered at:** {}\n",
+            run.created_at.to_rfc3339()
+        ));
+
+        // Deployment context
+        if run.trigger_source_type.as_deref() == Some("deployment") {
+            if let Some(deploy_id) = run.trigger_source_id {
+                if let Ok(Some(deploy)) = deployments::Entity::find_by_id(deploy_id)
+                    .one(self.db.as_ref())
+                    .await
+                {
+                    ctx.push_str(&format!("- **Deploy ID:** {}\n", deploy.id));
+                    if let Some(ref sha) = deploy.commit_sha {
+                        ctx.push_str(&format!("- **Commit:** {}\n", sha));
+                    }
+                    if let Some(ref author) = deploy.commit_author {
+                        ctx.push_str(&format!("- **Author:** {}\n", author));
+                    }
+                    if let Some(ref msg) = deploy.commit_message {
+                        ctx.push_str(&format!("- **Commit message:** {}\n", msg));
+                    }
+                }
+            }
+        }
+
+        // Error context
+        if run.trigger_source_type.as_deref() == Some("error_group") {
+            if !error_type.is_empty() {
+                ctx.push_str(&format!("- **Error type:** {}\n", error_type));
+            }
+            if !error_message.is_empty() {
+                ctx.push_str(&format!("- **Error message:** {}\n", error_message));
+            }
+            if let Some(env) = environment_name {
+                ctx.push_str(&format!("- **Environment:** {}\n", env));
+            }
+            if let Some(group_id) = run.trigger_source_id {
+                ctx.push_str(&format!("- **Error group ID:** {}\n", group_id));
+            }
+            if !stack_trace.is_empty() {
+                ctx.push_str(&format!("\n### Stack Trace\n\n```\n{}\n```\n", stack_trace));
+            }
+        }
+
+        // Monitor context
+        if run.trigger_source_type.as_deref() == Some("status_monitor") {
+            if let Some(monitor_id) = run.trigger_source_id {
+                if let Ok(Some(monitor)) = status_monitors::Entity::find_by_id(monitor_id)
+                    .one(self.db.as_ref())
+                    .await
+                {
+                    ctx.push_str(&format!(
+                        "- **Monitor:** {} (ID: {})\n",
+                        monitor.name, monitor.id
+                    ));
+                    ctx.push_str(&format!("- **Monitor type:** {}\n", monitor.monitor_type));
+                    if let Some(ref path) = monitor.check_path {
+                        ctx.push_str(&format!("- **Check path:** {}\n", path));
+                    }
+                    ctx.push_str(&format!(
+                        "- **Check interval:** {}s\n",
+                        monitor.check_interval_seconds
+                    ));
+                }
+
+                // Latest status check
+                if let Ok(Some(check)) = status_checks::Entity::find()
+                    .filter(status_checks::Column::MonitorId.eq(monitor_id))
+                    .order_by(status_checks::Column::CheckedAt, Order::Desc)
+                    .one(self.db.as_ref())
+                    .await
+                {
+                    ctx.push_str(&format!("- **Current status:** {}\n", check.status));
+                    if let Some(ms) = check.response_time_ms {
+                        ctx.push_str(&format!("- **Response time:** {}ms\n", ms));
+                    }
+                    if let Some(ref err) = check.error_message {
+                        ctx.push_str(&format!("- **Check error:** {}\n", err));
+                    }
+                    ctx.push_str(&format!(
+                        "- **Last checked:** {}\n",
+                        check.checked_at.to_rfc3339()
+                    ));
+
+                    // Downtime duration: find last non-down check
+                    if check.status == "down" {
+                        if let Ok(Some(last_ok)) = status_checks::Entity::find()
+                            .filter(status_checks::Column::MonitorId.eq(monitor_id))
+                            .filter(status_checks::Column::Status.ne("down"))
+                            .order_by(status_checks::Column::CheckedAt, Order::Desc)
+                            .one(self.db.as_ref())
+                            .await
+                        {
+                            let secs = (check.checked_at - last_ok.checked_at).num_seconds();
+                            let mins = secs / 60;
+                            if mins > 0 {
+                                ctx.push_str(&format!(
+                                    "- **Down for:** {}m {}s\n",
+                                    mins,
+                                    secs % 60
+                                ));
+                            } else {
+                                ctx.push_str(&format!("- **Down for:** {}s\n", secs));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Container status for the project — helps the AI know if containers are
+        // running, stopped, or crashed without needing to query via CLI first.
+        if let Ok(containers) = deployment_containers::Entity::find()
+            .inner_join(deployments::Entity)
+            .filter(deployments::Column::ProjectId.eq(run.project_id))
+            .filter(deployment_containers::Column::DeletedAt.is_null())
+            .order_by(deployment_containers::Column::CreatedAt, Order::Desc)
+            .all(self.db.as_ref())
+            .await
+        {
+            if !containers.is_empty() {
+                ctx.push_str("\n### Container Status\n\n");
+                for c in &containers {
+                    let status = c.status.as_deref().unwrap_or("unknown");
+                    let service = c.service_name.as_deref().unwrap_or(&c.container_name);
+                    ctx.push_str(&format!(
+                        "- **{}**: {} (container: `{}`)\n",
+                        service, status, c.container_id
+                    ));
+                }
+            }
+        }
+
+        ctx
     }
 
     /// Load error context (type, message, stack trace, environment) from the error group and its
@@ -1860,6 +2374,41 @@ impl AgentExecutor {
         ))
     }
 
+    /// Send a failure notification. Loads run + agent config from DB to get names.
+    /// Best-effort: logs a warning if anything goes wrong.
+    async fn send_failure_notification(&self, run_id: i32, error: &AgentError) {
+        let run = match self.run_service.get_run(run_id).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let agent_id = run.agent_id.unwrap_or(run.config_id);
+        let config = match self.config_service.get_agent_by_id(agent_id).await {
+            Ok(Some(c)) => c,
+            _ => return,
+        };
+        let project = match projects::Entity::find_by_id(run.project_id)
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(p)) => p,
+            _ => return,
+        };
+
+        let body = format!(
+            "Workflow **{}** failed on run #{} for **{}**.\n\n**Error:** {}\n\nCheck the run logs for details.",
+            config.name, run_id, project.name, error
+        );
+        self.send_completion_notification(
+            run_id,
+            &config.name,
+            &project.name,
+            &project.slug,
+            &body,
+            &config.deliverable,
+        )
+        .await;
+    }
+
     /// Send a completion notification for any deliverable type.
     /// The body is markdown and gets converted to email-safe HTML before sending.
     async fn send_completion_notification(
@@ -1867,10 +2416,22 @@ impl AgentExecutor {
         run_id: i32,
         agent_name: &str,
         project_name: &str,
+        project_slug: &str,
         body: &str,
         deliverable: &str,
     ) {
-        let html_body = Self::markdown_to_email_html(body);
+        // Build the run URL relative to the app. The settings may contain a
+        // public_url; fall back to reading it from the DB settings table.
+        let run_url = self.build_run_url(project_slug, run_id).await;
+
+        // Append a "View Run" link to the body
+        let body_with_link = if let Some(ref url) = run_url {
+            format!("{}\n\n[View workflow run →]({})", body, url)
+        } else {
+            body.to_string()
+        };
+
+        let html_body = Self::markdown_to_email_html(&body_with_link);
         let notification = Notification::new(
             format!("{}: {} (run #{})", agent_name, project_name, run_id),
             html_body,
@@ -1891,6 +2452,22 @@ impl AgentExecutor {
                 e
             );
         }
+    }
+
+    /// Build the full URL to a workflow run in the dashboard.
+    /// Reads `external_url` from settings. Returns `None` if not configured.
+    async fn build_run_url(&self, project_slug: &str, run_id: i32) -> Option<String> {
+        let settings = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten()?;
+        let app_settings: temps_core::AppSettings = serde_json::from_value(settings.data).ok()?;
+        let base = app_settings.external_url.as_deref()?.trim_end_matches('/');
+        Some(format!(
+            "{}/projects/{}/agents/{}",
+            base, project_slug, run_id
+        ))
     }
 
     /// Convert markdown to email-safe HTML with inline styles.
@@ -2211,6 +2788,8 @@ mod tests {
                         .map(|(p, _)| p.clone())
                         .collect(),
                 ),
+                session_id: None,
+                is_max_turns_error: false,
             })
         }
         async fn continue_conversation(
@@ -2272,6 +2851,8 @@ mod tests {
                 tokens_output: Some(200),
                 model: Some("fake-model".into()),
                 changed_files: Some(vec![]),
+                session_id: None,
+                is_max_turns_error: false,
             })
         }
         async fn continue_conversation(
@@ -2435,6 +3016,7 @@ mod tests {
             phase: None,
             analysis: None,
             user_context: None,
+            ai_session_id: None,
         }
     }
 
@@ -2467,6 +3049,8 @@ mod tests {
             mcp_servers_config: None,
             skills_config: None,
             tools_config: None,
+            webhook_id: None,
+            webhook_token: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -2578,6 +3162,14 @@ mod tests {
         Arc::new(SecretService::new(db, make_encryption_service()))
     }
 
+    fn make_definition_service(
+        db: Arc<sea_orm::DatabaseConnection>,
+    ) -> Arc<crate::services::definition_service::DefinitionService> {
+        Arc::new(crate::services::definition_service::DefinitionService::new(
+            db,
+        ))
+    }
+
     /// Build a MockDatabase for the happy path.
     ///
     /// Sea-ORM MockDatabase serves query results as a single FIFO queue.
@@ -2661,7 +3253,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
         .with_ai_provider(ai);
 
@@ -2799,7 +3392,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
         .with_ai_provider(ai);
 
@@ -2922,7 +3516,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
         .with_ai_provider(ai);
 
@@ -3011,7 +3606,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
         .with_ai_provider(ai);
 
@@ -3115,7 +3711,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
         .with_ai_provider(ai);
 
@@ -3615,7 +4212,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
         .with_ai_provider(ai);
 
@@ -3723,7 +4321,8 @@ mod tests {
             config_svc,
             make_notification_service(db.clone()),
             make_sandbox_registry(),
-            make_secret_service(db),
+            make_secret_service(db.clone()),
+            make_definition_service(db),
         )
     }
 

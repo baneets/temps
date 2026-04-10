@@ -297,8 +297,9 @@ impl AutofixerService {
             });
         }
 
+        let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
         let (tokens_input, tokens_output, model) =
-            crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+            (parsed.tokens_input, parsed.tokens_output, parsed.model);
 
         self.run_service
             .append_log(
@@ -489,8 +490,9 @@ impl AutofixerService {
             });
         }
 
+        let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
         let (tokens_input, tokens_output, model) =
-            crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+            (parsed.tokens_input, parsed.tokens_output, parsed.model);
 
         self.run_service
             .append_log(
@@ -962,8 +964,9 @@ impl AutofixerService {
             });
         }
 
+        let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
         let (tokens_input, tokens_output, model) =
-            crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+            (parsed.tokens_input, parsed.tokens_output, parsed.model);
 
         // Extract the result text
         let analysis_text = extract_result_text(&exec_result.stdout);
@@ -1279,6 +1282,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             created_at: chrono::Utc::now(),
+            ai_session_id: None,
         }
     }
 

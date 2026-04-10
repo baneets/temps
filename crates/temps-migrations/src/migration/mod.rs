@@ -72,6 +72,9 @@ mod m20260407_000003_add_workspace_resource_limits;
 mod m20260408_000001_add_agent_skills_and_mcp;
 mod m20260408_000002_make_secrets_global;
 mod m20260409_000001_add_agent_mcp_and_skills;
+mod m20260409_000002_add_webhook_token;
+mod m20260409_000003_add_ai_session_id;
+mod m20260410_000001_create_skill_and_mcp_definitions;
 
 pub struct Migrator;
 
@@ -151,6 +154,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260408_000001_add_agent_skills_and_mcp::Migration),
             Box::new(m20260408_000002_make_secrets_global::Migration),
             Box::new(m20260409_000001_add_agent_mcp_and_skills::Migration),
+            Box::new(m20260409_000002_add_webhook_token::Migration),
+            Box::new(m20260409_000003_add_ai_session_id::Migration),
+            Box::new(m20260410_000001_create_skill_and_mcp_definitions::Migration),
         ]
     }
 }

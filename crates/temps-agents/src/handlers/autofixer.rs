@@ -745,6 +745,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             created_at: chrono::Utc::now(),
+            ai_session_id: None,
         }
     }
 

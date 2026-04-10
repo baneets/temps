@@ -125,8 +125,8 @@ fn default_health_retries() -> u32 {
 /// - `model` = AI model/harness to use (maps to `provider` internally)
 /// - `system` = system prompt (alias for `prompt`)
 /// - `tools` = inline tool definitions
-/// - `mcp_servers` = MCP server connections
-/// - `skills` = reusable domain-specific expertise
+/// - `mcp_servers` = slugs referencing project-level MCP server definitions
+/// - `skills` = slugs referencing project-level skill definitions
 ///
 /// Example:
 /// ```yaml
@@ -139,20 +139,8 @@ fn default_health_retries() -> u32 {
 /// on:
 ///   error:
 ///     new_issue: true
-/// mcp_servers:
-///   - name: github
-///     url: https://api.githubcopilot.com/mcp/
-///   - name: sentry
-///     command: npx -y @sentry/mcp-server
-///     env:
-///       SENTRY_AUTH_TOKEN: "${TEMPS_SECRET:sentry_token}"
-/// skills:
-///   - name: code-review
-///     description: Expert code reviewer
-///     content: |
-///       Review code changes for bugs, security issues, and style.
-///   - name: testing
-///     path: skills/testing.md
+/// mcp_servers: [github, sentry]
+/// skills: [code-review, testing]
 /// tools:
 ///   - type: web_search
 /// deliverable: pull_request
@@ -209,16 +197,14 @@ pub struct AgentYamlConfig {
     /// Inline tool definitions available to the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AgentToolConfig>>,
-    /// MCP servers the agent connects to. Each server is written to
-    /// `.claude/settings.json` under `mcpServers` in the sandbox.
-    /// Supports remote (URL) and local (command) servers.
+    /// MCP server slugs referencing project-level definitions in Temps.
+    /// Each slug is resolved to its full config at runtime and injected into the sandbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<AgentMcpServer>>,
-    /// Skills that provide domain-specific expertise. Each skill is written
-    /// as a `.claude/skills/*.md` file in the sandbox.
-    /// Skills load on demand via progressive disclosure.
+    pub mcp_servers: Option<Vec<String>>,
+    /// Skill slugs referencing project-level definitions in Temps.
+    /// Each slug is resolved to its full content at runtime and written to `.claude/skills/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skills: Option<Vec<AgentSkill>>,
+    pub skills: Option<Vec<String>>,
     /// Private config repo containing `.claude/` directory (skills, MCP servers, settings).
     /// Format: "owner/repo" (e.g. "myorg/claude-config"). Cloned at runtime and
     /// overlaid into the sandbox's `/workspace/.claude/` directory.
@@ -240,77 +226,6 @@ pub struct AgentToolConfig {
     pub config: serde_json::Value,
 }
 
-/// MCP server configuration for agents.
-///
-/// Two modes:
-/// - **Remote (URL):** `url` field set — connects to a remote MCP server via HTTP.
-/// - **Local (command):** `command` field set — spawns a local process (stdio transport).
-///
-/// Example:
-/// ```yaml
-/// mcp_servers:
-///   - name: github
-///     url: https://api.githubcopilot.com/mcp/
-///   - name: sentry
-///     command: npx -y @sentry/mcp-server
-///     args: ["--org", "my-org"]
-///     env:
-///       SENTRY_AUTH_TOKEN: "${TEMPS_SECRET:sentry_token}"
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentMcpServer {
-    /// Unique name for this MCP server. Used as the key in `mcpServers` in settings.json.
-    pub name: String,
-    /// Remote server URL (streamable HTTP transport). Mutually exclusive with `command`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Local command to spawn (stdio transport). Mutually exclusive with `url`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// Arguments to pass to the command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<Vec<String>>,
-    /// Environment variables for the MCP server process.
-    /// Supports `${TEMPS_SECRET:name}` placeholders.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<std::collections::HashMap<String, String>>,
-}
-
-/// Skill configuration for agents.
-///
-/// Two modes:
-/// - **Inline:** `content` field set — skill content defined directly in YAML.
-/// - **File reference:** `path` field set — path relative to repo root.
-///
-/// Example:
-/// ```yaml
-/// skills:
-///   - name: code-review
-///     description: Expert code reviewer
-///     content: |
-///       Review code changes for correctness, security, and style.
-///       Always suggest tests for untested code paths.
-///   - name: testing-guide
-///     description: Testing best practices
-///     path: .claude/skills/testing.md
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSkill {
-    /// Skill name. Used as the filename: `.claude/skills/{name}.md`.
-    pub name: String,
-    /// Description shown in the skills index. Used for progressive disclosure —
-    /// the AI reads this to decide whether to load the full skill content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Inline skill content (Markdown). Written directly to the skill file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    /// Path to a skill file in the repository (relative to repo root).
-    /// The file is read at runtime and written to `.claude/skills/{name}.md`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentTriggers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,6 +238,10 @@ pub struct AgentTriggers {
     pub schedule: Option<ScheduleTrigger>,
     #[serde(default = "default_true")]
     pub manual: bool,
+    /// Enable public webhook trigger. When true, Temps auto-generates a unique
+    /// webhook token and exposes `POST /api/agents/webhook/{token}`.
+    #[serde(default)]
+    pub webhook: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,47 +317,27 @@ impl AgentYamlConfig {
         })
     }
 
-    /// Convert MCP servers to Claude Code `settings.json` `mcpServers` format.
-    ///
-    /// Output: `{ "server-name": { "command": "...", "args": [...], "env": {...} }, ... }`
-    /// or `{ "server-name": { "url": "..." } }` for remote servers.
+    /// Convert MCP server slugs to a JSON array for DB storage.
+    /// Output: `["github", "sentry"]`
     pub fn mcp_servers_json(&self) -> Option<serde_json::Value> {
-        self.mcp_servers.as_ref().map(|servers| {
-            let mut map = serde_json::Map::new();
-            for server in servers {
-                let mut entry = serde_json::Map::new();
-                if let Some(ref url) = server.url {
-                    entry.insert("type".to_string(), serde_json::json!("url"));
-                    entry.insert("url".to_string(), serde_json::json!(url));
-                } else if let Some(ref command) = server.command {
-                    entry.insert("command".to_string(), serde_json::json!(command));
-                    if let Some(ref args) = server.args {
-                        entry.insert("args".to_string(), serde_json::json!(args));
-                    }
-                }
-                if let Some(ref env) = server.env {
-                    entry.insert("env".to_string(), serde_json::json!(env));
-                }
-                map.insert(server.name.clone(), serde_json::Value::Object(entry));
-            }
-            serde_json::Value::Object(map)
+        self.mcp_servers.as_ref().map(|slugs| {
+            serde_json::Value::Array(
+                slugs
+                    .iter()
+                    .map(|s| serde_json::Value::String(s.clone()))
+                    .collect(),
+            )
         })
     }
 
-    /// Convert skills to a JSON value for DB storage.
+    /// Convert skill slugs to a JSON array for DB storage.
+    /// Output: `["blog-writer", "seo-optimizer"]`
     pub fn skills_config_json(&self) -> Option<serde_json::Value> {
-        self.skills.as_ref().map(|skills| {
+        self.skills.as_ref().map(|slugs| {
             serde_json::Value::Array(
-                skills
+                slugs
                     .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "description": s.description,
-                            "content": s.content,
-                            "path": s.path,
-                        })
-                    })
+                    .map(|s| serde_json::Value::String(s.clone()))
                     .collect(),
             )
         })
@@ -463,6 +362,7 @@ impl AgentYamlConfig {
                 "cron": s.cron,
             })),
             "manual": self.on.manual,
+            "webhook": self.on.webhook,
         })
     }
 
@@ -1104,5 +1004,39 @@ tools:
         let t1 = &arr[1];
         assert_eq!(t1["type"], "custom");
         assert_eq!(t1["name"], "query_db");
+    }
+
+    #[test]
+    fn test_agent_yaml_with_skill_and_mcp_slugs() {
+        let yaml = r#"
+name: content-writer
+skills: [blog-writer, seo-optimizer]
+mcp_servers: [browser, github]
+"#;
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            agent.skills.as_ref().unwrap(),
+            &["blog-writer", "seo-optimizer"]
+        );
+        assert_eq!(agent.mcp_servers.as_ref().unwrap(), &["browser", "github"]);
+
+        let skills_json = agent.skills_config_json().unwrap();
+        assert_eq!(
+            skills_json,
+            serde_json::json!(["blog-writer", "seo-optimizer"])
+        );
+
+        let mcp_json = agent.mcp_servers_json().unwrap();
+        assert_eq!(mcp_json, serde_json::json!(["browser", "github"]));
+    }
+
+    #[test]
+    fn test_agent_yaml_no_skills_or_mcp_defaults_to_none() {
+        let yaml = "name: minimal\n";
+        let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(agent.skills.is_none());
+        assert!(agent.mcp_servers.is_none());
+        assert!(agent.skills_config_json().is_none());
+        assert!(agent.mcp_servers_json().is_none());
     }
 }

@@ -246,15 +246,17 @@ impl AiCliProvider for ClaudeCliProvider {
             });
         }
 
-        let (tokens_input, tokens_output, model) = parse_claude_output(&stdout);
+        let parsed = parse_claude_output(&stdout);
 
         Ok(AiRunResult {
             output: stdout,
             exit_code,
-            tokens_input,
-            tokens_output,
-            model,
+            tokens_input: parsed.tokens_input,
+            tokens_output: parsed.tokens_output,
+            model: parsed.model,
             changed_files: None,
+            session_id: parsed.session_id,
+            is_max_turns_error: parsed.is_max_turns_error,
         })
     }
 
@@ -374,25 +376,41 @@ impl AiCliProvider for ClaudeCliProvider {
             });
         }
 
-        let (tokens_input, tokens_output, model) = parse_claude_output(&stdout);
+        let parsed = parse_claude_output(&stdout);
 
         Ok(AiRunResult {
             output: stdout,
             exit_code,
-            tokens_input,
-            tokens_output,
-            model,
+            tokens_input: parsed.tokens_input,
+            tokens_output: parsed.tokens_output,
+            model: parsed.model,
             changed_files: None,
+            session_id: parsed.session_id,
+            is_max_turns_error: parsed.is_max_turns_error,
         })
     }
 }
 
 /// Parse Claude CLI JSON output for token usage and model information.
 /// Claude CLI may emit JSON objects per line (JSON Lines format).
-pub fn parse_claude_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
-    let mut tokens_input: Option<i32> = None;
-    let mut tokens_output: Option<i32> = None;
-    let mut model: Option<String> = None;
+pub struct ParsedClaudeOutput {
+    pub tokens_input: Option<i32>,
+    pub tokens_output: Option<i32>,
+    pub model: Option<String>,
+    /// Session ID from the `system/init` event, used for `--resume`.
+    pub session_id: Option<String>,
+    /// True when the CLI hit the max turns limit without completing.
+    pub is_max_turns_error: bool,
+}
+
+pub fn parse_claude_output(output: &str) -> ParsedClaudeOutput {
+    let mut result = ParsedClaudeOutput {
+        tokens_input: None,
+        tokens_output: None,
+        model: None,
+        session_id: None,
+        is_max_turns_error: false,
+    };
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -400,31 +418,59 @@ pub fn parse_claude_output(output: &str) -> (Option<i32>, Option<i32>, Option<St
             continue;
         }
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // Extract session_id from system/init event
+            if result.session_id.is_none()
+                && value.get("type").and_then(|v| v.as_str()) == Some("system")
+            {
+                result.session_id = value
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
             // Look for usage object at top level or nested
             if let Some(usage) = value.get("usage") {
-                if tokens_input.is_none() {
-                    tokens_input = usage
+                if result.tokens_input.is_none() {
+                    result.tokens_input = usage
                         .get("input_tokens")
                         .and_then(|v| v.as_i64())
                         .map(|v| v as i32);
                 }
-                if tokens_output.is_none() {
-                    tokens_output = usage
+                if result.tokens_output.is_none() {
+                    result.tokens_output = usage
                         .get("output_tokens")
                         .and_then(|v| v.as_i64())
                         .map(|v| v as i32);
                 }
             }
-            if model.is_none() {
-                model = value
+            if result.model.is_none() {
+                result.model = value
                     .get("model")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
             }
+            // Detect max_turns error from the result event
+            if value.get("type").and_then(|v| v.as_str()) == Some("result") {
+                if value.get("subtype").and_then(|v| v.as_str()) == Some("error_max_turns") {
+                    result.is_max_turns_error = true;
+                }
+                // Also extract usage from the result event's usage field
+                if let Some(usage) = value.get("usage") {
+                    result.tokens_input = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32)
+                        .or(result.tokens_input);
+                    result.tokens_output = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_i64())
+                        .map(|v| v as i32)
+                        .or(result.tokens_output);
+                }
+            }
         }
     }
 
-    (tokens_input, tokens_output, model)
+    result
 }
 
 #[cfg(test)]
@@ -435,19 +481,53 @@ mod tests {
     fn test_parse_claude_output_with_usage() {
         let output =
             r#"{"model":"claude-3-5-sonnet","usage":{"input_tokens":150,"output_tokens":42}}"#;
-        let (input, output_tokens, model) = parse_claude_output(output);
-        assert_eq!(input, Some(150));
-        assert_eq!(output_tokens, Some(42));
-        assert_eq!(model.as_deref(), Some("claude-3-5-sonnet"));
+        let parsed = parse_claude_output(output);
+        assert_eq!(parsed.tokens_input, Some(150));
+        assert_eq!(parsed.tokens_output, Some(42));
+        assert_eq!(parsed.model.as_deref(), Some("claude-3-5-sonnet"));
     }
 
     #[test]
     fn test_parse_claude_output_empty() {
-        let output = "no json here";
-        let (input, output_tokens, model) = parse_claude_output(output);
-        assert!(input.is_none());
-        assert!(output_tokens.is_none());
-        assert!(model.is_none());
+        let parsed = parse_claude_output("no json here");
+        assert!(parsed.tokens_input.is_none());
+        assert!(parsed.tokens_output.is_none());
+        assert!(parsed.model.is_none());
+        assert!(parsed.session_id.is_none());
+    }
+
+    #[test]
+    fn test_parse_claude_output_extracts_session_id() {
+        let output = r#"{"type":"system","subtype":"init","cwd":"/workspace","session_id":"08290b53-75ae-4be9-985a-d584375bf9e0"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"hello"}],"usage":{"input_tokens":100,"output_tokens":20}}}"#;
+        let parsed = parse_claude_output(output);
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("08290b53-75ae-4be9-985a-d584375bf9e0")
+        );
+    }
+
+    #[test]
+    fn test_parse_claude_output_detects_max_turns_error() {
+        let output = r#"{"type":"system","subtype":"init","cwd":"/workspace","session_id":"6dc3ab7b-9272-4b77-9496-1814c75be4e4"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"working..."}],"usage":{"input_tokens":100,"output_tokens":20}}}
+{"type":"result","subtype":"error_max_turns","duration_ms":84876,"is_error":true,"num_turns":16,"usage":{"input_tokens":500,"output_tokens":200}}"#;
+        let parsed = parse_claude_output(output);
+        assert!(parsed.is_max_turns_error);
+        assert_eq!(
+            parsed.session_id.as_deref(),
+            Some("6dc3ab7b-9272-4b77-9496-1814c75be4e4")
+        );
+        // Usage from the result event should be captured
+        assert_eq!(parsed.tokens_input, Some(500));
+        assert_eq!(parsed.tokens_output, Some(200));
+    }
+
+    #[test]
+    fn test_parse_claude_output_no_max_turns_error_on_success() {
+        let output = r#"{"type":"result","subtype":"success","duration_ms":5000,"is_error":false,"result":"Done","usage":{"input_tokens":100,"output_tokens":50}}"#;
+        let parsed = parse_claude_output(output);
+        assert!(!parsed.is_max_turns_error);
     }
 
     #[test]

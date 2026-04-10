@@ -73,6 +73,9 @@ export interface StartSessionRequest {
    *  session "off main" without touching the remote. */
   base_branch_name?: string
   metadata?: Record<string, unknown>
+  /** When resuming from an agent run, pass the run ID so the backend
+   *  can inject Claude session files into the workspace sandbox. */
+  agent_run_id?: number
 }
 
 export interface SendMessageRequest {

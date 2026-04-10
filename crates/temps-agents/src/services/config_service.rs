@@ -47,6 +47,30 @@ pub struct UpsertAgentRequest {
     pub tools_config: Option<serde_json::Value>,
 }
 
+/// Generate a short non-secret webhook ID (8 bytes = 16 hex chars) for the URL path.
+fn generate_webhook_id() -> String {
+    use rand::Rng;
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Generate a cryptographically random webhook token (32 bytes = 64 hex chars) for header auth.
+fn generate_webhook_token() -> String {
+    use rand::Rng;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Check if webhook trigger is enabled in a trigger_config JSON value.
+fn is_webhook_enabled(trigger_config: &serde_json::Value) -> bool {
+    trigger_config
+        .get("webhook")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 pub struct AgentConfigService {
     db: Arc<DatabaseConnection>,
     encryption_service: Arc<temps_core::EncryptionService>,
@@ -172,6 +196,11 @@ impl AgentConfigService {
                         .and_then(|s| s.get("cron"))
                         .and_then(|v| v.as_str())
                         .is_some(),
+                    "webhook" => a
+                        .trigger_config
+                        .get("webhook")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     _ => false,
                 }
             })
@@ -318,6 +347,12 @@ impl AgentConfigService {
                 "error": { "new_issue": true, "regression": true },
                 "manual": true
             });
+            let trigger_config = request.trigger_config.unwrap_or(default_trigger_config);
+            let (webhook_id, webhook_token) = if is_webhook_enabled(&trigger_config) {
+                (Some(generate_webhook_id()), Some(generate_webhook_token()))
+            } else {
+                (None, None)
+            };
             let active = project_agents::ActiveModel {
                 project_id: Set(project_id),
                 slug: Set(request
@@ -327,7 +362,7 @@ impl AgentConfigService {
                 description: Set(request.description),
                 source: Set("dashboard".to_string()),
                 enabled: Set(request.enabled.unwrap_or(false)),
-                trigger_config: Set(request.trigger_config.unwrap_or(default_trigger_config)),
+                trigger_config: Set(trigger_config),
                 prompt: Set(request.prompt),
                 ai_provider: Set(request
                     .ai_provider
@@ -345,6 +380,8 @@ impl AgentConfigService {
                 sandbox_enabled: Set(request.sandbox_enabled),
                 config_repo_url: Set(request.config_repo_url),
                 config_repo_branch: Set(request.config_repo_branch),
+                webhook_id: Set(webhook_id),
+                webhook_token: Set(webhook_token),
                 ..Default::default()
             };
 
@@ -370,6 +407,19 @@ impl AgentConfigService {
             .map_err(AgentError::Database)?;
 
         Ok(())
+    }
+
+    /// Find an agent by its webhook ID (non-secret, used in URL path).
+    /// Used by the public webhook trigger endpoint.
+    pub async fn get_agent_by_webhook_id(
+        &self,
+        webhook_id: &str,
+    ) -> Result<Option<project_agents::Model>, AgentError> {
+        project_agents::Entity::find()
+            .filter(project_agents::Column::WebhookId.eq(webhook_id))
+            .one(self.db.as_ref())
+            .await
+            .map_err(AgentError::Database)
     }
 
     /// Get a specific agent by slug for a project.
@@ -454,6 +504,15 @@ impl AgentConfigService {
             "manual": true
         });
 
+        let trigger_config = request.trigger_config.unwrap_or(default_trigger_config);
+
+        // Auto-generate webhook token if webhook trigger is enabled
+        let (webhook_id, webhook_token) = if is_webhook_enabled(&trigger_config) {
+            (Some(generate_webhook_id()), Some(generate_webhook_token()))
+        } else {
+            (None, None)
+        };
+
         let active = project_agents::ActiveModel {
             project_id: Set(project_id),
             slug: Set(slug),
@@ -461,7 +520,7 @@ impl AgentConfigService {
             description: Set(request.description),
             source: Set("dashboard".to_string()),
             enabled: Set(request.enabled.unwrap_or(false)),
-            trigger_config: Set(request.trigger_config.unwrap_or(default_trigger_config)),
+            trigger_config: Set(trigger_config),
             prompt: Set(request.prompt),
             ai_provider: Set(request
                 .ai_provider
@@ -484,6 +543,8 @@ impl AgentConfigService {
             mcp_servers_config: Set(request.mcp_servers_config),
             skills_config: Set(request.skills_config),
             tools_config: Set(request.tools_config),
+            webhook_id: Set(webhook_id),
+            webhook_token: Set(webhook_token),
             ..Default::default()
         };
 
@@ -509,6 +570,8 @@ impl AgentConfigService {
                 project_id,
                 slug: slug.to_string(),
             })?;
+
+        let existing_has_webhook = existing.webhook_id.is_some();
 
         // Validate git connection if being enabled
         if request.enabled.unwrap_or(false) && !existing.enabled {
@@ -594,6 +657,16 @@ impl AgentConfigService {
             active.cooldown_minutes = Set(cooldown);
         }
         if let Some(trigger_config) = request.trigger_config {
+            // Auto-manage webhook ID + token when trigger_config changes
+            if is_webhook_enabled(&trigger_config) {
+                if !existing_has_webhook {
+                    active.webhook_id = Set(Some(generate_webhook_id()));
+                    active.webhook_token = Set(Some(generate_webhook_token()));
+                }
+            } else {
+                active.webhook_id = Set(None);
+                active.webhook_token = Set(None);
+            }
             active.trigger_config = Set(trigger_config);
         }
         if let Some(prompt) = request.prompt {
@@ -710,6 +783,16 @@ impl AgentConfigService {
                 active.config_repo_url = Set(yaml_agent.config_repo.clone());
                 active.config_repo_branch = Set(yaml_agent.config_repo_branch.clone());
                 active.enabled = Set(yaml_agent.enabled);
+                // Auto-manage webhook ID + token
+                if yaml_agent.on.webhook {
+                    if existing_agent.webhook_id.is_none() {
+                        active.webhook_id = Set(Some(generate_webhook_id()));
+                        active.webhook_token = Set(Some(generate_webhook_token()));
+                    }
+                } else {
+                    active.webhook_id = Set(None);
+                    active.webhook_token = Set(None);
+                }
                 active
                     .update(self.db.as_ref())
                     .await
@@ -717,6 +800,11 @@ impl AgentConfigService {
                 updated += 1;
             } else {
                 // Insert
+                let (webhook_id, webhook_token) = if yaml_agent.on.webhook {
+                    (Some(generate_webhook_id()), Some(generate_webhook_token()))
+                } else {
+                    (None, None)
+                };
                 let active = project_agents::ActiveModel {
                     project_id: Set(project_id),
                     slug: Set(slug),
@@ -739,6 +827,8 @@ impl AgentConfigService {
                     tools_config: Set(yaml_agent.tools_config_json()),
                     config_repo_url: Set(yaml_agent.config_repo.clone()),
                     config_repo_branch: Set(yaml_agent.config_repo_branch.clone()),
+                    webhook_id: Set(webhook_id),
+                    webhook_token: Set(webhook_token),
                     ..Default::default()
                 };
                 active
@@ -803,6 +893,8 @@ mod tests {
             mcp_servers_config: None,
             skills_config: None,
             tools_config: None,
+            webhook_id: None,
+            webhook_token: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

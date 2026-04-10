@@ -5,6 +5,7 @@ import {
   listServices,
   createService,
   getService,
+  getServiceBySlug,
   deleteService,
   startService,
   stopService,
@@ -317,6 +318,13 @@ export function registerServicesCommands(program: Command): void {
     .option('-f, --force', 'Skip confirmation')
     .option('-y, --yes', 'Skip confirmation prompts (alias for --force)')
     .action(unlinkServiceAction)
+
+  services
+    .command('connect <name>')
+    .description('Get connection info for a service by name or slug')
+    .option('-p, --project <slug>', 'Project slug (auto-detected from .temps/config.json)')
+    .option('--json', 'Output in JSON format')
+    .action(connectAction)
 
   services
     .command('env')
@@ -1131,6 +1139,98 @@ async function envVarAction(options: EnvVarOptions): Promise<void> {
     keyValue(envVar.name, envVar.value + sensitiveTag)
   } else {
     warning(`Environment variable "${options.var}" not found`)
+  }
+  newline()
+}
+
+async function connectAction(name: string, options: { project?: string; json?: boolean }): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  // Try to find service by slug first, then by name match
+  let service: ExternalServiceInfo | undefined
+
+  // Try slug lookup
+  const { data: bySlug } = await getServiceBySlug({
+    client,
+    path: { slug: name },
+  })
+
+  if (bySlug) {
+    service = bySlug.service
+  } else {
+    // Fall back to name search across all services
+    const { data: allServices, error } = await listServices({ client })
+    if (error) {
+      throw new Error(getErrorMessage(error))
+    }
+    service = (allServices ?? []).find(
+      (s) => s.name === name || s.name.toLowerCase() === name.toLowerCase()
+    )
+  }
+
+  if (!service) {
+    warning(`Service "${name}" not found`)
+    info('Run: temps services list to see available services')
+    return
+  }
+
+  // Get full details including connection info
+  const details = await withSpinner('Fetching connection info...', async () => {
+    const { data, error } = await getService({
+      client,
+      path: { id: service!.id },
+    })
+    if (error || !data) {
+      throw new Error(getErrorMessage(error) ?? `Service ${name} not found`)
+    }
+    return data
+  })
+
+  // Try to get environment variables if linked to a project
+  let envVars: Array<{ name: string; value: string; sensitive?: boolean }> = []
+  if (options.project) {
+    const project = await resolveProjectId(options.project)
+    const { data: vars } = await getServiceEnvironmentVariables({
+      client,
+      path: { id: service.id, project_id: project.id },
+    })
+    envVars = vars ?? []
+  }
+
+  if (options.json) {
+    json({
+      id: details.service.id,
+      name: details.service.name,
+      type: details.service.service_type,
+      status: details.service.status,
+      connection_info: details.service.connection_info,
+      version: details.service.version,
+      parameters: details.current_parameters,
+      environment_variables: envVars.length > 0 ? envVars : undefined,
+    })
+    return
+  }
+
+  newline()
+  header(`${icons.info} ${details.service.name}`)
+  keyValue('Type', SERVICE_TYPE_LABELS[details.service.service_type] || details.service.service_type)
+  keyValue('Status', statusBadge(details.service.status === 'running' ? 'active' : 'inactive'))
+  if (details.service.version) {
+    keyValue('Version', details.service.version)
+  }
+  if (details.service.connection_info) {
+    newline()
+    header('Connection')
+    console.log(`  ${details.service.connection_info}`)
+  }
+  if (envVars.length > 0) {
+    newline()
+    header('Environment Variables')
+    for (const v of envVars) {
+      const sensitiveTag = v.sensitive ? colors.muted(' [sensitive]') : ''
+      keyValue(v.name, v.value + sensitiveTag)
+    }
   }
   newline()
 }

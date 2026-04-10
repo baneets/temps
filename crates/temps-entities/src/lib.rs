@@ -9,7 +9,9 @@ pub mod agent_run_logs;
 pub mod agent_runs;
 pub mod agent_secrets;
 pub mod project_agents;
+pub mod project_mcp_definitions;
 pub mod project_secrets;
+pub mod project_skill_definitions;
 // Legacy autopilot entities (kept for migration compatibility)
 pub mod api_keys;
 pub mod audit_logs;

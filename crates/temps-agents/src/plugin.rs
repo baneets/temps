@@ -156,6 +156,11 @@ impl AgentsPlugin {
                 .and_then(|s| s.get("cron"))
                 .and_then(|v| v.as_str())
                 .is_some(),
+            "webhook" => agent
+                .trigger_config
+                .get("webhook")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             "manual" => true,
             _ => false,
         };
@@ -490,6 +495,10 @@ impl TempsPlugin for AgentsPlugin {
                 tracing::warn!("Failed to recover stuck agent runs: {}", e);
             }
 
+            let definition_service =
+                Arc::new(crate::services::definition_service::DefinitionService::new(
+                    context.require_service::<sea_orm::DatabaseConnection>(),
+                ));
             let executor = Arc::new(AgentExecutor::new(
                 db.clone(),
                 git_provider_manager.clone(),
@@ -500,6 +509,7 @@ impl TempsPlugin for AgentsPlugin {
                 notification_service,
                 sandbox_registry.clone(),
                 secret_service.clone(),
+                definition_service.clone(),
             ));
             context.register_service(executor.clone());
 
@@ -548,6 +558,7 @@ impl TempsPlugin for AgentsPlugin {
                 audit_service: context.require_service::<dyn temps_core::AuditLogger>(),
                 autofixer_service,
                 secret_service,
+                definition_service,
                 docker: context.require_service::<bollard::Docker>(),
                 platform_config_service: context.require_service::<temps_config::ConfigService>(),
             });
@@ -664,6 +675,8 @@ mod tests {
             mcp_servers_config: None,
             skills_config: None,
             tools_config: None,
+            webhook_id: None,
+            webhook_token: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

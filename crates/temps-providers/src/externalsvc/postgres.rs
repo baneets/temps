@@ -825,7 +825,7 @@ impl PostgresService {
 
         let config: PostgresConfig = self.get_postgres_config(service_config)?;
         let connection_string = format!(
-            "postgres://{}:{}@{}:{}/postgres",
+            "postgres://{}:{}@{}:{}/postgres?sslmode=disable",
             urlencoding::encode(&config.username),
             urlencoding::encode(&config.password),
             config.host,

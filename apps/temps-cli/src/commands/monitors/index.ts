@@ -10,6 +10,8 @@ import {
   getUptimeHistory,
 } from '../../api/sdk.gen.js'
 import type { MonitorResponse } from '../../api/types.gen.js'
+import { requireProjectSlug } from '../../config/resolve-project.js'
+import { getProjectBySlug } from '../../api/sdk.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
 import { promptText, promptSelect, promptConfirm } from '../../ui/prompts.js'
@@ -63,6 +65,7 @@ interface HistoryOptions {
 export function registerMonitorsCommands(program: Command): void {
   const monitors = program
     .command('monitors')
+    .alias('monitoring')
     .description('Manage uptime monitors for status pages')
 
   monitors
@@ -103,10 +106,11 @@ export function registerMonitorsCommands(program: Command): void {
 
   monitors
     .command('status')
-    .description('Get current monitor status')
-    .requiredOption('--id <id>', 'Monitor ID')
+    .description('Get current status — all monitors for a project, or a single monitor by ID')
+    .option('--id <id>', 'Monitor ID (omit to show all monitors for the project)')
+    .option('-p, --project <slug>', 'Project slug (auto-detected from .temps/config.json or TEMPS_PROJECT)')
     .option('--json', 'Output in JSON format')
-    .action(getMonitorStatus)
+    .action(getMonitorStatusAction)
 
   monitors
     .command('history')
@@ -334,46 +338,137 @@ async function removeMonitor(options: RemoveOptions): Promise<void> {
   success('Monitor deleted')
 }
 
-async function getMonitorStatus(options: StatusOptions): Promise<void> {
+/** Resolve project slug → project ID */
+async function resolveProjectId(flagValue?: string): Promise<{ id: number; slug: string }> {
+  const resolved = await requireProjectSlug(flagValue)
+  if (resolved.source !== 'flag') {
+    info(`Using project ${colors.bold(resolved.slug)} (from ${resolved.source})`)
+  }
+  const { data, error } = await getProjectBySlug({
+    client,
+    path: { slug: resolved.slug },
+  })
+  if (error || !data) {
+    throw new Error(`Project "${resolved.slug}" not found`)
+  }
+  return { id: data.id, slug: resolved.slug }
+}
+
+async function getMonitorStatusAction(options: StatusOptions & { project?: string }): Promise<void> {
   await requireAuth()
   await setupClient()
 
-  const id = parseInt(options.id, 10)
-  if (isNaN(id)) {
-    warning('Invalid monitor ID')
+  // If --id is provided, show single monitor status (original behavior)
+  if (options.id) {
+    const id = parseInt(options.id, 10)
+    if (isNaN(id)) {
+      warning('Invalid monitor ID')
+      return
+    }
+
+    const status = await withSpinner('Fetching status...', async () => {
+      const { data, error } = await getCurrentMonitorStatus({
+        client,
+        path: { monitor_id: id },
+      })
+      if (error || !data) {
+        throw new Error(getErrorMessage(error) ?? 'Failed to get monitor status')
+      }
+      return data
+    })
+
+    if (options.json) {
+      json(status)
+      return
+    }
+
+    newline()
+    header(`${icons.info} Monitor Status`)
+    keyValue('Current Status', statusBadge(status.current_status === 'up' ? 'active' : 'inactive'))
+    if (status.avg_response_time_ms !== null && status.avg_response_time_ms !== undefined) {
+      keyValue('Avg Response Time', `${Math.round(status.avg_response_time_ms)}ms`)
+    }
+    if (status.uptime_percentage !== null && status.uptime_percentage !== undefined) {
+      const uptimeColor = status.uptime_percentage >= 99 ? colors.success : status.uptime_percentage >= 95 ? colors.warning : colors.error
+      keyValue('Uptime', uptimeColor(`${status.uptime_percentage.toFixed(2)}%`))
+    }
+    if (status.last_check_at) {
+      keyValue('Last Check', new Date(status.last_check_at).toLocaleString())
+    }
+    newline()
     return
   }
 
-  const status = await withSpinner('Fetching status...', async () => {
-    const { data, error } = await getCurrentMonitorStatus({
+  // No --id: show all monitors and their status for the project
+  const project = await resolveProjectId(options.project)
+
+  const monitorsData = await withSpinner('Fetching monitors...', async () => {
+    const { data, error } = await listMonitors({
       client,
-      path: { monitor_id: id },
+      path: { project_id: project.id },
     })
-    if (error || !data) {
-      throw new Error(getErrorMessage(error) ?? 'Failed to get monitor status')
+    if (error) {
+      throw new Error(getErrorMessage(error))
     }
-    return data
+    return data ?? []
+  })
+
+  if (monitorsData.length === 0) {
+    if (options.json) {
+      json({ project: project.slug, monitors: [] })
+      return
+    }
+    info('No monitors configured for this project')
+    return
+  }
+
+  // Fetch current status for each monitor
+  const statusResults = await withSpinner('Fetching monitor statuses...', async () => {
+    const results = await Promise.allSettled(
+      monitorsData.map(async (m) => {
+        const { data } = await getCurrentMonitorStatus({
+          client,
+          path: { monitor_id: m.id },
+        })
+        return { monitor: m, status: data }
+      })
+    )
+    return results
+      .filter((r) => r.status === 'fulfilled')
+      .map((r) => (r as PromiseFulfilledResult<{ monitor: MonitorResponse; status: Record<string, unknown> | undefined }>).value)
   })
 
   if (options.json) {
-    json(status)
+    json({
+      project: project.slug,
+      monitors: statusResults.map(({ monitor, status }) => ({
+        id: monitor.id,
+        name: monitor.name,
+        type: monitor.monitor_type,
+        url: monitor.monitor_url,
+        ...(status as Record<string, unknown>),
+      })),
+    })
     return
   }
 
   newline()
-  header(`${icons.info} Monitor Status`)
-  keyValue('Current Status', statusBadge(status.current_status === 'up' ? 'active' : 'inactive'))
-  if (status.avg_response_time_ms !== null && status.avg_response_time_ms !== undefined) {
-    keyValue('Avg Response Time', `${Math.round(status.avg_response_time_ms)}ms`)
-  }
-  if (status.uptime_percentage !== null && status.uptime_percentage !== undefined) {
-    const uptimeColor = status.uptime_percentage >= 99 ? colors.success : status.uptime_percentage >= 95 ? colors.warning : colors.error
-    keyValue('Uptime', uptimeColor(`${status.uptime_percentage.toFixed(2)}%`))
-  }
-  if (status.last_check_at) {
-    keyValue('Last Check', new Date(status.last_check_at).toLocaleString())
-  }
+  header(`${icons.info} Monitoring Status — ${project.slug}`)
   newline()
+
+  for (const { monitor, status } of statusResults) {
+    const s = status as { current_status?: string; avg_response_time_ms?: number; uptime_percentage?: number; last_check_at?: string } | null
+    const statusIcon = s?.current_status === 'up' ? colors.success('●') : colors.error('●')
+    const statusText = s?.current_status === 'up' ? 'UP' : s?.current_status?.toUpperCase() || 'UNKNOWN'
+    const responseTime = s?.avg_response_time_ms ? `${Math.round(s.avg_response_time_ms)}ms` : '-'
+    const uptime = s?.uptime_percentage !== null && s?.uptime_percentage !== undefined ? `${s.uptime_percentage.toFixed(1)}%` : '-'
+    const lastCheck = s?.last_check_at ? new Date(s.last_check_at).toLocaleString() : '-'
+
+    console.log(`  ${statusIcon} ${colors.bold(monitor.name)} (${monitor.monitor_type})`)
+    console.log(`    Status: ${statusText}  |  Response: ${responseTime}  |  Uptime: ${uptime}  |  Last: ${lastCheck}`)
+    console.log(`    URL: ${colors.muted(monitor.monitor_url || '-')}`)
+    newline()
+  }
 }
 
 async function getMonitorHistory(options: HistoryOptions): Promise<void> {

@@ -34,6 +34,11 @@ pub struct AiRunResult {
     /// If the provider knows which files it changed, list them here.
     /// If `None`, the executor will detect changes via `git diff`.
     pub changed_files: Option<Vec<String>>,
+    /// Claude CLI session ID (UUID) extracted from the `system/init` event.
+    /// Used to resume the conversation in a workspace via `--resume`.
+    pub session_id: Option<String>,
+    /// True when the CLI hit the max turns limit without completing.
+    pub is_max_turns_error: bool,
 }
 
 /// Status of the AI CLI tool on this server.

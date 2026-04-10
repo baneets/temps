@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -15,7 +15,7 @@ use utoipa::ToSchema;
 
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::audit::{AuditContext, AuditOperation};
-use temps_core::problemdetails::Problem;
+use temps_core::problemdetails::{self, Problem};
 use temps_core::RequestMetadata;
 
 use crate::ai_cli::{self, AiCliStatus};
@@ -69,6 +69,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/agents/{slug}/trigger",
             post(trigger_agent),
         )
+        // Public webhook endpoint — X-Webhook-Token header auth
+        .route("/agents/webhook/{webhook_id}", post(webhook_trigger))
         .route(
             "/projects/{project_id}/agents/cli-status",
             get(get_cli_status),
@@ -158,9 +160,6 @@ async fn trigger_agent(
         .map_err(Problem::from)?;
 
     // Spawn the executor in the background
-    // TODO: Manual triggers should use the two-phase interactive flow (analyze → review → fix)
-    // instead of autonomous execution. This requires unifying the agent executor with the
-    // autofixer's workflow engine. For now, manual triggers run autonomously.
     let executor = app_state.executor.clone();
     let run_id = run.id;
     tokio::spawn(async move {
@@ -213,6 +212,141 @@ async fn trigger_agent(
     );
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))
+}
+
+// ── Public Webhook Trigger ────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct WebhookTriggerRequest {
+    /// Arbitrary JSON payload from the caller. Passed to the agent as user_context.
+    #[serde(flatten)]
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WebhookTriggerResponse {
+    pub run_id: i32,
+    pub status: String,
+}
+
+/// Public webhook endpoint. Authenticated via `X-Webhook-Token` header.
+///
+/// `POST /api/agents/webhook/{webhook_id}`
+/// Header: `X-Webhook-Token: <secret>`
+///
+/// The `webhook_id` in the URL is a short non-secret identifier (safe to log).
+/// The actual credential is the secret token in the header.
+///
+/// Accepts any JSON body, which is passed as `user_context` to the agent run.
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/agents/webhook/{webhook_id}",
+    params(
+        ("webhook_id" = String, Path, description = "Webhook ID (non-secret)"),
+    ),
+    request_body = WebhookTriggerRequest,
+    responses(
+        (status = 202, description = "Agent run created", body = WebhookTriggerResponse),
+        (status = 401, description = "Missing or invalid X-Webhook-Token header"),
+        (status = 404, description = "Invalid webhook ID"),
+        (status = 422, description = "Agent disabled"),
+    ),
+)]
+async fn webhook_trigger(
+    State(app_state): State<Arc<AppState>>,
+    Path(webhook_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<WebhookTriggerRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    // Extract X-Webhook-Token header
+    let provided_token = headers
+        .get("x-webhook-token")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            problemdetails::new(StatusCode::UNAUTHORIZED)
+                .with_title("Missing Webhook Token")
+                .with_detail("X-Webhook-Token header is required")
+        })?;
+
+    // Look up agent by webhook ID (non-secret URL identifier)
+    let agent = app_state
+        .config_service
+        .get_agent_by_webhook_id(&webhook_id)
+        .await
+        .map_err(Problem::from)?
+        .ok_or_else(|| {
+            problemdetails::new(StatusCode::NOT_FOUND)
+                .with_title("Invalid Webhook ID")
+                .with_detail("No agent found for the provided webhook ID")
+        })?;
+
+    // Validate the secret token from the header
+    let expected_token = agent.webhook_token.as_deref().ok_or_else(|| {
+        problemdetails::new(StatusCode::NOT_FOUND)
+            .with_title("Webhook Not Configured")
+            .with_detail("This agent does not have webhook triggers enabled")
+    })?;
+
+    // Constant-time comparison to prevent timing attacks
+    if provided_token.len() != expected_token.len()
+        || !provided_token
+            .as_bytes()
+            .iter()
+            .zip(expected_token.as_bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
+    {
+        return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
+            .with_title("Invalid Webhook Token")
+            .with_detail("The provided X-Webhook-Token does not match"));
+    }
+
+    if !agent.enabled {
+        return Err(problemdetails::new(StatusCode::UNPROCESSABLE_ENTITY)
+            .with_title("Agent Disabled")
+            .with_detail(format!(
+                "Agent '{}' is disabled. Enable it before triggering via webhook.",
+                agent.slug
+            )));
+    }
+
+    // Serialize the payload as user_context
+    let user_context =
+        if request.payload.is_null() || request.payload.as_object().is_some_and(|m| m.is_empty()) {
+            None
+        } else {
+            Some(serde_json::to_string(&request.payload).unwrap_or_default())
+        };
+
+    // Create the run
+    let run = app_state
+        .run_service
+        .create_run(
+            agent.project_id,
+            agent.id,
+            "webhook".to_string(),
+            None,
+            Some("webhook".to_string()),
+            user_context,
+        )
+        .await
+        .map_err(Problem::from)?;
+
+    // Spawn the executor
+    let executor = app_state.executor.clone();
+    let run_id = run.id;
+    tokio::spawn(async move {
+        executor.execute_run(run_id).await;
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(WebhookTriggerResponse {
+            run_id: run.id,
+            status: "pending".to_string(),
+        }),
+    ))
 }
 
 // ── CLI Status ────────────────────────────────────────────────────────────────

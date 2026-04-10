@@ -77,6 +77,12 @@ pub enum AgentError {
 
     #[error("Secret '{name}' not found")]
     SecretNotFound { name: String },
+
+    #[error("Skill definition '{slug}' not found in project {project_id}")]
+    SkillDefinitionNotFound { project_id: i32, slug: String },
+
+    #[error("MCP definition '{slug}' not found in project {project_id}")]
+    McpDefinitionNotFound { project_id: i32, slug: String },
 }
 
 impl From<sea_orm::DbErr> for AgentError {

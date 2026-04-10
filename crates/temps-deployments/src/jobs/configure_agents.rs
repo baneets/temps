@@ -223,6 +223,7 @@ fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
                 .schedule
                 .map(|s| ScheduleTrigger { cron: s.cron }),
             manual: workflow.on.manual,
+            webhook: false,
         },
         system: None,
         prompt: Some(workflow.prompt),

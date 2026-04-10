@@ -376,7 +376,7 @@ export default function AppSidebar() {
   // Auto-collapse sidebar when on project detail pages
   useEffect(() => {
     const isProjectDetailPage = location.pathname.match(
-      /^\/projects\/[^/]+\/(project|deployments|analytics|storage|runtime|settings|speed|errors|logs|webhooks|monitors|monitoring|traces|ai-activity|services|environments|security)/
+      /^\/projects\/[^/]+\/(project|deployments|analytics|storage|runtime|settings|speed|errors|logs|webhooks|monitors|monitoring|traces|ai-gateway|services|environments|security)/
     )
 
     if (isProjectDetailPage && !isMobile) {

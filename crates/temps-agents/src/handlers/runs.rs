@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -13,9 +14,10 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use temps_auth::{permission_guard, RequireAuth};
-use temps_core::problemdetails::Problem;
+use temps_core::problemdetails::{self, Problem};
 use temps_entities::{agent_run_logs, agent_runs};
 
+use crate::error::AgentError;
 use crate::handlers::AppState;
 
 // ── Response DTOs ─────────────────────────────────────────────────────────────
@@ -53,6 +55,10 @@ pub struct AgentRunResponse {
     pub created_at: String,
     /// Whether this run executed inside a sandbox.
     pub sandbox_enabled: bool,
+    /// User-provided context for this run (e.g. webhook payload, manual instructions).
+    pub user_context: Option<String>,
+    /// Claude CLI session UUID for resuming conversations via `--resume`.
+    pub ai_session_id: Option<String>,
 }
 
 impl From<agent_runs::Model> for AgentRunResponse {
@@ -85,6 +91,8 @@ impl From<agent_runs::Model> for AgentRunResponse {
             completed_at: model.completed_at.map(|t| t.to_rfc3339()),
             created_at: model.created_at.to_rfc3339(),
             sandbox_enabled: false,
+            user_context: model.user_context,
+            ai_session_id: model.ai_session_id,
         }
     }
 }
@@ -181,6 +189,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/projects/{project_id}/agents/runs/{run_id}/cancel",
             axum::routing::post(cancel_run),
+        )
+        // Retry a completed/failed run with the same context
+        .route(
+            "/projects/{project_id}/agents/runs/{run_id}/retry",
+            axum::routing::post(retry_run),
         )
         // SSE stream for real-time run events
         .route(
@@ -589,4 +602,111 @@ async fn cancel_run(
         .map_err(Problem::from)?;
 
     Ok(Json(AgentRunResponse::from(run)))
+}
+
+/// Retry a completed, failed, cancelled, or no_fix run with the same trigger context.
+/// Creates a new run record and spawns the executor.
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/projects/{project_id}/agents/runs/{run_id}/retry",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("run_id" = i32, Path, description = "Run ID to retry"),
+    ),
+    responses(
+        (status = 202, description = "New run created from retry", body = AgentRunResponse),
+        (status = 400, description = "Run is still active"),
+        (status = 404, description = "Run not found"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn retry_run(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path((_project_id, run_id)): Path<(i32, i32)>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+
+    // Load the original run
+    let original = app_state
+        .run_service
+        .get_run(run_id)
+        .await
+        .map_err(Problem::from)?;
+
+    // Only allow retry on terminal runs
+    let terminal_statuses = ["completed", "failed", "no_fix", "cancelled"];
+    if !terminal_statuses.contains(&original.status.as_str()) {
+        return Err(problemdetails::new(StatusCode::BAD_REQUEST)
+            .with_title("Run Still Active")
+            .with_detail(format!(
+                "Cannot retry run {} — it is still in '{}' status. Cancel it first.",
+                run_id, original.status
+            )));
+    }
+
+    // Verify the agent still exists
+    let agent = app_state
+        .config_service
+        .get_agent_by_id(original.config_id)
+        .await
+        .map_err(Problem::from)?
+        .ok_or_else(|| {
+            Problem::from(AgentError::Validation {
+                message: format!(
+                    "The workflow for run {} no longer exists (config_id={}).",
+                    run_id, original.config_id
+                ),
+            })
+        })?;
+
+    // Create a new run with the same trigger context
+    let new_run = app_state
+        .run_service
+        .create_run(
+            original.project_id,
+            original.config_id,
+            "retry".to_string(),
+            original.trigger_source_id,
+            original.trigger_source_type,
+            original.user_context,
+        )
+        .await
+        .map_err(Problem::from)?;
+
+    // Spawn the executor
+    let executor = app_state.executor.clone();
+    let new_run_id = new_run.id;
+    tokio::spawn(async move {
+        executor.execute_run(new_run_id).await;
+    });
+
+    // Resolve sandbox
+    let global_sandbox_enabled = {
+        use sea_orm::EntityTrait;
+        temps_entities::settings::Entity::find_by_id(1)
+            .one(app_state.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data
+                    .get("agent_sandbox")
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    };
+    let run_resp = AgentRunResponse::from_with_agent(
+        new_run,
+        Some(agent.slug),
+        Some(agent.name),
+        agent.sandbox_enabled.unwrap_or(global_sandbox_enabled),
+    );
+
+    Ok((StatusCode::ACCEPTED, Json(run_resp)))
 }

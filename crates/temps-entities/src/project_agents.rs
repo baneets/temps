@@ -50,6 +50,12 @@ pub struct Model {
     pub config_repo_url: Option<String>,
     /// Branch of the config repo to use (default: "main").
     pub config_repo_branch: Option<String>,
+    /// Short non-secret ID used in the webhook URL path.
+    /// Safe to log. Auto-generated when `on: { webhook: true }` is set.
+    pub webhook_id: Option<String>,
+    /// Secret token validated via `X-Webhook-Token` header.
+    /// Never exposed in URLs. Auto-generated alongside `webhook_id`.
+    pub webhook_token: Option<String>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

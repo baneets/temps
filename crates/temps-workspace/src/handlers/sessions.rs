@@ -163,6 +163,9 @@ pub struct StartSessionRequest {
     /// it. Use this to start a session "off main" without touching the remote.
     pub base_branch_name: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    /// When resuming from an agent run, pass the run ID so that Claude CLI
+    /// session files are injected into the workspace sandbox for `--resume`.
+    pub agent_run_id: Option<i32>,
 }
 
 /// Body for `PATCH /projects/{project_id}/workspace/sessions/{session_id}`.
@@ -1155,7 +1158,7 @@ async fn handle_session_terminal(
     let inner_cmd = match kind.as_str() {
         "shell" => "exec bash".to_string(),
         _ => format!(
-            "cd /workspace && {{ {cli}{args} --continue 2>/dev/null || {cli}{args}; }}; exec bash",
+            "cd /workspace && if [ -f /tmp/.agent-session-id ]; then {cli}{args} --resume \"$(cat /tmp/.agent-session-id)\" || {cli}{args} --continue || {cli}{args}; rm -f /tmp/.agent-session-id; elif ls /home/temps/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; then {cli}{args} --continue || {cli}{args}; else {cli}{args}; fi; exec bash",
             cli = cli,
             args = cli_args,
         ),
@@ -1735,8 +1738,17 @@ async fn start_session(
                 session_id,
                 e
             );
-        } else if let Ok(refreshed) = app_state.workspace_service.get_session(session_id).await {
-            created.session = refreshed;
+        } else {
+            if let Ok(refreshed) = app_state.workspace_service.get_session(session_id).await {
+                created.session = refreshed;
+            }
+
+            // If opening from an agent run, inject the run's report as
+            // initial context so Claude starts with full knowledge of
+            // what the agent found.
+            if let Some(agent_run_id) = request.agent_run_id {
+                inject_agent_run_context(&app_state, session_id, agent_run_id).await;
+            }
         }
     }
 
@@ -1752,6 +1764,139 @@ async fn start_session(
         StatusCode::CREATED,
         Json(SessionResponse::from_created(created, &preview_parts)),
     ))
+}
+
+/// Copy the agent run's Claude CLI session file into the workspace sandbox
+/// so that `claude --resume <id>` (or `--continue`) can pick it up.
+///
+/// The executor already extracts session `.jsonl` files to the host at
+/// `~/.temps/agent-sessions/{run_id}/{session_id}.jsonl` after each run.
+/// This function reads that file and writes it into the workspace sandbox
+/// at the path Claude CLI expects:
+///   `/home/temps/.claude/projects/-workspace/{session_id}.jsonl`
+///
+/// The dtach startup command then uses `--resume <session_id>` to continue
+/// the agent's conversation in the interactive workspace.
+///
+/// Best-effort: failures are logged but never propagated.
+async fn inject_agent_run_context(state: &WorkspaceAppState, session_id: i32, agent_run_id: i32) {
+    use sea_orm::EntityTrait;
+
+    // 1. Load the agent run to get ai_session_id
+    let run = match temps_entities::agent_runs::Entity::find_by_id(agent_run_id)
+        .one(state.db.as_ref())
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            tracing::warn!(
+                "inject_agent_run_context: agent run {} not found",
+                agent_run_id
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "inject_agent_run_context: failed to load run {}: {}",
+                agent_run_id,
+                e
+            );
+            return;
+        }
+    };
+
+    let ai_session_id = match &run.ai_session_id {
+        Some(id) => id.clone(),
+        None => {
+            tracing::warn!(
+                "inject_agent_run_context: agent run {} has no ai_session_id",
+                agent_run_id
+            );
+            return;
+        }
+    };
+
+    // 2. Read the session file from the host
+    let data_dir = std::env::var("TEMPS_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".temps"))
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.temps"))
+        });
+    let session_file = data_dir
+        .join("agent-sessions")
+        .join(agent_run_id.to_string())
+        .join(format!("{}.jsonl", ai_session_id));
+
+    let session_data = match tokio::fs::read(&session_file).await {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::warn!(
+                "inject_agent_run_context: failed to read session file {:?} for run {}: {}",
+                session_file,
+                agent_run_id,
+                e
+            );
+            return;
+        }
+    };
+
+    // 3. Ensure the Claude projects directory exists in the sandbox
+    let _ = state
+        .session_manager
+        .exec(
+            session_id,
+            vec![
+                "mkdir".to_string(),
+                "-p".to_string(),
+                "/home/temps/.claude/projects/-workspace".to_string(),
+            ],
+            std::collections::HashMap::new(),
+            None,
+        )
+        .await;
+
+    // 4. Write the session .jsonl into the sandbox
+    let sandbox_path = format!(
+        "/home/temps/.claude/projects/-workspace/{}.jsonl",
+        ai_session_id
+    );
+    if let Err(e) = state
+        .session_manager
+        .write_file(session_id, &sandbox_path, &session_data, 0o644)
+        .await
+    {
+        tracing::warn!(
+            "inject_agent_run_context: write_file failed for session {}: {}",
+            session_id,
+            e
+        );
+        return;
+    }
+
+    // 5. Write the session ID to a marker file so the dtach startup command
+    //    can use `--resume <id>` instead of `--continue`
+    let marker_path = "/tmp/.agent-session-id";
+    if let Err(e) = state
+        .session_manager
+        .write_file(session_id, marker_path, ai_session_id.as_bytes(), 0o644)
+        .await
+    {
+        tracing::warn!(
+            "inject_agent_run_context: failed to write session marker: {}",
+            e
+        );
+        return;
+    }
+
+    tracing::info!(
+        "Injected agent session {} for run {} into workspace session {} ({} bytes)",
+        ai_session_id,
+        agent_run_id,
+        session_id,
+        session_data.len()
+    );
 }
 
 /// Load the preview URL parts (protocol, domain, optional port) from

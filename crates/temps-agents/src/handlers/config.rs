@@ -93,6 +93,14 @@ impl From<AgentError> for Problem {
             AgentError::SecretNotFound { .. } => problemdetails::new(StatusCode::NOT_FOUND)
                 .with_title("Secret Not Found")
                 .with_detail(error.to_string()),
+            AgentError::SkillDefinitionNotFound { .. } => {
+                problemdetails::new(StatusCode::NOT_FOUND)
+                    .with_title("Skill Definition Not Found")
+                    .with_detail(error.to_string())
+            }
+            AgentError::McpDefinitionNotFound { .. } => problemdetails::new(StatusCode::NOT_FOUND)
+                .with_title("MCP Definition Not Found")
+                .with_detail(error.to_string()),
         }
     }
 }
@@ -215,6 +223,13 @@ pub struct AgentConfigResponse {
     pub skills_config: Option<serde_json::Value>,
     /// Tools config as JSON array.
     pub tools_config: Option<serde_json::Value>,
+    /// Public webhook URL for triggering this agent externally.
+    /// Only set when `on: { webhook: true }` is configured.
+    /// Usage: `POST {webhook_url}` with header `X-Webhook-Token: {webhook_token}`
+    pub webhook_url: Option<String>,
+    /// Secret token for the `X-Webhook-Token` header. Shown once when created,
+    /// masked with `***` prefix in subsequent reads.
+    pub webhook_token: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -246,6 +261,18 @@ impl From<project_agents::Model> for AgentConfigResponse {
             mcp_servers_config: model.mcp_servers_config.map(|v| mask_mcp_env_values(&v)),
             skills_config: model.skills_config,
             tools_config: model.tools_config,
+            webhook_url: model
+                .webhook_id
+                .as_ref()
+                .map(|id| format!("/api/agents/webhook/{}", id)),
+            webhook_token: model.webhook_token.as_ref().map(|t| {
+                // Mask the token: show first 8 chars + ***
+                if t.len() > 8 {
+                    format!("{}***", &t[..8])
+                } else {
+                    "***".to_string()
+                }
+            }),
             created_at: model.created_at.to_rfc3339(),
             updated_at: model.updated_at.to_rfc3339(),
         }

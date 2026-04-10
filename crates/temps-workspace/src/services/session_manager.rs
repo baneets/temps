@@ -566,7 +566,8 @@ impl WorkspaceSessionManager {
     /// - TEMPS_API_URL — Temps instance URL
     /// - TEMPS_PROJECT_ID — for the memory script and any other scoped CLI calls
     /// - TEMPS_WORKFLOW_SLUG — for the memory script
-    /// - AI provider key (ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN)
+    /// - AI provider key (ANTHROPIC_API_KEY for api_key auth; subscription
+    ///   auth uses ~/.claude/.credentials.json written post-creation)
     /// - PATH — extended with /workspace/.temps/bin so `memory` is on PATH
     ///
     /// Service credentials (DATABASE_URL, REDIS_URL) are NOT baked in.
@@ -610,14 +611,13 @@ impl WorkspaceSessionManager {
             env.insert("TEMPS_WORKFLOW_SLUG".to_string(), slug.to_string());
         }
 
+        // For API key auth, set ANTHROPIC_API_KEY as container env var.
+        // For subscription auth, credentials are injected via
+        // ~/.claude/.credentials.json after container creation — not as
+        // an env var — so the CLI gets full OAuth context.
         if let Some(key) = ai_provider_key {
-            match ai_auth_type {
-                "subscription" => {
-                    env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key.to_string());
-                }
-                _ => {
-                    env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
-                }
+            if ai_auth_type != "subscription" {
+                env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
             }
         }
 
@@ -680,26 +680,27 @@ impl WorkspaceSessionManager {
     /// named volume, so without this seed every new session's first
     /// `claude` invocation in the terminal would block on the theme picker
     /// — even though the user is already authenticated via
-    /// `CLAUDE_CODE_OAUTH_TOKEN`.
+    /// `~/.claude/.credentials.json`.
     ///
     /// Best-effort: if the file already exists (e.g. the user completed
     /// onboarding once and the home volume persisted it across a container
     /// restart), we leave it alone.
     pub async fn seed_claude_config(&self, session_id: i32) -> Result<(), WorkspaceError> {
-        if self
-            .file_exists(session_id, "/home/temps/.claude.json")
-            .await
-        {
-            return Ok(());
-        }
-
-        // Minimal config that satisfies the CLI's onboarding gate. The keys
-        // tracked here match what the bundled CLI writes on a completed
-        // first-run; extra fields are ignored. Kept intentionally small so
-        // future CLI versions can layer their own state on top without
-        // needing us to regenerate this seed.
+        // Always overwrite — ensures the latest config fields are present.
+        // auto-updates / interactive prompts inside the sandbox.
         let body = serde_json::json!({
+            "numStartups": 3,
+            "installMethod": "native",
+            "autoUpdates": false,
+            "tipsHistory": { "new-user-warmup": 2 },
+            "autoUpdatesProtectedForNative": true,
             "hasCompletedOnboarding": true,
+            "lastOnboardingVersion": "2.1.96",
+            "projects": {},
+            "voiceNoticeSeenCount": 2,
+            "cachedExtraUsageDisabledReason": null,
+            "officialMarketplaceAutoInstallAttempted": true,
+            "officialMarketplaceAutoInstalled": true,
             "theme": "dark",
             "bypassPermissionsModeAccepted": true,
             "hasSeenWelcome": true,
@@ -714,6 +715,91 @@ impl WorkspaceSessionManager {
 
         tracing::debug!(
             "Seeded /home/temps/.claude.json for session {} (skips onboarding)",
+            session_id
+        );
+
+        // Also seed ~/.claude/settings.json with theme preference.
+        // mkdir -p first — credentials file may not have been written yet.
+        self.exec(
+            session_id,
+            vec!["mkdir".into(), "-p".into(), "/home/temps/.claude".into()],
+            std::collections::HashMap::new(),
+            None,
+        )
+        .await?;
+
+        let settings = serde_json::json!({ "theme": "dark" });
+        let settings_bytes =
+            serde_json::to_vec_pretty(&settings).map_err(|e| WorkspaceError::AiCliFailed {
+                session_id,
+                reason: format!("seed_claude_config: settings serialize failed: {}", e),
+            })?;
+        self.write_file(
+            session_id,
+            "/home/temps/.claude/settings.json",
+            &settings_bytes,
+            0o600,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Write `/home/temps/.claude/.credentials.json` with the OAuth token so
+    /// Claude CLI authenticates without needing `CLAUDE_CODE_OAUTH_TOKEN` env
+    /// var. This gives the CLI the full auth context (subscription type, scopes)
+    /// rather than just a bare token.
+    ///
+    /// For `api_key` auth type, does nothing — `ANTHROPIC_API_KEY` in `~/.env`
+    /// is the correct mechanism for API key auth.
+    pub async fn seed_claude_credentials(
+        &self,
+        session_id: i32,
+        access_token: &str,
+        auth_type: &str,
+    ) -> Result<(), WorkspaceError> {
+        if auth_type != "subscription" {
+            return Ok(());
+        }
+
+        // Ensure ~/.claude/ directory exists
+        self.exec(
+            session_id,
+            vec!["mkdir".into(), "-p".into(), "/home/temps/.claude".into()],
+            std::collections::HashMap::new(),
+            None,
+        )
+        .await?;
+
+        let body = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": access_token,
+                "expiresAt": 1772120060006_i64,
+                "scopes": [
+                    "user:inference",
+                    "user:mcp_servers",
+                    "user:profile",
+                    "user:sessions:claude_code"
+                ],
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x"
+            }
+        });
+        let bytes = serde_json::to_vec_pretty(&body).map_err(|e| WorkspaceError::AiCliFailed {
+            session_id,
+            reason: format!("seed_claude_credentials: serialize failed: {}", e),
+        })?;
+
+        self.write_file(
+            session_id,
+            "/home/temps/.claude/.credentials.json",
+            &bytes,
+            0o600,
+        )
+        .await?;
+
+        tracing::debug!(
+            "Seeded /home/temps/.claude/.credentials.json for session {}",
             session_id
         );
         Ok(())
@@ -1194,6 +1280,9 @@ mod tests {
 
     #[test]
     fn test_build_env_vars_subscription() {
+        // Subscription auth uses ~/.claude/.credentials.json (written after
+        // container creation), NOT an env var. So neither ANTHROPIC_API_KEY
+        // nor CLAUDE_CODE_OAUTH_TOKEN should be in the container env.
         let env = WorkspaceSessionManager::build_env_vars(
             "http://localhost:3000",
             "test-token",
@@ -1201,10 +1290,7 @@ mod tests {
             "subscription",
         );
 
-        assert_eq!(
-            env.get("CLAUDE_CODE_OAUTH_TOKEN").unwrap(),
-            "oauth-token-123"
-        );
+        assert!(!env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(!env.contains_key("ANTHROPIC_API_KEY"));
     }
 

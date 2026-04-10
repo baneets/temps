@@ -1207,8 +1207,8 @@ function SessionPickerState({
             <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
               Recent sessions
             </div>
-            <div className="flex flex-col divide-y rounded-md border">
-              {sessions.map((s) => (
+            <div className="flex flex-col divide-y rounded-md border max-h-[400px] overflow-y-auto">
+              {sessions.slice(0, 10).map((s) => (
                 <button
                   key={s.id}
                   type="button"

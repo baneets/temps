@@ -105,7 +105,7 @@ function getResourcePresetLabel(cpu: number, memory: number): string {
 }
 
 export function AgentSandboxSettings() {
-  usePageTitle('AI Agents')
+  usePageTitle('AI Workflows')
 
   const { data: settings, isLoading } = useSettings()
   const updateSettings = useUpdateSettings()
@@ -324,7 +324,7 @@ export function AgentSandboxSettings() {
         },
       })
       setIsDirty(false)
-      toast.success('Agent sandbox settings saved')
+      toast.success('Workflow sandbox settings saved')
     } catch {
       toast.error('Failed to save settings')
     }
@@ -356,7 +356,7 @@ export function AgentSandboxSettings() {
             AI Provider
           </CardTitle>
           <CardDescription>
-            Agents need an AI coding assistant installed and authenticated on the
+            Workflows need an AI coding assistant installed and authenticated on the
             server. Choose your provider below.
           </CardDescription>
         </CardHeader>
@@ -614,7 +614,7 @@ export function AgentSandboxSettings() {
             {!smokeTestResult && !smokeTestLoading && (
               <p className="text-sm text-muted-foreground">
                 Tests the default AI provider (Claude CLI) in the environment
-                where agents will run
+                where workflows will run
                 {enabled ? ' (sandbox container)' : ' (host)'}.
               </p>
             )}
@@ -627,10 +627,10 @@ export function AgentSandboxSettings() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5" />
-            Agent Sandbox
+            Workflow Sandbox
           </CardTitle>
           <CardDescription>
-            When sandbox is enabled, agents run inside isolated Docker
+            When sandbox is enabled, workflows run inside isolated Docker
             containers. Code changes are contained and can't affect your server.
             The container has access to the cloned repository, Claude CLI, and
             any MCP servers configured in your project.
@@ -727,7 +727,7 @@ export function AgentSandboxSettings() {
             <div className="space-y-0.5">
               <Label htmlFor="sandbox-enabled">Enable sandbox by default</Label>
               <p className="text-sm text-muted-foreground">
-                Agents use sandbox unless individually overridden. Agents with
+                Workflows use sandbox unless individually overridden. Workflows with
                 sandbox set to "off" in their config will still run on the host.
               </p>
             </div>
@@ -745,7 +745,7 @@ export function AgentSandboxSettings() {
             <Alert>
               <AlertTriangle className="h-4 w-4" />
               <AlertDescription>
-                Sandbox is disabled. Agents run directly on the host with full
+                Sandbox is disabled. Workflows run directly on the host with full
                 system access. Enable sandbox for better security isolation.
               </AlertDescription>
             </Alert>
@@ -904,7 +904,7 @@ export function AgentSandboxSettings() {
             Network Access
           </CardTitle>
           <CardDescription>
-            Controls whether sandbox containers can access the internet. Agents
+            Controls whether sandbox containers can access the internet. Workflows
             that use web search, MCP servers, or API calls need network access.
           </CardDescription>
         </CardHeader>
@@ -942,7 +942,7 @@ export function AgentSandboxSettings() {
           </Select>
           {networkMode === 'none' && (
             <p className="text-xs text-amber-500 mt-2">
-              Agents won't be able to install packages, use web search, run MCP
+              Workflows won't be able to install packages, use web search, run MCP
               servers, or call external APIs.
             </p>
           )}
@@ -956,9 +956,9 @@ export function AgentSandboxSettings() {
             Global Config Repository
           </CardTitle>
           <CardDescription>
-            A shared config repository applied to all agent runs. Contains a{' '}
+            A shared config repository applied to all workflow runs. Contains a{' '}
             <code className="text-xs bg-muted px-1 rounded">.claude/</code>{' '}
-            directory with skills, MCP servers, and settings. Per-agent config
+            directory with skills, MCP servers, and settings. Per-workflow config
             repos override conflicting files.
           </CardDescription>
         </CardHeader>

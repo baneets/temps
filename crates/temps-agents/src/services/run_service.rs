@@ -34,6 +34,8 @@ pub struct UpdateRunFields {
     pub analysis: Option<String>,
     /// Additional user context appended during the run
     pub user_context: Option<String>,
+    /// Claude CLI session UUID for resuming conversations
+    pub ai_session_id: Option<String>,
 }
 
 /// A run record together with its logs
@@ -181,6 +183,9 @@ impl AgentRunService {
         }
         if let Some(user_context) = fields.user_context {
             active.user_context = Set(Some(user_context));
+        }
+        if let Some(ai_session_id) = fields.ai_session_id {
+            active.ai_session_id = Set(Some(ai_session_id));
         }
 
         let model = active
@@ -519,6 +524,7 @@ mod tests {
             phase: None,
             analysis: None,
             user_context: None,
+            ai_session_id: None,
         }
     }
 

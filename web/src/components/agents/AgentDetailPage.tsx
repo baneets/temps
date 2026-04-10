@@ -14,10 +14,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   Box,
+  Copy,
   Cpu,
   Pencil,
   Play,
   Shield,
+  Webhook,
   Zap,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -73,6 +75,44 @@ function PropertyRow({ label, children }: { label: string; children: React.React
     <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-4">
       <dt className="text-sm text-muted-foreground sm:w-40 sm:flex-shrink-0">{label}</dt>
       <dd className="text-sm">{children}</dd>
+    </div>
+  )
+}
+
+const triggerColors = {
+  red: { enabled: 'bg-red-500/10 text-red-400', dot: 'bg-red-400' },
+  purple: { enabled: 'bg-purple-500/10 text-purple-400', dot: 'bg-purple-400' },
+  yellow: { enabled: 'bg-yellow-500/10 text-yellow-400', dot: 'bg-yellow-400' },
+  gray: { enabled: 'bg-muted text-muted-foreground', dot: 'bg-muted-foreground' },
+} as const
+
+function TriggerRow({ label, enabled, color, description }: {
+  label: string
+  enabled?: boolean
+  color: keyof typeof triggerColors
+  description: string
+}) {
+  const colors = triggerColors[color]
+  return (
+    <div className="flex items-start gap-3 py-1">
+      <div className="mt-1 flex-shrink-0">
+        {enabled ? (
+          <span className={`inline-block h-2 w-2 rounded-full ${colors.dot}`} />
+        ) : (
+          <span className="inline-block h-2 w-2 rounded-full bg-border" />
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">{label}</span>
+          {enabled ? (
+            <span className={`text-xs px-1.5 py-0.5 rounded ${colors.enabled}`}>On</span>
+          ) : (
+            <span className="text-xs text-muted-foreground/50">Off</span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+      </div>
     </div>
   )
 }
@@ -165,15 +205,49 @@ function AgentProperties({ agent }: { agent: Agent }) {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <PropertyRow label="New errors">
-            {agent.trigger_config?.error?.new_issue ? 'Enabled' : 'Disabled'}
-          </PropertyRow>
-          <PropertyRow label="Regressions">
-            {agent.trigger_config?.error?.regression ? 'Enabled' : 'Disabled'}
-          </PropertyRow>
-          <PropertyRow label="Manual">
-            {agent.trigger_config?.manual ? 'Enabled' : 'Disabled'}
-          </PropertyRow>
+          {/* Error triggers */}
+          <TriggerRow
+            label="New errors"
+            enabled={agent.trigger_config?.error?.new_issue}
+            color="red"
+            description="Fires when a new error type is detected"
+          />
+          <TriggerRow
+            label="Error regressions"
+            enabled={agent.trigger_config?.error?.regression}
+            color="red"
+            description="Fires when a previously resolved error recurs"
+          />
+
+          {/* Deploy triggers */}
+          <TriggerRow
+            label="Production deploys"
+            enabled={agent.trigger_config?.deploy?.production}
+            color="purple"
+            description="Fires after every production deployment"
+          />
+          <TriggerRow
+            label="Preview deploys"
+            enabled={agent.trigger_config?.deploy?.preview}
+            color="purple"
+            description="Fires after preview/staging deployments"
+          />
+
+          {/* Monitoring triggers */}
+          <TriggerRow
+            label="Downtime"
+            enabled={agent.trigger_config?.monitoring?.downtime}
+            color="yellow"
+            description="Fires when a monitor detects an outage"
+          />
+          <TriggerRow
+            label="Latency spikes"
+            enabled={agent.trigger_config?.monitoring?.latency_spike}
+            color="yellow"
+            description="Fires on sustained latency increases"
+          />
+
+          {/* Schedule */}
           {cronSchedule && (
             <PropertyRow label="Schedule">
               <div className="flex flex-col gap-1">
@@ -181,6 +255,67 @@ function AgentProperties({ agent }: { agent: Agent }) {
                 {nextRun && <span className="text-xs text-muted-foreground">{nextRun}</span>}
               </div>
             </PropertyRow>
+          )}
+
+          {/* Manual */}
+          <TriggerRow
+            label="Manual"
+            enabled={agent.trigger_config?.manual}
+            color="gray"
+            description="Can be triggered manually from the dashboard"
+          />
+
+          {/* Webhook URL */}
+          {agent.webhook_url && (
+            <div className="mt-4 pt-4 border-t space-y-2">
+              <div className="flex items-center gap-2">
+                <Webhook className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">Webhook</span>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs text-muted-foreground">URL</label>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs bg-muted px-2 py-1.5 rounded flex-1 overflow-x-auto">
+                    POST {window.location.origin}{agent.webhook_url}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}${agent.webhook_url}`)
+                      toast.success('URL copied')
+                    }}
+                    className="text-muted-foreground hover:text-foreground p-1"
+                    title="Copy URL"
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-xs text-muted-foreground">Token (header)</label>
+                <div className="flex items-center gap-2">
+                  <code className="text-xs bg-muted px-2 py-1.5 rounded flex-1">
+                    X-Webhook-Token: {agent.webhook_token ?? '***'}
+                  </code>
+                  {agent.webhook_token && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(agent.webhook_token!)
+                        toast.success('Token copied')
+                      }}
+                      className="text-muted-foreground hover:text-foreground p-1"
+                      title="Copy token"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Send a POST request with any JSON body. The body is passed as context to the workflow.
+              </p>
+            </div>
           )}
         </CardContent>
       </Card>
@@ -255,7 +390,7 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
   const trigger = useMutation({
     mutationFn: () => triggerAgent(project.id, agentSlug!),
     onSuccess: () => {
-      toast.success('Agent triggered')
+      toast.success('Workflow triggered')
       queryClient.invalidateQueries({ queryKey: ['agent-runs', project.id, agentSlug] })
     },
     onError: (error: Error) => {
@@ -277,9 +412,9 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
   if (agentError || !agent) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
-        <p className="text-muted-foreground text-sm">Agent not found</p>
+        <p className="text-muted-foreground text-sm">Workflow not found</p>
         <Button variant="ghost" size="sm" className="mt-4" asChild>
-          <Link to={`/projects/${project.slug}/agents`}>Back to agents</Link>
+          <Link to={`/projects/${project.slug}/agents`}>Back to workflows</Link>
         </Button>
       </div>
     )
@@ -353,7 +488,7 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
             <p className="text-muted-foreground text-sm">
-              No runs yet. Trigger the agent to start a run.
+              No runs yet. Trigger the workflow to start a run.
             </p>
           </CardContent>
         </Card>

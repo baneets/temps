@@ -37,6 +37,8 @@ pub struct Model {
     pub analysis: Option<String>,
     /// Additional context provided by the user during the run
     pub user_context: Option<String>,
+    /// Claude CLI session UUID for resuming conversations via `--resume`
+    pub ai_session_id: Option<String>,
     pub started_at: Option<DBDateTime>,
     pub completed_at: Option<DBDateTime>,
     pub created_at: DBDateTime,

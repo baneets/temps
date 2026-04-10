@@ -28,6 +28,13 @@ export interface Agent {
   sandbox_enabled: boolean | null
   config_repo_url: string | null
   config_repo_branch: string | null
+  /** Slug references to project-level MCP server definitions */
+  mcp_servers_config: string[] | null
+  /** Slug references to project-level skill definitions */
+  skills_config: string[] | null
+  tools_config: Record<string, unknown> | null
+  webhook_url: string | null
+  webhook_token: string | null
   created_at: string
   updated_at: string
 }
@@ -61,6 +68,8 @@ export interface AgentRun {
   completed_at: string | null
   created_at: string
   sandbox_enabled: boolean
+  user_context: string | null
+  ai_session_id: string | null
 }
 
 export interface AgentRunLog {
@@ -95,6 +104,9 @@ export interface CreateAgentRequest {
   sandbox_enabled?: boolean
   config_repo_url?: string
   config_repo_branch?: string
+  mcp_servers_config?: string[] | null
+  skills_config?: string[] | null
+  tools_config?: Record<string, unknown> | null
 }
 
 export interface UpdateAgentRequest {
@@ -114,6 +126,9 @@ export interface UpdateAgentRequest {
   sandbox_enabled?: boolean
   config_repo_url?: string | null
   config_repo_branch?: string | null
+  mcp_servers_config?: string[] | null
+  skills_config?: string[] | null
+  tools_config?: Record<string, unknown> | null
 }
 
 export interface PaginatedRuns {
@@ -212,6 +227,13 @@ export async function triggerAgent(projectId: number, slug: string, data?: { tri
   return handleResponse<AgentRun>(response)
 }
 
+export async function retryRun(projectId: number, runId: number): Promise<AgentRun> {
+  const response = await fetch(`/api/projects/${projectId}/agents/runs/${runId}/retry`, {
+    method: 'POST',
+  })
+  return handleResponse<AgentRun>(response)
+}
+
 // ── CLI Status ──
 
 export async function getCliStatus(projectId: number, provider = 'claude_cli'): Promise<AiCliStatus> {
@@ -260,4 +282,102 @@ export async function deleteSecret(name: string): Promise<void> {
     const text = await response.text().catch(() => '')
     throw new Error(text || `Request failed with status ${response.status}`)
   }
+}
+
+// ── Skill Definitions ──
+
+export interface SkillDefinition {
+  id: number
+  project_id: number
+  slug: string
+  name: string
+  description: string | null
+  content: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateSkillDefinitionRequest {
+  slug: string
+  name: string
+  description?: string
+  content: string
+}
+
+export async function listSkillDefinitions(projectId: number): Promise<SkillDefinition[]> {
+  const response = await fetch(`/api/projects/${projectId}/skills`)
+  const data = await handleResponse<{ items: SkillDefinition[] }>(response)
+  return data.items
+}
+
+export async function createSkillDefinition(projectId: number, data: CreateSkillDefinitionRequest): Promise<SkillDefinition> {
+  const response = await fetch(`/api/projects/${projectId}/skills`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<SkillDefinition>(response)
+}
+
+export async function updateSkillDefinition(projectId: number, slug: string, data: Partial<Omit<CreateSkillDefinitionRequest, 'slug'>>): Promise<SkillDefinition> {
+  const response = await fetch(`/api/projects/${projectId}/skills/${slug}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<SkillDefinition>(response)
+}
+
+export async function deleteSkillDefinition(projectId: number, slug: string): Promise<void> {
+  const response = await fetch(`/api/projects/${projectId}/skills/${slug}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error('Failed to delete skill definition')
+}
+
+// ── MCP Server Definitions ──
+
+export interface McpDefinition {
+  id: number
+  project_id: number
+  slug: string
+  name: string
+  description: string | null
+  config: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateMcpDefinitionRequest {
+  slug: string
+  name: string
+  description?: string
+  config: Record<string, unknown>
+}
+
+export async function listMcpDefinitions(projectId: number): Promise<McpDefinition[]> {
+  const response = await fetch(`/api/projects/${projectId}/mcp-servers`)
+  const data = await handleResponse<{ items: McpDefinition[] }>(response)
+  return data.items
+}
+
+export async function createMcpDefinition(projectId: number, data: CreateMcpDefinitionRequest): Promise<McpDefinition> {
+  const response = await fetch(`/api/projects/${projectId}/mcp-servers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<McpDefinition>(response)
+}
+
+export async function updateMcpDefinition(projectId: number, slug: string, data: Partial<Omit<CreateMcpDefinitionRequest, 'slug'>>): Promise<McpDefinition> {
+  const response = await fetch(`/api/projects/${projectId}/mcp-servers/${slug}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<McpDefinition>(response)
+}
+
+export async function deleteMcpDefinition(projectId: number, slug: string): Promise<void> {
+  const response = await fetch(`/api/projects/${projectId}/mcp-servers/${slug}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error('Failed to delete MCP server definition')
 }

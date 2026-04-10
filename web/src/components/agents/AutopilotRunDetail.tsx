@@ -10,6 +10,8 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -19,13 +21,21 @@ import {
   FileCode,
   GitBranch,
   Hash,
+  Loader2,
+  RefreshCw,
+  SquareTerminal,
+  Terminal,
+  Webhook,
   Zap,
 } from 'lucide-react'
-import { Link, useParams } from 'react-router-dom'
-import { getAgentRun } from './api'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { getAgentRun, retryRun } from './api'
 import type { AgentRunLog } from './api'
 import { AutopilotStatusBadge } from './AutopilotStatusBadge'
+import { startSession } from '@/components/workspace/api'
 import { cn } from '@/lib/utils'
+
+const proseClasses = 'prose prose-sm dark:prose-invert max-w-none prose-pre:bg-black/30 prose-pre:text-muted-foreground prose-pre:text-xs prose-pre:border-0 prose-code:before:content-none prose-code:after:content-none prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1.5 prose-ul:list-disc prose-ul:pl-5 prose-ol:my-1.5 prose-ol:list-decimal prose-ol:pl-5 prose-li:my-0.5 prose-li:marker:text-foreground/60 prose-hr:my-3 prose-hr:border-border prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1'
 
 interface AutopilotRunDetailProps {
   project: ProjectResponse
@@ -76,99 +86,13 @@ function logLevelColor(level: string): string {
   }
 }
 
-/** Render inline markdown: **bold**, `code`, *italic* */
-function renderInline(text: string): React.ReactNode {
-  const parts: React.ReactNode[] = []
-  let remaining = text
-  let key = 0
-
-  while (remaining.length > 0) {
-    // Bold
-    const boldMatch = remaining.match(/\*\*(.+?)\*\*/)
-    // Inline code
-    const codeMatch = remaining.match(/`(.+?)`/)
-
-    const boldIdx = boldMatch?.index ?? Infinity
-    const codeIdx = codeMatch?.index ?? Infinity
-
-    if (boldIdx === Infinity && codeIdx === Infinity) {
-      parts.push(remaining)
-      break
-    }
-
-    if (boldIdx <= codeIdx && boldMatch) {
-      parts.push(remaining.slice(0, boldIdx))
-      parts.push(<strong key={key++} className="font-semibold">{boldMatch[1]}</strong>)
-      remaining = remaining.slice(boldIdx + boldMatch[0].length)
-    } else if (codeMatch) {
-      parts.push(remaining.slice(0, codeIdx))
-      parts.push(<code key={key++} className="text-xs bg-muted px-1 py-0.5 rounded font-mono">{codeMatch[1]}</code>)
-      remaining = remaining.slice(codeIdx + codeMatch[0].length)
-    }
-  }
-
-  return parts.length === 1 ? parts[0] : <>{parts}</>
-}
-
-/** Simple markdown-like renderer for AI text output */
-function renderMarkdown(text: string) {
-  const lines = text.split('\n')
-  const elements: React.ReactNode[] = []
-  let inCodeBlock = false
-  let codeLines: string[] = []
-
-  lines.forEach((line, idx) => {
-    if (line.startsWith('```')) {
-      if (inCodeBlock) {
-        elements.push(
-          <pre key={`code-${idx}`} className="text-xs font-mono bg-black/30 p-3 rounded-lg overflow-x-auto my-2 text-muted-foreground">
-            {codeLines.join('\n')}
-          </pre>
-        )
-        codeLines = []
-        inCodeBlock = false
-      } else {
-        inCodeBlock = true
-      }
-      return
-    }
-    if (inCodeBlock) {
-      codeLines.push(line)
-      return
-    }
-
-    // Headings
-    if (line.startsWith('### ')) {
-      elements.push(<h4 key={idx} className="text-sm font-semibold mt-3 mb-1">{line.slice(4)}</h4>)
-    } else if (line.startsWith('## ')) {
-      elements.push(<h3 key={idx} className="text-base font-semibold mt-4 mb-1">{line.slice(3)}</h3>)
-    } else if (line.startsWith('# ')) {
-      elements.push(<h2 key={idx} className="text-lg font-semibold mt-4 mb-2">{line.slice(2)}</h2>)
-    } else if (line.startsWith('- ') || line.startsWith('* ')) {
-      elements.push(
-        <div key={idx} className="flex gap-2 ml-2">
-          <span className="text-muted-foreground">•</span>
-          <span>{renderInline(line.slice(2))}</span>
-        </div>
-      )
-    } else if (/^\d+\.\s/.test(line)) {
-      const match = line.match(/^(\d+)\.\s(.*)/)
-      if (match) {
-        elements.push(
-          <div key={idx} className="flex gap-2 ml-2">
-            <span className="text-muted-foreground">{match[1]}.</span>
-            <span>{renderInline(match[2])}</span>
-          </div>
-        )
-      }
-    } else if (line.trim() === '') {
-      elements.push(<div key={idx} className="h-2" />)
-    } else {
-      elements.push(<p key={idx}>{renderInline(line)}</p>)
-    }
-  })
-
-  return elements
+/** Render markdown content using prose styles */
+function Markdown({ children }: { children: string }) {
+  return (
+    <div className={proseClasses}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+    </div>
+  )
 }
 
 interface ConversationEvent {
@@ -176,6 +100,7 @@ interface ConversationEvent {
   role?: string
   content?: string
   tool?: string
+  toolUseId?: string
   toolInput?: Record<string, unknown>
   toolResult?: string
   result?: string
@@ -184,7 +109,9 @@ interface ConversationEvent {
   durationMs?: number
 }
 
-/** Parse stream-json output into conversation events */
+/** Parse stream-json output into conversation events.
+ *  Merges consecutive tool_call → tool_result pairs so the result
+ *  is available on the tool_call event itself (rendered collapsed). */
 function parseStreamOutput(output: string): ConversationEvent[] {
   const events: ConversationEvent[] = []
 
@@ -202,17 +129,48 @@ function parseStreamOutput(output: string): ConversationEvent[] {
             events.push({
               type: 'tool_call',
               tool: block.name,
+              toolUseId: block.id,
               toolInput: block.input,
             })
           }
         }
+      } else if (parsed.type === 'user' && parsed.message?.content) {
+        // Claude CLI stream-json wraps tool results as:
+        // {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"...","content":"..."}]}}
+        for (const block of parsed.message.content) {
+          if (block.type === 'tool_result') {
+            const content = Array.isArray(block.content)
+              ? block.content.map((c: { text?: string }) => c.text || '').join('')
+              : typeof block.content === 'string'
+                ? block.content
+                : JSON.stringify(block.content)
+            // Merge into the matching tool_call by tool_use_id, or the last unmatched one
+            const matchById = block.tool_use_id
+              ? events.find(
+                  (e) => e.type === 'tool_call' && e.toolUseId === block.tool_use_id && !e.toolResult,
+                )
+              : null
+            const target = matchById || [...events].reverse().find((e) => e.type === 'tool_call' && !e.toolResult)
+            if (target) {
+              target.toolResult = content
+            } else {
+              events.push({ type: 'tool_result', toolResult: content })
+            }
+          }
+        }
       } else if (parsed.type === 'tool_result') {
+        // Legacy/direct tool_result format (kept for backwards compatibility)
         const content = Array.isArray(parsed.content)
           ? parsed.content.map((c: { text?: string }) => c.text || '').join('')
           : typeof parsed.content === 'string'
             ? parsed.content
             : JSON.stringify(parsed.content)
-        events.push({ type: 'tool_result', toolResult: content })
+        const prev = events.length > 0 ? events[events.length - 1] : null
+        if (prev && prev.type === 'tool_call' && !prev.toolResult) {
+          prev.toolResult = content
+        } else {
+          events.push({ type: 'tool_result', toolResult: content })
+        }
       } else if (parsed.type === 'result') {
         events.push({
           type: 'result',
@@ -286,7 +244,7 @@ function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
             if (event.type === 'assistant_text') {
               return (
                 <div key={i} className="text-sm">
-                  {renderMarkdown(event.content || '')}
+                  <Markdown>{event.content || ''}</Markdown>
                 </div>
               )
             }
@@ -304,30 +262,47 @@ function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
                         : event.tool === 'Grep'
                           ? (input.pattern as string) || ''
                           : JSON.stringify(input).slice(0, 120)
+              const resultText = event.toolResult || ''
+              const hasResult = resultText.length > 2
               return (
-                <div
-                  key={i}
-                  className="flex items-start gap-2 rounded-md bg-blue-500/5 border border-blue-500/10 px-3 py-2"
-                >
-                  <span className="text-xs font-mono font-medium text-blue-400 whitespace-nowrap">
-                    {event.tool}
-                  </span>
-                  <span className="text-xs font-mono text-muted-foreground truncate">
-                    {preview}
-                  </span>
+                <div key={i} className="rounded-md bg-blue-500/5 border border-blue-500/10">
+                  <div className="flex items-start gap-2 px-3 py-2">
+                    <span className="text-xs font-mono font-medium text-blue-400 whitespace-nowrap">
+                      {event.tool}
+                    </span>
+                    <span className="text-xs font-mono text-muted-foreground truncate">
+                      {preview}
+                    </span>
+                  </div>
+                  {hasResult && (
+                    <details className="border-t border-blue-500/10">
+                      <summary className="px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer hover:bg-blue-500/5 select-none">
+                        Output ({resultText.length > 1000 ? `${Math.round(resultText.length / 1000)}k chars` : `${resultText.length} chars`})
+                      </summary>
+                      <pre className="text-xs font-mono bg-muted/30 px-3 py-2 overflow-x-auto max-h-48 overflow-y-auto text-muted-foreground whitespace-pre-wrap break-words">
+                        {resultText.length > 2000 ? resultText.slice(0, 2000) + '\n...' : resultText}
+                      </pre>
+                    </details>
+                  )}
                 </div>
               )
             }
             if (event.type === 'tool_result') {
+              // Only render standalone results that weren't merged into a tool_call
               const text = event.toolResult || ''
               if (!text || text.length < 3) return null
               return (
-                <pre
+                <details
                   key={i}
-                  className="text-xs font-mono bg-muted/50 p-2 rounded overflow-x-auto max-h-32 overflow-y-auto text-muted-foreground"
+                  className="rounded-md bg-muted/30 border border-border"
                 >
-                  {text.length > 500 ? text.slice(0, 500) + '...' : text}
-                </pre>
+                  <summary className="px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer hover:bg-muted/50 select-none">
+                    Tool output ({text.length > 1000 ? `${Math.round(text.length / 1000)}k chars` : `${text.length} chars`})
+                  </summary>
+                  <pre className="text-xs font-mono px-3 py-2 overflow-x-auto max-h-48 overflow-y-auto text-muted-foreground whitespace-pre-wrap break-words">
+                    {text.length > 2000 ? text.slice(0, 2000) + '\n...' : text}
+                  </pre>
+                </details>
               )
             }
             if (event.type === 'result' && event.result) {
@@ -339,7 +314,7 @@ function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
                   <p className="text-xs font-medium text-green-400 mb-1">
                     Result
                   </p>
-                  <div className="text-sm">{renderMarkdown(event.result)}</div>
+                  <div className="text-sm"><Markdown>{event.result}</Markdown></div>
                 </div>
               )
             }
@@ -353,8 +328,11 @@ function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
 
 export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
   const { runId } = useParams()
+  const navigate = useNavigate()
   const [streamLogs, setStreamLogs] = useState<AgentRunLog[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false)
+  const [isRetrying, setIsRetrying] = useState(false)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['agent-run', project.id, runId],
@@ -427,7 +405,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
         <AlertDescription>
           {error instanceof Error
             ? error.message
-            : 'Failed to load agent run'}
+            : 'Failed to load run'}
         </AlertDescription>
       </Alert>
     )
@@ -464,24 +442,79 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             <span className="text-xs text-green-400 animate-pulse">LIVE</span>
           )}
         </div>
-        {activeStatuses.has(run.status) && (
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={async () => {
-              try {
-                await fetch(`/api/projects/${project.id}/agents/runs/${run.id}/cancel`, {
-                  method: 'POST',
-                })
-                window.location.reload()
-              } catch {
-                // ignore
-              }
-            }}
-          >
-            Cancel
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {!activeStatuses.has(run.status) && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isRetrying}
+                onClick={async () => {
+                  setIsRetrying(true)
+                  try {
+                    const newRun = await retryRun(project.id, run.id)
+                    navigate(`../agents/${newRun.id}`)
+                  } catch (e) {
+                    console.error('Failed to retry run:', e)
+                  } finally {
+                    setIsRetrying(false)
+                  }
+                }}
+              >
+                {isRetrying ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                ) : (
+                  <RefreshCw className="h-4 w-4 mr-1" />
+                )}
+                Retry
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isOpeningWorkspace}
+                onClick={async () => {
+                  setIsOpeningWorkspace(true)
+                  try {
+                    const session = await startSession(project.id, {
+                      branch_name: run.branch_name || undefined,
+                      agent_run_id: run.id,
+                    })
+                    navigate(`../workspace?session=${session.id}`)
+                  } catch (e) {
+                    console.error('Failed to open workspace:', e)
+                  } finally {
+                    setIsOpeningWorkspace(false)
+                  }
+                }}
+              >
+                {isOpeningWorkspace ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                ) : (
+                  <SquareTerminal className="h-4 w-4 mr-1" />
+                )}
+                Open in Workspace
+              </Button>
+            </>
+          )}
+          {activeStatuses.has(run.status) && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={async () => {
+                try {
+                  await fetch(`/api/projects/${project.id}/agents/runs/${run.id}/cancel`, {
+                    method: 'POST',
+                  })
+                  window.location.reload()
+                } catch {
+                  // ignore
+                }
+              }}
+            >
+              Cancel
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Info cards grid */}
@@ -606,7 +639,56 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             </div>
           </CardContent>
         </Card>
+        {run.ai_session_id && (
+          <Card>
+            <CardContent className="p-4 flex items-center gap-2">
+              <SquareTerminal className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground">Session ID</p>
+                <p className="text-sm font-mono truncate" title={run.ai_session_id}>
+                  {run.ai_session_id.slice(0, 8)}…
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
       </div>
+
+      {/* Trigger & Arguments */}
+      {(run.trigger_type || run.user_context) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              {run.trigger_type === 'webhook' ? (
+                <Webhook className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <Terminal className="h-4 w-4 text-muted-foreground" />
+              )}
+              <CardTitle className="text-sm">
+                Trigger: <span className="capitalize">{run.trigger_type}</span>
+                {run.agent_name && (
+                  <span className="text-muted-foreground font-normal">
+                    {' '}— {run.agent_name}
+                  </span>
+                )}
+              </CardTitle>
+            </div>
+          </CardHeader>
+          {run.user_context && (
+            <CardContent className="pt-0">
+              <pre className="whitespace-pre-wrap text-xs font-mono bg-muted p-3 rounded-md overflow-x-auto max-h-48 overflow-y-auto">
+                {(() => {
+                  try {
+                    return JSON.stringify(JSON.parse(run.user_context), null, 2)
+                  } catch {
+                    return run.user_context
+                  }
+                })()}
+              </pre>
+            </CardContent>
+          )}
+        </Card>
+      )}
 
       {/* Error message */}
       {run.error_message && (
@@ -626,8 +708,8 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             <CardTitle className="text-sm">Report</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="text-sm prose dark:prose-invert max-w-none">
-              {renderMarkdown(run.analysis)}
+            <div className="text-sm">
+              <Markdown>{run.analysis}</Markdown>
             </div>
           </CardContent>
         </Card>

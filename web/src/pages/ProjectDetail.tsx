@@ -400,7 +400,7 @@ export function ProjectDetail() {
                 element={<Traces project={project} />}
               />
               <Route
-                path="ai-activity"
+                path="ai-gateway"
                 element={<ProjectAgentActivity projectId={project.id} />}
               />
               <Route

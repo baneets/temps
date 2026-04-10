@@ -7,19 +7,17 @@ pub struct Migration;
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
-        // MCP servers config: JSONB with Claude Code settings.json mcpServers format
+        // Use ADD COLUMN IF NOT EXISTS to be idempotent (columns may exist from dev iterations)
         db.execute_unprepared(
-            "ALTER TABLE project_agents ADD COLUMN mcp_servers_config JSONB DEFAULT NULL",
+            "ALTER TABLE project_agents ADD COLUMN IF NOT EXISTS mcp_servers_config JSONB DEFAULT NULL",
         )
         .await?;
-        // Skills config: JSONB array of skill definitions
         db.execute_unprepared(
-            "ALTER TABLE project_agents ADD COLUMN skills_config JSONB DEFAULT NULL",
+            "ALTER TABLE project_agents ADD COLUMN IF NOT EXISTS skills_config JSONB DEFAULT NULL",
         )
         .await?;
-        // Tools config: JSONB array of tool definitions
         db.execute_unprepared(
-            "ALTER TABLE project_agents ADD COLUMN tools_config JSONB DEFAULT NULL",
+            "ALTER TABLE project_agents ADD COLUMN IF NOT EXISTS tools_config JSONB DEFAULT NULL",
         )
         .await?;
         Ok(())

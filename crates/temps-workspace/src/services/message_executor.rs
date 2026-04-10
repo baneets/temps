@@ -536,6 +536,28 @@ impl MessageExecutor {
             session.project_id.to_string(),
         );
 
+        // Re-inject AI provider credentials so ~/.env stays fresh.
+        // Subscription auth uses ~/.claude/.credentials.json; API key uses ~/.env.
+        if let Ok((api_key, auth_type)) = self.resolve_ai_credentials().await {
+            if let Some(key) = api_key.as_deref() {
+                if auth_type == "subscription" {
+                    if let Err(e) = self
+                        .session_manager
+                        .seed_claude_credentials(session.id, key, &auth_type)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to refresh claude credentials for session {}: {}",
+                            session.id,
+                            e
+                        );
+                    }
+                } else {
+                    managed_env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
+                }
+            }
+        }
+
         match self
             .external_service_manager
             .get_project_service_environment_variables(session.project_id)
@@ -1232,6 +1254,23 @@ impl MessageExecutor {
             );
         }
 
+        // For subscription auth, write ~/.claude/.credentials.json so
+        // Claude CLI picks up the full OAuth context (scopes, subscription
+        // type) rather than just a bare env var token.
+        if let Some(key) = api_key.as_deref() {
+            if let Err(e) = self
+                .session_manager
+                .seed_claude_credentials(session.id, key, &auth_type)
+                .await
+            {
+                tracing::warn!(
+                    "Failed to seed claude credentials for session {}: {}",
+                    session.id,
+                    e
+                );
+            }
+        }
+
         // Collect linked-service env vars + git provider tokens and write
         // them into `/root/.env`. A global `~/.claude/CLAUDE.md` is also
         // installed instructing the agent to source the file before any
@@ -1239,6 +1278,15 @@ impl MessageExecutor {
         // by rewriting the file — no container restart needed.
         let mut managed_env: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+
+        // AI provider credentials — for API key auth, write to ~/.env so
+        // it's available inside the dtach sub-shell. For subscription auth,
+        // credentials are in ~/.claude/.credentials.json instead.
+        if let Some(key) = api_key.as_deref() {
+            if auth_type != "subscription" {
+                managed_env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
+            }
+        }
 
         // Linked external services (DATABASE_URL, REDIS_URL, ...)
         match self
