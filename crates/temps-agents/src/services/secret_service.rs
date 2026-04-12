@@ -40,6 +40,19 @@ pub struct ResolvedSecret {
     pub mount_path: Option<String>,
 }
 
+// Custom Debug impl never prints `value` — defense against accidental leaks
+// via `{:?}` formatting in logs or error paths.
+impl std::fmt::Debug for ResolvedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSecret")
+            .field("name", &self.name)
+            .field("secret_type", &self.secret_type)
+            .field("value", &"<redacted>")
+            .field("mount_path", &self.mount_path)
+            .finish()
+    }
+}
+
 pub struct SecretService {
     db: Arc<DatabaseConnection>,
     encryption_service: Arc<EncryptionService>,

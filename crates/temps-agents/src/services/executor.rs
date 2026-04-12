@@ -688,18 +688,80 @@ impl AgentExecutor {
                             ),
                         }
                     })?;
+                    const MAX_DECOMPRESSED_BYTES: u64 = 500 * 1024 * 1024; // 500 MB cap
                     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive_data));
                     let mut archive = tar::Archive::new(decoder);
-                    archive.unpack(tmp_dir.path()).map_err(|e| {
+                    // Disallow symlinks and absolute paths; unpack_in validates each entry
+                    // path stays within the destination (prevents `../` traversal).
+                    archive.set_preserve_permissions(false);
+                    archive.set_unpack_xattrs(false);
+                    let entries = archive.entries().map_err(|e| {
                         crate::error::AgentError::SandboxExecFailed {
                             run_id,
                             sandbox_id: String::new(),
                             reason: format!(
-                                "Failed to extract archive for skill '{}': {}",
+                                "Failed to read archive entries for skill '{}': {}",
                                 def.slug, e
                             ),
                         }
                     })?;
+                    let mut total_bytes: u64 = 0;
+                    for entry in entries {
+                        let mut entry =
+                            entry.map_err(|e| crate::error::AgentError::SandboxExecFailed {
+                                run_id,
+                                sandbox_id: String::new(),
+                                reason: format!(
+                                    "Invalid archive entry for skill '{}': {}",
+                                    def.slug, e
+                                ),
+                            })?;
+                        let entry_size = entry.header().size().unwrap_or(0);
+                        total_bytes = total_bytes.saturating_add(entry_size);
+                        if total_bytes > MAX_DECOMPRESSED_BYTES {
+                            return Err(crate::error::AgentError::SandboxExecFailed {
+                                run_id,
+                                sandbox_id: String::new(),
+                                reason: format!(
+                                    "Archive for skill '{}' exceeds 500MB decompressed limit",
+                                    def.slug
+                                ),
+                            });
+                        }
+                        // Reject symlinks/hardlinks: both can escape the sandbox dir.
+                        let entry_type = entry.header().entry_type();
+                        if entry_type.is_symlink() || entry_type.is_hard_link() {
+                            return Err(crate::error::AgentError::SandboxExecFailed {
+                                run_id,
+                                sandbox_id: String::new(),
+                                reason: format!(
+                                    "Archive for skill '{}' contains disallowed link entry",
+                                    def.slug
+                                ),
+                            });
+                        }
+                        // unpack_in validates path stays within tmp_dir (returns false if not).
+                        let unpacked = entry.unpack_in(tmp_dir.path()).map_err(|e| {
+                            crate::error::AgentError::SandboxExecFailed {
+                                run_id,
+                                sandbox_id: String::new(),
+                                reason: format!(
+                                    "Failed to extract archive entry for skill '{}': {}",
+                                    def.slug, e
+                                ),
+                            }
+                        })?;
+                        if !unpacked {
+                            return Err(crate::error::AgentError::SandboxExecFailed {
+                                run_id,
+                                sandbox_id: String::new(),
+                                reason: format!(
+                                    "Archive for skill '{}' contains path traversal",
+                                    def.slug
+                                ),
+                            });
+                        }
+                    }
                     let target_path = format!("/workspace/.claude/skills/{}", def.slug);
                     self.sandbox_registry
                         .write_directory(run_id, tmp_dir.path(), &target_path)

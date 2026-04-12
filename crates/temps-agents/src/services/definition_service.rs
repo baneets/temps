@@ -10,6 +10,40 @@ use temps_entities::{project_mcp_definitions, project_skill_definitions};
 
 use crate::error::AgentError;
 
+/// Validate a slug used as a URL segment AND as a filesystem path component
+/// (skills are extracted to `/workspace/.claude/skills/<slug>/`, MCP archives
+/// will land in `/home/temps/.mcp/<slug>/`). Must reject `..`, `/`, and
+/// other characters that could escape the intended directory.
+fn validate_slug(slug: &str, kind: &str) -> Result<(), AgentError> {
+    if slug.is_empty() {
+        return Err(AgentError::Validation {
+            message: format!("{kind} slug cannot be empty"),
+        });
+    }
+    if slug.len() > 63 {
+        return Err(AgentError::Validation {
+            message: format!("{kind} slug must be 63 characters or fewer"),
+        });
+    }
+    let first = slug.as_bytes()[0];
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(AgentError::Validation {
+            message: format!("{kind} slug must start with a lowercase letter or digit"),
+        });
+    }
+    if !slug
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(AgentError::Validation {
+            message: format!(
+                "{kind} slug must contain only lowercase letters, digits, and hyphens"
+            ),
+        });
+    }
+    Ok(())
+}
+
 // ── Skill Definitions ──
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -114,11 +148,7 @@ impl DefinitionService {
         project_id: i32,
         request: CreateSkillDefinitionRequest,
     ) -> Result<project_skill_definitions::Model, AgentError> {
-        if request.slug.is_empty() {
-            return Err(AgentError::Validation {
-                message: "Skill slug cannot be empty".into(),
-            });
-        }
+        validate_slug(&request.slug, "Skill")?;
         if request.content.is_empty() {
             return Err(AgentError::Validation {
                 message: "Skill content cannot be empty".into(),
@@ -203,11 +233,7 @@ impl DefinitionService {
         &self,
         request: CreateSkillDefinitionRequest,
     ) -> Result<project_skill_definitions::Model, AgentError> {
-        if request.slug.is_empty() {
-            return Err(AgentError::Validation {
-                message: "Skill slug cannot be empty".into(),
-            });
-        }
+        validate_slug(&request.slug, "Skill")?;
         if request.content.is_empty() {
             return Err(AgentError::Validation {
                 message: "Skill content cannot be empty".into(),
@@ -331,11 +357,7 @@ impl DefinitionService {
         project_id: i32,
         request: CreateMcpDefinitionRequest,
     ) -> Result<project_mcp_definitions::Model, AgentError> {
-        if request.slug.is_empty() {
-            return Err(AgentError::Validation {
-                message: "MCP server slug cannot be empty".into(),
-            });
-        }
+        validate_slug(&request.slug, "MCP server")?;
 
         let active = project_mcp_definitions::ActiveModel {
             project_id: Set(Some(project_id)),
@@ -411,11 +433,7 @@ impl DefinitionService {
         &self,
         request: CreateMcpDefinitionRequest,
     ) -> Result<project_mcp_definitions::Model, AgentError> {
-        if request.slug.is_empty() {
-            return Err(AgentError::Validation {
-                message: "MCP server slug cannot be empty".into(),
-            });
-        }
+        validate_slug(&request.slug, "MCP server")?;
 
         let active = project_mcp_definitions::ActiveModel {
             project_id: Set(None),

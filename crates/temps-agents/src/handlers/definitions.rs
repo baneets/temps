@@ -1,16 +1,18 @@
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use utoipa::ToSchema;
 
 use temps_auth::{permission_guard, RequireAuth};
+use temps_core::audit::{AuditContext, AuditOperation};
 use temps_core::problemdetails::{self, Problem};
+use temps_core::RequestMetadata;
 
 use crate::handlers::AppState;
 use crate::services::definition_service::{
@@ -124,7 +126,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/skills",
             get(list_skills).post(create_skill),
         )
-        .route("/projects/{project_id}/skills/upload", post(upload_skill))
+        .route(
+            "/projects/{project_id}/skills/upload",
+            post(upload_skill).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .route(
             "/projects/{project_id}/skills/{slug}",
             get(get_skill).put(update_skill).delete(delete_skill),
@@ -147,7 +152,10 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/settings/skills",
             get(list_global_skills).post(create_global_skill),
         )
-        .route("/settings/skills/upload", post(upload_global_skill))
+        .route(
+            "/settings/skills/upload",
+            post(upload_global_skill).layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        )
         .route(
             "/settings/skills/{slug}",
             get(get_global_skill)
@@ -169,6 +177,59 @@ pub fn routes() -> Router<Arc<AppState>> {
                 .put(update_global_mcp)
                 .delete(delete_global_mcp),
         )
+}
+
+// ── Audit ───────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct DefinitionAudit {
+    context: AuditContext,
+    operation: &'static str,
+    resource_kind: &'static str,
+    scope: &'static str,
+    project_id: Option<i32>,
+    slug: String,
+    name: Option<String>,
+}
+
+impl AuditOperation for DefinitionAudit {
+    fn operation_type(&self) -> String {
+        format!("{}_{}", self.resource_kind, self.operation)
+    }
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+    fn serialize(&self) -> temps_core::anyhow::Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| temps_core::anyhow::anyhow!("Failed to serialize audit: {}", e))
+    }
+}
+
+fn audit_ctx(auth: &temps_auth::AuthContext, metadata: &RequestMetadata) -> AuditContext {
+    AuditContext {
+        user_id: auth.user_id(),
+        ip_address: Some(metadata.ip_address.clone()),
+        user_agent: metadata.user_agent.clone(),
+    }
+}
+
+async fn log_audit(app_state: &AppState, audit: DefinitionAudit) {
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        tracing::error!(
+            "Failed to write audit log ({}_{} {} {}): {}",
+            audit.resource_kind,
+            audit.operation,
+            audit.scope,
+            audit.slug,
+            e
+        );
+    }
 }
 
 // ── Project-scoped Skill handlers ──────────────────────────────────────────
@@ -215,6 +276,7 @@ async fn get_skill(
 async fn create_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(project_id): Path<i32>,
     Json(request): Json<CreateSkillRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -235,6 +297,20 @@ async fn create_skill(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "CREATED",
+            resource_kind: "SKILL",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: skill.slug.clone(),
+            name: Some(skill.name.clone()),
+        },
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(SkillDefinitionResponse::from(skill)),
@@ -244,6 +320,7 @@ async fn create_skill(
 async fn update_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path((project_id, slug)): Path<(i32, String)>,
     Json(request): Json<UpdateSkillRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -264,12 +341,27 @@ async fn update_skill(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "UPDATED",
+            resource_kind: "SKILL",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: skill.slug.clone(),
+            name: Some(skill.name.clone()),
+        },
+    )
+    .await;
+
     Ok(Json(SkillDefinitionResponse::from(skill)))
 }
 
 async fn delete_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path((project_id, slug)): Path<(i32, String)>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ProjectsWrite);
@@ -279,6 +371,20 @@ async fn delete_skill(
         .delete_skill(project_id, &slug)
         .await
         .map_err(Problem::from)?;
+
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "DELETED",
+            resource_kind: "SKILL",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: slug.clone(),
+            name: None,
+        },
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -324,6 +430,7 @@ async fn get_mcp(
 async fn create_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(project_id): Path<i32>,
     Json(request): Json<CreateMcpRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -343,12 +450,27 @@ async fn create_mcp(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "CREATED",
+            resource_kind: "MCP",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: mcp.slug.clone(),
+            name: Some(mcp.name.clone()),
+        },
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(McpDefinitionResponse::from(mcp))))
 }
 
 async fn update_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path((project_id, slug)): Path<(i32, String)>,
     Json(request): Json<UpdateMcpRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -368,12 +490,27 @@ async fn update_mcp(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "UPDATED",
+            resource_kind: "MCP",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: mcp.slug.clone(),
+            name: Some(mcp.name.clone()),
+        },
+    )
+    .await;
+
     Ok(Json(McpDefinitionResponse::from(mcp)))
 }
 
 async fn delete_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path((project_id, slug)): Path<(i32, String)>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ProjectsWrite);
@@ -383,6 +520,20 @@ async fn delete_mcp(
         .delete_mcp(project_id, &slug)
         .await
         .map_err(Problem::from)?;
+
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "DELETED",
+            resource_kind: "MCP",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: slug.clone(),
+            name: None,
+        },
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -430,6 +581,7 @@ async fn get_global_skill(
 async fn create_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateSkillRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
@@ -446,6 +598,20 @@ async fn create_global_skill(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "CREATED",
+            resource_kind: "SKILL",
+            scope: "global",
+            project_id: None,
+            slug: skill.slug.clone(),
+            name: Some(skill.name.clone()),
+        },
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(SkillDefinitionResponse::from(skill)),
@@ -455,6 +621,7 @@ async fn create_global_skill(
 async fn update_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(slug): Path<String>,
     Json(request): Json<UpdateSkillRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -474,12 +641,27 @@ async fn update_global_skill(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "UPDATED",
+            resource_kind: "SKILL",
+            scope: "global",
+            project_id: None,
+            slug: skill.slug.clone(),
+            name: Some(skill.name.clone()),
+        },
+    )
+    .await;
+
     Ok(Json(SkillDefinitionResponse::from(skill)))
 }
 
 async fn delete_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
@@ -489,6 +671,20 @@ async fn delete_global_skill(
         .delete_global_skill(&slug)
         .await
         .map_err(Problem::from)?;
+
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "DELETED",
+            resource_kind: "SKILL",
+            scope: "global",
+            project_id: None,
+            slug: slug.clone(),
+            name: None,
+        },
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -533,6 +729,7 @@ async fn get_global_mcp(
 async fn create_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Json(request): Json<CreateMcpRequest>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
@@ -548,12 +745,27 @@ async fn create_global_mcp(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "CREATED",
+            resource_kind: "MCP",
+            scope: "global",
+            project_id: None,
+            slug: mcp.slug.clone(),
+            name: Some(mcp.name.clone()),
+        },
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(McpDefinitionResponse::from(mcp))))
 }
 
 async fn update_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(slug): Path<String>,
     Json(request): Json<UpdateMcpRequest>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -572,12 +784,27 @@ async fn update_global_mcp(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "UPDATED",
+            resource_kind: "MCP",
+            scope: "global",
+            project_id: None,
+            slug: mcp.slug.clone(),
+            name: Some(mcp.name.clone()),
+        },
+    )
+    .await;
+
     Ok(Json(McpDefinitionResponse::from(mcp)))
 }
 
 async fn delete_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
@@ -587,6 +814,20 @@ async fn delete_global_mcp(
         .delete_global_mcp(&slug)
         .await
         .map_err(Problem::from)?;
+
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "DELETED",
+            resource_kind: "MCP",
+            scope: "global",
+            project_id: None,
+            slug: slug.clone(),
+            name: None,
+        },
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -679,6 +920,7 @@ async fn parse_skill_multipart(
 async fn upload_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(project_id): Path<i32>,
     multipart: Multipart,
 ) -> Result<impl IntoResponse, Problem> {
@@ -691,6 +933,20 @@ async fn upload_skill(
         .await
         .map_err(Problem::from)?;
 
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "UPLOADED",
+            resource_kind: "SKILL",
+            scope: "project",
+            project_id: Some(project_id),
+            slug: skill.slug.clone(),
+            name: Some(skill.name.clone()),
+        },
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(SkillDefinitionResponse::from(skill)),
@@ -701,6 +957,7 @@ async fn upload_skill(
 async fn upload_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     multipart: Multipart,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
@@ -711,6 +968,20 @@ async fn upload_global_skill(
         .create_global_skill(request)
         .await
         .map_err(Problem::from)?;
+
+    log_audit(
+        &app_state,
+        DefinitionAudit {
+            context: audit_ctx(&auth, &metadata),
+            operation: "UPLOADED",
+            resource_kind: "SKILL",
+            scope: "global",
+            project_id: None,
+            slug: skill.slug.clone(),
+            name: Some(skill.name.clone()),
+        },
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,

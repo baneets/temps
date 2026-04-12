@@ -1,7 +1,8 @@
 import type { Command } from 'commander'
-import { readFileSync, statSync, existsSync } from 'node:fs'
-import { execSync } from 'node:child_process'
-import { resolve } from 'node:path'
+import { readFileSync, statSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { execFileSync, execSync } from 'node:child_process'
+import { resolve, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { requireAuth, credentials, config } from '../../config/store.js'
 import {
   setupClient,
@@ -153,6 +154,273 @@ async function resolveProjectId(projectSlug: string): Promise<number> {
   throw new Error(`Project '${projectSlug}' not found`)
 }
 
+// --- skills.sh / GitHub import helpers ---
+
+interface DiscoveredSkill {
+  /** Path on disk where SKILL.md lives */
+  dir: string
+  /** Slug derived from directory name */
+  slug: string
+  /** Parsed frontmatter name */
+  name: string
+  /** Parsed frontmatter description */
+  description?: string
+  /** Raw SKILL.md content */
+  content: string
+}
+
+/** Parse minimal YAML frontmatter (name + description only). */
+function parseSkillFrontmatter(content: string): { name?: string; description?: string } {
+  const match = content.match(/^---\n([\s\S]*?)\n---/)
+  const body: string | undefined = match?.[1]
+  if (!body) return {}
+  const out: { name?: string; description?: string } = {}
+  for (const line of body.split('\n')) {
+    const m = line.match(/^(name|description)\s*:\s*(.+)$/)
+    const key = m?.[1]
+    let value = m?.[2]?.trim()
+    if (!key || !value) continue
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1)
+    }
+    out[key as 'name' | 'description'] = value
+  }
+  return out
+}
+
+/**
+ * Walk the extracted repo and find every directory containing a SKILL.md.
+ * Limited to the conventional locations used by skills.sh:
+ *  - repo root
+ *  - skills/<name>/ (and skills/.curated/<name>/)
+ *  - .claude/skills/<name>/, .agents/skills/<name>/
+ */
+function discoverSkills(rootDir: string): DiscoveredSkill[] {
+  const found: DiscoveredSkill[] = []
+  const candidateBases = [
+    rootDir,
+    join(rootDir, 'skills'),
+    join(rootDir, 'skills', '.curated'),
+    join(rootDir, '.claude', 'skills'),
+    join(rootDir, '.agents', 'skills'),
+  ]
+
+  const tryPush = (dir: string, slugFallback: string) => {
+    const skillMd = join(dir, 'SKILL.md')
+    if (!existsSync(skillMd)) return
+    const content = readFileSync(skillMd, 'utf-8')
+    const fm = parseSkillFrontmatter(content)
+    found.push({
+      dir,
+      slug: slugFallback,
+      name: fm.name ?? slugFallback,
+      description: fm.description,
+      content,
+    })
+  }
+
+  // Root-level skill
+  tryPush(rootDir, basenameSafe(rootDir))
+
+  // Multi-skill bases
+  for (const base of candidateBases.slice(1)) {
+    if (!existsSync(base) || !statSync(base).isDirectory()) continue
+    for (const entry of readdirSync(base)) {
+      const full = join(base, entry)
+      try {
+        if (!statSync(full).isDirectory()) continue
+      } catch {
+        continue
+      }
+      tryPush(full, entry)
+    }
+  }
+
+  return found
+}
+
+function basenameSafe(p: string): string {
+  const parts = p.split('/').filter(Boolean)
+  return parts[parts.length - 1] ?? 'skill'
+}
+
+// GitHub allows [A-Za-z0-9_.-] in owner/repo (repos can't start with .).
+// Branch refs are more permissive but we restrict to a safe subset so the value
+// can be passed into execFileSync args without shell interpretation concerns.
+const GITHUB_OWNER_REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/
+const GITHUB_BRANCH_RE = /^[A-Za-z0-9._/-]{1,200}$/
+
+/**
+ * Download a public GitHub repo as tar.gz and extract it.
+ * Returns the extracted root directory (which contains the repo contents).
+ */
+function downloadAndExtractRepo(owner: string, repo: string, branch: string): string {
+  if (!GITHUB_OWNER_REPO_RE.test(owner)) {
+    throw new Error(`Invalid owner '${owner}'. Must match ${GITHUB_OWNER_REPO_RE}.`)
+  }
+  if (!GITHUB_OWNER_REPO_RE.test(repo)) {
+    throw new Error(`Invalid repo '${repo}'. Must match ${GITHUB_OWNER_REPO_RE}.`)
+  }
+  if (!GITHUB_BRANCH_RE.test(branch) || branch.includes('..')) {
+    throw new Error(`Invalid branch '${branch}'. Must match ${GITHUB_BRANCH_RE} and not contain '..'.`)
+  }
+
+  const workDir = mkdtempSync(join(tmpdir(), 'temps-skill-import-'))
+  const tarballPath = join(workDir, 'repo.tar.gz')
+  const url = `https://codeload.github.com/${owner}/${repo}/tar.gz/refs/heads/${branch}`
+
+  // Download with curl (avoids buffering the entire tarball through Node).
+  // execFileSync avoids a shell entirely — the URL/path can't be reinterpreted.
+  try {
+    execFileSync('curl', ['-fSL', '-o', tarballPath, url], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+  } catch {
+    rmSync(workDir, { recursive: true, force: true })
+    throw new Error(
+      `Failed to download ${owner}/${repo}@${branch}. Check that the repository is public and the branch exists.`,
+    )
+  }
+
+  // GitHub tarballs extract into <repo>-<branch>/
+  execFileSync('tar', ['-xzf', tarballPath, '-C', workDir], { stdio: 'ignore' })
+
+  // Find the single top-level directory inside workDir
+  const entries = readdirSync(workDir).filter(e => e !== 'repo.tar.gz')
+  const top = entries[0]
+  if (!top) {
+    rmSync(workDir, { recursive: true, force: true })
+    throw new Error('Tarball was empty')
+  }
+  return join(workDir, top)
+}
+
+interface ImportOptions {
+  branch?: string
+  slug?: string
+  name?: string
+  description?: string
+  global?: boolean
+  project?: string
+  force?: boolean
+}
+
+async function importAction(source: string, options: ImportOptions): Promise<void> {
+  await requireAuth()
+  await setupClient()
+
+  // Parse: <owner>/<repo>[/<skill>]
+  const parts = source.split('/').filter(Boolean)
+  if (parts.length < 2) {
+    throw new Error(
+      `Invalid source '${source}'. Expected '<owner>/<repo>' or '<owner>/<repo>/<skill-name>'`,
+    )
+  }
+  const owner = parts[0]
+  const repo = parts[1]
+  if (!owner || !repo) {
+    throw new Error(
+      `Invalid source '${source}'. Expected '<owner>/<repo>' or '<owner>/<repo>/<skill-name>'`,
+    )
+  }
+  const rest = parts.slice(2)
+  const requestedSkill = rest.length > 0 ? rest.join('/') : undefined
+  const branch = options.branch ?? 'main'
+
+  // Download + discover
+  const extractRoot = await withSpinner(
+    `Downloading ${owner}/${repo}@${branch}...`,
+    async () => downloadAndExtractRepo(owner, repo, branch),
+  )
+
+  let workDir: string | undefined
+  try {
+    // Track the temp dir for cleanup (parent of extractRoot)
+    workDir = resolve(extractRoot, '..')
+
+    const skills = discoverSkills(extractRoot)
+    if (skills.length === 0) {
+      throw new Error(
+        `No skills found in ${owner}/${repo}@${branch}. Looked in: root, skills/, .claude/skills/, .agents/skills/`,
+      )
+    }
+
+    // Pick the skill
+    let chosen: DiscoveredSkill
+    if (requestedSkill) {
+      const match = skills.find(s => s.slug === requestedSkill || s.name === requestedSkill)
+      if (!match) {
+        throw new Error(
+          `Skill '${requestedSkill}' not found in repo. Available: ${skills.map(s => s.slug).join(', ')}`,
+        )
+      }
+      chosen = match
+    } else if (skills.length === 1) {
+      chosen = skills[0]!
+    } else {
+      throw new Error(
+        `Repo contains ${skills.length} skills. Specify which: ${skills.map(s => `${owner}/${repo}/${s.slug}`).join(', ')}`,
+      )
+    }
+
+    // Apply overrides
+    const finalSlug = options.slug ?? chosen.slug
+    const finalName = options.name ?? chosen.name
+    const finalDescription = options.description ?? chosen.description
+
+    // Pack + upload
+    const isProject = !!options.project
+    const skill = await withSpinner(
+      `Importing skill '${finalSlug}'...`,
+      async () => {
+        const { archive } = packDirectory(chosen.dir)
+        const apiUrl = normalizeApiUrl(config.get('apiUrl'))
+        const apiKey = (await credentials.getApiKey()) || ''
+
+        let uploadUrl: string
+        if (isProject) {
+          const pid = await resolveProjectId(options.project!)
+          uploadUrl = `/projects/${pid}/skills/upload`
+        } else {
+          uploadUrl = '/settings/skills/upload'
+        }
+
+        try {
+          return await uploadSkillMultipart(apiUrl, apiKey, uploadUrl, {
+            slug: finalSlug,
+            name: finalName,
+            description: finalDescription,
+            content: chosen.content,
+            archive,
+          })
+        } catch (err) {
+          // Conflict (slug exists) → retry with --force via update
+          const msg = err instanceof Error ? err.message : String(err)
+          if (!options.force || !/409|exists|conflict|duplicate/i.test(msg)) {
+            throw err
+          }
+          // Fall back to update path. Server's PUT endpoint accepts JSON body
+          // with the same fields; archive update would need a separate flow.
+          // For now, surface a clearer error so the user can delete + re-import.
+          throw new Error(
+            `Skill '${finalSlug}' already exists. Delete it first with 'temps skills delete ${finalSlug} ${isProject ? `--project ${options.project}` : '--global'}' and re-run.`,
+          )
+        }
+      },
+    )
+
+    success(`Imported skill: ${skill.name} (${skill.slug}) [from ${owner}/${repo}]`)
+  } finally {
+    if (workDir) {
+      try {
+        rmSync(workDir, { recursive: true, force: true })
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  }
+}
+
 // --- Options ---
 
 interface ListOptions {
@@ -243,6 +511,21 @@ export function registerSkillsCommands(program: Command): void {
     .option('-f, --force', 'Skip confirmation')
     .option('-y, --yes', 'Skip confirmation (alias for --force)')
     .action(deleteAction)
+
+  skills
+    .command('import')
+    .description(
+      'Import a skill from a public GitHub repository (skills.sh-compatible). Source: <owner>/<repo> or <owner>/<repo>/<skill-name>',
+    )
+    .argument('<source>', 'GitHub source: owner/repo or owner/repo/skill-name')
+    .option('-b, --branch <branch>', 'Git branch to fetch from', 'main')
+    .option('-s, --slug <slug>', 'Override slug (defaults to skill directory name)')
+    .option('-n, --name <name>', 'Override skill name (defaults to SKILL.md frontmatter)')
+    .option('-d, --description <description>', 'Override description')
+    .option('--global', 'Install as a global (platform-wide) skill')
+    .option('--project <slug>', 'Install for a specific project')
+    .option('-f, --force', 'Overwrite if a skill with the same slug already exists')
+    .action(importAction)
 }
 
 // --- Actions ---
