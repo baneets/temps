@@ -23,6 +23,8 @@ import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
   createAgent,
+  listGlobalMcpDefinitions,
+  listGlobalSkillDefinitions,
   listMcpDefinitions,
   listSkillDefinitions,
   updateAgent,
@@ -114,18 +116,36 @@ export function AgentSettingsDialog({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { resetForm() }, [agent?.id, open])
 
-  // Fetch available project-level definitions for slug pickers
-  const { data: availableSkills = [] } = useQuery({
+  // Fetch available definitions: project-level + global
+  const { data: projectSkills = [] } = useQuery({
     queryKey: ['skill-definitions', projectId],
     queryFn: () => listSkillDefinitions(projectId),
     enabled: open,
   })
+  const { data: globalSkills = [] } = useQuery({
+    queryKey: ['global-skills'],
+    queryFn: () => listGlobalSkillDefinitions(),
+    enabled: open,
+  })
+  const availableSkills = [
+    ...projectSkills,
+    ...globalSkills.filter((g) => !projectSkills.some((p) => p.slug === g.slug)),
+  ]
 
-  const { data: availableMcps = [] } = useQuery({
+  const { data: projectMcps = [] } = useQuery({
     queryKey: ['mcp-definitions', projectId],
     queryFn: () => listMcpDefinitions(projectId),
     enabled: open,
   })
+  const { data: globalMcps = [] } = useQuery({
+    queryKey: ['global-mcp-servers'],
+    queryFn: () => listGlobalMcpDefinitions(),
+    enabled: open,
+  })
+  const availableMcps = [
+    ...projectMcps,
+    ...globalMcps.filter((g) => !projectMcps.some((p) => p.slug === g.slug)),
+  ]
 
   const toggleSkill = (slug: string) => {
     setSelectedSkills((prev) =>
@@ -520,7 +540,12 @@ export function AgentSettingsDialog({
                       className="mt-0.5"
                     />
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium">{skill.name}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-medium">{skill.name}</span>
+                        {skill.project_id === null && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground">Global</span>
+                        )}
+                      </div>
                       <div className="text-xs text-muted-foreground truncate">
                         {skill.description || skill.slug}
                       </div>
@@ -530,7 +555,7 @@ export function AgentSettingsDialog({
               </div>
             ) : (
               <p className="text-xs text-muted-foreground italic">
-                No skills defined for this project. Create skills in Settings to use them here.
+                No skills defined. Create skills in project or platform settings.
               </p>
             )}
           </div>
@@ -555,7 +580,12 @@ export function AgentSettingsDialog({
                       className="mt-0.5"
                     />
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium">{mcp.name}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-medium">{mcp.name}</span>
+                        {mcp.project_id === null && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-muted text-muted-foreground">Global</span>
+                        )}
+                      </div>
                       <div className="text-xs text-muted-foreground truncate">
                         {mcp.description || mcp.slug}
                       </div>
@@ -565,7 +595,7 @@ export function AgentSettingsDialog({
               </div>
             ) : (
               <p className="text-xs text-muted-foreground italic">
-                No MCP servers defined for this project. Create MCP servers in Settings to use them here.
+                No MCP servers defined. Create MCP servers in project or platform settings.
               </p>
             )}
           </div>

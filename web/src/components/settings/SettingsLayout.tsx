@@ -20,6 +20,7 @@ import {
   Shield,
   Sparkles,
   Users,
+  Wand2,
   type LucideIcon,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -62,6 +63,16 @@ const settingsNavGroups: SettingsNavGroup[] = [
         title: 'AI Workflows',
         url: '/settings/agent-sandbox',
         icon: Bot,
+      },
+      {
+        title: 'Skills',
+        url: '/settings/skills',
+        icon: Wand2,
+      },
+      {
+        title: 'MCP Servers',
+        url: '/settings/mcp-servers',
+        icon: Server,
       },
       {
         title: 'Git Providers',

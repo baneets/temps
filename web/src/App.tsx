@@ -190,6 +190,16 @@ const AgentSandboxSettingsPage = lazy(() =>
     default: m.AgentSandboxSettings,
   }))
 )
+const GlobalSkillsSettingsPage = lazy(() =>
+  import('./components/settings/GlobalSkillsSettings').then((m) => ({
+    default: m.GlobalSkillsSettings,
+  }))
+)
+const GlobalMcpServersSettingsPage = lazy(() =>
+  import('./components/settings/GlobalMcpServersSettings').then((m) => ({
+    default: m.GlobalMcpServersSettings,
+  }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -315,6 +325,8 @@ const FullAppRoutes = () => {
                   <Route path="email/:id" element={<EmailDetail />} />
                   <Route path="ai-gateway" element={<AiGateway />} />
                   <Route path="agent-sandbox" element={<AgentSandboxSettingsPage />} />
+                  <Route path="skills" element={<GlobalSkillsSettingsPage />} />
+                  <Route path="mcp-servers" element={<GlobalMcpServersSettingsPage />} />
                   <Route path="git-providers" element={<GitSources />} />
                   <Route path="git-providers/add" element={<AddGitProvider />} />
                   <Route path="git-providers/:id" element={<GitProviderDetail />} />

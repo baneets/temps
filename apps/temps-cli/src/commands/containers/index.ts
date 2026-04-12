@@ -8,20 +8,13 @@ import {
   stopContainer,
   restartContainer,
   getContainerMetrics,
+  getEnvironments,
 } from '../../api/sdk.gen.js'
-import type { ContainerInfoResponse, ContainerDetailResponse } from '../../api/types.gen.js'
+import type { ContainerInfoResponse } from '../../api/types.gen.js'
 import { withSpinner } from '../../ui/spinner.js'
 import { printTable, statusBadge, type TableColumn } from '../../ui/table.js'
 import { promptConfirm } from '../../ui/prompts.js'
 import { newline, header, icons, json, colors, success, info, warning, keyValue } from '../../ui/output.js'
-
-interface ContainerOptions {
-  projectId: string
-  environmentId: string
-  containerId?: string
-  json?: boolean
-  force?: boolean
-}
 
 export function registerContainersCommands(program: Command): void {
   const containers = program
@@ -32,9 +25,9 @@ export function registerContainersCommands(program: Command): void {
   containers
     .command('list')
     .alias('ls')
-    .description('List all containers in an environment')
+    .description('List containers in an environment, or across all environments if -e omitted')
     .requiredOption('-p, --project-id <id>', 'Project ID')
-    .requiredOption('-e, --environment-id <id>', 'Environment ID')
+    .option('-e, --environment-id <id>', 'Environment ID (optional - lists all environments if omitted)')
     .option('--json', 'Output in JSON format')
     .action(listContainersAction)
 
@@ -85,52 +78,101 @@ export function registerContainersCommands(program: Command): void {
 }
 
 async function listContainersAction(
-  options: { projectId: string; environmentId: string; json?: boolean }
+  options: { projectId: string; environmentId?: string; json?: boolean }
 ): Promise<void> {
   await requireAuth()
   await setupClient()
 
   const projId = parseInt(options.projectId, 10)
-  const envId = parseInt(options.environmentId, 10)
-  if (isNaN(projId) || isNaN(envId)) {
-    warning('Invalid project or environment ID')
+  if (isNaN(projId)) {
+    warning('Invalid project ID')
     return
   }
 
-  const result = await withSpinner('Fetching containers...', async () => {
-    const { data, error } = await listContainers({
-      client,
-      path: { project_id: projId, environment_id: envId },
-    })
-    if (error) {
-      throw new Error(getErrorMessage(error))
+  // Resolve which environments to query
+  let envIds: { id: number; name: string }[] = []
+  if (options.environmentId) {
+    const envId = parseInt(options.environmentId, 10)
+    if (isNaN(envId)) {
+      warning('Invalid environment ID')
+      return
     }
-    return data
-  })
+    envIds = [{ id: envId, name: String(envId) }]
+  } else {
+    const envs = await withSpinner('Fetching environments...', async () => {
+      const { data, error } = await getEnvironments({
+        client,
+        path: { project_id: projId },
+      })
+      if (error) throw new Error(getErrorMessage(error))
+      return data ?? []
+    })
+    if (envs.length === 0) {
+      info('No environments found in this project')
+      return
+    }
+    envIds = envs.map((e: { id: number; name: string }) => ({ id: e.id, name: e.name }))
+  }
+
+  // Fetch containers for each environment
+  type ContainerWithEnv = ContainerInfoResponse & { __env_id: number; __env_name: string }
+  const all = await withSpinner(
+    `Fetching containers across ${envIds.length} environment(s)...`,
+    async () => {
+      const results: ContainerWithEnv[] = []
+      for (const env of envIds) {
+        try {
+          const { data, error } = await listContainers({
+            client,
+            path: { project_id: projId, environment_id: env.id },
+          })
+          if (error || !data?.containers) continue
+          for (const c of data.containers) {
+            results.push({ ...c, __env_id: env.id, __env_name: env.name })
+          }
+        } catch {
+          // continue
+        }
+      }
+      return results
+    },
+  )
 
   if (options.json) {
-    json(result)
+    json(all)
     return
   }
 
   newline()
-  header(`${icons.info} Containers in Environment ${envId} (${result?.total ?? 0})`)
+  const scope = options.environmentId
+    ? `Environment ${options.environmentId}`
+    : `${envIds.length} environment(s)`
+  header(`${icons.info} Containers in ${scope} (${all.length})`)
 
-  if (!result?.containers || result.containers.length === 0) {
-    info('No containers found in this environment')
+  if (all.length === 0) {
+    info('No containers found')
     newline()
     return
   }
 
-  const columns: TableColumn<ContainerInfoResponse>[] = [
+  const baseColumns: TableColumn<ContainerWithEnv>[] = [
     { header: 'ID', key: 'container_id', width: 16, color: (v) => colors.muted(v.slice(0, 12) + '...') },
     { header: 'Name', key: 'container_name', color: (v) => colors.bold(v) },
+  ]
+  if (!options.environmentId) {
+    baseColumns.push({
+      header: 'Env',
+      accessor: (c) => c.__env_name,
+      color: (v) => colors.info(v),
+    })
+  }
+  baseColumns.push(
     { header: 'Image', key: 'image_name', color: (v) => colors.muted(v.length > 40 ? v.slice(0, 40) + '...' : v) },
     { header: 'Status', key: 'status', color: (v) => statusBadge(v.toLowerCase().includes('running') ? 'active' : 'inactive') },
     { header: 'Created', key: 'created_at', color: (v) => colors.muted(new Date(v).toLocaleDateString()) },
-  ]
+  )
 
-  printTable(result.containers, columns, { style: 'minimal' })
+  printTable(all, baseColumns, { style: 'minimal' })
   newline()
 }
 

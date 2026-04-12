@@ -1,8 +1,8 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Multipart, Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use temps_auth::{permission_guard, RequireAuth};
-use temps_core::problemdetails::Problem;
+use temps_core::problemdetails::{self, Problem};
 
 use crate::handlers::AppState;
 use crate::services::definition_service::{
@@ -23,17 +23,19 @@ use crate::services::definition_service::{
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SkillDefinitionResponse {
     pub id: i32,
-    pub project_id: i32,
+    pub project_id: Option<i32>,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
     pub content: String,
+    pub has_archive: bool,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl From<temps_entities::project_skill_definitions::Model> for SkillDefinitionResponse {
     fn from(m: temps_entities::project_skill_definitions::Model) -> Self {
+        let has_archive = m.archive.is_some();
         Self {
             id: m.id,
             project_id: m.project_id,
@@ -41,6 +43,7 @@ impl From<temps_entities::project_skill_definitions::Model> for SkillDefinitionR
             name: m.name,
             description: m.description,
             content: m.content,
+            has_archive,
             created_at: m.created_at.to_rfc3339(),
             updated_at: m.updated_at.to_rfc3339(),
         }
@@ -50,7 +53,7 @@ impl From<temps_entities::project_skill_definitions::Model> for SkillDefinitionR
 #[derive(Debug, Serialize, ToSchema)]
 pub struct McpDefinitionResponse {
     pub id: i32,
-    pub project_id: i32,
+    pub project_id: Option<i32>,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
@@ -116,16 +119,21 @@ pub struct UpdateMcpRequest {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        // Skills
+        // Project-scoped skills
         .route(
             "/projects/{project_id}/skills",
             get(list_skills).post(create_skill),
         )
+        .route("/projects/{project_id}/skills/upload", post(upload_skill))
         .route(
             "/projects/{project_id}/skills/{slug}",
             get(get_skill).put(update_skill).delete(delete_skill),
         )
-        // MCP servers
+        .route(
+            "/projects/{project_id}/skills/{slug}/archive",
+            get(download_skill_archive),
+        )
+        // Project-scoped MCP servers
         .route(
             "/projects/{project_id}/mcp-servers",
             get(list_mcps).post(create_mcp),
@@ -134,9 +142,36 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/mcp-servers/{slug}",
             get(get_mcp).put(update_mcp).delete(delete_mcp),
         )
+        // Global skills (platform-wide)
+        .route(
+            "/settings/skills",
+            get(list_global_skills).post(create_global_skill),
+        )
+        .route("/settings/skills/upload", post(upload_global_skill))
+        .route(
+            "/settings/skills/{slug}",
+            get(get_global_skill)
+                .put(update_global_skill)
+                .delete(delete_global_skill),
+        )
+        .route(
+            "/settings/skills/{slug}/archive",
+            get(download_global_skill_archive),
+        )
+        // Global MCP servers (platform-wide)
+        .route(
+            "/settings/mcp-servers",
+            get(list_global_mcps).post(create_global_mcp),
+        )
+        .route(
+            "/settings/mcp-servers/{slug}",
+            get(get_global_mcp)
+                .put(update_global_mcp)
+                .delete(delete_global_mcp),
+        )
 }
 
-// ── Skill handlers ──────────────────────────────────────────────────────────
+// ── Project-scoped Skill handlers ──────────────────────────────────────────
 
 async fn list_skills(
     RequireAuth(auth): RequireAuth,
@@ -194,6 +229,7 @@ async fn create_skill(
                 name: request.name,
                 description: request.description,
                 content: request.content,
+                archive: None,
             },
         )
         .await
@@ -222,6 +258,7 @@ async fn update_skill(
                 name: request.name,
                 description: request.description,
                 content: request.content,
+                archive: None,
             },
         )
         .await
@@ -246,7 +283,7 @@ async fn delete_skill(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── MCP handlers ────────────────────────────────────────────────────────────
+// ── Project-scoped MCP handlers ────────────────────────────────────────────
 
 async fn list_mcps(
     RequireAuth(auth): RequireAuth,
@@ -348,4 +385,407 @@ async fn delete_mcp(
         .map_err(Problem::from)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Global Skill handlers ──────────────────────────────────────────────────
+
+async fn list_global_skills(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let items = app_state
+        .definition_service
+        .list_global_skills()
+        .await
+        .map_err(Problem::from)?;
+
+    let total = items.len();
+    Ok(Json(ListResponse {
+        items: items
+            .into_iter()
+            .map(SkillDefinitionResponse::from)
+            .collect(),
+        total,
+    }))
+}
+
+async fn get_global_skill(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let skill = app_state
+        .definition_service
+        .get_global_skill(&slug)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(SkillDefinitionResponse::from(skill)))
+}
+
+async fn create_global_skill(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Json(request): Json<CreateSkillRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let skill = app_state
+        .definition_service
+        .create_global_skill(CreateSkillDefinitionRequest {
+            slug: request.slug,
+            name: request.name,
+            description: request.description,
+            content: request.content,
+            archive: None,
+        })
+        .await
+        .map_err(Problem::from)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SkillDefinitionResponse::from(skill)),
+    ))
+}
+
+async fn update_global_skill(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    Json(request): Json<UpdateSkillRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let skill = app_state
+        .definition_service
+        .update_global_skill(
+            &slug,
+            UpdateSkillDefinitionRequest {
+                name: request.name,
+                description: request.description,
+                content: request.content,
+                archive: None,
+            },
+        )
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(SkillDefinitionResponse::from(skill)))
+}
+
+async fn delete_global_skill(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    app_state
+        .definition_service
+        .delete_global_skill(&slug)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Global MCP handlers ────────────────────────────────────────────────────
+
+async fn list_global_mcps(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let items = app_state
+        .definition_service
+        .list_global_mcps()
+        .await
+        .map_err(Problem::from)?;
+
+    let total = items.len();
+    Ok(Json(ListResponse {
+        items: items.into_iter().map(McpDefinitionResponse::from).collect(),
+        total,
+    }))
+}
+
+async fn get_global_mcp(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let mcp = app_state
+        .definition_service
+        .get_global_mcp(&slug)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(McpDefinitionResponse::from(mcp)))
+}
+
+async fn create_global_mcp(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Json(request): Json<CreateMcpRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let mcp = app_state
+        .definition_service
+        .create_global_mcp(CreateMcpDefinitionRequest {
+            slug: request.slug,
+            name: request.name,
+            description: request.description,
+            config: request.config,
+        })
+        .await
+        .map_err(Problem::from)?;
+
+    Ok((StatusCode::CREATED, Json(McpDefinitionResponse::from(mcp))))
+}
+
+async fn update_global_mcp(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    Json(request): Json<UpdateMcpRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let mcp = app_state
+        .definition_service
+        .update_global_mcp(
+            &slug,
+            UpdateMcpDefinitionRequest {
+                name: request.name,
+                description: request.description,
+                config: request.config,
+            },
+        )
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(McpDefinitionResponse::from(mcp)))
+}
+
+async fn delete_global_mcp(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    app_state
+        .definition_service
+        .delete_global_mcp(&slug)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Skill archive upload/download ─────────────────────────────────────────
+
+/// Parse multipart form for skill upload.
+/// Expected fields: slug, name, content (SKILL.md text), archive (tar.gz binary),
+/// and optionally description.
+async fn parse_skill_multipart(
+    mut multipart: Multipart,
+) -> Result<CreateSkillDefinitionRequest, Problem> {
+    let mut slug = None;
+    let mut name = None;
+    let mut description = None;
+    let mut content = None;
+    let mut archive = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        problemdetails::new(StatusCode::BAD_REQUEST)
+            .with_title("Multipart Error")
+            .with_detail(format!("Failed to read multipart field: {}", e))
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
+        match field_name.as_str() {
+            "slug" => {
+                slug = Some(field.text().await.map_err(|e| {
+                    problemdetails::new(StatusCode::BAD_REQUEST)
+                        .with_title("Multipart Error")
+                        .with_detail(format!("Failed to read slug: {}", e))
+                })?);
+            }
+            "name" => {
+                name = Some(field.text().await.map_err(|e| {
+                    problemdetails::new(StatusCode::BAD_REQUEST)
+                        .with_title("Multipart Error")
+                        .with_detail(format!("Failed to read name: {}", e))
+                })?);
+            }
+            "description" => {
+                description = Some(field.text().await.map_err(|e| {
+                    problemdetails::new(StatusCode::BAD_REQUEST)
+                        .with_title("Multipart Error")
+                        .with_detail(format!("Failed to read description: {}", e))
+                })?);
+            }
+            "content" => {
+                content = Some(field.text().await.map_err(|e| {
+                    problemdetails::new(StatusCode::BAD_REQUEST)
+                        .with_title("Multipart Error")
+                        .with_detail(format!("Failed to read content: {}", e))
+                })?);
+            }
+            "archive" => {
+                let bytes = field.bytes().await.map_err(|e| {
+                    problemdetails::new(StatusCode::BAD_REQUEST)
+                        .with_title("Multipart Error")
+                        .with_detail(format!("Failed to read archive: {}", e))
+                })?;
+                if !bytes.is_empty() {
+                    archive = Some(bytes.to_vec());
+                }
+            }
+            _ => {} // ignore unknown fields
+        }
+    }
+
+    let slug = slug.ok_or_else(|| {
+        problemdetails::new(StatusCode::BAD_REQUEST)
+            .with_title("Missing Field")
+            .with_detail("'slug' is required")
+    })?;
+    let name = name.ok_or_else(|| {
+        problemdetails::new(StatusCode::BAD_REQUEST)
+            .with_title("Missing Field")
+            .with_detail("'name' is required")
+    })?;
+    let content = content.unwrap_or_default();
+
+    Ok(CreateSkillDefinitionRequest {
+        slug,
+        name,
+        description,
+        content,
+        archive,
+    })
+}
+
+/// Upload a skill with an archive (tar.gz) — project-scoped.
+async fn upload_skill(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(project_id): Path<i32>,
+    multipart: Multipart,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+
+    let request = parse_skill_multipart(multipart).await?;
+    let skill = app_state
+        .definition_service
+        .create_skill(project_id, request)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SkillDefinitionResponse::from(skill)),
+    ))
+}
+
+/// Upload a skill with an archive (tar.gz) — global.
+async fn upload_global_skill(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    multipart: Multipart,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsWrite);
+
+    let request = parse_skill_multipart(multipart).await?;
+    let skill = app_state
+        .definition_service
+        .create_global_skill(request)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SkillDefinitionResponse::from(skill)),
+    ))
+}
+
+/// Download a skill's archive (tar.gz) — project-scoped.
+async fn download_skill_archive(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path((project_id, slug)): Path<(i32, String)>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsRead);
+
+    let skill = app_state
+        .definition_service
+        .get_skill(project_id, &slug)
+        .await
+        .map_err(Problem::from)?;
+
+    let archive = skill.archive.ok_or_else(|| {
+        problemdetails::new(StatusCode::NOT_FOUND)
+            .with_title("No Archive")
+            .with_detail(format!("Skill '{}' does not have an archive", slug))
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/gzip".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}.tar.gz\"", slug),
+            ),
+        ],
+        archive,
+    ))
+}
+
+/// Download a skill's archive (tar.gz) — global.
+async fn download_global_skill_archive(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, SettingsRead);
+
+    let skill = app_state
+        .definition_service
+        .get_global_skill(&slug)
+        .await
+        .map_err(Problem::from)?;
+
+    let archive = skill.archive.ok_or_else(|| {
+        problemdetails::new(StatusCode::NOT_FOUND)
+            .with_title("No Archive")
+            .with_detail(format!("Skill '{}' does not have an archive", slug))
+    })?;
+
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/gzip".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}.tar.gz\"", slug),
+            ),
+        ],
+        archive,
+    ))
 }

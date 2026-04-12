@@ -47,6 +47,8 @@ import { registerPlatformCommands } from './commands/platform/index.js'
 import { registerPresetsCommands } from './commands/presets/index.js'
 import { registerFunnelsCommands } from './commands/funnels/index.js'
 import { registerNotificationPreferencesCommands } from './commands/notification-preferences/index.js'
+import { registerSkillsCommands } from './commands/skills/index.js'
+import { registerMcpServersCommands } from './commands/mcp-servers/index.js'
 
 // Developer workflow commands
 import { registerInitCommand } from './commands/init/index.js'
@@ -134,6 +136,8 @@ export function createProgram(): Command {
   registerPresetsCommands(program)
   registerFunnelsCommands(program)
   registerNotificationPreferencesCommands(program)
+  registerSkillsCommands(program)
+  registerMcpServersCommands(program)
 
   // Developer workflow commands
   registerInitCommand(program)

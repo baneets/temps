@@ -185,6 +185,8 @@ const baseNavItems: NavItem[] = [
       { title: 'Security', url: 'settings/security' },
       { title: 'Cron Jobs', url: 'settings/cron-jobs' },
       { title: 'Webhooks', url: 'settings/webhooks' },
+      { title: 'Skills', url: 'settings/skills' },
+      { title: 'MCP Servers', url: 'settings/mcp-servers' },
       { title: 'Alert Rules', url: 'errors/alert-rules' },
     ],
   },

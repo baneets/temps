@@ -8,6 +8,8 @@ import { EnvironmentVariablesSettings } from './settings/EnvironmentVariablesSet
 import { GeneralSettings } from './settings/GeneralSettings'
 import { GitSettings } from './settings/GitSettings'
 import { ProjectSecuritySettings } from './settings/ProjectSecuritySettings'
+import { McpServersSettings } from './settings/McpServersSettings'
+import { SkillsSettings } from './settings/SkillsSettings'
 import { WebhooksSettings } from './settings/WebhooksSettings'
 import { CreateWebhookPage } from './settings/webhooks/CreateWebhookPage'
 import { EditWebhookPage } from './settings/webhooks/EditWebhookPage'
@@ -60,6 +62,14 @@ export function ProjectSettings({ project, refetch }: ProjectSettingsProps) {
         <Route
           path="webhooks/:webhookId"
           element={<WebhookDetail project={project} />}
+        />
+        <Route
+          path="skills"
+          element={<SkillsSettings project={project} />}
+        />
+        <Route
+          path="mcp-servers"
+          element={<McpServersSettings project={project} />}
         />
         <Route path="*" element={<Navigate to="." replace />} />
       </Routes>

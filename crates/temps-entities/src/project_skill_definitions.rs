@@ -9,12 +9,16 @@ use temps_core::DBDateTime;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub project_id: i32,
+    pub project_id: Option<i32>,
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub content: String,
+    /// Tar.gz archive of the skill directory (SKILL.md + supporting files).
+    /// When set, the skill is a directory; `content` holds the extracted SKILL.md text.
+    #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
+    pub archive: Option<Vec<u8>>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

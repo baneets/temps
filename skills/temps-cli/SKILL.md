@@ -869,24 +869,34 @@ bunx @temps-sdk/cli incidents bucketed --project-id 5 -i hourly --json
 
 **Alias**: `cts`
 
+**Required for all subcommands**: `-p, --project-id <id>` (numeric).
+**Required for `show`, `start`, `stop`, `restart`, single-container `metrics`**: `-e, --environment-id <id>` and `-c, --container-id <id>`.
+**Optional for `list`**: `-e` — when omitted, lists containers across **all environments** in the project.
+
 ```bash
-# List containers
+# List containers across ALL environments (no -e needed)
+bunx @temps-sdk/cli containers list -p 5
+
+# List containers in a specific environment
 bunx @temps-sdk/cli containers list -p 5 -e 1 --json
 
-# Show container details
+# Show container details (all three IDs required)
 bunx @temps-sdk/cli containers show -p 5 -e 1 -c abc123 --json
 
-# Start/stop/restart
+# Start/stop/restart (all three IDs required)
 bunx @temps-sdk/cli containers start -p 5 -e 1 -c abc123
 bunx @temps-sdk/cli containers stop -p 5 -e 1 -c abc123
 bunx @temps-sdk/cli containers restart -p 5 -e 1 -c abc123
 
-# Force stop
+# Force stop (skip confirmation)
 bunx @temps-sdk/cli containers stop -p 5 -e 1 -c abc123 -f
 
-# Live metrics (auto-refresh)
+# Metrics: single container with watch (-e required)
 bunx @temps-sdk/cli containers metrics -p 5 -e 1 -c abc123 -w -i 2
 bunx @temps-sdk/cli containers metrics -p 5 -e 1 -c abc123 --json
+
+# Metrics: all containers in an env (-c omitted, -e still required)
+bunx @temps-sdk/cli containers metrics -p 5 -e 1 --json
 ```
 
 ---

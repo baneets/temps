@@ -75,6 +75,8 @@ mod m20260409_000001_add_agent_mcp_and_skills;
 mod m20260409_000002_add_webhook_token;
 mod m20260409_000003_add_ai_session_id;
 mod m20260410_000001_create_skill_and_mcp_definitions;
+mod m20260411_000001_allow_global_skill_and_mcp_definitions;
+mod m20260411_000002_add_skill_archive_column;
 
 pub struct Migrator;
 
@@ -157,6 +159,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260409_000002_add_webhook_token::Migration),
             Box::new(m20260409_000003_add_ai_session_id::Migration),
             Box::new(m20260410_000001_create_skill_and_mcp_definitions::Migration),
+            Box::new(m20260411_000001_allow_global_skill_and_mcp_definitions::Migration),
+            Box::new(m20260411_000002_add_skill_archive_column::Migration),
         ]
     }
 }

@@ -1,5 +1,6 @@
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, QueryFilter,
+    QueryOrder, Set,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -17,6 +18,10 @@ pub struct CreateSkillDefinitionRequest {
     pub name: String,
     pub description: Option<String>,
     pub content: String,
+    /// Tar.gz archive of the skill directory (SKILL.md + supporting files).
+    #[serde(skip)]
+    #[schema(value_type = Option<String>, format = "binary")]
+    pub archive: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -24,6 +29,10 @@ pub struct UpdateSkillDefinitionRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub content: Option<String>,
+    /// Tar.gz archive of the skill directory.
+    #[serde(skip)]
+    #[schema(value_type = Option<String>, format = "binary")]
+    pub archive: Option<Vec<u8>>,
 }
 
 // ── MCP Definitions ──
@@ -54,7 +63,7 @@ impl DefinitionService {
         Self { db }
     }
 
-    // ── Skills ──
+    // ── Skills (project-scoped) ──
 
     pub async fn list_skills(
         &self,
@@ -117,11 +126,12 @@ impl DefinitionService {
         }
 
         let active = project_skill_definitions::ActiveModel {
-            project_id: Set(project_id),
+            project_id: Set(Some(project_id)),
             slug: Set(request.slug),
             name: Set(request.name),
             description: Set(request.description),
             content: Set(request.content),
+            archive: Set(request.archive),
             ..Default::default()
         };
         let model = active.insert(self.db.as_ref()).await?;
@@ -146,6 +156,9 @@ impl DefinitionService {
         if let Some(content) = request.content {
             active.content = Set(content);
         }
+        if request.archive.is_some() {
+            active.archive = Set(request.archive);
+        }
 
         let model = active.update(self.db.as_ref()).await?;
         Ok(model)
@@ -158,7 +171,116 @@ impl DefinitionService {
         Ok(())
     }
 
-    // ── MCP Servers ──
+    // ── Skills (global — project_id IS NULL) ──
+
+    pub async fn list_global_skills(
+        &self,
+    ) -> Result<Vec<project_skill_definitions::Model>, AgentError> {
+        let items = project_skill_definitions::Entity::find()
+            .filter(project_skill_definitions::Column::ProjectId.is_null())
+            .order_by_asc(project_skill_definitions::Column::Name)
+            .all(self.db.as_ref())
+            .await?;
+        Ok(items)
+    }
+
+    pub async fn get_global_skill(
+        &self,
+        slug: &str,
+    ) -> Result<project_skill_definitions::Model, AgentError> {
+        project_skill_definitions::Entity::find()
+            .filter(project_skill_definitions::Column::ProjectId.is_null())
+            .filter(project_skill_definitions::Column::Slug.eq(slug))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(AgentError::SkillDefinitionNotFound {
+                project_id: 0,
+                slug: slug.to_string(),
+            })
+    }
+
+    pub async fn create_global_skill(
+        &self,
+        request: CreateSkillDefinitionRequest,
+    ) -> Result<project_skill_definitions::Model, AgentError> {
+        if request.slug.is_empty() {
+            return Err(AgentError::Validation {
+                message: "Skill slug cannot be empty".into(),
+            });
+        }
+        if request.content.is_empty() {
+            return Err(AgentError::Validation {
+                message: "Skill content cannot be empty".into(),
+            });
+        }
+
+        let active = project_skill_definitions::ActiveModel {
+            project_id: Set(None),
+            slug: Set(request.slug),
+            name: Set(request.name),
+            description: Set(request.description),
+            content: Set(request.content),
+            archive: Set(request.archive),
+            ..Default::default()
+        };
+        let model = active.insert(self.db.as_ref()).await?;
+        Ok(model)
+    }
+
+    pub async fn update_global_skill(
+        &self,
+        slug: &str,
+        request: UpdateSkillDefinitionRequest,
+    ) -> Result<project_skill_definitions::Model, AgentError> {
+        let existing = self.get_global_skill(slug).await?;
+        let mut active: project_skill_definitions::ActiveModel = existing.into();
+
+        if let Some(name) = request.name {
+            active.name = Set(name);
+        }
+        if let Some(description) = request.description {
+            active.description = Set(Some(description));
+        }
+        if let Some(content) = request.content {
+            active.content = Set(content);
+        }
+        if request.archive.is_some() {
+            active.archive = Set(request.archive);
+        }
+
+        let model = active.update(self.db.as_ref()).await?;
+        Ok(model)
+    }
+
+    pub async fn delete_global_skill(&self, slug: &str) -> Result<(), AgentError> {
+        let existing = self.get_global_skill(slug).await?;
+        let active: project_skill_definitions::ActiveModel = existing.into();
+        active.delete(self.db.as_ref()).await?;
+        Ok(())
+    }
+
+    /// Get all skills available to a project: project-scoped + global definitions.
+    pub async fn get_all_available_skills(
+        &self,
+        project_id: i32,
+        slugs: &[String],
+    ) -> Result<Vec<project_skill_definitions::Model>, AgentError> {
+        if slugs.is_empty() {
+            return Ok(vec![]);
+        }
+        let items = project_skill_definitions::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(project_skill_definitions::Column::ProjectId.eq(project_id))
+                    .add(project_skill_definitions::Column::ProjectId.is_null()),
+            )
+            .filter(project_skill_definitions::Column::Slug.is_in(slugs.iter().map(|s| s.as_str())))
+            .all(self.db.as_ref())
+            .await?;
+        Ok(items)
+    }
+
+    // ── MCP Servers (project-scoped) ──
 
     pub async fn list_mcps(
         &self,
@@ -216,7 +338,7 @@ impl DefinitionService {
         }
 
         let active = project_mcp_definitions::ActiveModel {
-            project_id: Set(project_id),
+            project_id: Set(Some(project_id)),
             slug: Set(request.slug),
             name: Set(request.name),
             description: Set(request.description),
@@ -255,5 +377,105 @@ impl DefinitionService {
         let active: project_mcp_definitions::ActiveModel = existing.into();
         active.delete(self.db.as_ref()).await?;
         Ok(())
+    }
+
+    // ── MCP Servers (global — project_id IS NULL) ──
+
+    pub async fn list_global_mcps(
+        &self,
+    ) -> Result<Vec<project_mcp_definitions::Model>, AgentError> {
+        let items = project_mcp_definitions::Entity::find()
+            .filter(project_mcp_definitions::Column::ProjectId.is_null())
+            .order_by_asc(project_mcp_definitions::Column::Name)
+            .all(self.db.as_ref())
+            .await?;
+        Ok(items)
+    }
+
+    pub async fn get_global_mcp(
+        &self,
+        slug: &str,
+    ) -> Result<project_mcp_definitions::Model, AgentError> {
+        project_mcp_definitions::Entity::find()
+            .filter(project_mcp_definitions::Column::ProjectId.is_null())
+            .filter(project_mcp_definitions::Column::Slug.eq(slug))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(AgentError::McpDefinitionNotFound {
+                project_id: 0,
+                slug: slug.to_string(),
+            })
+    }
+
+    pub async fn create_global_mcp(
+        &self,
+        request: CreateMcpDefinitionRequest,
+    ) -> Result<project_mcp_definitions::Model, AgentError> {
+        if request.slug.is_empty() {
+            return Err(AgentError::Validation {
+                message: "MCP server slug cannot be empty".into(),
+            });
+        }
+
+        let active = project_mcp_definitions::ActiveModel {
+            project_id: Set(None),
+            slug: Set(request.slug),
+            name: Set(request.name),
+            description: Set(request.description),
+            config: Set(request.config),
+            ..Default::default()
+        };
+        let model = active.insert(self.db.as_ref()).await?;
+        Ok(model)
+    }
+
+    pub async fn update_global_mcp(
+        &self,
+        slug: &str,
+        request: UpdateMcpDefinitionRequest,
+    ) -> Result<project_mcp_definitions::Model, AgentError> {
+        let existing = self.get_global_mcp(slug).await?;
+        let mut active: project_mcp_definitions::ActiveModel = existing.into();
+
+        if let Some(name) = request.name {
+            active.name = Set(name);
+        }
+        if let Some(description) = request.description {
+            active.description = Set(Some(description));
+        }
+        if let Some(config) = request.config {
+            active.config = Set(config);
+        }
+
+        let model = active.update(self.db.as_ref()).await?;
+        Ok(model)
+    }
+
+    pub async fn delete_global_mcp(&self, slug: &str) -> Result<(), AgentError> {
+        let existing = self.get_global_mcp(slug).await?;
+        let active: project_mcp_definitions::ActiveModel = existing.into();
+        active.delete(self.db.as_ref()).await?;
+        Ok(())
+    }
+
+    /// Get all MCP servers available to a project: project-scoped + global definitions.
+    pub async fn get_all_available_mcps(
+        &self,
+        project_id: i32,
+        slugs: &[String],
+    ) -> Result<Vec<project_mcp_definitions::Model>, AgentError> {
+        if slugs.is_empty() {
+            return Ok(vec![]);
+        }
+        let items = project_mcp_definitions::Entity::find()
+            .filter(
+                Condition::any()
+                    .add(project_mcp_definitions::Column::ProjectId.eq(project_id))
+                    .add(project_mcp_definitions::Column::ProjectId.is_null()),
+            )
+            .filter(project_mcp_definitions::Column::Slug.is_in(slugs.iter().map(|s| s.as_str())))
+            .all(self.db.as_ref())
+            .await?;
+        Ok(items)
     }
 }

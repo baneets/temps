@@ -129,6 +129,7 @@ function MonitorCard({ monitor, projectSlug, onDelete, environment }: MonitorCar
         end_time: endDate ? endDate.toISOString() : undefined,
       },
     }),
+    refetchInterval: 30000, // Refresh every 30 seconds to match status timeline
   })
 
   const uptimePercentage = useMemo(
@@ -203,9 +204,31 @@ function MonitorCard({ monitor, projectSlug, onDelete, environment }: MonitorCar
                   <div className="text-lg font-semibold">
                     {uptimePercentage?.toFixed(0) ?? 'N/A'}%
                   </div>
-                  <div className="text-xs text-green-500 flex items-center gap-1">
-                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-green-500"></span>
-                    Healthy
+                  <div className={`text-xs flex items-center gap-1 ${
+                    currentMonitorStatus?.current_status === 'operational'
+                      ? 'text-green-500'
+                      : currentMonitorStatus?.current_status === 'degraded'
+                        ? 'text-yellow-500'
+                        : currentMonitorStatus?.current_status === 'major_outage'
+                          ? 'text-red-500'
+                          : 'text-muted-foreground'
+                  }`}>
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${
+                      currentMonitorStatus?.current_status === 'operational'
+                        ? 'bg-green-500'
+                        : currentMonitorStatus?.current_status === 'degraded'
+                          ? 'bg-yellow-500'
+                          : currentMonitorStatus?.current_status === 'major_outage'
+                            ? 'bg-red-500'
+                            : 'bg-gray-400'
+                    }`}></span>
+                    {currentMonitorStatus?.current_status === 'operational'
+                      ? 'Healthy'
+                      : currentMonitorStatus?.current_status === 'degraded'
+                        ? 'Degraded'
+                        : currentMonitorStatus?.current_status === 'major_outage'
+                          ? 'Major Outage'
+                          : 'Unknown'}
                   </div>
                 </div>
                 {/* Mini Status Timeline */}

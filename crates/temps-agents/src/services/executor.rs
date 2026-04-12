@@ -538,7 +538,7 @@ impl AgentExecutor {
             if has_mcp {
                 let mcp_defs = self
                     .definition_service
-                    .get_mcps_by_slugs(config.project_id, &mcp_slugs)
+                    .get_all_available_mcps(config.project_id, &mcp_slugs)
                     .await?;
 
                 for def in &mcp_defs {
@@ -591,12 +591,55 @@ impl AgentExecutor {
                 )
                 .await?;
 
+            // Also write MCP servers to ~/.claude.json (user-level global config).
+            // Claude Code reads mcpServers from both project settings and the global
+            // config; some MCP servers need to be visible at the global level.
+            let home_claude_json = self
+                .sandbox_registry
+                .read_file(run_id, "/home/temps/.claude.json")
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .unwrap_or_else(|| serde_json::json!({}));
+
+            let mut home_config = home_claude_json;
+            let mut home_mcp = home_config
+                .get("mcpServers")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+
+            // Merge the same MCP servers into the global config
+            for (k, v) in &merged {
+                home_mcp.insert(k.clone(), v.clone());
+            }
+            home_config["mcpServers"] = serde_json::Value::Object(home_mcp);
+
+            let mut home_config_str =
+                serde_json::to_string_pretty(&home_config).unwrap_or_default();
+            if !secrets.is_empty() && home_config_str.contains("${TEMPS_SECRET:") {
+                home_config_str =
+                    crate::services::secret_service::SecretService::resolve_placeholders(
+                        &home_config_str,
+                        secrets,
+                    );
+            }
+
+            self.sandbox_registry
+                .write_file(
+                    run_id,
+                    "/home/temps/.claude.json",
+                    home_config_str.as_bytes(),
+                    0o644,
+                )
+                .await?;
+
             self.run_service
                 .append_log(
                     run_id,
                     "info",
                     &format!(
-                        "Wrote .claude/settings.json with {} MCP server(s){}",
+                        "Wrote .claude/settings.json and ~/.claude.json with {} MCP server(s){}",
                         merged.len(),
                         if has_custom_tools {
                             " (including custom tools proxy)"
@@ -627,15 +670,57 @@ impl AgentExecutor {
 
             let skill_defs = self
                 .definition_service
-                .get_skills_by_slugs(config.project_id, &skill_slugs)
+                .get_all_available_skills(config.project_id, &skill_slugs)
                 .await?;
 
             let mut count = 0;
             for def in &skill_defs {
-                let path = format!("/workspace/.claude/skills/{}.md", def.slug);
-                self.sandbox_registry
-                    .write_file(run_id, &path, def.content.as_bytes(), 0o644)
-                    .await?;
+                if let Some(archive_data) = &def.archive {
+                    // Directory skill: extract tar.gz into a temp dir, then upload
+                    // the whole directory to .claude/skills/{slug}/
+                    let tmp_dir = tempfile::tempdir().map_err(|e| {
+                        crate::error::AgentError::SandboxExecFailed {
+                            run_id,
+                            sandbox_id: String::new(),
+                            reason: format!(
+                                "Failed to create temp dir for skill '{}': {}",
+                                def.slug, e
+                            ),
+                        }
+                    })?;
+                    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive_data));
+                    let mut archive = tar::Archive::new(decoder);
+                    archive.unpack(tmp_dir.path()).map_err(|e| {
+                        crate::error::AgentError::SandboxExecFailed {
+                            run_id,
+                            sandbox_id: String::new(),
+                            reason: format!(
+                                "Failed to extract archive for skill '{}': {}",
+                                def.slug, e
+                            ),
+                        }
+                    })?;
+                    let target_path = format!("/workspace/.claude/skills/{}", def.slug);
+                    self.sandbox_registry
+                        .write_directory(run_id, tmp_dir.path(), &target_path)
+                        .await?;
+                } else {
+                    // Simple single-file skill: write as .claude/skills/{slug}/SKILL.md
+                    let dir_path = format!("/workspace/.claude/skills/{}", def.slug);
+                    let _ = self
+                        .sandbox_registry
+                        .exec(
+                            run_id,
+                            vec!["mkdir".to_string(), "-p".to_string(), dir_path.clone()],
+                            std::collections::HashMap::new(),
+                            None,
+                        )
+                        .await;
+                    let path = format!("{}/SKILL.md", dir_path);
+                    self.sandbox_registry
+                        .write_file(run_id, &path, def.content.as_bytes(), 0o644)
+                        .await?;
+                }
                 count += 1;
             }
 

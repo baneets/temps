@@ -288,7 +288,7 @@ export async function deleteSecret(name: string): Promise<void> {
 
 export interface SkillDefinition {
   id: number
-  project_id: number
+  project_id: number | null
   slug: string
   name: string
   description: string | null
@@ -337,7 +337,7 @@ export async function deleteSkillDefinition(projectId: number, slug: string): Pr
 
 export interface McpDefinition {
   id: number
-  project_id: number
+  project_id: number | null
   slug: string
   name: string
   description: string | null
@@ -380,4 +380,66 @@ export async function updateMcpDefinition(projectId: number, slug: string, data:
 export async function deleteMcpDefinition(projectId: number, slug: string): Promise<void> {
   const response = await fetch(`/api/projects/${projectId}/mcp-servers/${slug}`, { method: 'DELETE' })
   if (!response.ok) throw new Error('Failed to delete MCP server definition')
+}
+
+// ── Global Skill Definitions ──
+
+export async function listGlobalSkillDefinitions(): Promise<SkillDefinition[]> {
+  const response = await fetch('/api/settings/skills')
+  const data = await handleResponse<{ items: SkillDefinition[] }>(response)
+  return data.items
+}
+
+export async function createGlobalSkillDefinition(data: CreateSkillDefinitionRequest): Promise<SkillDefinition> {
+  const response = await fetch('/api/settings/skills', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<SkillDefinition>(response)
+}
+
+export async function updateGlobalSkillDefinition(slug: string, data: Partial<Omit<CreateSkillDefinitionRequest, 'slug'>>): Promise<SkillDefinition> {
+  const response = await fetch(`/api/settings/skills/${slug}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<SkillDefinition>(response)
+}
+
+export async function deleteGlobalSkillDefinition(slug: string): Promise<void> {
+  const response = await fetch(`/api/settings/skills/${slug}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error('Failed to delete global skill definition')
+}
+
+// ── Global MCP Server Definitions ──
+
+export async function listGlobalMcpDefinitions(): Promise<McpDefinition[]> {
+  const response = await fetch('/api/settings/mcp-servers')
+  const data = await handleResponse<{ items: McpDefinition[] }>(response)
+  return data.items
+}
+
+export async function createGlobalMcpDefinition(data: CreateMcpDefinitionRequest): Promise<McpDefinition> {
+  const response = await fetch('/api/settings/mcp-servers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<McpDefinition>(response)
+}
+
+export async function updateGlobalMcpDefinition(slug: string, data: Partial<Omit<CreateMcpDefinitionRequest, 'slug'>>): Promise<McpDefinition> {
+  const response = await fetch(`/api/settings/mcp-servers/${slug}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  return handleResponse<McpDefinition>(response)
+}
+
+export async function deleteGlobalMcpDefinition(slug: string): Promise<void> {
+  const response = await fetch(`/api/settings/mcp-servers/${slug}`, { method: 'DELETE' })
+  if (!response.ok) throw new Error('Failed to delete global MCP server definition')
 }
