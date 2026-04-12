@@ -33,8 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump `tar` 0.4.44 → 0.4.45 (RUSTSEC-2026-0067, RUSTSEC-2026-0068: symlink follow and PAX header issues)
 - Bump `rkyv` 0.7.45 → 0.7.46 (RUSTSEC-2026-0001: undefined behavior on OOM)
 - Bump `rustls` 0.23.34 → 0.23.37
+- Bump `aiohttp` ≥3.11 → ≥3.13.5 in Python SDK (10 CVEs: duplicate Host headers, null bytes, response splitting, cookie leaks, memory DoS, multipart bypass, CRLF injection, DNS cache DoS, trailer headers, SSRF)
+- Bump `next` across examples/fixtures to 15.3.3/16.2.2 (5 CVEs: disk cache growth, request smuggling, postponed buffering DoS, null origin CSRF bypass)
+- Bump `testcontainers` 0.27.1 → 0.27.2 / `astral-tokio-tar` 0.5.6 → 0.6.0 (insufficient PAX extension validation, dev-only)
 
 ### Fixed
+- **CLI: `environments vars` subcommands ignored `--project` flag**: `get`, `set`, `delete`, `import`, `export` used `cmd.parent!.parent!.opts().project` (traversing to `environments` command level where `--project` isn't defined) instead of `cmd.parent!.opts().project` (the `vars` command where it is). This caused "Project undefined not found" errors. The `list` subcommand was not affected.
+- **CLI: `services env` crashed with "envVars is not iterable"**: the API endpoint `GET /external-services/{id}/projects/{project_id}/environment` returns `HashMap<String, String>` but the CLI expected `Array<EnvironmentVariableInfo>`. Added handling to convert the object response into the expected array format.
 - Email event timeline returned 404: UI fetched from `/emails/{id}/events` (unregistered plugin route) instead of `/emails/{id}/tracking/events`; also fixed event type mismatches (`open`/`click` vs `opened`/`clicked`) and added client-side pagination for flat array response
 - Gmail image proxy misidentified as "Firefox" in email tracking events; now shows "Gmail (Google Proxy)"
 - Email detail back button navigated to default Providers tab instead of Sent Emails tab
