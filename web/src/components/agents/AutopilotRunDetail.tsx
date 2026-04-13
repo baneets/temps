@@ -15,8 +15,10 @@ import remarkGfm from 'remark-gfm'
 import {
   AlertTriangle,
   ArrowLeft,
+  Bot,
   Box,
   Clock,
+  Cpu,
   ExternalLink,
   FileCode,
   GitBranch,
@@ -103,16 +105,130 @@ interface ConversationEvent {
   toolUseId?: string
   toolInput?: Record<string, unknown>
   toolResult?: string
+  toolStatus?: 'in_progress' | 'completed' | 'failed'
   result?: string
   numTurns?: number
   costUsd?: number
   durationMs?: number
+  tokensInput?: number
+  tokensOutput?: number
 }
 
-/** Parse stream-json output into conversation events.
+/** Detect whether the output contains Codex-format JSON events.
+ *  Codex emits `type: "item.completed"`, `type: "turn.completed"`, etc. */
+function isCodexFormat(output: string): boolean {
+  // Check first few JSON lines for Codex-specific event types
+  for (const line of output.split('\n').slice(0, 10)) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('{')) continue
+    if (
+      trimmed.includes('"thread.started"') ||
+      trimmed.includes('"item.completed"') ||
+      trimmed.includes('"turn.completed"') ||
+      trimmed.includes('"item.started"')
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Parse Codex CLI --json output into conversation events.
+ *
+ *  Codex format:
+ *  - {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+ *  - {"type":"item.started","item":{"type":"command_execution","command":"...","status":"in_progress"}}
+ *  - {"type":"item.completed","item":{"type":"command_execution","command":"...","aggregated_output":"...","exit_code":0,"status":"completed"}}
+ *  - {"type":"turn.completed","usage":{"input_tokens":N,"output_tokens":N}}
+ */
+function parseCodexOutput(output: string): ConversationEvent[] {
+  const events: ConversationEvent[] = []
+  let totalInputTokens = 0
+  let totalOutputTokens = 0
+
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || !trimmed.startsWith('{')) continue
+    try {
+      const parsed = JSON.parse(trimmed)
+      const item = parsed.item
+
+      if (parsed.type === 'item.completed' && item?.type === 'agent_message' && item.text) {
+        events.push({ type: 'assistant_text', content: item.text })
+      } else if (parsed.type === 'item.started' && item?.type === 'command_execution') {
+        // Command started — create a tool_call event that will be merged
+        // with the completed event when it arrives
+        events.push({
+          type: 'tool_call',
+          tool: 'Bash',
+          toolUseId: item.id,
+          toolInput: { command: item.command },
+          toolStatus: 'in_progress',
+        })
+      } else if (parsed.type === 'item.completed' && item?.type === 'command_execution') {
+        // Command completed — merge into existing tool_call or create new one
+        const existing = item.id
+          ? events.find((e) => e.type === 'tool_call' && e.toolUseId === item.id)
+          : [...events].reverse().find(
+              (e) => e.type === 'tool_call' && !e.toolResult && e.toolInput?.command === item.command,
+            )
+
+        const resultText = item.aggregated_output || ''
+        const exitCode = item.exit_code ?? null
+        const statusLabel =
+          item.status === 'failed' || (exitCode != null && exitCode !== 0)
+            ? `[exit ${exitCode}] `
+            : ''
+        const fullResult = `${statusLabel}${resultText}`
+
+        if (existing) {
+          existing.toolResult = fullResult
+          existing.toolStatus = item.status === 'failed' ? 'failed' : 'completed'
+        } else {
+          events.push({
+            type: 'tool_call',
+            tool: 'Bash',
+            toolUseId: item.id,
+            toolInput: { command: item.command },
+            toolResult: fullResult,
+            toolStatus: item.status === 'failed' ? 'failed' : 'completed',
+          })
+        }
+      } else if (parsed.type === 'item.completed' && item?.type === 'function_call') {
+        // Codex function calls (MCP tools, etc.)
+        events.push({
+          type: 'tool_call',
+          tool: item.name || 'function',
+          toolUseId: item.id,
+          toolInput: item.arguments ? JSON.parse(item.arguments) : {},
+          toolResult: item.output || '',
+          toolStatus: 'completed',
+        })
+      } else if (parsed.type === 'turn.completed' && parsed.usage) {
+        totalInputTokens += parsed.usage.input_tokens || 0
+        totalOutputTokens += parsed.usage.output_tokens || 0
+      }
+    } catch {
+      // Not valid JSON
+    }
+  }
+
+  // Add a synthetic result event with accumulated token usage
+  if (events.length > 0 && (totalInputTokens > 0 || totalOutputTokens > 0)) {
+    events.push({
+      type: 'result',
+      tokensInput: totalInputTokens,
+      tokensOutput: totalOutputTokens,
+    })
+  }
+
+  return events
+}
+
+/** Parse Claude stream-json output into conversation events.
  *  Merges consecutive tool_call → tool_result pairs so the result
  *  is available on the tool_call event itself (rendered collapsed). */
-function parseStreamOutput(output: string): ConversationEvent[] {
+function parseClaudeOutput(output: string): ConversationEvent[] {
   const events: ConversationEvent[] = []
 
   for (const line of output.split('\n')) {
@@ -135,8 +251,6 @@ function parseStreamOutput(output: string): ConversationEvent[] {
           }
         }
       } else if (parsed.type === 'user' && parsed.message?.content) {
-        // Claude CLI stream-json wraps tool results as:
-        // {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"...","content":"..."}]}}
         for (const block of parsed.message.content) {
           if (block.type === 'tool_result') {
             const content = Array.isArray(block.content)
@@ -144,7 +258,6 @@ function parseStreamOutput(output: string): ConversationEvent[] {
               : typeof block.content === 'string'
                 ? block.content
                 : JSON.stringify(block.content)
-            // Merge into the matching tool_call by tool_use_id, or the last unmatched one
             const matchById = block.tool_use_id
               ? events.find(
                   (e) => e.type === 'tool_call' && e.toolUseId === block.tool_use_id && !e.toolResult,
@@ -159,7 +272,6 @@ function parseStreamOutput(output: string): ConversationEvent[] {
           }
         }
       } else if (parsed.type === 'tool_result') {
-        // Legacy/direct tool_result format (kept for backwards compatibility)
         const content = Array.isArray(parsed.content)
           ? parsed.content.map((c: { text?: string }) => c.text || '').join('')
           : typeof parsed.content === 'string'
@@ -186,6 +298,12 @@ function parseStreamOutput(output: string): ConversationEvent[] {
   }
 
   return events
+}
+
+/** Parse stream output from any AI provider into conversation events.
+ *  Auto-detects Codex vs Claude format. */
+function parseStreamOutput(output: string): ConversationEvent[] {
+  return isCodexFormat(output) ? parseCodexOutput(output) : parseClaudeOutput(output)
 }
 
 /** Render the full AI conversation */
@@ -234,6 +352,12 @@ function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
               {resultEvent.costUsd != null && (
                 <span>${resultEvent.costUsd.toFixed(2)}</span>
               )}
+              {resultEvent.tokensInput != null && (
+                <span>{resultEvent.tokensInput.toLocaleString()} in</span>
+              )}
+              {resultEvent.tokensOutput != null && (
+                <span>{resultEvent.tokensOutput.toLocaleString()} out</span>
+              )}
             </div>
           )}
         </div>
@@ -264,19 +388,29 @@ function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
                           : JSON.stringify(input).slice(0, 120)
               const resultText = event.toolResult || ''
               const hasResult = resultText.length > 2
+              const isFailed = event.toolStatus === 'failed'
+              const borderColor = isFailed ? 'border-red-500/20' : 'border-blue-500/10'
+              const bgColor = isFailed ? 'bg-red-500/5' : 'bg-blue-500/5'
+              const labelColor = isFailed ? 'text-red-400' : 'text-blue-400'
               return (
-                <div key={i} className="rounded-md bg-blue-500/5 border border-blue-500/10">
+                <div key={i} className={`rounded-md ${bgColor} border ${borderColor}`}>
                   <div className="flex items-start gap-2 px-3 py-2">
-                    <span className="text-xs font-mono font-medium text-blue-400 whitespace-nowrap">
+                    <span className={`text-xs font-mono font-medium ${labelColor} whitespace-nowrap`}>
                       {event.tool}
                     </span>
-                    <span className="text-xs font-mono text-muted-foreground truncate">
+                    <span className="text-xs font-mono text-muted-foreground truncate flex-1">
                       {preview}
                     </span>
+                    {isFailed && (
+                      <span className="text-[10px] font-medium text-red-400 shrink-0">FAILED</span>
+                    )}
+                    {event.toolStatus === 'in_progress' && (
+                      <Loader2 className="h-3 w-3 text-blue-400 animate-spin shrink-0" />
+                    )}
                   </div>
                   {hasResult && (
-                    <details className="border-t border-blue-500/10">
-                      <summary className="px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer hover:bg-blue-500/5 select-none">
+                    <details className={`border-t ${borderColor}`}>
+                      <summary className={`px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer hover:${bgColor} select-none`}>
                         Output ({resultText.length > 1000 ? `${Math.round(resultText.length / 1000)}k chars` : `${resultText.length} chars`})
                       </summary>
                       <pre className="text-xs font-mono bg-muted/30 px-3 py-2 overflow-x-auto max-h-48 overflow-y-auto text-muted-foreground whitespace-pre-wrap break-words">
@@ -623,6 +757,40 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             </div>
           </CardContent>
         </Card>
+
+        {run.ai_provider && (
+          <Card>
+            <CardContent className="p-4 flex items-center gap-2">
+              <Bot className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground">AI Provider</p>
+                <p className="text-sm font-medium">
+                  {run.ai_provider === 'claude_cli'
+                    ? 'Claude Code'
+                    : run.ai_provider === 'codex_cli'
+                      ? 'Codex'
+                      : run.ai_provider === 'opencode'
+                        ? 'OpenCode'
+                        : run.ai_provider}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {run.ai_model && (
+          <Card>
+            <CardContent className="p-4 flex items-center gap-2">
+              <Cpu className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground">AI Model</p>
+                <p className="text-sm font-medium truncate" title={run.ai_model}>
+                  {run.ai_model}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardContent className="p-4 flex items-center gap-2">

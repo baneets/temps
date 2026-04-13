@@ -5,5 +5,6 @@ pub mod definition_service;
 pub mod executor;
 pub mod prompt_builder;
 pub mod run_service;
+pub mod sandbox_injector;
 pub mod sandbox_registry;
 pub mod secret_service;

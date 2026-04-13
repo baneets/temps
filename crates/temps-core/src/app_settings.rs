@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 
 /// Application settings stored in the database
@@ -72,25 +73,71 @@ pub struct ContainerLogSettings {
     pub service_max_file: u32,
 }
 
+/// Per-provider credential and configuration entry stored inside
+/// `AgentSandboxSettings.providers`. Free-form on purpose: every provider
+/// (`claude_cli`, `codex_cli`, `opencode`, future ones) has its own auth
+/// model — Claude has subscription-vs-api-key, OpenCode has an arbitrary
+/// `auth.json` blob, Codex has a single env var. The Rust-side
+/// `ai_cli::catalog` module describes how to interpret each provider's
+/// fields, so adding a new provider only requires:
+///   1. an entry in the catalog,
+///   2. a `seed_provider_credentials` arm in `session_manager`,
+///   3. (optionally) UI metadata in the catalog for the settings page.
+///
+/// No DB migration is ever needed — everything lives inside the existing
+/// `settings.data` JSON column.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// Auth flavor for this provider. Valid values depend on the provider:
+    ///   - `claude_cli`: "subscription" (OAuth token) | "api_key"
+    ///   - `codex_cli`: "api_key"
+    ///   - `opencode`:  "config_file"
+    pub auth_type: String,
+    /// Encrypted credential payload. The decrypted bytes are interpreted
+    /// according to the catalog entry's `credential_format`:
+    ///   - `ApiKey` / `OauthToken`: plain UTF-8 string (env var value)
+    ///   - `ConfigFile`: raw file body written to the catalog's seed path
+    pub credentials_encrypted: Option<String>,
+    /// Default model id for this provider (e.g. `sonnet` for Claude,
+    /// `gpt-5-codex` for Codex). Empty/`None` means "use the CLI's own
+    /// default". Each provider uses a disjoint id namespace, so keeping
+    /// the default *with* the provider (instead of one global field) means
+    /// switching active provider doesn't drop the user into an invalid
+    /// model for the new CLI.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Per-provider extras (base URL, custom flags, future per-provider
+    /// settings). Intentionally untyped so new providers don't require
+    /// schema changes.
+    pub extra: serde_json::Value,
+}
+
 /// Global agent sandbox settings. Controls whether agent runs are isolated
 /// inside Docker containers by default. Individual agents can override this.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct AgentSandboxSettings {
     /// Default AI provider for agents: "claude_cli", "opencode", or "codex_cli".
-    /// Individual agents can override this.
+    /// Workspaces always use this provider — no per-session override.
     #[schema(example = "claude_cli")]
     pub default_provider: String,
-    /// Default model for the selected provider (e.g. "claude-sonnet-4-20250514", "gpt-4o", "anthropic/claude-sonnet-4-20250514").
-    /// Empty = use the provider's default model.
+    /// Per-provider auth + config. Keyed by provider id (e.g. `claude_cli`,
+    /// `codex_cli`, `opencode`). Adding a new provider only requires a new
+    /// catalog entry on the Rust side — the JSON column stays migration-free.
     #[serde(default)]
-    pub default_model: String,
-    /// Auth type: "api_key" (ANTHROPIC_API_KEY/OPENAI_API_KEY) or "subscription" (Claude OAuth token via setup-token).
+    pub providers: HashMap<String, ProviderConfig>,
+
+    // === Legacy fields (read-only, mirrored into `providers` on load) ===
+    // Kept so old settings rows still deserialize. New writes go through
+    // `providers`. Removed in a future release once everyone has migrated.
+    /// DEPRECATED: use `providers[default_provider].auth_type` instead.
     #[serde(default = "default_auth_type")]
     pub auth_type: String,
-    /// Encrypted credential (API key or OAuth token depending on auth_type).
+    /// DEPRECATED: use `providers[default_provider].credentials_encrypted` instead.
     #[serde(default)]
     pub api_key_encrypted: Option<String>,
+
     /// Whether sandbox is enabled globally for all agents by default.
     /// Individual agents can override this with their `sandbox_enabled` field.
     pub enabled: bool,
@@ -144,7 +191,7 @@ impl Default for AgentSandboxSettings {
     fn default() -> Self {
         Self {
             default_provider: "claude_cli".to_string(),
-            default_model: String::new(),
+            providers: HashMap::new(),
             auth_type: "subscription".to_string(),
             api_key_encrypted: None,
             enabled: false,
@@ -154,6 +201,41 @@ impl Default for AgentSandboxSettings {
             memory_limit_mb: 8192,
             network_mode: "full".to_string(),
         }
+    }
+}
+
+impl AgentSandboxSettings {
+    /// Returns the per-provider config, falling back to the deprecated flat
+    /// `auth_type` / `api_key_encrypted` fields when the provider entry is
+    /// missing. New code reads through this helper so legacy settings rows
+    /// keep working without any DB migration.
+    pub fn provider_config(&self, provider_id: &str) -> ProviderConfig {
+        if let Some(cfg) = self.providers.get(provider_id) {
+            return cfg.clone();
+        }
+        // Legacy fallback. The flat `auth_type` / `api_key_encrypted` fields
+        // predate the multi-provider catalog and only ever stored Claude
+        // credentials — Codex/OpenCode were added after the `providers` map
+        // existed. So we surface the legacy blob under `claude_cli` even
+        // when that isn't the currently active provider; otherwise, a user
+        // who activates codex loses visibility of their pre-existing Claude
+        // credential (and the New-Session picker falsely reports "only one
+        // provider configured").
+        //
+        // We *also* honor it for `default_provider` in case some old install
+        // wrote non-Claude credentials into the flat fields via a path we
+        // haven't found — cheap insurance, since the only way this differs
+        // is if `default_provider != "claude_cli"`, and in that case the
+        // flat fields almost certainly hold a Claude credential anyway.
+        if provider_id == "claude_cli" || provider_id == self.default_provider {
+            return ProviderConfig {
+                auth_type: self.auth_type.clone(),
+                credentials_encrypted: self.api_key_encrypted.clone(),
+                default_model: None,
+                extra: serde_json::Value::Null,
+            };
+        }
+        ProviderConfig::default()
     }
 }
 

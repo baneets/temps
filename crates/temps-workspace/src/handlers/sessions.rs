@@ -154,6 +154,10 @@ impl From<WorkspaceError> for Problem {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct StartSessionRequest {
     pub ai_provider: Option<String>,
+    /// Override the provider's default model for this session only. Leave
+    /// `None` to use `agent_sandbox.providers[id].default_model` from platform
+    /// settings (which itself can be `None`, meaning "let the CLI pick").
+    pub ai_model: Option<String>,
     /// Branch to check out in the workspace sandbox. Defaults to the project's main branch.
     /// If `base_branch_name` is also set, this is the *new* branch to be created
     /// locally off `base_branch_name`.
@@ -166,6 +170,15 @@ pub struct StartSessionRequest {
     /// When resuming from an agent run, pass the run ID so that Claude CLI
     /// session files are injected into the workspace sandbox for `--resume`.
     pub agent_run_id: Option<i32>,
+    /// Slugs of skill definitions to inject into the sandbox. Resolved from
+    /// `project_skill_definitions` (falls back to global). Written to
+    /// `/workspace/.claude/skills/<slug>/` at session start.
+    pub skills: Option<Vec<String>>,
+    /// Slugs of MCP server definitions to inject into the sandbox. Deep-merged
+    /// into `/workspace/.claude/settings.json` and `/home/temps/.claude.json`
+    /// at session start. Resolved from `project_mcp_definitions` (falls back
+    /// to global).
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 /// Body for `PATCH /projects/{project_id}/workspace/sessions/{session_id}`.
@@ -254,6 +267,10 @@ pub struct SessionResponse {
     pub memory_limit_mb: Option<i32>,
     /// PID limit. `None` → server default applies.
     pub pids_limit: Option<i32>,
+    /// Slugs of skill definitions attached to this session (injected at start).
+    pub skills: Vec<String>,
+    /// Slugs of MCP server definitions attached to this session (injected at start).
+    pub mcp_servers: Vec<String>,
 }
 
 impl SessionResponse {
@@ -287,6 +304,12 @@ impl SessionResponse {
             cpu_limit: s.cpu_milli.map(|m| m as f32 / 1000.0),
             memory_limit_mb: s.memory_limit_mb,
             pids_limit: s.pids_limit,
+            skills: temps_agents::services::sandbox_injector::parse_slug_array(
+                s.skills_config.as_ref(),
+            ),
+            mcp_servers: temps_agents::services::sandbox_injector::parse_slug_array(
+                s.mcp_servers_config.as_ref(),
+            ),
         }
     }
 
@@ -1146,34 +1169,60 @@ async fn handle_session_terminal(
     // if they don't match, we wipe the directory and start fresh. This
     // runs once per container boot; subsequent exec invocations in the
     // same boot are a no-op.
-    let sock_path = format!("/run/temps-pty/{}.sock", tmux_session_name);
+    // Socket path is scoped by the active provider so switching from
+    // claude_cli → codex_cli (or vice versa) starts a fresh dtach master
+    // instead of re-attaching to the old one and showing the wrong CLI.
+    // Shape: `temps-{provider}-{kind}-{tab}.sock`.
+    let sock_path = format!("/run/temps-pty/{}-{}.sock", ai_provider, tmux_session_name);
+
+    // Provider-specific resume plumbing. Claude writes per-project JSONL
+    // session files under ~/.claude/projects/-workspace/; `codex` and
+    // `opencode` don't, so checking that path for them is a false-negative.
+    // The `.agent-session-id` marker is written by the chat-mode flow and
+    // only applies to claude's `--resume <id>` protocol.
+    let resume_snippet = if cli == "claude" {
+        format!(
+            "if [ -f /tmp/.agent-session-id ]; then {cli}{args} --resume \"$(cat /tmp/.agent-session-id)\" || {cli}{args} --continue || {cli}{args}; rm -f /tmp/.agent-session-id; elif ls /home/temps/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; then {cli}{args} --continue || {cli}{args}; else {cli}{args}; fi",
+            cli = cli,
+            args = cli_args,
+        )
+    } else {
+        // codex/opencode: just launch the CLI. They keep their own local
+        // conversation state keyed by cwd, so a fresh process already
+        // resumes the right session if one exists.
+        format!("{cli}{args}", cli = cli, args = cli_args)
+    };
+
     // `inner_cmd` is the script dtach runs ONCE on master creation. After the
     // CLI exits (or if it fails to launch), we fall through to bash so the
     // user still has a live shell inside the dtach master — they can fix
     // whatever went wrong and relaunch manually without losing the tab.
     //
-    // Note we don't use `exec` on the CLI invocations here — if claude fails
+    // Note we don't use `exec` on the CLI invocations here — if the CLI fails
     // with a non-zero exit we want the `||` chain to fire. Only the final
     // `exec bash` replaces the shell (there's nothing after it).
     let inner_cmd = match kind.as_str() {
         "shell" => "exec bash".to_string(),
         _ => format!(
-            "cd /workspace && if [ -f /tmp/.agent-session-id ]; then {cli}{args} --resume \"$(cat /tmp/.agent-session-id)\" || {cli}{args} --continue || {cli}{args}; rm -f /tmp/.agent-session-id; elif ls /home/temps/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; then {cli}{args} --continue || {cli}{args}; else {cli}{args}; fi; exec bash",
-            cli = cli,
-            args = cli_args,
+            "cd /workspace && {resume}; exec bash",
+            resume = resume_snippet
         ),
     };
 
     // PATH hardening: the dockerfile sets `ENV PATH=/home/temps/.local/bin:...`,
-    // but older cached sandbox images (or containers created before that fix
-    // landed) have `~/.local/bin` missing from their frozen env. An interactive
-    // shell picks it up via `~/.bashrc`, but the non-interactive `sh -c` dtach
-    // runs does not source .bashrc — so `claude` would appear missing even
-    // though it's installed at /home/temps/.local/bin/claude. Prepending the
-    // known install directories here is cheap insurance and works regardless
-    // of what the container image baked in.
+    // but Docker's explicit Config.Env on container creation replaces the
+    // image PATH entirely (see `session_manager::build_env_vars`), and the
+    // non-interactive `sh -c` dtach runs does not source .bashrc. So we must
+    // list every AI CLI install dir here explicitly:
+    //   - /home/temps/.local/bin       → claude
+    //   - /home/temps/.bun/bin         → codex (installed via `bun add -g`)
+    //   - /home/temps/.opencode/bin    → opencode (installer hardcodes this)
+    // Also keep /usr/local/bun/bin for backwards compat with older images
+    // that installed bun system-wide.
+    let cli_path_prefix =
+        "/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/bun/bin";
     let exec_script = format!(
-        r#"export PATH=/home/temps/.local/bin:/usr/local/bun/bin:$PATH; \
+        r#"export PATH={path_prefix}:$PATH; \
 . ~/.env 2>/dev/null; \
 BOOT_ID=$(stat -c %Y /proc/1 2>/dev/null || echo unknown); \
 if [ "$(cat /run/temps-pty/.boot 2>/dev/null)" != "$BOOT_ID" ]; then \
@@ -1181,10 +1230,11 @@ if [ "$(cat /run/temps-pty/.boot 2>/dev/null)" != "$BOOT_ID" ]; then \
   echo "$BOOT_ID" > /run/temps-pty/.boot 2>/dev/null; \
 fi; \
 if command -v dtach >/dev/null 2>&1; then \
-  exec dtach -A {sock} -E -z -r winch /bin/sh -c 'export PATH=/home/temps/.local/bin:/usr/local/bun/bin:$PATH; . ~/.env 2>/dev/null; cd /workspace && {inner}'; \
+  exec dtach -A {sock} -E -z -r winch /bin/sh -c 'export PATH={path_prefix}:$PATH; . ~/.env 2>/dev/null; cd /workspace && {inner}'; \
 else \
   cd /workspace && {inner}; \
 fi"#,
+        path_prefix = cli_path_prefix,
         sock = sock_path,
         inner = inner_cmd,
     );
@@ -1721,9 +1771,14 @@ async fn start_session(
             ai_provider: request
                 .ai_provider
                 .unwrap_or_else(|| "claude_cli".to_string()),
+            ai_model: request
+                .ai_model
+                .and_then(|m| if m.trim().is_empty() { None } else { Some(m) }),
             branch_name: request.branch_name,
             base_branch_name: request.base_branch_name,
             metadata: request.metadata,
+            skills: request.skills,
+            mcp_servers: request.mcp_servers,
         })
         .await?;
 

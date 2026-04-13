@@ -738,6 +738,7 @@ mod tests {
             ai_output: None,
             ai_reasoning: None,
             ai_model: None,
+            ai_provider: None,
             tokens_input: 0,
             tokens_output: 0,
             estimated_cost_cents: 0,

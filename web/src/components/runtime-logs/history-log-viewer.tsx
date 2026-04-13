@@ -21,6 +21,7 @@ import {
 } from '@/hooks/useLogHistory'
 import { useQuery } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import AnsiToHtml from 'ansi-to-html'
 import {
   AlertCircle,
   ChevronLeft,
@@ -30,6 +31,13 @@ import {
   Search,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+const ansiConverter = new AnsiToHtml({
+  fg: 'var(--foreground)',
+  bg: 'var(--background)',
+  newline: false,
+  escapeXML: true,
+})
 
 const LOG_LEVEL_OPTIONS: LogLevel[] = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE']
 
@@ -78,13 +86,14 @@ function getTimeRange(range: string): { start: string; end: string } {
 }
 
 function HistoryLogLine({ line }: { line: LogSearchLine }) {
-  const ts = new Date(line.timestamp).toLocaleTimeString('en-US', {
+  const d = new Date(line.timestamp)
+  const base = d.toLocaleTimeString('en-US', {
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    fractionalSecondDigits: 3,
   })
+  const ts = `${base}.${String(d.getMilliseconds()).padStart(3, '0')}`
 
   return (
     <div className="flex items-start gap-2 py-0.5 px-2 font-mono text-xs hover:bg-muted/50">
@@ -103,9 +112,11 @@ function HistoryLogLine({ line }: { line: LogSearchLine }) {
       <span className="text-muted-foreground shrink-0 w-[70px] truncate">
         {line.service}
       </span>
-      <span className="whitespace-pre-wrap break-all min-w-0 flex-1">
-        {line.message}
-      </span>
+      <span
+        className="whitespace-pre-wrap break-all min-w-0 flex-1"
+        dangerouslySetInnerHTML={{ __html: ansiConverter.toHtml(line.message) }}
+      />
+
     </div>
   )
 }

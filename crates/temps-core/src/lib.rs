@@ -47,8 +47,8 @@ pub use anyhow;
 pub use app_settings::{
     AgentSandboxSettings, AiConfigSettings, AppSettings, ContainerLogSettings,
     DiskSpaceAlertSettings, DnsProviderSettings, DockerRegistrySettings, LetsEncryptSettings,
-    MultiNodeSettings, PreviewGatewaySettings, RateLimitSettings, ScreenshotSettings,
-    SecurityHeadersSettings,
+    MultiNodeSettings, PreviewGatewaySettings, ProviderConfig, RateLimitSettings,
+    ScreenshotSettings, SecurityHeadersSettings,
 };
 pub use async_trait;
 pub use chrono;

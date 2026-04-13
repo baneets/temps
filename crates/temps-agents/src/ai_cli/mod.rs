@@ -1,6 +1,11 @@
+pub mod catalog;
 pub mod claude;
 pub mod codex;
 pub mod opencode;
+
+pub use catalog::{
+    find_provider, AuthFlavor, CredentialFormat, ProviderCatalogEntry, PROVIDER_CATALOG,
+};
 
 use async_trait::async_trait;
 use std::future::Future;
@@ -21,6 +26,9 @@ pub struct AiRunConfig {
     pub api_key: String,
     pub max_turns: i32,
     pub timeout: Duration,
+    /// Optional preferred model name (e.g. "sonnet", "gpt-5-codex").
+    /// `None` lets the CLI pick its default.
+    pub model: Option<String>,
     /// Optional callback for streaming each line of output in real-time
     pub on_event: Option<OnEventCallback>,
 }

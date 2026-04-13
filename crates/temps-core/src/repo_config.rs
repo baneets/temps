@@ -163,13 +163,25 @@ pub struct AgentYamlConfig {
     /// Legacy alias for `system`. If both are set, `system` takes precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// AI model/provider to use. Values: `claude_cli` (default), `opencode`, `codex_cli`.
+    /// AI provider to use. Values: `claude_cli` (default), `opencode`, `codex_cli`.
     /// Alias: `provider` (for backward compatibility). If `model` is set, it takes precedence.
+    /// NOTE: historically this field overloaded as both provider id and model id.
+    /// Prefer `ai_provider` + `ai_model` going forward.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Legacy alias for `model`.
-    #[serde(default = "default_provider")]
-    pub provider: String,
+    /// Legacy alias for `model`. `None` means "use the platform default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Preferred model identifier for the CLI (e.g. "sonnet", "opus", "gpt-5-codex").
+    /// NULL means: let the CLI pick its default. This is independent from `provider` —
+    /// the provider decides which CLI runs; `ai_model` picks the model inside that CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
+    /// Clean provider identifier (preferred over legacy `provider`/`model`).
+    /// Values: `claude_cli`, `opencode`, `codex_cli`. If set, takes precedence over
+    /// both `model` and `provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_provider: Option<String>,
     /// Maximum number of AI turns before the agent stops.
     #[serde(default = "default_max_turns")]
     pub max_turns: i32,
@@ -257,9 +269,6 @@ pub struct ScheduleTrigger {
     pub cron: Option<String>,
 }
 
-fn default_provider() -> String {
-    "claude_cli".to_string()
-}
 fn default_max_turns() -> i32 {
     25
 }
@@ -283,9 +292,22 @@ fn default_true() -> bool {
 }
 
 impl AgentYamlConfig {
-    /// Resolved provider: `model` takes precedence over `provider`.
-    pub fn resolved_provider(&self) -> &str {
-        self.model.as_deref().unwrap_or(&self.provider)
+    /// Resolved provider: `ai_provider` > legacy `model` > legacy `provider`.
+    /// Returns `None` when no provider is specified in the YAML, meaning
+    /// "use the platform default" from agent_sandbox settings.
+    pub fn resolved_provider(&self) -> Option<&str> {
+        self.ai_provider
+            .as_deref()
+            .or(self.model.as_deref())
+            .or(self.provider.as_deref())
+    }
+
+    /// Resolved model id for the CLI (None means "let the CLI pick").
+    /// Only the dedicated `ai_model` field counts — we never interpret the
+    /// legacy `model` field as a CLI model id, since that field is already
+    /// overloaded as a provider alias.
+    pub fn resolved_model(&self) -> Option<&str> {
+        self.ai_model.as_deref()
     }
 
     /// Resolved system prompt: `system` takes precedence over `prompt`.
@@ -394,8 +416,12 @@ pub struct WorkflowYamlConfig {
     /// The prompt IS the workflow. Template variables are injected by Temps
     /// based on the trigger type.
     pub prompt: String,
-    #[serde(default = "default_provider")]
-    pub provider: String,
+    /// AI provider override. `None` means "use the platform default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Preferred model for the CLI (e.g. "sonnet", "gpt-5-codex"). `None` = CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
     #[serde(default = "default_max_turns")]
     pub max_turns: i32,
     #[serde(default = "default_timeout")]
@@ -700,7 +726,7 @@ max_turns: 25
     fn test_agent_yaml_defaults() {
         let yaml = "name: minimal-agent\n";
         let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(agent.provider, "claude_cli");
+        assert_eq!(agent.provider, None);
         assert_eq!(agent.max_turns, 25);
         assert_eq!(agent.timeout_seconds, 600);
         assert!(agent.enabled);
@@ -804,7 +830,7 @@ name: minimal
 prompt: do something
 "#;
         let workflow: WorkflowYamlConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(workflow.provider, "claude_cli");
+        assert_eq!(workflow.provider, None);
         assert_eq!(workflow.max_turns, 25);
         assert_eq!(workflow.timeout_seconds, 600);
         assert!(workflow.enabled);
@@ -862,7 +888,7 @@ model: opencode
 provider: claude_cli
 "#;
         let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(agent.resolved_provider(), "opencode");
+        assert_eq!(agent.resolved_provider(), Some("opencode"));
     }
 
     #[test]
@@ -887,10 +913,10 @@ prompt: You are a prompt
     }
 
     #[test]
-    fn test_agent_yaml_model_falls_back_to_provider() {
+    fn test_agent_yaml_no_provider_returns_none() {
         let yaml = "name: test-agent\n";
         let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(agent.resolved_provider(), "claude_cli");
+        assert_eq!(agent.resolved_provider(), None);
     }
 
     #[test]
@@ -939,7 +965,7 @@ max_turns: 30
 "#;
         let agent: AgentYamlConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(agent.name, "Coding Assistant");
-        assert_eq!(agent.resolved_provider(), "claude_cli");
+        assert_eq!(agent.resolved_provider(), Some("claude_cli"));
         assert!(agent
             .resolved_prompt()
             .unwrap()

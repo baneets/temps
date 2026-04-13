@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump `next` across examples/fixtures to 15.3.3/16.2.2 (5 CVEs: disk cache growth, request smuggling, postponed buffering DoS, null origin CSRF bypass)
 - Bump `testcontainers` 0.27.1 → 0.27.2 / `astral-tokio-tar` 0.5.6 → 0.6.0 (insufficient PAX extension validation, dev-only)
 
+### Changed
+- **Audit Logs page redesign**: switched from card-per-row layout to a responsive table matching the rest of the app (filter bar in a card, type badge + icon per category, responsive `hidden md:/lg:table-cell` columns, skeleton loaders, proper empty state, and paginated footer)
+- **Audit operation labels**: added human-readable descriptions for the new `SKILL_*`, `MCP_*`, and `SECRET_*` operation types, and a `humanize()` fallback so any future operation type renders as "Something New" instead of "Performed unknown operation"
+
 ### Fixed
 - **CLI: `environments vars` subcommands ignored `--project` flag**: `get`, `set`, `delete`, `import`, `export` used `cmd.parent!.parent!.opts().project` (traversing to `environments` command level where `--project` isn't defined) instead of `cmd.parent!.opts().project` (the `vars` command where it is). This caused "Project undefined not found" errors. The `list` subcommand was not affected.
 - **CLI: `services env` crashed with "envVars is not iterable"**: the API endpoint `GET /external-services/{id}/projects/{project_id}/environment` returns `HashMap<String, String>` but the CLI expected `Array<EnvironmentVariableInfo>`. Added handling to convert the object response into the expected array format.

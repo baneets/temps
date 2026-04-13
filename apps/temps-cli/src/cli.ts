@@ -45,10 +45,12 @@ import { registerMigrateCommands } from './commands/migrate/index.js'
 import { registerTemplatesCommands } from './commands/templates/index.js'
 import { registerPlatformCommands } from './commands/platform/index.js'
 import { registerPresetsCommands } from './commands/presets/index.js'
+import { registerAnalyticsCommands } from './commands/analytics/index.js'
 import { registerFunnelsCommands } from './commands/funnels/index.js'
 import { registerNotificationPreferencesCommands } from './commands/notification-preferences/index.js'
 import { registerSkillsCommands } from './commands/skills/index.js'
 import { registerMcpServersCommands } from './commands/mcp-servers/index.js'
+import { registerSecretsCommands } from './commands/secrets/index.js'
 
 // Developer workflow commands
 import { registerInitCommand } from './commands/init/index.js'
@@ -134,10 +136,12 @@ export function createProgram(): Command {
   registerTemplatesCommands(program)
   registerPlatformCommands(program)
   registerPresetsCommands(program)
+  registerAnalyticsCommands(program)
   registerFunnelsCommands(program)
   registerNotificationPreferencesCommands(program)
   registerSkillsCommands(program)
   registerMcpServersCommands(program)
+  registerSecretsCommands(program)
 
   // Developer workflow commands
   registerInitCommand(program)

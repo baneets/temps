@@ -43,9 +43,15 @@ export interface DiskSpaceAlertSettings {
 
 export interface AgentSandboxSettings {
   default_provider: string
-  default_model: string
-  auth_type: string
+  /// @deprecated Per-provider auth lives in `providers[id].auth_type` now.
+  /// Kept optional for backward compatibility with old settings rows.
+  auth_type?: string
+  /// @deprecated Per-provider credentials live in
+  /// `providers[id].credentials_encrypted` now.
   api_key_encrypted?: string | null
+  /// @deprecated Per-provider model lives in `providers[id].default_model` now.
+  /// Read from old settings payloads but never written from the UI.
+  default_model?: string
   enabled: boolean
   runtime: string
   custom_image: string
@@ -75,149 +81,62 @@ export interface PlatformSettings extends AppSettings {
 }
 
 /**
- * Get platform settings
- * @returns Promise<PlatformSettings>
+ * Get platform settings.
+ *
+ * The server is the single source of truth — every field on `AppSettings`
+ * (including `agent_sandbox`, `ai_config`, security headers, etc.) is
+ * populated server-side via `AppSettings::default()` when the row is
+ * created. This client used to re-default each field when missing, which
+ * masked real backend bugs (e.g. the user activating Codex but the UI
+ * silently rendering `claude_cli` because some unrelated field was null).
+ *
+ * Errors propagate to the caller so TanStack Query can surface a real
+ * error state instead of substituting hardcoded defaults.
  */
 export async function getPlatformSettings(): Promise<PlatformSettings> {
-  try {
-    // Fetch from API
-    const response = await getSettings()
+  const response = await getSettings()
 
-    if (response.data) {
-      // Cast to include extended fields not yet in generated types
-      const data = response.data as typeof response.data & {
-        disk_space_alert?: DiskSpaceAlertSettings
-        agent_sandbox?: AgentSandboxSettings
-        ai_config?: AiConfigSettings
-        attack_mode?: boolean
-      }
-      // Ensure all required fields have defaults
-      const settings: PlatformSettings = {
-        dns_provider: data.dns_provider || {
-          provider: 'manual',
-          cloudflare_api_key: null,
-        },
-        external_url: data.external_url || null,
-        letsencrypt: data.letsencrypt || {
-          email: null,
-          environment: 'production',
-        },
-        preview_domain: data.preview_domain || 'localho.st',
-        screenshots: data.screenshots || {
-          enabled: false,
-          provider: 'local',
-          url: null,
-        },
-        security_headers: data.security_headers || {
-          enabled: true,
-          preset: 'moderate',
-          content_security_policy:
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
-          x_frame_options: 'SAMEORIGIN',
-          x_content_type_options: 'nosniff',
-          x_xss_protection: '1; mode=block',
-          strict_transport_security: 'max-age=31536000; includeSubDomains',
-          referrer_policy: 'strict-origin-when-cross-origin',
-          permissions_policy: 'geolocation=(), microphone=(), camera=()',
-        },
-        rate_limiting: data.rate_limiting || {
-          enabled: false,
-          max_requests_per_minute: 60,
-          max_requests_per_hour: 1000,
-          whitelist_ips: [],
-          blacklist_ips: [],
-        },
-        disk_space_alert: data.disk_space_alert || {
-          enabled: true,
-          threshold_percent: 80,
-          check_interval_seconds: 300,
-          monitor_path: null,
-        },
-        agent_sandbox: data.agent_sandbox || {
-          default_provider: 'claude_cli',
-          default_model: '',
-          auth_type: 'subscription',
-          api_key_encrypted: null,
-          enabled: false,
-          runtime: 'node',
-          custom_image: '',
-          cpu_limit: 2.0,
-          memory_limit_mb: 2048,
-          network_mode: 'full',
-        },
-        ai_config: data.ai_config || {
-          config_repo: '',
-          config_repo_branch: 'main',
-        },
-        attack_mode: data.attack_mode || false,
-      }
-
-      // Cache in localStorage for offline access
-      localStorage.setItem('platform_settings', JSON.stringify(settings))
-      return settings
-    }
-
-    // Return default settings if no data
-    return getDefaultSettings()
-  } catch (error) {
-    console.error('Error fetching platform settings:', error)
-    // Return cached or default settings on error
-    const stored = localStorage.getItem('platform_settings')
-    if (stored) {
-      return JSON.parse(stored)
-    }
-    return getDefaultSettings()
+  if (!response.data) {
+    throw new Error('Settings endpoint returned no data')
   }
+
+  // Cast to include extended fields not yet present in generated OpenAPI types.
+  // The server contract guarantees these are populated.
+  return response.data as PlatformSettings
 }
 
 /**
- * Update platform settings
- * @param settings - Partial settings to update
- * @returns Promise<PlatformSettings>
+ * Update platform settings. Reads the current full settings from the server,
+ * merges the partial update on top, validates, and persists. No localStorage —
+ * always round-trip through the server so we never write stale cached data.
  */
 export async function updatePlatformSettings(
   settings: Partial<PlatformSettings>
 ): Promise<PlatformSettings> {
-  try {
-    // Get current settings from cache first to avoid overwriting with API defaults
-    const cachedSettings = localStorage.getItem('platform_settings')
-    const current = cachedSettings
-      ? JSON.parse(cachedSettings)
-      : await getPlatformSettings()
-    const updated = { ...current, ...settings }
+  const current = await getPlatformSettings()
+  const updated = { ...current, ...settings }
 
-    // Validate settings before saving
-    validateSettings(updated)
+  validateSettings(updated)
 
-    // Update via API - cast body to include extended fields not yet in generated types
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const body: any = {
-      dns_provider: updated.dns_provider,
-      external_url: updated.external_url,
-      letsencrypt: updated.letsencrypt,
-      preview_domain: updated.preview_domain,
-      screenshots: updated.screenshots,
-      security_headers: updated.security_headers,
-      rate_limiting: updated.rate_limiting,
-      disk_space_alert: updated.disk_space_alert,
-      agent_sandbox: updated.agent_sandbox,
-      ai_config: updated.ai_config,
-      attack_mode: updated.attack_mode,
-    }
-    const response = await updateSettings({ body })
-
-    if (response.data) {
-      // API returns only a message, so use our updated settings
-      // Update localStorage cache with the settings we sent
-      localStorage.setItem('platform_settings', JSON.stringify(updated))
-      return updated
-    }
-
-    return updated
-  } catch (error) {
-    console.error('Error updating platform settings:', error)
-    throw error
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body: any = {
+    dns_provider: updated.dns_provider,
+    external_url: updated.external_url,
+    letsencrypt: updated.letsencrypt,
+    preview_domain: updated.preview_domain,
+    screenshots: updated.screenshots,
+    security_headers: updated.security_headers,
+    rate_limiting: updated.rate_limiting,
+    disk_space_alert: updated.disk_space_alert,
+    agent_sandbox: updated.agent_sandbox,
+    ai_config: updated.ai_config,
+    attack_mode: updated.attack_mode,
   }
+  await updateSettings({ body })
+
+  // The PATCH endpoint returns only an ack message, so we hand back our
+  // merged view. Callers that need the absolute server state should refetch.
+  return updated
 }
 
 /**
@@ -263,72 +182,6 @@ function validateSettings(settings: PlatformSettings): void {
     throw new Error(
       'Valid screenshot API URL is required when using external provider'
     )
-  }
-}
-
-/**
- * Get default platform settings
- * @returns PlatformSettings
- */
-function getDefaultSettings(): PlatformSettings {
-  return {
-    dns_provider: {
-      provider: 'manual',
-      cloudflare_api_key: null,
-    },
-    external_url: null,
-    letsencrypt: {
-      email: null,
-      environment: 'production',
-    },
-    preview_domain: 'localho.st',
-    screenshots: {
-      enabled: false,
-      provider: 'local',
-      url: '',
-    },
-    security_headers: {
-      enabled: true,
-      preset: 'moderate',
-      content_security_policy:
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
-      x_frame_options: 'SAMEORIGIN',
-      x_content_type_options: 'nosniff',
-      x_xss_protection: '1; mode=block',
-      strict_transport_security: 'max-age=31536000; includeSubDomains',
-      referrer_policy: 'strict-origin-when-cross-origin',
-      permissions_policy: 'geolocation=(), microphone=(), camera=()',
-    },
-    rate_limiting: {
-      enabled: false,
-      max_requests_per_minute: 60,
-      max_requests_per_hour: 1000,
-      whitelist_ips: [],
-      blacklist_ips: [],
-    },
-    disk_space_alert: {
-      enabled: true,
-      threshold_percent: 80,
-      check_interval_seconds: 300,
-      monitor_path: null,
-    },
-    agent_sandbox: {
-      default_provider: 'claude_cli',
-      default_model: '',
-      auth_type: 'subscription',
-      api_key_encrypted: null,
-      enabled: false,
-      runtime: 'node',
-      custom_image: '',
-      cpu_limit: 2.0,
-      memory_limit_mb: 2048,
-      network_mode: 'full',
-    },
-    ai_config: {
-      config_repo: '',
-      config_repo_branch: 'main',
-    },
-    attack_mode: false,
   }
 }
 

@@ -64,6 +64,11 @@ pub struct MessageExecutor {
     /// Sessions whose drain loop should bail out at the next turn boundary.
     /// Set by `cancel`. The loop clears it when it exits.
     drain_cancel: Arc<RwLock<HashSet<i32>>>,
+    /// Optional: used to resolve + inject secrets, skills, and MCP servers
+    /// into workspace sandboxes at session start. When `None`, workspace
+    /// sessions skip the injection phase (agents plugin not loaded).
+    secret_service: Option<Arc<temps_agents::services::secret_service::SecretService>>,
+    definition_service: Option<Arc<temps_agents::services::definition_service::DefinitionService>>,
 }
 
 impl MessageExecutor {
@@ -90,7 +95,22 @@ impl MessageExecutor {
             dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
             draining_sessions: Arc::new(RwLock::new(HashSet::new())),
             drain_cancel: Arc::new(RwLock::new(HashSet::new())),
+            secret_service: None,
+            definition_service: None,
         }
+    }
+
+    /// Wire in the agents-plugin services so workspace sessions get the same
+    /// skills / MCP / secret injection as agent runs. Call this at plugin
+    /// registration time when both services are available.
+    pub fn with_injection_services(
+        mut self,
+        secret_service: Arc<temps_agents::services::secret_service::SecretService>,
+        definition_service: Arc<temps_agents::services::definition_service::DefinitionService>,
+    ) -> Self {
+        self.secret_service = Some(secret_service);
+        self.definition_service = Some(definition_service);
+        self
     }
 
     /// Cancel an in-flight run for this session. Called from the cancel
@@ -536,27 +556,13 @@ impl MessageExecutor {
             session.project_id.to_string(),
         );
 
-        // Re-inject AI provider credentials so ~/.env stays fresh.
-        // Subscription auth uses ~/.claude/.credentials.json; API key uses ~/.env.
-        if let Ok((api_key, auth_type)) = self.resolve_ai_credentials().await {
-            if let Some(key) = api_key.as_deref() {
-                if auth_type == "subscription" {
-                    if let Err(e) = self
-                        .session_manager
-                        .seed_claude_credentials(session.id, key, &auth_type)
-                        .await
-                    {
-                        tracing::warn!(
-                            "Failed to refresh claude credentials for session {}: {}",
-                            session.id,
-                            e
-                        );
-                    }
-                } else {
-                    managed_env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
-                }
-            }
-        }
+        // Re-inject credentials for *every* configured provider (not just the
+        // active one) so claude/codex/opencode terminal tabs all stay
+        // authenticated through a refresh. Catalog dispatch handles the
+        // per-flavor split: env-var flavors land in `managed_env` (and thus
+        // in `~/.env`); file-based flavors are written directly to disk.
+        let provider_env = self.seed_all_configured_providers(session.id).await;
+        managed_env.extend(provider_env);
 
         match self
             .external_service_manager
@@ -635,6 +641,47 @@ impl MessageExecutor {
         if let Err(e) = self.session_manager.inject_skill_file(session.id).await {
             tracing::warn!("refresh_sandbox: inject_skill_file failed: {}", e);
         }
+
+        // Re-run the shared injector so skill archives, MCP JSON, and secret
+        // values reflect the latest state of the definition / secret tables.
+        // Users hit "refresh" specifically when they've rotated a secret or
+        // updated a skill — skipping this would leave the sandbox stale.
+        if let (Some(secret_service), Some(definition_service)) = (
+            self.secret_service.as_ref(),
+            self.definition_service.as_ref(),
+        ) {
+            use temps_agents::services::sandbox_injector;
+            let mcp_slugs = sandbox_injector::parse_slug_array(session.mcp_servers_config.as_ref());
+            let skill_slugs = sandbox_injector::parse_slug_array(session.skills_config.as_ref());
+            if !mcp_slugs.is_empty() || !skill_slugs.is_empty() {
+                match secret_service.resolve_secrets().await {
+                    Ok(secrets) => {
+                        let fs = crate::services::workspace_sandbox_fs::WorkspaceSandboxFs {
+                            sm: self.session_manager.clone(),
+                            session_id: session.id,
+                        };
+                        if let Err(e) = sandbox_injector::inject(
+                            &fs,
+                            definition_service.clone(),
+                            session.project_id,
+                            &mcp_slugs,
+                            &skill_slugs,
+                            &secrets,
+                            &session.ai_provider,
+                        )
+                        .await
+                        {
+                            tracing::warn!("refresh_sandbox: skill/MCP reinjection failed: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        "refresh_sandbox: failed to resolve secrets for reinjection: {}",
+                        e
+                    ),
+                }
+            }
+        }
+
         if let Err(e) = self
             .setup_git_credentials(session.id, session.user_id, git_creds.as_ref())
             .await
@@ -1216,12 +1263,13 @@ impl MessageExecutor {
         // sessions don't have an associated workflow slug, so memory writes
         // from the chat sandbox will fail until we add a chat-scoped memory
         // model. Workflow runs use a different code path that DOES set the slug.
-        let (api_key, auth_type) = self.resolve_ai_credentials().await?;
+        let (provider_id, auth_type, decrypted_credential) = self.resolve_ai_credentials().await?;
         let env_vars = WorkspaceSessionManager::build_env_vars_with_workflow(
             &self.get_temps_api_url(),
             &session_token,
-            api_key.as_deref(),
+            &provider_id,
             &auth_type,
+            decrypted_credential.as_deref(),
             Some(session.project_id),
             None, // chat sessions: no workflow scope
         );
@@ -1243,6 +1291,73 @@ impl MessageExecutor {
         // Inject the Temps platform skill file
         let _ = self.session_manager.inject_skill_file(session.id).await;
 
+        // Inject per-session skills + MCP servers + secrets via the shared
+        // agent-sandbox injector. Skipped cleanly if the agents plugin is not
+        // loaded (both services are None in that case).
+        if let (Some(secret_service), Some(definition_service)) = (
+            self.secret_service.as_ref(),
+            self.definition_service.as_ref(),
+        ) {
+            use temps_agents::services::sandbox_injector;
+            let mcp_slugs = sandbox_injector::parse_slug_array(session.mcp_servers_config.as_ref());
+            let skill_slugs = sandbox_injector::parse_slug_array(session.skills_config.as_ref());
+
+            match secret_service.resolve_secrets().await {
+                Ok(secrets) => {
+                    let fs = crate::services::workspace_sandbox_fs::WorkspaceSandboxFs {
+                        sm: self.session_manager.clone(),
+                        session_id: session.id,
+                    };
+                    match sandbox_injector::inject(
+                        &fs,
+                        definition_service.clone(),
+                        session.project_id,
+                        &mcp_slugs,
+                        &skill_slugs,
+                        &secrets,
+                        &session.ai_provider,
+                    )
+                    .await
+                    {
+                        Ok(s) => {
+                            tracing::info!(
+                                "Workspace session {}: injected {} MCP, {} skill, {} env-secret, {} file-secret",
+                                session.id,
+                                s.mcp_count,
+                                s.skill_count,
+                                s.env_secret_count,
+                                s.file_secret_count
+                            );
+                            for slug in s.unresolved_mcp_slugs {
+                                tracing::warn!(
+                                    "Workspace session {}: MCP slug '{}' not found — skipped",
+                                    session.id,
+                                    slug
+                                );
+                            }
+                            for slug in s.unresolved_skill_slugs {
+                                tracing::warn!(
+                                    "Workspace session {}: skill slug '{}' not found — skipped",
+                                    session.id,
+                                    slug
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "Workspace session {}: sandbox injector failed: {}",
+                            session.id,
+                            e
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "Workspace session {}: failed to resolve secrets: {}",
+                    session.id,
+                    e
+                ),
+            }
+        }
+
         // Seed ~/.claude.json so the terminal's first `claude` launch
         // doesn't block on the onboarding/theme picker. Best-effort — a
         // failure here shouldn't abort sandbox creation.
@@ -1254,39 +1369,31 @@ impl MessageExecutor {
             );
         }
 
-        // For subscription auth, write ~/.claude/.credentials.json so
-        // Claude CLI picks up the full OAuth context (scopes, subscription
-        // type) rather than just a bare env var token.
-        if let Some(key) = api_key.as_deref() {
-            if let Err(e) = self
-                .session_manager
-                .seed_claude_credentials(session.id, key, &auth_type)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to seed claude credentials for session {}: {}",
-                    session.id,
-                    e
-                );
-            }
+        // Seed ~/.codex/config.toml so the terminal's first `codex` launch
+        // doesn't block on the "Do you trust the contents of this directory?"
+        // picker. Applies even when the active provider isn't codex, because
+        // the user can open a codex tab at any point. Best-effort.
+        if let Err(e) = self.session_manager.seed_codex_config(session.id).await {
+            tracing::warn!(
+                "Failed to seed codex config for session {}: {}",
+                session.id,
+                e
+            );
         }
 
-        // Collect linked-service env vars + git provider tokens and write
-        // them into `/root/.env`. A global `~/.claude/CLAUDE.md` is also
-        // installed instructing the agent to source the file before any
-        // command that needs credentials. This way we can refresh tokens
-        // by rewriting the file — no container restart needed.
+        // Drop every configured provider's credential into the sandbox via
+        // the catalog dispatcher. For env-var flavors (`ApiKey`) this merges
+        // env vars into `~/.env` — for file-based flavors (`OauthToken`,
+        // `ConfigFile`) the bytes land directly on disk.
+        //
+        // Seeding ALL providers (not just the active one) matters because the
+        // terminal UI lets the user open a tab per CLI. If we only seeded the
+        // default, a user whose default is codex would see "Not logged in"
+        // when they open a claude tab even though they've configured Claude
+        // credentials. Disjoint seed paths keep the writes conflict-free.
         let mut managed_env: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-
-        // AI provider credentials — for API key auth, write to ~/.env so
-        // it's available inside the dtach sub-shell. For subscription auth,
-        // credentials are in ~/.claude/.credentials.json instead.
-        if let Some(key) = api_key.as_deref() {
-            if auth_type != "subscription" {
-                managed_env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
-            }
-        }
+        managed_env.extend(self.seed_all_configured_providers(session.id).await);
 
         // Linked external services (DATABASE_URL, REDIS_URL, ...)
         match self
@@ -1498,45 +1605,173 @@ impl MessageExecutor {
         Ok(())
     }
 
-    /// Resolve AI provider credentials from the global settings table.
-    async fn resolve_ai_credentials(&self) -> Result<(Option<String>, String), WorkspaceError> {
+    /// Resolve the active AI provider's credentials from the global settings
+    /// table. Returns:
+    ///   - `provider_id`: which CLI to use (`claude_cli`, `codex_cli`,
+    ///     `opencode`, …) — drives catalog dispatch downstream.
+    ///   - `auth_type`: which flavor of credential the user picked
+    ///     (`subscription`, `api_key`, `config_file`, …).
+    ///   - `decrypted`: the plaintext credential bytes if the user has saved
+    ///     one, else `None` (the sandbox still launches; the agent will fail
+    ///     authentication when it tries to use the CLI).
+    ///
+    /// Reads through `AgentSandboxSettings::provider_config`, which falls back
+    /// to the legacy flat fields (`auth_type`/`api_key_encrypted`) when the
+    /// settings row predates the multi-provider schema — so existing users
+    /// don't need to re-enter their key.
+    async fn resolve_ai_credentials(
+        &self,
+    ) -> Result<(String, String, Option<Vec<u8>>), WorkspaceError> {
         let settings_row = settings::Entity::find_by_id(1)
             .one(self.db.as_ref())
             .await?;
 
-        if let Some(settings_row) = settings_row {
-            if let Some(sandbox_config) = settings_row.data.get("agent_sandbox") {
-                let auth_type = sandbox_config
-                    .get("auth_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("api_key")
-                    .to_string();
+        let sandbox = settings_row
+            .as_ref()
+            .and_then(|row| row.data.get("agent_sandbox"))
+            .and_then(|v| {
+                serde_json::from_value::<temps_core::AgentSandboxSettings>(v.clone()).ok()
+            })
+            .unwrap_or_default();
 
-                let api_key_encrypted = sandbox_config
-                    .get("api_key_encrypted")
-                    .and_then(|v| v.as_str());
+        let provider_id = if sandbox.default_provider.is_empty() {
+            "claude_cli".to_string()
+        } else {
+            sandbox.default_provider.clone()
+        };
 
-                if let Some(encrypted) = api_key_encrypted {
-                    match self.encryption_service.decrypt(encrypted) {
-                        Ok(plain_bytes) => {
-                            let plain = String::from_utf8(plain_bytes).map_err(|e| {
-                                WorkspaceError::Validation {
-                                    message: format!("Decrypted key is not valid UTF-8: {}", e),
-                                }
-                            })?;
-                            return Ok((Some(plain), auth_type));
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to decrypt AI provider key: {}", e);
-                        }
-                    }
+        let provider_cfg = sandbox.provider_config(&provider_id);
+        let auth_type = if provider_cfg.auth_type.is_empty() {
+            // Fall back to the catalog default flavor for this provider.
+            temps_agents::ai_cli::find_provider(&provider_id)
+                .map(|p| p.default_flavor().id.to_string())
+                .unwrap_or_else(|| "api_key".to_string())
+        } else {
+            provider_cfg.auth_type.clone()
+        };
+
+        let decrypted = match provider_cfg.credentials_encrypted.as_deref() {
+            Some(encrypted) => match self.encryption_service.decrypt(encrypted) {
+                Ok(bytes) => Some(bytes),
+                Err(e) => {
+                    tracing::warn!(
+                        "resolve_ai_credentials: decrypt failed for provider {}: {}",
+                        provider_id,
+                        e
+                    );
+                    None
                 }
+            },
+            None => None,
+        };
 
-                return Ok((None, auth_type));
+        Ok((provider_id, auth_type, decrypted))
+    }
+
+    /// Resolve credentials for **every** configured provider, not just the
+    /// active/default one. Workspaces let the user open a terminal tab per
+    /// provider (claude tab, codex tab, shell tab), so each provider that has
+    /// saved credentials needs its file/env landing in the sandbox — otherwise
+    /// tabs for non-default providers show "Not logged in".
+    ///
+    /// Returns one entry per provider that has a non-empty credential, with
+    /// decryption already performed. Providers whose credential fails to
+    /// decrypt are logged and skipped (rather than failing the whole bootstrap
+    /// — one bad entry shouldn't lock the user out of every CLI).
+    ///
+    /// The returned list is unordered; callers should seed them in any
+    /// order since each provider's seed paths are disjoint
+    /// (`~/.claude/.credentials.json`, `~/.codex/auth.json`,
+    /// `~/.local/share/opencode/auth.json`, …).
+    async fn resolve_all_ai_credentials(
+        &self,
+    ) -> Result<Vec<(String, String, Vec<u8>)>, WorkspaceError> {
+        let settings_row = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await?;
+
+        let sandbox = settings_row
+            .as_ref()
+            .and_then(|row| row.data.get("agent_sandbox"))
+            .and_then(|v| {
+                serde_json::from_value::<temps_core::AgentSandboxSettings>(v.clone()).ok()
+            })
+            .unwrap_or_default();
+
+        // Union of every provider id the catalog knows about, because the
+        // legacy fields on `AgentSandboxSettings` are surfaced through
+        // `provider_config("claude_cli")` even when the `providers` map
+        // doesn't have an explicit entry. Iterating the catalog ensures we
+        // cover that legacy-migration path too.
+        let mut out = Vec::new();
+        for entry in temps_agents::ai_cli::PROVIDER_CATALOG {
+            let cfg = sandbox.provider_config(entry.id);
+            let encrypted = match cfg.credentials_encrypted.as_deref() {
+                Some(e) if !e.is_empty() => e,
+                _ => continue,
+            };
+            let auth_type = if cfg.auth_type.is_empty() {
+                entry.default_flavor().id.to_string()
+            } else {
+                cfg.auth_type.clone()
+            };
+            match self.encryption_service.decrypt(encrypted) {
+                Ok(bytes) => out.push((entry.id.to_string(), auth_type, bytes)),
+                Err(e) => tracing::warn!(
+                    "resolve_all_ai_credentials: decrypt failed for provider {}: {} — skipping",
+                    entry.id,
+                    e
+                ),
             }
         }
+        Ok(out)
+    }
 
-        Ok((None, "api_key".to_string()))
+    /// Seed every configured provider's credential into the sandbox and
+    /// return any env vars that should be merged into `~/.env` (for ApiKey
+    /// flavors). Failures for individual providers are logged and skipped.
+    ///
+    /// Shared by `initialize_sandbox` (first boot) and `refresh_sandbox`
+    /// (token rotation / env rewrite) so both paths produce the same on-disk
+    /// state.
+    async fn seed_all_configured_providers(
+        &self,
+        session_id: i32,
+    ) -> std::collections::HashMap<String, String> {
+        let mut env = std::collections::HashMap::new();
+        let all = match self.resolve_all_ai_credentials().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "seed_all_configured_providers: resolve failed for session {}: {}",
+                    session_id,
+                    e
+                );
+                return env;
+            }
+        };
+        if all.is_empty() {
+            tracing::debug!(
+                "seed_all_configured_providers: no credentials configured for any provider (session {})",
+                session_id
+            );
+        }
+        for (provider_id, auth_type, creds) in all {
+            match self
+                .session_manager
+                .seed_provider_credentials(session_id, &provider_id, &auth_type, &creds)
+                .await
+            {
+                Ok(provider_env) => env.extend(provider_env),
+                Err(e) => tracing::warn!(
+                    "Failed to seed {} credentials for session {}: {}",
+                    provider_id,
+                    session_id,
+                    e
+                ),
+            }
+        }
+        env
     }
 
     fn get_temps_api_url(&self) -> String {

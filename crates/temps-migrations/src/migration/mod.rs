@@ -77,6 +77,9 @@ mod m20260409_000003_add_ai_session_id;
 mod m20260410_000001_create_skill_and_mcp_definitions;
 mod m20260411_000001_allow_global_skill_and_mcp_definitions;
 mod m20260411_000002_add_skill_archive_column;
+mod m20260412_000001_add_workspace_skills_and_mcp;
+mod m20260413_000001_add_ai_provider_to_agent_runs;
+mod m20260413_000002_add_ai_model_to_project_agents;
 
 pub struct Migrator;
 
@@ -161,6 +164,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260410_000001_create_skill_and_mcp_definitions::Migration),
             Box::new(m20260411_000001_allow_global_skill_and_mcp_definitions::Migration),
             Box::new(m20260411_000002_add_skill_archive_column::Migration),
+            Box::new(m20260412_000001_add_workspace_skills_and_mcp::Migration),
+            Box::new(m20260413_000001_add_ai_provider_to_agent_runs::Migration),
+            Box::new(m20260413_000002_add_ai_model_to_project_agents::Migration),
         ]
     }
 }

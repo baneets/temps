@@ -229,6 +229,8 @@ fn workflow_to_agent(workflow: WorkflowYamlConfig) -> AgentYamlConfig {
         prompt: Some(workflow.prompt),
         model: None,
         provider: workflow.provider,
+        ai_model: workflow.ai_model,
+        ai_provider: None, // workflows use legacy `provider`; clean field stays None
         max_turns: workflow.max_turns,
         timeout_seconds: workflow.timeout_seconds,
         daily_budget_cents: workflow.daily_budget_cents,

@@ -1,3 +1,4 @@
+pub mod ai_providers;
 pub mod autofixer;
 pub mod config;
 pub mod definitions;
@@ -35,6 +36,7 @@ pub struct AppState {
 
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
+        .merge(ai_providers::routes())
         .merge(autofixer::routes())
         .merge(config::routes())
         .merge(definitions::routes())

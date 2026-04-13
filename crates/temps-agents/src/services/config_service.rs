@@ -4,7 +4,7 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 
 use temps_core::AgentYamlConfig;
-use temps_entities::{project_agents, projects};
+use temps_entities::{project_agents, projects, settings};
 
 use crate::error::AgentError;
 
@@ -22,6 +22,8 @@ pub struct UpsertAgentRequest {
     pub description: Option<String>,
     pub enabled: Option<bool>,
     pub ai_provider: Option<String>,
+    /// Preferred model identifier for the CLI. `Some("")` clears the stored value.
+    pub ai_model: Option<String>,
     /// Plain-text API key — will be encrypted before storage
     pub api_key: Option<String>,
     pub ai_provider_key_id: Option<i32>,
@@ -85,6 +87,25 @@ impl AgentConfigService {
             db,
             encryption_service,
         }
+    }
+
+    /// Read the platform's configured default AI provider from agent_sandbox settings.
+    /// Falls back to `"claude_cli"` when no settings exist yet.
+    async fn platform_default_provider(&self) -> String {
+        let record = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten();
+
+        record
+            .as_ref()
+            .and_then(|r| r.data.get("agent_sandbox"))
+            .and_then(|v| v.get("default_provider"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("claude_cli")
+            .to_string()
     }
 
     /// Get the first agent for a project (backward compat — prefer list_agents or get_agent_by_id)
@@ -271,6 +292,10 @@ impl AgentConfigService {
                 }
                 active.ai_provider = Set(provider);
             }
+            if let Some(model) = request.ai_model {
+                // Empty string is the convention for "clear the stored model"
+                active.ai_model = Set(if model.is_empty() { None } else { Some(model) });
+            }
             if let Some(encrypted) = encrypted_key {
                 active.api_key_encrypted = Set(Some(encrypted));
             }
@@ -353,6 +378,7 @@ impl AgentConfigService {
             } else {
                 (None, None)
             };
+            let default_provider = self.platform_default_provider().await;
             let active = project_agents::ActiveModel {
                 project_id: Set(project_id),
                 slug: Set(request
@@ -364,9 +390,10 @@ impl AgentConfigService {
                 enabled: Set(request.enabled.unwrap_or(false)),
                 trigger_config: Set(trigger_config),
                 prompt: Set(request.prompt),
-                ai_provider: Set(request
-                    .ai_provider
-                    .unwrap_or_else(|| "claude_cli".to_string())),
+                ai_provider: Set(request.ai_provider.unwrap_or(default_provider)),
+                ai_model: Set(request
+                    .ai_model
+                    .and_then(|m| if m.is_empty() { None } else { Some(m) })),
                 api_key_encrypted: Set(encrypted_key),
                 ai_provider_key_id: Set(request.ai_provider_key_id),
                 max_turns: Set(request.max_turns.unwrap_or(10)),
@@ -513,6 +540,7 @@ impl AgentConfigService {
             (None, None)
         };
 
+        let default_provider = self.platform_default_provider().await;
         let active = project_agents::ActiveModel {
             project_id: Set(project_id),
             slug: Set(slug),
@@ -522,9 +550,10 @@ impl AgentConfigService {
             enabled: Set(request.enabled.unwrap_or(false)),
             trigger_config: Set(trigger_config),
             prompt: Set(request.prompt),
-            ai_provider: Set(request
-                .ai_provider
-                .unwrap_or_else(|| "claude_cli".to_string())),
+            ai_provider: Set(request.ai_provider.unwrap_or(default_provider)),
+            ai_model: Set(request
+                .ai_model
+                .and_then(|m| if m.is_empty() { None } else { Some(m) })),
             api_key_encrypted: Set(encrypted_key),
             ai_provider_key_id: Set(request.ai_provider_key_id),
             max_turns: Set(request.max_turns.unwrap_or(25)),
@@ -625,6 +654,9 @@ impl AgentConfigService {
                 });
             }
             active.ai_provider = Set(provider);
+        }
+        if let Some(model) = request.ai_model {
+            active.ai_model = Set(if model.is_empty() { None } else { Some(model) });
         }
         if let Some(encrypted) = encrypted_key {
             active.api_key_encrypted = Set(Some(encrypted));
@@ -756,6 +788,9 @@ impl AgentConfigService {
         let mut updated = 0usize;
         let mut deleted = 0usize;
 
+        // Read platform default once — used when YAML doesn't specify a provider
+        let platform_provider = self.platform_default_provider().await;
+
         let yaml_slugs: Vec<String> = yaml_agents.iter().map(|a| a.slug()).collect();
 
         // 2. Upsert each YAML agent
@@ -769,7 +804,11 @@ impl AgentConfigService {
                 active.description = Set(yaml_agent.description.clone());
                 active.trigger_config = Set(yaml_agent.trigger_config_json());
                 active.prompt = Set(yaml_agent.resolved_prompt().map(|s| s.to_string()));
-                active.ai_provider = Set(yaml_agent.resolved_provider().to_string());
+                active.ai_provider = Set(yaml_agent
+                    .resolved_provider()
+                    .unwrap_or(&platform_provider)
+                    .to_string());
+                active.ai_model = Set(yaml_agent.resolved_model().map(|s| s.to_string()));
                 active.max_turns = Set(yaml_agent.max_turns);
                 active.timeout_seconds = Set(yaml_agent.timeout_seconds);
                 active.daily_budget_cents = Set(yaml_agent.daily_budget_cents);
@@ -814,7 +853,11 @@ impl AgentConfigService {
                     enabled: Set(yaml_agent.enabled),
                     trigger_config: Set(yaml_agent.trigger_config_json()),
                     prompt: Set(yaml_agent.resolved_prompt().map(|s| s.to_string())),
-                    ai_provider: Set(yaml_agent.resolved_provider().to_string()),
+                    ai_provider: Set(yaml_agent
+                        .resolved_provider()
+                        .unwrap_or(&platform_provider)
+                        .to_string()),
+                    ai_model: Set(yaml_agent.resolved_model().map(|s| s.to_string())),
                     max_turns: Set(yaml_agent.max_turns),
                     timeout_seconds: Set(yaml_agent.timeout_seconds),
                     daily_budget_cents: Set(yaml_agent.daily_budget_cents),
@@ -879,6 +922,7 @@ mod tests {
             }),
             prompt: None,
             ai_provider: "claude_cli".to_string(),
+            ai_model: None,
             api_key_encrypted: None,
             ai_provider_key_id: None,
             max_turns: 10,
@@ -986,6 +1030,7 @@ mod tests {
         let request = UpsertAgentRequest {
             enabled: Some(true),
             ai_provider: None,
+            ai_model: None,
             api_key: Some(String::new()),
             ai_provider_key_id: None,
             daily_budget_cents: None,
@@ -1022,6 +1067,7 @@ mod tests {
         let request = UpsertAgentRequest {
             enabled: Some(true),
             ai_provider: None,
+            ai_model: None,
             api_key: None,
             ai_provider_key_id: None,
             daily_budget_cents: None,
@@ -1057,7 +1103,9 @@ mod tests {
     async fn test_upsert_allows_disabled_config_without_git() {
         // When enabled=false, the git check is skipped
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            // No project lookup needed — enabled is false
+            // platform_default_provider() → settings lookup
+            .append_query_results(vec![Vec::<settings::Model>::new()])
+            // No existing config found
             .append_query_results(vec![Vec::<project_agents::Model>::new()])
             // insert returns model
             .append_query_results(vec![vec![make_config(1)]])
@@ -1067,6 +1115,7 @@ mod tests {
         let request = UpsertAgentRequest {
             enabled: Some(false),
             ai_provider: None,
+            ai_model: None,
             api_key: None,
             ai_provider_key_id: None,
             daily_budget_cents: None,
@@ -1103,6 +1152,7 @@ mod tests {
         expected.sandbox_enabled = None; // model returned by mock DB reflects what was stored
 
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<settings::Model>::new()]) // platform_default_provider
             .append_query_results(vec![Vec::<project_agents::Model>::new()]) // no existing config
             .append_query_results(vec![vec![expected.clone()]]) // insert returns model
             .into_connection();
@@ -1112,6 +1162,7 @@ mod tests {
             enabled: Some(false),
             sandbox_enabled: None, // explicit None
             ai_provider: None,
+            ai_model: None,
             api_key: None,
             ai_provider_key_id: None,
             daily_budget_cents: None,
@@ -1150,6 +1201,7 @@ mod tests {
         expected.sandbox_enabled = Some(true);
 
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<settings::Model>::new()]) // platform_default_provider
             .append_query_results(vec![Vec::<project_agents::Model>::new()]) // no existing config
             .append_query_results(vec![vec![expected.clone()]]) // insert returns model
             .into_connection();
@@ -1159,6 +1211,7 @@ mod tests {
             enabled: Some(false),
             sandbox_enabled: Some(true),
             ai_provider: None,
+            ai_model: None,
             api_key: None,
             ai_provider_key_id: None,
             daily_budget_cents: None,
@@ -1198,6 +1251,7 @@ mod tests {
         expected.sandbox_enabled = Some(false);
 
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<settings::Model>::new()]) // platform_default_provider
             .append_query_results(vec![Vec::<project_agents::Model>::new()]) // no existing config
             .append_query_results(vec![vec![expected.clone()]]) // insert returns model
             .into_connection();
@@ -1207,6 +1261,7 @@ mod tests {
             enabled: Some(false),
             sandbox_enabled: Some(false),
             ai_provider: None,
+            ai_model: None,
             api_key: None,
             ai_provider_key_id: None,
             daily_budget_cents: None,

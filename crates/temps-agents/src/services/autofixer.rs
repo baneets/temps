@@ -273,7 +273,7 @@ impl AutofixerService {
             .await?;
 
         // Run Claude CLI inside sandbox
-        let cmd = build_claude_cmd("claude_cli", &prompt, 10, false);
+        let cmd = build_claude_cmd("claude_cli", &prompt, 10, false, None);
         let exec_result = tokio::time::timeout(
             Duration::from_secs(300),
             self.sandbox_registry.exec(
@@ -466,7 +466,7 @@ impl AutofixerService {
             .await?;
 
         // Use --continue to keep the full analysis context from the same session
-        let cmd = build_claude_cmd("claude_cli", &prompt, 20, true);
+        let cmd = build_claude_cmd("claude_cli", &prompt, 20, true, None);
         let exec_result = tokio::time::timeout(
             Duration::from_secs(600),
             self.sandbox_registry.exec(
@@ -940,7 +940,7 @@ impl AutofixerService {
         });
 
         // Use --continue to resume the same conversation in the sandbox
-        let cmd = build_claude_cmd("claude_cli", &prompt, 10, true);
+        let cmd = build_claude_cmd("claude_cli", &prompt, 10, true, None);
         let exec_result = tokio::time::timeout(
             Duration::from_secs(300),
             self.sandbox_registry.exec(
@@ -1275,6 +1275,7 @@ mod tests {
             ai_output: None,
             ai_reasoning: None,
             ai_model: None,
+            ai_provider: None,
             tokens_input: 0,
             tokens_output: 0,
             estimated_cost_cents: 0,

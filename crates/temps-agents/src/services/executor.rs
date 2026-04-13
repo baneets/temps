@@ -517,22 +517,9 @@ impl AgentExecutor {
                 .await?;
         }
 
-        // ── MCP servers: resolve slugs from project definitions and merge into settings.json ──
+        // ── MCP servers: resolve slugs from project definitions and write provider-specific configs ──
         if has_mcp || has_custom_tools {
-            let existing_settings = self
-                .sandbox_registry
-                .read_file(run_id, "/workspace/.claude/settings.json")
-                .await
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-
-            let mut settings = existing_settings;
-            let mut merged = settings
-                .get("mcpServers")
-                .and_then(|v| v.as_object())
-                .cloned()
-                .unwrap_or_default();
+            let mut merged = serde_json::Map::new();
 
             // Resolve MCP slugs from project definitions
             if has_mcp {
@@ -572,66 +559,12 @@ impl AgentExecutor {
                 }
             }
 
-            settings["mcpServers"] = serde_json::Value::Object(merged.clone());
-
-            let mut settings_str = serde_json::to_string_pretty(&settings).unwrap_or_default();
-            if !secrets.is_empty() && settings_str.contains("${TEMPS_SECRET:") {
-                settings_str = crate::services::secret_service::SecretService::resolve_placeholders(
-                    &settings_str,
-                    secrets,
-                );
-            }
-
-            self.sandbox_registry
-                .write_file(
-                    run_id,
-                    "/workspace/.claude/settings.json",
-                    settings_str.as_bytes(),
-                    0o644,
-                )
-                .await?;
-
-            // Also write MCP servers to ~/.claude.json (user-level global config).
-            // Claude Code reads mcpServers from both project settings and the global
-            // config; some MCP servers need to be visible at the global level.
-            let home_claude_json = self
-                .sandbox_registry
-                .read_file(run_id, "/home/temps/.claude.json")
-                .await
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-
-            let mut home_config = home_claude_json;
-            let mut home_mcp = home_config
-                .get("mcpServers")
-                .and_then(|v| v.as_object())
-                .cloned()
-                .unwrap_or_default();
-
-            // Merge the same MCP servers into the global config
-            for (k, v) in &merged {
-                home_mcp.insert(k.clone(), v.clone());
-            }
-            home_config["mcpServers"] = serde_json::Value::Object(home_mcp);
-
-            let mut home_config_str =
-                serde_json::to_string_pretty(&home_config).unwrap_or_default();
-            if !secrets.is_empty() && home_config_str.contains("${TEMPS_SECRET:") {
-                home_config_str =
-                    crate::services::secret_service::SecretService::resolve_placeholders(
-                        &home_config_str,
-                        secrets,
-                    );
-            }
-
-            self.sandbox_registry
-                .write_file(
-                    run_id,
-                    "/home/temps/.claude.json",
-                    home_config_str.as_bytes(),
-                    0o644,
-                )
+            // Write MCP configs in all provider formats (Claude Code + active provider)
+            let fs = super::sandbox_injector::RegistrySandboxFs {
+                registry: self.sandbox_registry.clone(),
+                run_id,
+            };
+            super::sandbox_injector::write_mcp_configs(&fs, &merged, secrets, &config.ai_provider)
                 .await?;
 
             self.run_service
@@ -639,7 +572,8 @@ impl AgentExecutor {
                     run_id,
                     "info",
                     &format!(
-                        "Wrote .claude/settings.json and ~/.claude.json with {} MCP server(s){}",
+                        "Wrote MCP config ({}) with {} server(s){}",
+                        config.ai_provider,
                         merged.len(),
                         if has_custom_tools {
                             " (including custom tools proxy)"
@@ -1119,6 +1053,25 @@ impl AgentExecutor {
         }
     }
 
+    /// Read the platform's configured default AI provider from settings.
+    async fn platform_default_provider(&self) -> String {
+        use temps_entities::settings;
+        let record = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten();
+
+        record
+            .as_ref()
+            .and_then(|r| r.data.get("agent_sandbox"))
+            .and_then(|v| v.get("default_provider"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("claude_cli")
+            .to_string()
+    }
+
     /// Execute a single autopilot run. Handles the full lifecycle from cloning to PR creation.
     pub async fn execute_run(&self, run_id: i32) {
         tracing::info!("Starting autopilot run {}", run_id);
@@ -1187,11 +1140,19 @@ impl AgentExecutor {
         // Use agent_id from the run record (set when the run was created).
         // Fall back to config_id for backward compatibility with old runs.
         let agent_id = run.agent_id.unwrap_or(run.config_id);
-        let config = self.config_service.get_agent_by_id(agent_id).await?.ok_or(
+        let mut config = self.config_service.get_agent_by_id(agent_id).await?.ok_or(
             AgentError::ConfigNotFound {
                 project_id: run.project_id,
             },
         )?;
+
+        // For YAML-sourced workflows that don't declare an explicit provider,
+        // the DB row stores whatever the platform default was at sync time.
+        // Always re-resolve from the current platform default so the admin's
+        // choice takes effect immediately without needing a redeploy.
+        if config.source == "yaml" && config.ai_provider_key_id.is_none() {
+            config.ai_provider = self.platform_default_provider().await;
+        }
 
         // Step 3: Load the project
         let project = projects::Entity::find_by_id(run.project_id)
@@ -1301,22 +1262,55 @@ impl AgentExecutor {
                 Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime))
             };
 
-            // Inject auth credentials into sandbox based on auth_type and provider
+            // Inject auth credentials into sandbox based on auth_type and provider.
+            // Use per-provider credentials from the `providers` map so each CLI
+            // gets its own key/token, not just the legacy Claude-only flat fields.
             let mut sandbox_env = std::collections::HashMap::new();
-            if let Some(ref encrypted_key) = global_sandbox.api_key_encrypted {
-                if let Ok(key) = self.encryption_service.decrypt_string(encrypted_key) {
-                    if global_sandbox.auth_type == "subscription" {
-                        // Subscription/OAuth token — only CLAUDE_CODE_OAUTH_TOKEN
-                        // Do NOT set ANTHROPIC_API_KEY (API rejects OAuth tokens)
-                        sandbox_env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key);
-                    } else {
-                        // API key — set the right env var for the provider
-                        match global_sandbox.default_provider.as_str() {
-                            "codex_cli" => {
-                                sandbox_env.insert("OPENAI_API_KEY".to_string(), key);
-                            }
-                            _ => {
-                                sandbox_env.insert("ANTHROPIC_API_KEY".to_string(), key);
+            // Stash decrypted credential + auth_type for file-based seeding after
+            // the sandbox container is created (ApiKey goes into env vars now;
+            // ConfigFile/OauthToken need the sandbox filesystem).
+            let mut deferred_credential: Option<(String, String)> = None; // (value, auth_type)
+            {
+                let provider_cfg = global_sandbox.provider_config(&config.ai_provider);
+                if let Some(ref encrypted) = provider_cfg.credentials_encrypted {
+                    if !encrypted.is_empty() {
+                        if let Ok(key) = self.encryption_service.decrypt_string(encrypted) {
+                            let provider_entry =
+                                crate::ai_cli::catalog::find_provider(&config.ai_provider);
+                            let auth_type = if provider_cfg.auth_type.is_empty() {
+                                provider_entry
+                                    .map(|p| p.default_flavor().id)
+                                    .unwrap_or("api_key")
+                                    .to_string()
+                            } else {
+                                provider_cfg.auth_type.clone()
+                            };
+                            let flavor = provider_entry.and_then(|p| p.flavor(&auth_type));
+
+                            match flavor.map(|f| f.format) {
+                                Some(crate::ai_cli::catalog::CredentialFormat::ApiKey) => {
+                                    let env_var = flavor.unwrap().env_var;
+                                    sandbox_env.insert(env_var.to_string(), key);
+                                }
+                                Some(crate::ai_cli::catalog::CredentialFormat::OauthToken) => {
+                                    // Claude OAuth needs the env var AND the credential file
+                                    sandbox_env
+                                        .insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key.clone());
+                                    deferred_credential = Some((key, auth_type));
+                                }
+                                Some(crate::ai_cli::catalog::CredentialFormat::ConfigFile) => {
+                                    // ConfigFile (Codex auth.json, OpenCode auth.json) —
+                                    // written to the sandbox filesystem after creation
+                                    deferred_credential = Some((key, auth_type));
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        "Unknown provider/auth_type {}/{} — falling back to env var",
+                                        config.ai_provider,
+                                        auth_type
+                                    );
+                                    sandbox_env.insert("ANTHROPIC_API_KEY".to_string(), key);
+                                }
                             }
                         }
                     }
@@ -1335,9 +1329,14 @@ impl AgentExecutor {
             );
             // Put the memory script dir on PATH so the AI can type
             // `memory write "..."` instead of the full /workspace/.temps/bin/memory.
+            // Include the AI CLI install locations baked into the sandbox image
+            // (claude → .local/bin, codex → .bun/bin, opencode → .opencode/bin).
+            // Docker's explicit `Config.Env` replaces the image's `ENV PATH`, so
+            // we must re-list those dirs here or non-interactive execs can't
+            // find the CLIs.
             sandbox_env.insert(
                 "PATH".to_string(),
-                "/workspace/.temps/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                "/workspace/.temps/bin:/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                     .to_string(),
             );
 
@@ -1395,6 +1394,79 @@ impl AgentExecutor {
                     None,
                 )
                 .await?;
+
+            // Write file-based credentials (ConfigFile / OauthToken) into the
+            // running sandbox. These can't go in env vars — they need the filesystem.
+            if let Some((cred_value, auth_type)) = deferred_credential {
+                if let Some(provider_entry) =
+                    crate::ai_cli::catalog::find_provider(&config.ai_provider)
+                {
+                    if let Some(flavor) = provider_entry.flavor(&auth_type) {
+                        let seed_path = flavor.seed_path;
+                        // Ensure parent directory exists
+                        if let Some(idx) = seed_path.rfind('/') {
+                            let parent = &seed_path[..idx];
+                            let _ = self
+                                .sandbox_registry
+                                .exec(
+                                    run_id,
+                                    vec!["mkdir".into(), "-p".into(), parent.to_string()],
+                                    std::collections::HashMap::new(),
+                                    None,
+                                )
+                                .await;
+                        }
+
+                        let file_bytes = match flavor.format {
+                            crate::ai_cli::catalog::CredentialFormat::OauthToken => {
+                                // Claude OAuth envelope
+                                let body = serde_json::json!({
+                                    "claudeAiOauth": {
+                                        "accessToken": cred_value,
+                                        "expiresAt": chrono::Utc::now().timestamp_millis() + 365 * 24 * 3600 * 1000,
+                                        "scopes": [
+                                            "user:inference",
+                                            "user:mcp_servers",
+                                            "user:profile",
+                                            "user:sessions:claude_code"
+                                        ],
+                                        "subscriptionType": "max",
+                                        "rateLimitTier": "default_claude_max_20x"
+                                    }
+                                });
+                                serde_json::to_vec_pretty(&body).unwrap_or_default()
+                            }
+                            crate::ai_cli::catalog::CredentialFormat::ConfigFile => {
+                                // Codex auth.json / OpenCode auth.json — write verbatim
+                                cred_value.into_bytes()
+                            }
+                            _ => Vec::new(),
+                        };
+
+                        if !file_bytes.is_empty() {
+                            if let Err(e) = self
+                                .sandbox_registry
+                                .write_file(run_id, seed_path, &file_bytes, 0o600)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to write credential file {} for run {}: {}",
+                                    seed_path,
+                                    run_id,
+                                    e
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "Seeded credential file {} for {} on run {}",
+                                    seed_path,
+                                    config.ai_provider,
+                                    run_id
+                                );
+                            }
+                        }
+                    }
+                }
+            }
 
             // Install the workflow memory script. Best-effort: if it fails
             // (e.g. jq not present in a custom image), we log a warning and
@@ -1641,16 +1713,32 @@ impl AgentExecutor {
                 api_key: api_key.clone(),
                 max_turns: config.max_turns,
                 timeout: Duration::from_secs(config.timeout_seconds as u64),
+                model: config.ai_model.clone(),
                 on_event: Some(on_event),
             };
             override_provider.run(ai_config).await?
         } else if use_sandbox {
             // Sandbox path: execute AI CLI inside isolated container
-            let cmd = build_claude_cmd(&config.ai_provider, &prompt, config.max_turns, false);
+            let cmd = build_claude_cmd(
+                &config.ai_provider,
+                &prompt,
+                config.max_turns,
+                false,
+                config.ai_model.as_deref(),
+            );
 
             let mut env = std::collections::HashMap::new();
             if !api_key.is_empty() {
-                env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
+                // Set the correct env var for the provider (e.g. OPENAI_API_KEY for Codex)
+                let env_var = crate::ai_cli::catalog::find_provider(&config.ai_provider)
+                    .and_then(|p| {
+                        p.auth_flavors.iter().find(|f| {
+                            matches!(f.format, crate::ai_cli::catalog::CredentialFormat::ApiKey)
+                        })
+                    })
+                    .map(|f| f.env_var)
+                    .unwrap_or("ANTHROPIC_API_KEY");
+                env.insert(env_var.to_string(), api_key.clone());
             }
 
             let exec_result = tokio::time::timeout(
@@ -1671,7 +1759,20 @@ impl AgentExecutor {
                 });
             }
 
-            let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+            // Parse output based on provider format
+            let parsed = if config.ai_provider == "codex_cli" {
+                let (tokens_input, tokens_output, model) =
+                    crate::ai_cli::codex::parse_codex_output(&exec_result.stdout);
+                crate::ai_cli::claude::ParsedClaudeOutput {
+                    tokens_input,
+                    tokens_output,
+                    model,
+                    session_id: None,
+                    is_max_turns_error: false,
+                }
+            } else {
+                crate::ai_cli::claude::parse_claude_output(&exec_result.stdout)
+            };
 
             AiRunResult {
                 output: exec_result.stdout,
@@ -1702,6 +1803,7 @@ impl AgentExecutor {
                 api_key: api_key.clone(),
                 max_turns: config.max_turns,
                 timeout: Duration::from_secs(config.timeout_seconds as u64),
+                model: config.ai_model.clone(),
                 on_event: Some(on_event),
             };
             provider.run(ai_config).await?
@@ -1754,6 +1856,7 @@ impl AgentExecutor {
                     api_key: api_key.clone(),
                     max_turns: config.max_turns,
                     timeout: Duration::from_secs(config.timeout_seconds as u64),
+                    model: config.ai_model.clone(),
                     on_event: Some(on_event),
                 };
                 override_provider.continue_conversation(ai_config).await?
@@ -1763,10 +1866,19 @@ impl AgentExecutor {
                     &continue_prompt,
                     config.max_turns,
                     true,
+                    config.ai_model.as_deref(),
                 );
                 let mut env = std::collections::HashMap::new();
                 if !api_key.is_empty() {
-                    env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
+                    let env_var = crate::ai_cli::catalog::find_provider(&config.ai_provider)
+                        .and_then(|p| {
+                            p.auth_flavors.iter().find(|f| {
+                                matches!(f.format, crate::ai_cli::catalog::CredentialFormat::ApiKey)
+                            })
+                        })
+                        .map(|f| f.env_var)
+                        .unwrap_or("ANTHROPIC_API_KEY");
+                    env.insert(env_var.to_string(), api_key.clone());
                 }
                 let exec_result = tokio::time::timeout(
                     Duration::from_secs(config.timeout_seconds as u64),
@@ -1782,7 +1894,19 @@ impl AgentExecutor {
                     break;
                 }
 
-                let parsed = crate::ai_cli::claude::parse_claude_output(&exec_result.stdout);
+                let parsed = if config.ai_provider == "codex_cli" {
+                    let (tokens_input, tokens_output, model) =
+                        crate::ai_cli::codex::parse_codex_output(&exec_result.stdout);
+                    crate::ai_cli::claude::ParsedClaudeOutput {
+                        tokens_input,
+                        tokens_output,
+                        model,
+                        session_id: None,
+                        is_max_turns_error: false,
+                    }
+                } else {
+                    crate::ai_cli::claude::parse_claude_output(&exec_result.stdout)
+                };
                 AiRunResult {
                     output: exec_result.stdout,
                     exit_code: exec_result.exit_code,
@@ -1806,6 +1930,7 @@ impl AgentExecutor {
                     api_key: api_key.clone(),
                     max_turns: config.max_turns,
                     timeout: Duration::from_secs(config.timeout_seconds as u64),
+                    model: config.ai_model.clone(),
                     on_event: Some(on_event),
                 };
                 provider.continue_conversation(ai_config).await?
@@ -1838,6 +1963,7 @@ impl AgentExecutor {
                 UpdateRunFields {
                     ai_output: Some(ai_result.output.clone()),
                     ai_model: ai_result.model.clone(),
+                    ai_provider: Some(config.ai_provider.clone()),
                     tokens_input: ai_result.tokens_input,
                     tokens_output: ai_result.tokens_output,
                     ai_session_id: ai_result.session_id.clone(),
@@ -2827,6 +2953,7 @@ pub fn build_claude_cmd(
     prompt: &str,
     max_turns: i32,
     continue_conversation: bool,
+    model: Option<&str>,
 ) -> Vec<String> {
     match provider_name {
         "claude_cli" => {
@@ -2848,16 +2975,32 @@ pub fn build_claude_cmd(
                 "--dangerously-skip-permissions".to_string(),
                 "--verbose".to_string(),
             ]);
+            if let Some(m) = model {
+                if !m.is_empty() {
+                    cmd.push("--model".to_string());
+                    cmd.push(m.to_string());
+                }
+            }
             cmd
         }
         "codex_cli" => {
-            vec![
-                "codex".to_string(),
-                "--approval-mode".to_string(),
-                "full-auto".to_string(),
-                "--quiet".to_string(),
-                prompt.to_string(),
-            ]
+            let mut cmd = vec!["codex".to_string(), "exec".to_string()];
+            if let Some(m) = model {
+                if !m.is_empty() {
+                    cmd.push("--model".to_string());
+                    cmd.push(m.to_string());
+                }
+            }
+            // Skip Codex's internal bubblewrap sandbox and approval prompts
+            // — we're already running inside a Docker container which
+            // provides isolation. This flag is designed for exactly this
+            // use case ("environments that are externally sandboxed").
+            cmd.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+            // Emit structured JSONL output (like Claude's --output-format
+            // stream-json) so each line is stored as an ai_event log entry.
+            cmd.push("--json".to_string());
+            cmd.push(prompt.to_string());
+            cmd
         }
         _ => {
             vec![provider_name.to_string(), prompt.to_string()]
@@ -3153,6 +3296,7 @@ mod tests {
             ai_output: None,
             ai_reasoning: None,
             ai_model: None,
+            ai_provider: None,
             tokens_input: 0,
             tokens_output: 0,
             estimated_cost_cents: 0,
@@ -3182,6 +3326,7 @@ mod tests {
             }),
             prompt: None,
             ai_provider: "fake_cli".into(),
+            ai_model: None,
             api_key_encrypted: Some("encrypted-key".into()),
             ai_provider_key_id: None,
             max_turns: 10,

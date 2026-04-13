@@ -16,6 +16,11 @@ pub struct CreateSessionRequest {
     pub project_id: i32,
     pub user_id: i32,
     pub ai_provider: String,
+    /// Optional model override. `None` means "fall back to the provider's
+    /// default_model from platform settings, or the CLI's own default if that
+    /// is also unset". Persisted as-is on the session row so it survives
+    /// provider-level model changes later.
+    pub ai_model: Option<String>,
     /// Branch the workspace should check out in its sandbox. None = project default.
     /// If `base_branch_name` is also set, this is the *new* branch to be created
     /// locally off `base_branch_name` during sandbox initialization.
@@ -25,6 +30,14 @@ pub struct CreateSessionRequest {
     /// `branch_name` as a new local branch on top of it.
     pub base_branch_name: Option<String>,
     pub metadata: Option<serde_json::Value>,
+    /// Slugs of skill definitions to inject into the sandbox at session start.
+    /// Resolved from `project_skill_definitions` (falls back to global).
+    pub skills: Option<Vec<String>>,
+    /// Slugs of MCP server definitions to inject into the sandbox at session
+    /// start. Deep-merged into `/workspace/.claude/settings.json` and
+    /// `/home/temps/.claude.json`. Resolved from `project_mcp_definitions`
+    /// (falls back to global).
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 /// Request to send a message in a workspace session.
@@ -130,9 +143,16 @@ impl WorkspaceService {
             user_id: Set(request.user_id),
             status: Set("active".to_string()),
             ai_provider: Set(request.ai_provider),
+            ai_model: Set(request.ai_model),
             branch_name: Set(request.branch_name),
             base_branch_name: Set(request.base_branch_name),
             metadata: Set(request.metadata),
+            skills_config: Set(request.skills.filter(|v| !v.is_empty()).map(|v| {
+                serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect())
+            })),
+            mcp_servers_config: Set(request.mcp_servers.filter(|v| !v.is_empty()).map(|v| {
+                serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect())
+            })),
             last_activity_at: Set(now),
             started_at: Set(now),
             created_at: Set(now),
@@ -581,6 +601,8 @@ mod tests {
             cpu_milli: None,
             memory_limit_mb: None,
             pids_limit: None,
+            mcp_servers_config: None,
+            skills_config: None,
             last_activity_at: now,
             started_at: now,
             closed_at: None,
@@ -617,9 +639,12 @@ mod tests {
                 project_id: 10,
                 user_id: 1,
                 ai_provider: "claude_cli".to_string(),
+                ai_model: None,
                 branch_name: None,
                 base_branch_name: None,
                 metadata: None,
+                skills: None,
+                mcp_servers: None,
             })
             .await;
 
@@ -639,9 +664,12 @@ mod tests {
                 project_id: 10,
                 user_id: 1,
                 ai_provider: "".to_string(),
+                ai_model: None,
                 branch_name: None,
                 base_branch_name: None,
                 metadata: None,
+                skills: None,
+                mcp_servers: None,
             })
             .await;
 

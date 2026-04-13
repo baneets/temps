@@ -81,8 +81,13 @@ impl AiCliProvider for CodexCliProvider {
         cmd.arg("exec")
             .arg(&config.prompt)
             .arg("--full-auto")
-            .arg("--json")
-            .current_dir(&config.work_dir)
+            .arg("--json");
+        if let Some(m) = config.model.as_deref() {
+            if !m.is_empty() {
+                cmd.arg("--model").arg(m);
+            }
+        }
+        cmd.current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -143,7 +148,7 @@ impl AiCliProvider for CodexCliProvider {
 }
 
 /// Parse Codex CLI JSON output for token usage and model information.
-fn parse_codex_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
+pub fn parse_codex_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
     let mut tokens_input: Option<i32> = None;
     let mut tokens_output: Option<i32> = None;
     let mut model: Option<String> = None;

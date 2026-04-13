@@ -39,6 +39,7 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { EllipsisVertical, Loader2, Plus, Server } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   type McpDefinition,
@@ -50,6 +51,7 @@ import {
 
 export function GlobalMcpServersSettings() {
   usePageTitle('MCP Servers')
+  const navigate = useNavigate()
 
   const [mcpToDelete, setMcpToDelete] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -131,7 +133,11 @@ export function GlobalMcpServersSettings() {
             const command = mcp.config.command as string | undefined
             const args = mcp.config.args as string[] | undefined
             return (
-              <Card key={mcp.id}>
+              <Card
+                key={mcp.id}
+                className="cursor-pointer hover:bg-muted/30 transition-colors"
+                onClick={() => navigate(`/settings/mcp-servers/${mcp.slug}`)}
+              >
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between">
                     <div className="flex items-start gap-3 flex-1">
@@ -158,7 +164,10 @@ export function GlobalMcpServersSettings() {
                       </div>
                     </div>
                     <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
+                      <DropdownMenuTrigger
+                        asChild
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <Button
                           variant="ghost"
                           size="icon"
@@ -167,7 +176,17 @@ export function GlobalMcpServersSettings() {
                           <EllipsisVertical className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
+                      <DropdownMenuContent
+                        align="end"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <DropdownMenuItem
+                          onClick={() =>
+                            navigate(`/settings/mcp-servers/${mcp.slug}`)
+                          }
+                        >
+                          View details
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openEdit(mcp)}>
                           Edit
                         </DropdownMenuItem>

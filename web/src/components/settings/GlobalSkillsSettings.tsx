@@ -45,6 +45,7 @@ import {
   Wand2,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   type SkillDefinition,
@@ -56,6 +57,7 @@ import {
 
 export function GlobalSkillsSettings() {
   usePageTitle('Skills')
+  const navigate = useNavigate()
 
   const [skillToDelete, setSkillToDelete] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -134,7 +136,11 @@ export function GlobalSkillsSettings() {
       ) : !error && skills && skills.length > 0 ? (
         <div className="space-y-3">
           {skills.map((skill) => (
-            <Card key={skill.id}>
+            <Card
+              key={skill.id}
+              className="cursor-pointer hover:bg-muted/30 transition-colors"
+              onClick={() => navigate(`/settings/skills/${skill.slug}`)}
+            >
               <CardHeader className="pb-2">
                 <div className="flex items-start justify-between">
                   <div className="flex items-start gap-3 flex-1">
@@ -161,12 +167,22 @@ export function GlobalSkillsSettings() {
                     </div>
                   </div>
                   <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
+                    <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
                       <Button variant="ghost" size="icon" className="h-8 w-8">
                         <EllipsisVertical className="h-4 w-4" />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
+                    <DropdownMenuContent
+                      align="end"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <DropdownMenuItem
+                        onClick={() =>
+                          navigate(`/settings/skills/${skill.slug}`)
+                        }
+                      >
+                        View details
+                      </DropdownMenuItem>
                       <DropdownMenuItem onClick={() => openEdit(skill)}>
                         Edit
                       </DropdownMenuItem>

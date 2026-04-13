@@ -9,16 +9,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-RUNTIMES=("${@:-node bun python rust go full}")
 if [ $# -eq 0 ]; then
     RUNTIMES=(node bun python rust go full)
+else
+    RUNTIMES=("$@")
 fi
 
 PRINT_DOCKERFILE="$REPO_ROOT/target/debug/examples/print_dockerfile"
 
-if [ ! -f "$PRINT_DOCKERFILE" ]; then
-    echo "Building print_dockerfile helper..."
-    cargo build --example print_dockerfile -p temps-agents --manifest-path "$REPO_ROOT/Cargo.toml"
+# Always rebuild the helper so Dockerfile changes in temps-agents land in
+# the pushed images. Cargo short-circuits if nothing changed, so the cost
+# is just a stat-check on incremental builds.
+echo "Building print_dockerfile helper..."
+cargo build --example print_dockerfile -p temps-agents --manifest-path "$REPO_ROOT/Cargo.toml"
+
+if [ ! -x "$PRINT_DOCKERFILE" ]; then
+    echo "error: print_dockerfile binary not found at $PRINT_DOCKERFILE after build" >&2
+    exit 1
 fi
 
 # Ensure buildx builder with multi-arch support

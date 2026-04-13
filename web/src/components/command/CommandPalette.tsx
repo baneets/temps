@@ -1,4 +1,8 @@
 import { getProjectsOptions } from '@/api/client/@tanstack/react-query.gen'
+import {
+  listGlobalMcpDefinitions,
+  listGlobalSkillDefinitions,
+} from '@/components/agents/api'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import {
   Command,
@@ -20,6 +24,7 @@ import {
   BarChart3,
   Bell,
   BellPlus,
+  Bot,
   Boxes,
   Cloud,
   Database,
@@ -44,6 +49,7 @@ import {
   SquareTerminal,
   Upload,
   Users,
+  Wand2,
   Workflow,
   type LucideIcon,
 } from 'lucide-react'
@@ -155,6 +161,24 @@ const settingsNavItems: NavigationItem[] = [
     url: '/settings/ai-gateway',
     icon: Sparkles,
     keywords: ['ai', 'llm', 'openai', 'anthropic', 'gateway', 'models', 'providers', 'chat', 'gpt', 'claude'],
+  },
+  {
+    title: 'AI Workflows',
+    url: '/settings/agent-sandbox',
+    icon: Bot,
+    keywords: ['ai', 'workflows', 'agents', 'sandbox', 'automation', 'autopilot'],
+  },
+  {
+    title: 'Skills',
+    url: '/settings/skills',
+    icon: Wand2,
+    keywords: ['skills', 'ai', 'agents', 'claude', 'instructions', 'prompts', 'global'],
+  },
+  {
+    title: 'MCP Servers',
+    url: '/settings/mcp-servers',
+    icon: Server,
+    keywords: ['mcp', 'model', 'context', 'protocol', 'tools', 'servers', 'agents', 'claude', 'global'],
   },
   {
     title: 'Git Providers',
@@ -414,6 +438,30 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['cron', 'jobs', 'scheduled', 'tasks'],
   },
   {
+    title: 'Webhooks',
+    url: 'settings/webhooks',
+    icon: Workflow,
+    keywords: ['webhooks', 'hooks', 'events', 'callbacks', 'integrations'],
+  },
+  {
+    title: 'Project Skills',
+    url: 'settings/skills',
+    icon: Wand2,
+    keywords: ['skills', 'ai', 'agents', 'claude', 'instructions', 'project'],
+  },
+  {
+    title: 'Project MCP Servers',
+    url: 'settings/mcp-servers',
+    icon: Server,
+    keywords: ['mcp', 'model', 'context', 'protocol', 'tools', 'servers', 'project'],
+  },
+  {
+    title: 'Metrics',
+    url: 'monitoring',
+    icon: BarChart3,
+    keywords: ['metrics', 'monitoring', 'cpu', 'memory', 'resources'],
+  },
+  {
     title: 'Services',
     url: 'services',
     icon: Boxes,
@@ -431,6 +479,48 @@ const projectNavItems: NavigationItem[] = [
     icon: HardDrive,
     keywords: ['blob', 's3', 'files', 'storage', 'uploads', 'objects'],
   },
+  {
+    title: 'AI Gateway',
+    url: 'ai-gateway',
+    icon: Sparkles,
+    keywords: ['ai', 'gateway', 'llm', 'openai', 'anthropic', 'models'],
+  },
+  {
+    title: 'Agents',
+    url: 'agents',
+    icon: Bot,
+    keywords: ['agents', 'autopilot', 'ai', 'automation', 'workflows'],
+  },
+  {
+    title: 'Autofixer',
+    url: 'autofixer',
+    icon: Wand2,
+    keywords: ['autofix', 'autofixer', 'ai', 'errors', 'repair'],
+  },
+  {
+    title: 'Workspace',
+    url: 'workspace',
+    icon: SquareTerminal,
+    keywords: ['workspace', 'shell', 'terminal', 'exec'],
+  },
+  {
+    title: 'Error Alert Rules',
+    url: 'errors/alert-rules',
+    icon: Bell,
+    keywords: ['errors', 'alerts', 'rules', 'notifications'],
+  },
+  {
+    title: 'Security Scans',
+    url: 'security',
+    icon: Shield,
+    keywords: ['security', 'scans', 'vulnerabilities', 'cve'],
+  },
+  {
+    title: 'Request Logs',
+    url: 'request-logs',
+    icon: ScrollText,
+    keywords: ['logs', 'requests', 'http', 'traffic'],
+  },
 ]
 
 export function CommandPalette() {
@@ -438,7 +528,7 @@ export function CommandPalette() {
   const [search, setSearch] = useState('')
   const navigate = useNavigate()
   const location = useLocation()
-  const { plugins } = usePluginsContext()
+  const { plugins, projectNavEntries } = usePluginsContext()
 
   const { data: projectResponse, refetch: refetchProjects } = useQuery({
     ...getProjectsOptions({
@@ -453,6 +543,20 @@ export function CommandPalette() {
     [projectResponse]
   )
 
+  const { data: globalSkills = [], refetch: refetchSkills } = useQuery({
+    queryKey: ['global-skills'],
+    queryFn: () => listGlobalSkillDefinitions(),
+    enabled: open,
+    staleTime: 60_000,
+  })
+
+  const { data: globalMcpServers = [], refetch: refetchMcp } = useQuery({
+    queryKey: ['global-mcp-servers'],
+    queryFn: () => listGlobalMcpDefinitions(),
+    enabled: open,
+    staleTime: 60_000,
+  })
+
   // Detect if user is on a project page and extract slug
   const currentProjectSlug = useMemo(() => {
     const match = location.pathname.match(/^\/projects\/([^/]+)/)
@@ -463,12 +567,14 @@ export function CommandPalette() {
     if (!currentProjectSlug) return null
     return projects.find((p) => p.slug === currentProjectSlug)
   }, [currentProjectSlug, projects])
-  // Refetch projects when the dialog is opened or when react-query invalidates projects
+  // Refetch when the dialog is opened or when react-query invalidates
   useEffect(() => {
     if (open) {
       refetchProjects()
+      refetchSkills()
+      refetchMcp()
     }
-  }, [open, refetchProjects])
+  }, [open, refetchProjects, refetchSkills, refetchMcp])
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -503,6 +609,18 @@ export function CommandPalette() {
     [plugins]
   )
 
+  // Project-scoped plugin nav entries (relative URLs, prefixed at render time)
+  const projectPluginNavItems: NavigationItem[] = useMemo(
+    () =>
+      projectNavEntries.map((entry) => ({
+        title: entry.label,
+        url: entry.path,
+        icon: resolvePluginIcon(entry.icon),
+        keywords: ['plugin', 'project', entry.label.toLowerCase()],
+      })),
+    [projectNavEntries]
+  )
+
   // Create Fuse instances for fuzzy search
   const navFuse = useMemo(() => {
     const allNavItems = [
@@ -515,7 +633,10 @@ export function CommandPalette() {
 
     // Add project-specific navigation if we're on a project page
     if (currentProjectSlug && currentProject) {
-      const projectSpecificItems = projectNavItems.map((item) => ({
+      const projectSpecificItems = [
+        ...projectNavItems,
+        ...projectPluginNavItems,
+      ].map((item) => ({
         ...item,
         // Prepend project slug to URL for absolute navigation
         url: `/projects/${currentProjectSlug}/${item.url}`,
@@ -535,7 +656,7 @@ export function CommandPalette() {
       shouldSort: true,
       minMatchCharLength: 1,
     })
-  }, [currentProjectSlug, currentProject, pluginNavItems])
+  }, [currentProjectSlug, currentProject, pluginNavItems, projectPluginNavItems])
 
   const projectsFuse = useMemo(() => {
     return new Fuse(projects, {
@@ -550,12 +671,40 @@ export function CommandPalette() {
     })
   }, [projects])
 
+  const skillsFuse = useMemo(() => {
+    return new Fuse(globalSkills, {
+      keys: [
+        { name: 'name', weight: 2 },
+        { name: 'slug', weight: 1.5 },
+        { name: 'description', weight: 1 },
+      ],
+      threshold: 0.3,
+      includeScore: true,
+      shouldSort: true,
+      minMatchCharLength: 1,
+    })
+  }, [globalSkills])
+
+  const mcpFuse = useMemo(() => {
+    return new Fuse(globalMcpServers, {
+      keys: [
+        { name: 'name', weight: 2 },
+        { name: 'slug', weight: 1.5 },
+        { name: 'description', weight: 1 },
+      ],
+      threshold: 0.3,
+      includeScore: true,
+      shouldSort: true,
+      minMatchCharLength: 1,
+    })
+  }, [globalMcpServers])
+
   // Perform fuzzy search
   const searchResults = useMemo(() => {
     // Prepare project navigation with full URLs
     const projectNavigation =
       currentProjectSlug && currentProject
-        ? projectNavItems.map((item) => ({
+        ? [...projectNavItems, ...projectPluginNavItems].map((item) => ({
             ...item,
             url: `/projects/${currentProjectSlug}/${item.url}`,
           }))
@@ -570,6 +719,8 @@ export function CommandPalette() {
         plugins: pluginNavItems,
         projectNav: projectNavigation,
         projects: projects,
+        skills: globalSkills,
+        mcpServers: globalMcpServers,
         actions: ['toggle-theme'],
       }
     }
@@ -613,6 +764,10 @@ export function CommandPalette() {
     const projectResults = projectsFuse.search(search)
     const filteredProjects = projectResults.map((result) => result.item)
 
+    // Search skills & mcp servers
+    const filteredSkills = skillsFuse.search(search).map((r) => r.item)
+    const filteredMcp = mcpFuse.search(search).map((r) => r.item)
+
     // Search actions (simple fuzzy match for now)
     const actions: string[] = []
     const themeKeywords = ['toggle', 'theme', 'dark', 'light', 'mode']
@@ -629,14 +784,21 @@ export function CommandPalette() {
       plugins: groupedNavResults.plugins,
       projectNav: groupedNavResults.projectNav,
       projects: filteredProjects,
+      skills: filteredSkills,
+      mcpServers: filteredMcp,
       actions: actions,
     }
   }, [
     search,
     navFuse,
     projectsFuse,
+    skillsFuse,
+    mcpFuse,
     projects,
+    globalSkills,
+    globalMcpServers,
     pluginNavItems,
+    projectPluginNavItems,
     currentProjectSlug,
     currentProject,
   ])
@@ -759,6 +921,58 @@ export function CommandPalette() {
                   >
                     <item.icon className="h-4 w-4" />
                     <span>{item.title}</span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+              <CommandSeparator />
+            </>
+          )}
+
+          {/* Skills */}
+          {searchResults.skills.length > 0 && (
+            <>
+              <CommandGroup heading="Skills">
+                {searchResults.skills.slice(0, 10).map((skill) => (
+                  <CommandItem
+                    key={`skill-${skill.id}`}
+                    onSelect={() =>
+                      runCommand(() =>
+                        navigate(`/settings/skills/${skill.slug}`)
+                      )
+                    }
+                    className="flex items-center gap-2"
+                  >
+                    <Wand2 className="h-4 w-4" />
+                    <span className="truncate">{skill.name}</span>
+                    <span className="text-xs text-muted-foreground font-mono truncate">
+                      {skill.slug}
+                    </span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+              <CommandSeparator />
+            </>
+          )}
+
+          {/* MCP Servers */}
+          {searchResults.mcpServers.length > 0 && (
+            <>
+              <CommandGroup heading="MCP Servers">
+                {searchResults.mcpServers.slice(0, 10).map((mcp) => (
+                  <CommandItem
+                    key={`mcp-${mcp.id}`}
+                    onSelect={() =>
+                      runCommand(() =>
+                        navigate(`/settings/mcp-servers/${mcp.slug}`)
+                      )
+                    }
+                    className="flex items-center gap-2"
+                  >
+                    <Server className="h-4 w-4" />
+                    <span className="truncate">{mcp.name}</span>
+                    <span className="text-xs text-muted-foreground font-mono truncate">
+                      {mcp.slug}
+                    </span>
                   </CommandItem>
                 ))}
               </CommandGroup>

@@ -52,15 +52,22 @@ interface QuickstartStep {
 
 interface AiQuickstartProps {
   provider: string
-  authType: string
-  tokenSaved: boolean
   sandboxEnabled: boolean
+}
+
+interface CatalogEntry {
+  id: string
+  credential_saved: boolean
+  current_auth_type: string | null
+}
+
+interface CatalogResponse {
+  default_provider: string
+  providers: CatalogEntry[]
 }
 
 export function AiQuickstart({
   provider,
-  authType,
-  tokenSaved,
   sandboxEnabled,
 }: AiQuickstartProps) {
   const [collapsed, setCollapsed] = useState(false)
@@ -68,6 +75,14 @@ export function AiQuickstart({
   const [smokeResult, setSmokeResult] = useState<SmokeTestResult | null>(null)
   const [testing, setTesting] = useState(false)
   const [statusChecked, setStatusChecked] = useState(false)
+  const [catalog, setCatalog] = useState<CatalogResponse | null>(null)
+
+  // The credentials step needs to know whether *this* provider has a saved
+  // credential — pulled from the same catalog endpoint the AiProvidersCard
+  // uses so the two stay in sync.
+  const activeCatalogEntry = catalog?.providers.find((p) => p.id === provider)
+  const tokenSaved = !!activeCatalogEntry?.credential_saved
+  const authType = activeCatalogEntry?.current_auth_type ?? 'api_key'
 
   const providerName =
     provider === 'claude_cli'
@@ -90,6 +105,12 @@ export function AiQuickstart({
 
   useEffect(() => {
     fetchSandboxStatus()
+    fetch('/api/settings/ai-providers')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) setCatalog(data)
+      })
+      .catch(() => {})
   }, [fetchSandboxStatus])
 
   const handleTest = async () => {

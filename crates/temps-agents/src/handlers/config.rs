@@ -202,6 +202,8 @@ pub struct AgentConfigResponse {
     pub trigger_config: serde_json::Value,
     pub prompt: Option<String>,
     pub ai_provider: String,
+    /// Preferred model for the CLI (e.g. "sonnet", "gpt-5-codex"). `None` means default.
+    pub ai_model: Option<String>,
     /// `true` if an API key is set; `false` otherwise.
     pub api_key_set: bool,
     pub ai_provider_key_id: Option<i32>,
@@ -247,6 +249,7 @@ impl From<project_agents::Model> for AgentConfigResponse {
             trigger_config: model.trigger_config,
             prompt: model.prompt,
             ai_provider: model.ai_provider,
+            ai_model: model.ai_model,
             api_key_set: model.api_key_encrypted.is_some(),
             ai_provider_key_id: model.ai_provider_key_id,
             max_turns: model.max_turns,

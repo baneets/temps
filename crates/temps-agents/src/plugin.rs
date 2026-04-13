@@ -480,6 +480,7 @@ impl TempsPlugin for AgentsPlugin {
 
             let secret_service =
                 Arc::new(SecretService::new(db.clone(), encryption_service.clone()));
+            context.register_service(secret_service.clone());
 
             // Register the sync adapter so the deployment pipeline can sync agents from YAML
             let sync_adapter: Arc<dyn AgentSyncService> = Arc::new(AgentConfigSyncAdapter {
@@ -499,6 +500,7 @@ impl TempsPlugin for AgentsPlugin {
                 Arc::new(crate::services::definition_service::DefinitionService::new(
                     context.require_service::<sea_orm::DatabaseConnection>(),
                 ));
+            context.register_service(definition_service.clone());
             let executor = Arc::new(AgentExecutor::new(
                 db.clone(),
                 git_provider_manager.clone(),
@@ -661,6 +663,7 @@ mod tests {
             }),
             prompt: None,
             ai_provider: "claude_cli".to_string(),
+            ai_model: None,
             api_key_encrypted: None,
             ai_provider_key_id: None,
             max_turns: 10,

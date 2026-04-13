@@ -36,6 +36,26 @@ import {
 interface TerminalTabsProps {
   projectId: number
   sessionId: number
+  /// Provider id from the session (`claude_cli`, `codex_cli`, `opencode`).
+  /// Drives the primary tab's label + icon so it matches which CLI actually
+  /// runs inside the sandbox. `claude_cli` is the fallback for older
+  /// sessions created before this field existed.
+  aiProvider: string
+}
+
+/// Display label for the primary AI tab — derived from the session's
+/// provider so we never show "claude" when the container is actually
+/// running codex. Keep short so it fits the tab strip on small screens.
+function providerTabLabel(providerId: string): string {
+  switch (providerId) {
+    case 'codex_cli':
+      return 'codex'
+    case 'opencode':
+      return 'opencode'
+    case 'claude_cli':
+    default:
+      return 'claude'
+  }
 }
 
 export type TerminalTabsHandle = SessionTerminalHandle
@@ -59,9 +79,10 @@ function makeShellId(): string {
 }
 
 export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
-  function TerminalTabs({ projectId, sessionId }, ref) {
+  function TerminalTabs({ projectId, sessionId, aiProvider }, ref) {
   const handlesRef = useRef<Map<string, SessionTerminalHandle | null>>(new Map())
   const activeKeyRef = useRef<string>('claude-main')
+  const primaryLabel = providerTabLabel(aiProvider)
 
   useImperativeHandle(ref, () => ({
     sendKeys: (data: string) => {
@@ -73,10 +94,12 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       h?.focus()
     },
   }))
-  // The default tab — claude/main — always exists. Anything else is restored
-  // from the server on mount or added by the user clicking +.
+  // The default primary tab always exists. Its label tracks the session's
+  // provider (claude/codex/opencode) so the UI matches what's actually
+  // running inside the sandbox. Anything else is restored from the server
+  // on mount or added by the user clicking +.
   const [tabs, setTabs] = useState<LocalTab[]>([
-    { kind: 'claude', id: 'main', label: 'claude' },
+    { kind: 'claude', id: 'main', label: primaryLabel },
   ])
   const [activeKey, setActiveKey] = useState<string>('claude-main')
   activeKeyRef.current = activeKey
@@ -91,6 +114,20 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     setStatuses((prev) => (prev[key] === s ? prev : { ...prev, [key]: s }))
   const reconnect = (key: string) =>
     setReconnectKeys((prev) => ({ ...prev, [key]: (prev[key] ?? 0) + 1 }))
+
+  // Keep the primary AI tab's label in sync with the active session's
+  // provider. Without this, switching sessions (or the user activating a
+  // new provider in settings) would leave the tab stuck on the label the
+  // component was first mounted with.
+  useEffect(() => {
+    setTabs((current) =>
+      current.map((t) =>
+        t.kind === 'claude' && t.id === 'main'
+          ? { ...t, label: primaryLabel }
+          : t
+      )
+    )
+  }, [primaryLabel])
 
   // Rehydrate tabs from the container on mount: any tmux session named
   // `temps-{kind}-{id}` that we don't already know about gets added.
@@ -112,8 +149,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
               label:
                 t.kind === 'claude'
                   ? t.id === 'main'
-                    ? 'claude'
-                    : `claude (${t.id})`
+                    ? primaryLabel
+                    : `${primaryLabel} (${t.id})`
                   : `shell ${++shellCount}`,
             })
           }

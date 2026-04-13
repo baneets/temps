@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   GitBranch,
@@ -36,24 +36,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
 
@@ -66,7 +50,6 @@ import {
   listSessions,
   sendMessage,
   sessionStreamUrl,
-  startSession,
   updateSession,
   type WorkspaceMessage,
   type WorkspaceSession,
@@ -98,6 +81,7 @@ interface WorkspacePageProps {
 
 export function WorkspacePage({ project }: WorkspacePageProps) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   // Active session id is persisted in the URL (?session=N) so a hard refresh
   // (F5) lands on the same conversation. setActiveSessionId is a thin wrapper
@@ -118,10 +102,6 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   }
   const [streamedMessages, setStreamedMessages] = useState<WorkspaceMessage[]>([])
   const [inputValue, setInputValue] = useState('')
-  const [newSessionOpen, setNewSessionOpen] = useState(false)
-  const [selectedBranch, setSelectedBranch] = useState<string>('')
-  const [createNewBranch, setCreateNewBranch] = useState(false)
-  const [newBranchName, setNewBranchName] = useState<string>('')
   // Sidebar is hidden by default; users open it via the toggle in the chat
   // panel header. The mobile-style session Select in the chat header always
   // works regardless of sidebar state.
@@ -131,35 +111,6 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   const eventSourceRef = useRef<EventSource | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<TerminalTabsHandle | null>(null)
-
-  // Fetch git branches for the project (only when the dialog is open)
-  const branchesQuery = useQuery({
-    queryKey: [
-      'workspace-branches',
-      project.repo_owner,
-      project.repo_name,
-      project.git_provider_connection_id,
-    ],
-    queryFn: async () => {
-      if (
-        !project.repo_owner ||
-        !project.repo_name ||
-        !project.git_provider_connection_id
-      ) {
-        return { branches: [] }
-      }
-      const res = await fetch(
-        `/api/repositories/${encodeURIComponent(project.repo_owner)}/${encodeURIComponent(project.repo_name)}/branches?connection_id=${project.git_provider_connection_id}`,
-      )
-      if (!res.ok) throw new Error(`Failed to load branches: ${res.status}`)
-      return res.json() as Promise<{ branches: { name: string }[] }>
-    },
-    enabled:
-      newSessionOpen &&
-      !!project.repo_owner &&
-      !!project.repo_name &&
-      !!project.git_provider_connection_id,
-  })
 
   // Fetch sessions list
   const sessionsQuery = useQuery({
@@ -174,59 +125,10 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
     enabled: activeSessionId !== null,
   })
 
-  // Create session mutation. Two modes:
-  //   - branch only: check out an existing branch in the sandbox.
-  //   - base + new branch: clone the base, create the new branch off it
-  //     locally inside the sandbox (does not push to remote).
-  const createSession = useMutation({
-    mutationFn: (args: { branchName?: string; baseBranchName?: string }) =>
-      startSession(project.id, {
-        ...(args.branchName ? { branch_name: args.branchName } : {}),
-        ...(args.baseBranchName
-          ? { base_branch_name: args.baseBranchName }
-          : {}),
-      }),
-    onSuccess: (session) => {
-      setActiveSessionId(session.id)
-      setStreamedMessages([])
-      setNewSessionOpen(false)
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'sessions'],
-      })
-      toast.success(
-        session.branch_name
-          ? `Workspace session started on ${session.branch_name}`
-          : 'Workspace session started',
-      )
-    },
-    onError: (error: Error) => {
-      toast.error(`Failed to start session: ${error.message}`)
-    },
-  })
-
-  const openNewSessionDialog = () => {
-    setSelectedBranch(project.main_branch ?? '')
-    setCreateNewBranch(false)
-    setNewBranchName('')
-    setNewSessionOpen(true)
-  }
-
-  const handleConfirmNewSession = () => {
-    const base = selectedBranch.trim()
-    if (createNewBranch) {
-      const newBranch = newBranchName.trim()
-      if (!newBranch) {
-        toast.error('Enter a name for the new branch')
-        return
-      }
-      if (!base) {
-        toast.error('Pick a base branch to fork from')
-        return
-      }
-      createSession.mutate({ branchName: newBranch, baseBranchName: base })
-    } else {
-      createSession.mutate({ branchName: base || undefined })
-    }
+  // Navigate to the dedicated new-session page. Skills + MCP lists can be
+  // long, so a full page lets them grow vertically with filtering.
+  const openNewSession = () => {
+    navigate('new', { relative: 'path' })
   }
 
   // Close session mutation
@@ -502,16 +404,8 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
               <Sparkles className="h-4 w-4" />
               Sessions
             </h3>
-            <Button
-              size="sm"
-              onClick={openNewSessionDialog}
-              disabled={createSession.isPending}
-            >
-              {createSession.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="h-4 w-4" />
-              )}
+            <Button size="sm" onClick={openNewSession}>
+              <Plus className="h-4 w-4" />
               New
             </Button>
           </div>
@@ -554,8 +448,8 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
               setActiveSessionId(id)
               setStreamedMessages([])
             }}
-            onCreate={openNewSessionDialog}
-            creating={createSession.isPending}
+            onCreate={openNewSession}
+            creating={false}
           />
         ) : (
           <>
@@ -623,6 +517,27 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                       )}
                     </span>
                   )}
+                  {activeSessionQuery.data?.session.skills?.map((slug) => (
+                    <a
+                      key={`skill-${slug}`}
+                      href={`/settings/skills/${slug}`}
+                      title={`Skill: ${slug}`}
+                      className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded shrink-0 hover:bg-muted/80"
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      {slug}
+                    </a>
+                  ))}
+                  {activeSessionQuery.data?.session.mcp_servers?.map((slug) => (
+                    <a
+                      key={`mcp-${slug}`}
+                      href={`/settings/mcp-servers/${slug}`}
+                      title={`MCP server: ${slug}`}
+                      className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded shrink-0 hover:bg-muted/80"
+                    >
+                      {'{mcp}'} {slug}
+                    </a>
+                  ))}
                 </h3>
                 <p className="text-xs text-muted-foreground hidden lg:block">
                   {activeSessionQuery.data?.session.ai_provider ?? 'claude_cli'}
@@ -636,15 +551,10 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 <Button
                   size="icon"
                   variant="ghost"
-                  onClick={openNewSessionDialog}
-                  disabled={createSession.isPending}
+                  onClick={openNewSession}
                   title="New session"
                 >
-                  {createSession.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Plus className="h-4 w-4" />
-                  )}
+                  <Plus className="h-4 w-4" />
                 </Button>
                 <Button
                   size="icon"
@@ -805,6 +715,9 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                     ref={terminalRef}
                     projectId={project.id}
                     sessionId={activeSessionId}
+                    aiProvider={
+                      activeSessionQuery.data?.session.ai_provider ?? 'claude_cli'
+                    }
                   />
                   {/* Floating special-keys dropdown — anchored bottom-right
                       of the terminal pane so it stays out of the way of the
@@ -940,110 +853,6 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
         )}
       </Card>
 
-      {/* New session dialog with branch picker */}
-      <Dialog open={newSessionOpen} onOpenChange={setNewSessionOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Start a new workspace session</DialogTitle>
-            <DialogDescription>
-              Pick the branch the AI should work on. The repo is cloned into a
-              fresh sandbox checked out at this branch.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 py-2">
-            <label className="text-sm font-medium">
-              {createNewBranch ? 'Base branch (fork from)' : 'Branch'}
-            </label>
-            {!project.repo_owner || !project.repo_name ? (
-              <p className="text-sm text-muted-foreground">
-                No git repository connected to this project — the session will
-                start with an empty workspace.
-              </p>
-            ) : branchesQuery.isPending ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading branches…
-              </div>
-            ) : branchesQuery.isError ? (
-              <p className="text-sm text-destructive">
-                Failed to load branches. Falls back to project default.
-              </p>
-            ) : (
-              <Select value={selectedBranch} onValueChange={setSelectedBranch}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a branch" />
-                </SelectTrigger>
-                <SelectContent>
-                  {branchesQuery.data?.branches.map((b) => (
-                    <SelectItem key={b.name} value={b.name}>
-                      {b.name}
-                      {b.name === project.main_branch ? ' (default)' : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-
-            {project.repo_owner && project.repo_name && (
-              <>
-                <div className="flex items-center gap-2 pt-1">
-                  <Checkbox
-                    id="create-new-branch"
-                    checked={createNewBranch}
-                    onCheckedChange={(v) => setCreateNewBranch(v === true)}
-                  />
-                  <label
-                    htmlFor="create-new-branch"
-                    className="text-sm cursor-pointer select-none"
-                  >
-                    Create a new branch off this one
-                  </label>
-                </div>
-
-                {createNewBranch && (
-                  <div className="space-y-1">
-                    <label className="text-sm font-medium">
-                      New branch name
-                    </label>
-                    <Input
-                      value={newBranchName}
-                      onChange={(e) => setNewBranchName(e.target.value)}
-                      placeholder="feature/my-change"
-                      autoFocus
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      The branch is created locally inside the sandbox. It
-                      isn't pushed until you (or the AI) push it.
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setNewSessionOpen(false)}
-              disabled={createSession.isPending}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleConfirmNewSession}
-              disabled={createSession.isPending}
-            >
-              {createSession.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-1" />
-              ) : (
-                <Plus className="h-4 w-4 mr-1" />
-              )}
-              Start session
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }
@@ -1174,8 +983,8 @@ function SessionPickerState({
   creating,
 }: SessionPickerStateProps) {
   return (
-    <div className="flex-1 min-h-0 flex flex-col items-center justify-center p-6 lg:p-10">
-      <div className="w-full max-w-xl flex flex-col items-center">
+    <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center p-6 lg:p-10">
+      <div className="w-full max-w-xl flex flex-col items-center my-auto">
         <Sparkles className="h-10 w-10 mb-3 text-muted-foreground" />
         <h3 className="text-lg font-semibold mb-1 text-center">
           Pick a session or start a new one

@@ -27,6 +27,7 @@ pub struct Model {
     pub ai_output: Option<String>,
     pub ai_reasoning: Option<String>,
     pub ai_model: Option<String>,
+    pub ai_provider: Option<String>,
     pub tokens_input: i32,
     pub tokens_output: i32,
     pub estimated_cost_cents: i32,

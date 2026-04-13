@@ -53,7 +53,8 @@ export function AgentSettingsDialog({
   const [name, setName] = useState(agent?.name ?? '')
   const [description, setDescription] = useState(agent?.description ?? '')
   const [enabled, setEnabled] = useState(agent?.enabled ?? false)
-  const [aiProvider, setAiProvider] = useState(agent?.ai_provider ?? 'claude_cli')
+  const [aiProvider, setAiProvider] = useState(agent?.ai_provider ?? '')
+  const [aiModel, setAiModel] = useState<string>(agent?.ai_model ?? '')
   const [prompt, setPrompt] = useState(agent?.prompt ?? '')
   const [maxTurns, setMaxTurns] = useState(agent?.max_turns ?? 25)
   const [timeoutSeconds, setTimeoutSeconds] = useState(agent?.timeout_seconds ?? 600)
@@ -93,7 +94,8 @@ export function AgentSettingsDialog({
     setName(agent?.name ?? '')
     setDescription(agent?.description ?? '')
     setEnabled(agent?.enabled ?? false)
-    setAiProvider(agent?.ai_provider ?? 'claude_cli')
+    setAiProvider(agent?.ai_provider ?? '')
+    setAiModel(agent?.ai_model ?? '')
     setPrompt(agent?.prompt ?? '')
     setMaxTurns(agent?.max_turns ?? 25)
     setTimeoutSeconds(agent?.timeout_seconds ?? 600)
@@ -115,6 +117,36 @@ export function AgentSettingsDialog({
   // Reset form when agent changes (opening dialog for a different agent)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { resetForm() }, [agent?.id, open])
+
+  // Fetch the AI provider catalog so we can render a model picker driven by
+  // the same `models` list the settings page uses. Empty `models` for a
+  // provider (e.g. OpenCode) hides the dropdown — that provider picks its own.
+  const { data: providerCatalog } = useQuery({
+    queryKey: ['ai-provider-catalog'],
+    queryFn: async () => {
+      const res = await fetch('/api/settings/ai-providers')
+      if (!res.ok) return null
+      return res.json() as Promise<{
+        default_provider: string
+        providers: Array<{ id: string; models: string[]; default_model: string | null }>
+      }>
+    },
+    enabled: open,
+    staleTime: 60 * 1000,
+  })
+
+  const availableModels =
+    providerCatalog?.providers.find((p) => p.id === aiProvider)?.models ?? []
+
+  // When creating a new workflow and the catalog loads, sync the provider
+  // dropdown to the platform's configured default instead of hardcoding claude_cli.
+  useEffect(() => {
+    if (!isEdit && providerCatalog?.default_provider) {
+      setAiProvider((prev) =>
+        prev === '' ? providerCatalog.default_provider : prev,
+      )
+    }
+  }, [isEdit, providerCatalog?.default_provider])
 
   // Fetch available definitions: project-level + global
   const { data: projectSkills = [] } = useQuery({
@@ -201,6 +233,7 @@ export function AgentSettingsDialog({
         description: description || undefined,
         enabled,
         ai_provider: aiProvider,
+        ai_model: aiModel === '' ? null : aiModel,
         trigger_config: triggerConfig,
         prompt: prompt || undefined,
         max_turns: maxTurns,
@@ -230,6 +263,7 @@ export function AgentSettingsDialog({
         description: description || undefined,
         enabled,
         ai_provider: aiProvider,
+        ai_model: aiModel === '' ? null : aiModel,
         trigger_config: triggerConfig,
         prompt: prompt || undefined,
         max_turns: maxTurns,
@@ -378,7 +412,15 @@ export function AgentSettingsDialog({
             <h3 className="text-sm font-medium">AI Provider</h3>
             <div className="space-y-1.5">
               <Label htmlFor="ai-provider">Provider</Label>
-              <Select value={aiProvider} onValueChange={setAiProvider}>
+              <Select
+                value={aiProvider}
+                onValueChange={(v) => {
+                  setAiProvider(v)
+                  // Reset model when switching provider — the catalog model
+                  // lists don't overlap (e.g. "sonnet" vs "gpt-5-codex").
+                  setAiModel('')
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
@@ -389,6 +431,28 @@ export function AgentSettingsDialog({
                 </SelectContent>
               </Select>
             </div>
+            {availableModels.length > 0 && (
+              <div className="space-y-1.5">
+                <Label htmlFor="ai-model">Model</Label>
+                <Select
+                  value={aiModel === '' ? '__default__' : aiModel}
+                  onValueChange={(v) => setAiModel(v === '__default__' ? '' : v)}
+                >
+                  <SelectTrigger id="ai-model">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__default__">Use provider default</SelectItem>
+                    {availableModels.map((m) => (
+                      <SelectItem key={m} value={m}>{m}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Overrides the provider's default model. Passed as <code className="bg-muted px-1 rounded">--model</code> to the CLI.
+                </p>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="prompt">Custom prompt</Label>
               <Textarea

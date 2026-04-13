@@ -17,6 +17,7 @@ export interface Agent {
   }
   prompt: string | null
   ai_provider: string
+  ai_model: string | null
   api_key_set: boolean
   ai_provider_key_id: number | null
   max_turns: number
@@ -59,6 +60,7 @@ export interface AgentRun {
   ai_output: string | null
   ai_reasoning: string | null
   ai_model: string | null
+  ai_provider: string | null
   tokens_input: number
   tokens_output: number
   estimated_cost_cents: number
@@ -92,6 +94,7 @@ export interface CreateAgentRequest {
   description?: string
   enabled?: boolean
   ai_provider?: string
+  ai_model?: string | null
   api_key?: string
   trigger_config?: Record<string, unknown>
   prompt?: string
@@ -114,6 +117,7 @@ export interface UpdateAgentRequest {
   description?: string
   enabled?: boolean
   ai_provider?: string
+  ai_model?: string | null
   api_key?: string
   trigger_config?: Record<string, unknown>
   prompt?: string

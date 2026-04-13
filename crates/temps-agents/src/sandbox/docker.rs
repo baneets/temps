@@ -130,7 +130,7 @@ pub fn dockerfile_for_runtime(runtime: &str) -> String {
         r#"FROM {base}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/home/temps/.local/bin:/usr/local/bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-RUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} wget tmux && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} wget tmux bubblewrap && rm -rf /var/lib/apt/lists/*
 RUN {extra_run}
 {bun_install}# Install GitHub CLI from official apt repo
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
@@ -172,14 +172,34 @@ RUN mkdir -p /run/temps-pty && chown temps:temps /run/temps-pty && chmod 0700 /r
 # if the parent env wasn't propagated.
 USER temps
 ENV HOME=/home/temps
+# Make every AI CLI bin directory discoverable by all shells — interactive or
+# not. Bashrc alone isn't enough: `docker exec` and the workspace terminal
+# launch non-login shells that don't source it, so commands were silently
+# invisible. Each CLI lives in its own tree:
+#   - claude:   ~/.local/bin/claude (native installer)
+#   - codex:    ~/.bun/bin/codex (bun add -g)
+#   - opencode: ~/.opencode/bin/opencode (curl|bash installer, hardcoded path)
+ENV PATH=/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:$PATH
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && /home/temps/.local/bin/claude --version \
-    && echo 'export PATH=/home/temps/.local/bin:$PATH' >> /home/temps/.bashrc
-# Backup Claude CLI to a path outside /home/temps so named-volume mounts
-# (which overlay the entire home dir) don't mask the binary. The container
-# start-up hook restores from here when the volume is stale.
+    && echo 'export PATH=/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:$PATH' >> /home/temps/.bashrc
+RUN BUN_INSTALL=/home/temps/.bun bun add -g @openai/codex \
+    && /home/temps/.bun/bin/codex --version
+RUN curl -fsSL https://opencode.ai/install | bash \
+    && /home/temps/.opencode/bin/opencode --version
+# Backup Claude CLI + Codex + OpenCode to a path outside /home/temps so
+# named-volume mounts (which overlay the entire home dir) don't mask the
+# binaries. The container start-up hook restores from here when the volume
+# is stale. Each CLI installer picks its own home subdir, so we mirror all
+# three:
+#   - ~/.local       → claude (native installer)
+#   - ~/.bun         → codex (bun add -g)
+#   - ~/.opencode    → opencode (curl|bash installer, hardcoded INSTALL_DIR)
 USER root
-RUN cp -a /home/temps/.local /opt/claude-backup
+RUN mkdir -p /opt/claude-backup \
+    && cp -a /home/temps/.local /opt/claude-backup/local \
+    && cp -a /home/temps/.bun /opt/claude-backup/bun \
+    && cp -a /home/temps/.opencode /opt/claude-backup/opencode
 USER temps
 WORKDIR /workspace
 "#
@@ -841,10 +861,15 @@ impl SandboxProvider for DockerSandboxProvider {
                 .await;
         }
 
-        // Ensure Claude CLI is present in the home volume. Named volumes
-        // persist across image rebuilds and mask the image's /home/temps.
-        // Strategy: try /opt/claude-backup first (local builds), fall back
-        // to running the installer if Claude is still missing.
+        // Ensure AI CLIs are present in the home volume. Named volumes
+        // persist across image rebuilds and mask the image's /home/temps,
+        // wiping claude/codex/opencode every time the volume gets recycled.
+        // Strategy: restore from /opt/claude-backup (local builds always
+        // populate it), fall back to re-running the claude installer if
+        // /opt/claude-backup is missing entirely (older Hub images).
+        //
+        // We restore both ~/.local (claude + opencode) and ~/.bun (codex)
+        // because bun installs codex into its own global tree, not ~/.local.
         {
             let exec = self
                 .docker
@@ -856,10 +881,21 @@ impl SandboxProvider for DockerSandboxProvider {
                             "sh".to_string(),
                             "-c".to_string(),
                             concat!(
-                                "if [ -x /home/temps/.local/bin/claude ]; then exit 0; fi; ",
-                                "echo 'Claude CLI missing in home volume, restoring...'; ",
-                                "if [ -d /opt/claude-backup ]; then ",
-                                "  cp -a /opt/claude-backup/* /home/temps/.local/ && ",
+                                "need_restore=0; ",
+                                "[ -x /home/temps/.local/bin/claude ] || need_restore=1; ",
+                                "[ -x /home/temps/.bun/bin/codex ] || need_restore=1; ",
+                                "[ -x /home/temps/.opencode/bin/opencode ] || need_restore=1; ",
+                                "if [ \"$need_restore\" = \"0\" ]; then exit 0; fi; ",
+                                "echo 'AI CLIs missing in home volume, restoring...'; ",
+                                "if [ -d /opt/claude-backup/local ]; then ",
+                                "  mkdir -p /home/temps/.local /home/temps/.bun /home/temps/.opencode && ",
+                                "  cp -a /opt/claude-backup/local/. /home/temps/.local/ && ",
+                                "  cp -a /opt/claude-backup/bun/. /home/temps/.bun/ && ",
+                                "  cp -a /opt/claude-backup/opencode/. /home/temps/.opencode/ && ",
+                                "  chown -R temps:temps /home/temps/.local /home/temps/.bun /home/temps/.opencode; ",
+                                "elif [ -d /opt/claude-backup ]; then ",
+                                // Old layout (pre-codex): backup was just the .local tree.
+                                "  cp -a /opt/claude-backup/. /home/temps/.local/ && ",
                                 "  chown -R temps:temps /home/temps/.local; ",
                                 "elif command -v curl >/dev/null 2>&1; then ",
                                 "  su - temps -c 'curl -fsSL https://claude.ai/install.sh | bash' 2>&1; ",

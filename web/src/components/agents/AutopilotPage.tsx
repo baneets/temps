@@ -28,7 +28,6 @@ import { toast } from 'sonner'
 import { AgentSettingsDialog } from './AgentSettingsDialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
-  getCliStatus,
   listAgents,
   listAllRuns,
   triggerAgent,
@@ -228,7 +227,20 @@ function AgentCard({
           <p className="text-sm text-muted-foreground mb-2">{agent.description}</p>
         )}
         <div className="flex flex-wrap gap-2 text-xs text-muted-foreground items-center">
-          <span>{agent.ai_provider === 'claude_cli' ? 'Claude' : 'Codex'}</span>
+          <span className="bg-muted px-1.5 py-0.5 rounded font-medium">
+            {agent.ai_provider === 'claude_cli'
+              ? 'Claude Code'
+              : agent.ai_provider === 'codex_cli'
+                ? 'Codex'
+                : agent.ai_provider === 'opencode'
+                  ? 'OpenCode'
+                  : agent.ai_provider}
+          </span>
+          {agent.ai_model && (
+            <span className="bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded font-mono">
+              {agent.ai_model}
+            </span>
+          )}
           {agent.sandbox_enabled && <span className="bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded">sandbox</span>}
         </div>
         <TriggerBadges agent={agent} nextRun={nextRun} />
@@ -294,11 +306,25 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
     queryFn: () => listAgents(project.id),
   })
 
-  const { data: cliStatus } = useQuery({
-    queryKey: ['cli-status', project.id],
-    queryFn: () => getCliStatus(project.id),
+  // Fetch the provider catalog to determine the platform's configured default
+  // and whether credentials are saved (which is what actually matters for sandbox mode)
+  const { data: providerCatalog } = useQuery({
+    queryKey: ['ai-provider-catalog'],
+    queryFn: async () => {
+      const res = await fetch('/api/settings/ai-providers')
+      if (!res.ok) return null
+      return res.json() as Promise<{
+        default_provider: string
+        providers: Array<{ id: string; name: string; credential_saved: boolean }>
+      }>
+    },
     staleTime: 60_000,
   })
+
+  const defaultProvider = providerCatalog?.default_provider ?? 'claude_cli'
+  const defaultProviderEntry = providerCatalog?.providers.find((p) => p.id === defaultProvider)
+  const defaultProviderName = defaultProviderEntry?.name ?? 'AI CLI'
+  const hasCredential = defaultProviderEntry?.credential_saved ?? false
 
   const {
     data: runsData,
@@ -371,42 +397,28 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
         agent={editingAgent}
       />
 
-      {/* AI CLI status banner */}
-      {cliStatus && !cliStatus.authenticated && (
+      {/* AI provider credential banner */}
+      {providerCatalog && !hasCredential && (
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
           <AlertDescription>
             <div className="space-y-2">
               <p className="font-medium">
-                {!cliStatus.installed
-                  ? 'Claude CLI is not installed'
-                  : 'Claude CLI is not authenticated'}
+                {defaultProviderName} is not configured
               </p>
-              {!cliStatus.installed ? (
-                <p className="text-sm opacity-90">
-                  Install on the server: <code className="bg-black/20 px-1 rounded">npm install -g @anthropic-ai/claude-code</code>
-                </p>
-              ) : (
-                <div className="text-sm opacity-90 space-y-1">
-                  <p>Choose one:</p>
-                  <ol className="list-decimal list-inside space-y-0.5">
-                    <li>Run <code className="bg-black/20 px-1 rounded">claude setup-token</code> on the server to authenticate with your Anthropic account</li>
-                    <li>Configure in <Link to="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Workflows</Link></li>
-                  </ol>
-                </div>
-              )}
+              <p className="text-sm opacity-90">
+                Add credentials in{' '}
+                <Link to="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Workflows</Link>
+              </p>
             </div>
           </AlertDescription>
         </Alert>
       )}
 
-      {cliStatus?.authenticated && (
+      {providerCatalog && hasCredential && (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
-          <span>
-            Claude CLI {cliStatus.version} — {cliStatus.email || cliStatus.auth_method || 'authenticated'}
-            {cliStatus.subscription_type && ` (${cliStatus.subscription_type})`}
-          </span>
+          <span>{defaultProviderName} — configured</span>
         </div>
       )}
 

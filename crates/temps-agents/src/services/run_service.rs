@@ -21,6 +21,7 @@ pub struct UpdateRunFields {
     pub error_message: Option<String>,
     pub ai_output: Option<String>,
     pub ai_model: Option<String>,
+    pub ai_provider: Option<String>,
     pub tokens_input: Option<i32>,
     pub tokens_output: Option<i32>,
     pub estimated_cost_cents: Option<i32>,
@@ -153,6 +154,9 @@ impl AgentRunService {
         }
         if let Some(ai_model) = fields.ai_model {
             active.ai_model = Set(Some(ai_model));
+        }
+        if let Some(ai_provider) = fields.ai_provider {
+            active.ai_provider = Set(Some(ai_provider));
         }
         if let Some(tokens_input) = fields.tokens_input {
             active.tokens_input = Set(tokens_input);
@@ -514,6 +518,7 @@ mod tests {
             ai_output: None,
             ai_reasoning: None,
             ai_model: None,
+            ai_provider: None,
             tokens_input: 0,
             tokens_output: 0,
             estimated_cost_cents: 0,

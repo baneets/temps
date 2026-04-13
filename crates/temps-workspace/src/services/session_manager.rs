@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use temps_agents::ai_cli::OnEventCallback;
+use temps_agents::ai_cli::{
+    catalog::{find_provider, CredentialFormat},
+    OnEventCallback,
+};
 use temps_agents::sandbox::{
     SandboxCreateConfig, SandboxExecResult, SandboxHandle, SandboxProvider,
 };
@@ -53,6 +56,27 @@ pub struct LiveSession {
     /// Docker container's Mounts if ever needed.
     pub host_work_dir: Option<PathBuf>,
     pub is_first_message: bool,
+}
+
+/// Compute the OAuth `expiresAt` value (ms since epoch) that we stamp into
+/// `~/.claude/.credentials.json` when seeding a subscription credential.
+///
+/// The real expiry lives inside the access token itself (Claude CLI refreshes
+/// against Anthropic's servers when the token is close to expiring); the
+/// envelope's `expiresAt` only controls whether the CLI *trusts* the file on
+/// load. If the stamped timestamp is in the past the CLI treats the whole
+/// credentials file as stale and silently falls back to API-key / "Not
+/// logged in" mode. We push it far enough out (1 year from now) that this
+/// doesn't happen between sandbox creation and the next server restart.
+fn oauth_expires_at_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // ~1 year in milliseconds. Safe to bump higher if needed — Claude CLI
+    // doesn't care about the exact value beyond "not in the past".
+    now_ms + 365 * 24 * 60 * 60 * 1000
 }
 
 /// Manages sandbox containers for workspace sessions.
@@ -223,6 +247,27 @@ impl WorkspaceSessionManager {
             .map_err(|e| WorkspaceError::AiCliFailed {
                 session_id,
                 reason: format!("Failed to read {}: {}", path, e),
+            })
+    }
+
+    /// Upload an entire local directory tree into the session's sandbox.
+    /// Used by the shared sandbox injector to install skill archives.
+    pub async fn write_directory(
+        &self,
+        session_id: i32,
+        local_dir: &std::path::Path,
+        target_path: &str,
+    ) -> Result<(), WorkspaceError> {
+        let sessions = self.sessions.read().await;
+        let live = sessions
+            .get(&session_id)
+            .ok_or(WorkspaceError::SandboxNotAvailable { session_id })?;
+        self.provider
+            .write_directory(&live.handle, local_dir, target_path)
+            .await
+            .map_err(|e| WorkspaceError::AiCliFailed {
+                session_id,
+                reason: format!("Failed to write dir {}: {}", target_path, e),
             })
     }
 
@@ -398,9 +443,9 @@ impl WorkspaceSessionManager {
             "codex_cli" => {
                 vec![
                     "codex".to_string(),
-                    "--approval-mode".to_string(),
-                    "full-auto".to_string(),
-                    "--quiet".to_string(),
+                    "exec".to_string(),
+                    "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                    "--json".to_string(),
                     prompt.to_string(),
                 ]
             }
@@ -566,8 +611,11 @@ impl WorkspaceSessionManager {
     /// - TEMPS_API_URL — Temps instance URL
     /// - TEMPS_PROJECT_ID — for the memory script and any other scoped CLI calls
     /// - TEMPS_WORKFLOW_SLUG — for the memory script
-    /// - AI provider key (ANTHROPIC_API_KEY for api_key auth; subscription
-    ///   auth uses ~/.claude/.credentials.json written post-creation)
+    /// - AI provider env var (varies by provider: `ANTHROPIC_API_KEY`,
+    ///   `OPENAI_API_KEY`, …) — only set for `ApiKey` flavors. File-based
+    ///   flavors (Claude subscription, OpenCode config) leave the env empty
+    ///   and rely on `seed_provider_credentials` writing the credential file
+    ///   inside the container after creation.
     /// - PATH — extended with /workspace/.temps/bin so `memory` is on PATH
     ///
     /// Service credentials (DATABASE_URL, REDIS_URL) are NOT baked in.
@@ -575,14 +623,16 @@ impl WorkspaceSessionManager {
     pub fn build_env_vars(
         temps_api_url: &str,
         temps_api_token: &str,
-        ai_provider_key: Option<&str>,
-        ai_auth_type: &str,
+        provider_id: &str,
+        auth_type: &str,
+        decrypted_credential: Option<&[u8]>,
     ) -> HashMap<String, String> {
         Self::build_env_vars_with_workflow(
             temps_api_url,
             temps_api_token,
-            ai_provider_key,
-            ai_auth_type,
+            provider_id,
+            auth_type,
+            decrypted_credential,
             None,
             None,
         )
@@ -594,8 +644,9 @@ impl WorkspaceSessionManager {
     pub fn build_env_vars_with_workflow(
         temps_api_url: &str,
         temps_api_token: &str,
-        ai_provider_key: Option<&str>,
-        ai_auth_type: &str,
+        provider_id: &str,
+        auth_type: &str,
+        decrypted_credential: Option<&[u8]>,
         project_id: Option<i32>,
         workflow_slug: Option<&str>,
     ) -> HashMap<String, String> {
@@ -611,24 +662,47 @@ impl WorkspaceSessionManager {
             env.insert("TEMPS_WORKFLOW_SLUG".to_string(), slug.to_string());
         }
 
-        // For API key auth, set ANTHROPIC_API_KEY as container env var.
-        // For subscription auth, credentials are injected via
-        // ~/.claude/.credentials.json after container creation — not as
-        // an env var — so the CLI gets full OAuth context.
-        if let Some(key) = ai_provider_key {
-            if ai_auth_type != "subscription" {
-                env.insert("ANTHROPIC_API_KEY".to_string(), key.to_string());
+        // Catalog-driven AI credential injection. We only set an env var here
+        // for `ApiKey` flavors — file-based flavors are seeded later via
+        // `seed_provider_credentials` so the CLI gets full auth context (e.g.
+        // Claude OAuth scopes, OpenCode auth.json) instead of just a token.
+        if let (Some(creds), Some(provider)) = (decrypted_credential, find_provider(provider_id)) {
+            if let Some(flavor) = provider.flavor(auth_type) {
+                if matches!(flavor.format, CredentialFormat::ApiKey) {
+                    if let Ok(value) = std::str::from_utf8(creds) {
+                        env.insert(flavor.env_var.to_string(), value.to_string());
+                    } else {
+                        tracing::warn!(
+                            "build_env_vars: {} credential is not valid UTF-8, skipping",
+                            provider_id
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "build_env_vars: provider {} has no flavor {}",
+                    provider_id,
+                    auth_type
+                );
             }
         }
 
-        // Tell Claude CLI to accept non-interactive mode
+        // Tell Claude CLI to accept non-interactive mode. Harmless for other
+        // providers — they ignore unknown env vars.
         env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
 
         // Put /workspace/.temps/bin on PATH so the memory script is callable
-        // as `memory` from anywhere (instead of by full path).
+        // as `memory` from anywhere (instead of by full path). Also include
+        // the AI CLI install locations baked into the sandbox image:
+        //   - /home/temps/.local/bin   → claude
+        //   - /home/temps/.bun/bin     → codex (installed via `bun add -g`)
+        //   - /home/temps/.opencode/bin → opencode (installer hardcodes this path)
+        // Docker's `Config.Env` replaces the image's `ENV PATH=...` entirely,
+        // so we must re-include these here or non-interactive execs can't find
+        // the CLIs even though they exist on disk.
         env.insert(
             "PATH".to_string(),
-            "/workspace/.temps/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "/workspace/.temps/bin:/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 .to_string(),
         );
 
@@ -686,25 +760,62 @@ impl WorkspaceSessionManager {
     /// onboarding once and the home volume persisted it across a container
     /// restart), we leave it alone.
     pub async fn seed_claude_config(&self, session_id: i32) -> Result<(), WorkspaceError> {
-        // Always overwrite — ensures the latest config fields are present.
-        // auto-updates / interactive prompts inside the sandbox.
-        let body = serde_json::json!({
-            "numStartups": 3,
-            "installMethod": "native",
-            "autoUpdates": false,
-            "tipsHistory": { "new-user-warmup": 2 },
-            "autoUpdatesProtectedForNative": true,
-            "hasCompletedOnboarding": true,
-            "lastOnboardingVersion": "2.1.96",
-            "projects": {},
-            "voiceNoticeSeenCount": 2,
-            "cachedExtraUsageDisabledReason": null,
-            "officialMarketplaceAutoInstallAttempted": true,
-            "officialMarketplaceAutoInstalled": true,
-            "theme": "dark",
+        // Merge with any existing file rather than clobbering. The sandbox
+        // injector writes `mcpServers` into /home/temps/.claude.json earlier
+        // in session bootstrap; if we overwrite blindly we'd strip those.
+        // `projects["/workspace"].hasTrustDialogAccepted = true` suppresses the
+        // "Quick safety check: is this a project you trust?" prompt, and
+        // `hasCompletedProjectOnboarding` covers the "Welcome back!" variant.
+        let existing = self
+            .read_file(session_id, "/home/temps/.claude.json")
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let mut body = existing.unwrap_or_else(|| serde_json::json!({}));
+
+        // Onboarding keys — safe to always set/overwrite.
+        body["numStartups"] = serde_json::json!(3);
+        body["installMethod"] = serde_json::json!("native");
+        body["autoUpdates"] = serde_json::json!(false);
+        body["tipsHistory"] = serde_json::json!({ "new-user-warmup": 2 });
+        body["autoUpdatesProtectedForNative"] = serde_json::json!(true);
+        body["hasCompletedOnboarding"] = serde_json::json!(true);
+        body["lastOnboardingVersion"] = serde_json::json!("2.1.96");
+        body["voiceNoticeSeenCount"] = serde_json::json!(2);
+        body["cachedExtraUsageDisabledReason"] = serde_json::json!(null);
+        body["officialMarketplaceAutoInstallAttempted"] = serde_json::json!(true);
+        body["officialMarketplaceAutoInstalled"] = serde_json::json!(true);
+        body["theme"] = serde_json::json!("dark");
+        body["bypassPermissionsModeAccepted"] = serde_json::json!(true);
+        body["hasSeenWelcome"] = serde_json::json!(true);
+
+        // Merge /workspace trust into `projects` without stomping sibling
+        // entries the injector or the CLI may have added.
+        let projects = body
+            .get_mut("projects")
+            .and_then(|v| v.as_object_mut())
+            .map(|_| ())
+            .is_some();
+        if !projects {
+            body["projects"] = serde_json::json!({});
+        }
+        // `dontCrawlDirectory` + `hasTrustDialogAccepted` + the two
+        // `*BypassPermissionsModeAccepted` flags together silence the
+        // "WARNING: Claude Code running in Bypass Permissions mode" gate.
+        // Claude CLI checks per-project first, then falls back to the root-
+        // level `bypassPermissionsModeAccepted` — we set both to be safe.
+        body["projects"]["/workspace"] = serde_json::json!({
+            "hasTrustDialogAccepted": true,
+            "hasCompletedProjectOnboarding": true,
+            "projectOnboardingSeenCount": 1,
+            "dontCrawlDirectory": false,
+            "hasClaudeMdExternalIncludesApproved": true,
+            "hasClaudeMdExternalIncludesWarningShown": true,
             "bypassPermissionsModeAccepted": true,
-            "hasSeenWelcome": true,
+            "allowedTools": [],
+            "history": [],
         });
+
         let bytes = serde_json::to_vec_pretty(&body).map_err(|e| WorkspaceError::AiCliFailed {
             session_id,
             reason: format!("seed_claude_config: serialize failed: {}", e),
@@ -714,12 +825,12 @@ impl WorkspaceSessionManager {
             .await?;
 
         tracing::debug!(
-            "Seeded /home/temps/.claude.json for session {} (skips onboarding)",
+            "Seeded /home/temps/.claude.json for session {} (merged; preserved mcpServers if present)",
             session_id
         );
 
-        // Also seed ~/.claude/settings.json with theme preference.
-        // mkdir -p first — credentials file may not have been written yet.
+        // Also seed ~/.claude/settings.json — again merging so we don't lose
+        // anything the injector may have put there in the future.
         self.exec(
             session_id,
             vec!["mkdir".into(), "-p".into(), "/home/temps/.claude".into()],
@@ -728,7 +839,18 @@ impl WorkspaceSessionManager {
         )
         .await?;
 
-        let settings = serde_json::json!({ "theme": "dark" });
+        let existing_settings = self
+            .read_file(session_id, "/home/temps/.claude/settings.json")
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let mut settings = existing_settings.unwrap_or_else(|| serde_json::json!({}));
+        settings["theme"] = serde_json::json!("dark");
+        // `effort: "medium"` suppresses the "We recommend medium effort for
+        // Opus" picker on first launch. Users can still override per-turn
+        // with `/effort high` or `ultrathink`.
+        settings["effort"] = serde_json::json!("medium");
+
         let settings_bytes =
             serde_json::to_vec_pretty(&settings).map_err(|e| WorkspaceError::AiCliFailed {
                 session_id,
@@ -774,7 +896,7 @@ impl WorkspaceSessionManager {
         let body = serde_json::json!({
             "claudeAiOauth": {
                 "accessToken": access_token,
-                "expiresAt": 1772120060006_i64,
+                "expiresAt": oauth_expires_at_ms(),
                 "scopes": [
                     "user:inference",
                     "user:mcp_servers",
@@ -800,6 +922,237 @@ impl WorkspaceSessionManager {
 
         tracing::debug!(
             "Seeded /home/temps/.claude/.credentials.json for session {}",
+            session_id
+        );
+        Ok(())
+    }
+
+    /// Seed `/home/temps/.codex/config.toml` so Codex CLI skips its first-run
+    /// "Do you trust the contents of this directory?" prompt for `/workspace`.
+    /// Without this, the very first `codex` launch inside a fresh sandbox
+    /// blocks on an interactive 1/2 picker that the PTY has no way to answer
+    /// automatically — the user sees the prompt but the CLI never proceeds.
+    ///
+    /// Merge strategy: if the file already contains a `[projects."/workspace"]`
+    /// section (e.g. the user edited it in a previous session and the home
+    /// volume persisted it), leave it alone. Otherwise append the trust
+    /// section to whatever is there (preserving `model = "..."`,
+    /// `model_reasoning_effort = "..."`, and any other top-level keys the
+    /// installer or the user may have added).
+    ///
+    /// Best-effort: a failure here shouldn't abort sandbox creation, so the
+    /// caller logs a warning and moves on.
+    pub async fn seed_codex_config(&self, session_id: i32) -> Result<(), WorkspaceError> {
+        self.exec(
+            session_id,
+            vec!["mkdir".into(), "-p".into(), "/home/temps/.codex".into()],
+            std::collections::HashMap::new(),
+            None,
+        )
+        .await?;
+
+        let existing = self
+            .read_file(session_id, "/home/temps/.codex/config.toml")
+            .await
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default();
+
+        // Already trusts /workspace → nothing to do. Check for the exact
+        // header string; codex writes it with this spacing.
+        if existing.contains("[projects.\"/workspace\"]") {
+            tracing::debug!(
+                "Codex config.toml already trusts /workspace for session {} — skipping seed",
+                session_id
+            );
+            return Ok(());
+        }
+
+        // Append the trust section. Codex's config.toml format is one
+        // `[projects."<abs-path>"]` table per trusted directory, with a single
+        // `trust_level = "trusted"` key underneath. Leading newline keeps us
+        // safe when `existing` doesn't already end with one.
+        let trust_block = "\n[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n";
+        let mut body = existing;
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str(trust_block);
+
+        self.write_file(
+            session_id,
+            "/home/temps/.codex/config.toml",
+            body.as_bytes(),
+            0o600,
+        )
+        .await?;
+
+        tracing::debug!(
+            "Seeded /home/temps/.codex/config.toml with /workspace trust for session {}",
+            session_id
+        );
+        Ok(())
+    }
+
+    /// Generic per-provider credential seeder. Dispatches off the catalog so
+    /// that adding a new AI CLI (Gemini, Grok, …) only requires a catalog
+    /// entry — no new method, no new arm in `message_executor`.
+    ///
+    /// Returns the env vars that should be merged into the session's `.env`
+    /// file (for `ApiKey` flavors). For file-based flavors the credential is
+    /// written directly to disk inside the sandbox and an empty map is
+    /// returned.
+    ///
+    /// `decrypted_credential` is the plaintext bytes (already decrypted by
+    /// the caller). For `OauthToken` flavors the bytes are the OAuth access
+    /// token; we wrap them in Claude's expected JSON envelope before writing.
+    /// For `ConfigFile` flavors the bytes are the raw file body.
+    pub async fn seed_provider_credentials(
+        &self,
+        session_id: i32,
+        provider_id: &str,
+        auth_type: &str,
+        decrypted_credential: &[u8],
+    ) -> Result<HashMap<String, String>, WorkspaceError> {
+        let provider = find_provider(provider_id).ok_or_else(|| WorkspaceError::Validation {
+            message: format!(
+                "seed_provider_credentials: unknown provider '{}'",
+                provider_id
+            ),
+        })?;
+        let flavor = provider
+            .flavor(auth_type)
+            .ok_or_else(|| WorkspaceError::Validation {
+                message: format!(
+                    "seed_provider_credentials: provider '{}' does not support auth_type '{}'",
+                    provider_id, auth_type
+                ),
+            })?;
+
+        let mut env = HashMap::new();
+
+        match flavor.format {
+            CredentialFormat::ApiKey => {
+                let value = std::str::from_utf8(decrypted_credential).map_err(|e| {
+                    WorkspaceError::Validation {
+                        message: format!(
+                            "seed_provider_credentials: {} credential is not valid UTF-8: {}",
+                            provider_id, e
+                        ),
+                    }
+                })?;
+                env.insert(flavor.env_var.to_string(), value.to_string());
+                tracing::debug!(
+                    "Prepared {} env var for {} on session {}",
+                    flavor.env_var,
+                    provider_id,
+                    session_id
+                );
+            }
+            CredentialFormat::OauthToken => {
+                let token = std::str::from_utf8(decrypted_credential).map_err(|e| {
+                    WorkspaceError::Validation {
+                        message: format!(
+                            "seed_provider_credentials: {} OAuth token is not valid UTF-8: {}",
+                            provider_id, e
+                        ),
+                    }
+                })?;
+                self.write_oauth_credential_file(session_id, flavor.seed_path, token)
+                    .await?;
+            }
+            CredentialFormat::ConfigFile => {
+                self.write_config_credential_file(
+                    session_id,
+                    flavor.seed_path,
+                    decrypted_credential,
+                )
+                .await?;
+            }
+        }
+
+        Ok(env)
+    }
+
+    /// Write Claude's OAuth credential envelope. Currently hardcoded to the
+    /// `claudeAiOauth` shape since Claude is the only provider using
+    /// `OauthToken`; if a second provider needs OAuth we'll teach the
+    /// catalog about envelope shape.
+    async fn write_oauth_credential_file(
+        &self,
+        session_id: i32,
+        seed_path: &str,
+        access_token: &str,
+    ) -> Result<(), WorkspaceError> {
+        // Make sure the parent directory exists. Splitting on '/' is fine
+        // because every catalog seed_path is absolute and uses Unix slashes.
+        if let Some(idx) = seed_path.rfind('/') {
+            let parent = &seed_path[..idx];
+            self.exec(
+                session_id,
+                vec!["mkdir".into(), "-p".into(), parent.to_string()],
+                std::collections::HashMap::new(),
+                None,
+            )
+            .await?;
+        }
+
+        let body = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": access_token,
+                "expiresAt": oauth_expires_at_ms(),
+                "scopes": [
+                    "user:inference",
+                    "user:mcp_servers",
+                    "user:profile",
+                    "user:sessions:claude_code"
+                ],
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x"
+            }
+        });
+        let bytes = serde_json::to_vec_pretty(&body).map_err(|e| WorkspaceError::AiCliFailed {
+            session_id,
+            reason: format!(
+                "seed_provider_credentials: oauth envelope serialize failed: {}",
+                e
+            ),
+        })?;
+
+        self.write_file(session_id, seed_path, &bytes, 0o600)
+            .await?;
+        tracing::debug!(
+            "Seeded OAuth credential file {} for session {}",
+            seed_path,
+            session_id
+        );
+        Ok(())
+    }
+
+    /// Write a raw config-file credential (e.g. OpenCode's `auth.json`)
+    /// verbatim to the catalog-declared seed path. Caller is responsible for
+    /// supplying valid file content — we just persist it.
+    async fn write_config_credential_file(
+        &self,
+        session_id: i32,
+        seed_path: &str,
+        bytes: &[u8],
+    ) -> Result<(), WorkspaceError> {
+        if let Some(idx) = seed_path.rfind('/') {
+            let parent = &seed_path[..idx];
+            self.exec(
+                session_id,
+                vec!["mkdir".into(), "-p".into(), parent.to_string()],
+                std::collections::HashMap::new(),
+                None,
+            )
+            .await?;
+        }
+        self.write_file(session_id, seed_path, bytes, 0o600).await?;
+        tracing::debug!(
+            "Seeded config credential file {} ({} bytes) for session {}",
+            seed_path,
+            bytes.len(),
             session_id
         );
         Ok(())
@@ -1264,34 +1617,67 @@ mod tests {
     }
 
     #[test]
-    fn test_build_env_vars_api_key() {
+    fn test_build_env_vars_claude_api_key() {
         let env = WorkspaceSessionManager::build_env_vars(
             "http://localhost:3000",
             "test-token",
-            Some("sk-ant-123"),
+            "claude_cli",
             "api_key",
+            Some(b"sk-ant-123"),
         );
 
         assert_eq!(env.get("TEMPS_API_URL").unwrap(), "http://localhost:3000");
         assert_eq!(env.get("TEMPS_API_TOKEN").unwrap(), "test-token");
         assert_eq!(env.get("ANTHROPIC_API_KEY").unwrap(), "sk-ant-123");
+        assert!(!env.contains_key("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn test_build_env_vars_codex_api_key() {
+        // Codex uses OPENAI_API_KEY — confirms the catalog dispatch picks
+        // the right env var name per provider rather than hardcoding ANTHROPIC.
+        let env = WorkspaceSessionManager::build_env_vars(
+            "http://localhost:3000",
+            "test-token",
+            "codex_cli",
+            "api_key",
+            Some(b"sk-openai-xyz"),
+        );
+
+        assert_eq!(env.get("OPENAI_API_KEY").unwrap(), "sk-openai-xyz");
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn test_build_env_vars_subscription_uses_no_env_var() {
+        // Subscription auth is OauthToken format → seeded as a file, never
+        // as an env var. Neither ANTHROPIC_API_KEY nor any other key should
+        // land in the container env.
+        let env = WorkspaceSessionManager::build_env_vars(
+            "http://localhost:3000",
+            "test-token",
+            "claude_cli",
+            "subscription",
+            Some(b"oauth-token-123"),
+        );
+
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
         assert!(!env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
     }
 
     #[test]
-    fn test_build_env_vars_subscription() {
-        // Subscription auth uses ~/.claude/.credentials.json (written after
-        // container creation), NOT an env var. So neither ANTHROPIC_API_KEY
-        // nor CLAUDE_CODE_OAUTH_TOKEN should be in the container env.
+    fn test_build_env_vars_opencode_config_file_uses_no_env_var() {
+        // ConfigFile flavors are seeded directly to disk — env stays empty.
         let env = WorkspaceSessionManager::build_env_vars(
             "http://localhost:3000",
             "test-token",
-            Some("oauth-token-123"),
-            "subscription",
+            "opencode",
+            "config_file",
+            Some(b"{\"oauth\": {}}"),
         );
 
-        assert!(!env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!env.contains_key("OPENAI_API_KEY"));
     }
 
     #[test]
@@ -1299,12 +1685,12 @@ mod tests {
         let env = WorkspaceSessionManager::build_env_vars(
             "http://localhost:3000",
             "test-token",
-            None,
+            "claude_cli",
             "api_key",
+            None,
         );
 
         assert!(!env.contains_key("ANTHROPIC_API_KEY"));
-        assert!(!env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
         assert!(env.contains_key("TEMPS_API_URL"));
     }
 
@@ -1313,8 +1699,9 @@ mod tests {
         let env = WorkspaceSessionManager::build_env_vars(
             "http://localhost:3000",
             "test-token",
-            None,
+            "claude_cli",
             "api_key",
+            None,
         );
         let path = env.get("PATH").expect("PATH should be set");
         assert!(
@@ -1329,8 +1716,9 @@ mod tests {
         let env = WorkspaceSessionManager::build_env_vars_with_workflow(
             "http://localhost:3000",
             "test-token",
-            Some("sk-ant-xxx"),
+            "claude_cli",
             "api_key",
+            Some(b"sk-ant-xxx"),
             Some(42),
             Some("error-autofix"),
         );
@@ -1345,8 +1733,9 @@ mod tests {
         let env = WorkspaceSessionManager::build_env_vars_with_workflow(
             "http://localhost:3000",
             "test-token",
-            None,
+            "claude_cli",
             "api_key",
+            None,
             None,
             None,
         );
@@ -1450,7 +1839,9 @@ mod tests {
         let cmd = manager.build_chat_cmd("do stuff", 25, false, "codex_cli");
 
         assert_eq!(cmd[0], "codex");
-        assert!(cmd.contains(&"full-auto".to_string()));
+        assert_eq!(cmd[1], "exec");
+        assert!(cmd.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(cmd.contains(&"--json".to_string()));
     }
 
     #[test]

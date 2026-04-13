@@ -44,6 +44,8 @@ pub struct AgentRunResponse {
     pub ai_output: Option<String>,
     pub ai_reasoning: Option<String>,
     pub ai_model: Option<String>,
+    /// AI provider slug that executed this run (e.g. claude_cli, codex_cli, opencode).
+    pub ai_provider: Option<String>,
     pub tokens_input: i32,
     pub tokens_output: i32,
     pub estimated_cost_cents: i32,
@@ -82,6 +84,7 @@ impl From<agent_runs::Model> for AgentRunResponse {
             ai_output: model.ai_output,
             ai_reasoning: model.ai_reasoning,
             ai_model: model.ai_model,
+            ai_provider: model.ai_provider,
             tokens_input: model.tokens_input,
             tokens_output: model.tokens_output,
             estimated_cost_cents: model.estimated_cost_cents,

@@ -39,6 +39,10 @@ export interface WorkspaceSession {
   memory_limit_mb: number | null
   /** PID limit. Null = server default. */
   pids_limit: number | null
+  /** Skill slugs attached to this session (resolved from project/global definitions). */
+  skills: string[]
+  /** MCP-server slugs attached to this session. */
+  mcp_servers: string[]
 }
 
 export interface WorkspaceMessage {
@@ -64,6 +68,10 @@ export interface SessionListResponse {
 
 export interface StartSessionRequest {
   ai_provider?: string
+  /** Per-session model override. Takes precedence over the provider's
+   *  configured default_model for this session only. Omit to use the
+   *  platform default. */
+  ai_model?: string
   /** Branch the workspace should check out. Defaults to project main branch.
    *  When `base_branch_name` is also set, this is the *new* branch to be
    *  created locally off `base_branch_name`. */
@@ -76,6 +84,11 @@ export interface StartSessionRequest {
   /** When resuming from an agent run, pass the run ID so the backend
    *  can inject Claude session files into the workspace sandbox. */
   agent_run_id?: number
+  /** Skill slugs to inject into the sandbox. Resolved from project-scoped
+   *  and global `skill_definitions` tables. */
+  skills?: string[]
+  /** MCP-server slugs to inject into the sandbox. */
+  mcp_servers?: string[]
 }
 
 export interface SendMessageRequest {

@@ -89,19 +89,31 @@ impl TempsPlugin for WorkspacePlugin {
                 let git_provider_manager = context.require_service::<dyn GitProviderManagerTrait>();
                 let deployment_token_service = context.require_service::<DeploymentTokenService>();
                 let external_service_manager = context.require_service::<ExternalServiceManager>();
-                let message_executor = Arc::new(
-                    MessageExecutor::new(
-                        db.clone(),
-                        workspace_service,
-                        session_manager,
-                        git_provider_manager,
-                        encryption_service,
-                        deployment_token_service,
-                        external_service_manager,
-                    )
-                    .with_memory_service(memory_service),
-                );
-                context.register_service(message_executor);
+                let mut executor = MessageExecutor::new(
+                    db.clone(),
+                    workspace_service,
+                    session_manager,
+                    git_provider_manager,
+                    encryption_service,
+                    deployment_token_service,
+                    external_service_manager,
+                )
+                .with_memory_service(memory_service);
+
+                // Wire agents-plugin services so workspace sandboxes get the
+                // same skill / MCP / secret injection pipeline as agent runs.
+                // Both services are registered by the agents plugin which
+                // loads before us; `get_service` returns `None` only if that
+                // plugin is absent — in which case we skip injection cleanly.
+                if let (Some(secret_service), Some(definition_service)) = (
+                    context.get_service::<temps_agents::services::secret_service::SecretService>(),
+                    context.get_service::<temps_agents::services::definition_service::DefinitionService>(),
+                ) {
+                    executor = executor.with_injection_services(secret_service, definition_service);
+                    info!("Workspace message executor wired to agent skill/MCP injector");
+                }
+
+                context.register_service(Arc::new(executor));
                 info!("Workspace session manager + message executor registered");
             } else {
                 warn!(

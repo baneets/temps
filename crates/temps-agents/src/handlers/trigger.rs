@@ -87,7 +87,6 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(smoke_test_agent),
         )
         .route("/settings/agent-token", post(save_agent_token))
-        .route("/settings/agent-models", get(list_available_models))
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -817,57 +816,8 @@ async fn save_agent_token(
     Ok(Json(SaveAgentTokenResponse { saved: true }))
 }
 
-// ── Available Models ─────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, ToSchema)]
-struct AvailableModelsResponse {
-    provider: String,
-    models: Vec<String>,
-}
-
-/// List available models from the installed AI CLI.
-async fn list_available_models(
-    RequireAuth(auth): RequireAuth,
-    State(_app_state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, Problem> {
-    permission_guard!(auth, SettingsRead);
-
-    use std::process::Stdio;
-    use tokio::process::Command;
-
-    // Try opencode models first (gives structured list)
-    let opencode_result = Command::new("opencode")
-        .args(["models"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-
-    if let Ok(output) = opencode_result {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let models: Vec<String> = stdout
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect();
-            return Ok(Json(AvailableModelsResponse {
-                provider: "opencode".into(),
-                models,
-            }));
-        }
-    }
-
-    // Fallback: hardcoded list for Claude CLI (no models command)
-    Ok(Json(AvailableModelsResponse {
-        provider: "claude_cli".into(),
-        models: vec![
-            "claude-sonnet-4-6".into(),
-            "claude-opus-4-6".into(),
-            "claude-haiku-4-5".into(),
-            "sonnet".into(),
-            "opus".into(),
-            "haiku".into(),
-        ],
-    }))
-}
+// `list_available_models` was retired in favour of the per-provider
+// `models` field on the `/settings/ai-providers` catalog response. Each
+// provider declares its own valid model ids in `ai_cli::catalog`, which
+// keeps Claude/Codex/OpenCode from sharing one global list (and from
+// shelling out to a host-side `opencode` binary that often isn't there).

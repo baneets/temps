@@ -734,6 +734,40 @@ impl RustfsService {
             Err(anyhow::anyhow!("RustFS service not initialized"))
         }
     }
+
+    /// Ensure the given bucket exists, creating it if missing.
+    async fn ensure_bucket(&self, config: ServiceConfig, name: &str) -> Result<()> {
+        let runtime_config: RustfsConfig = {
+            let input_config: RustfsInputConfig = serde_json::from_value(config.parameters.clone())
+                .context("Failed to parse RustFS configuration")?;
+            RustfsConfig::from(input_config)
+        };
+
+        let client = self.create_s3_client(&runtime_config).await?;
+        let sanitized_name = name.replace('_', "-").to_lowercase();
+
+        match client.head_bucket().bucket(&sanitized_name).send().await {
+            Ok(_) => {
+                info!("RustFS bucket {} already exists", sanitized_name);
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::debug!("RustFS bucket {} does not exist: {}", sanitized_name, err);
+            }
+        }
+
+        client
+            .create_bucket()
+            .bucket(sanitized_name.clone())
+            .send()
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to create RustFS bucket {}: {:?}", sanitized_name, e)
+            })?;
+
+        info!("Created RustFS bucket {}", sanitized_name);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -971,6 +1005,73 @@ impl ExternalService for RustfsService {
         env.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key);
 
         Ok(env)
+    }
+
+    fn get_runtime_env_definitions(&self) -> Vec<super::RuntimeEnvVar> {
+        vec![
+            super::RuntimeEnvVar {
+                name: "S3_BUCKET".to_string(),
+                description: "S3 bucket name for this project/environment".to_string(),
+                example: "project-123-production".to_string(),
+                sensitive: false,
+            },
+            super::RuntimeEnvVar {
+                name: "S3_ENDPOINT".to_string(),
+                description: "S3-compatible endpoint URL (internal container name)".to_string(),
+                example: "http://rustfs-my-service:9000".to_string(),
+                sensitive: false,
+            },
+        ]
+    }
+
+    async fn get_runtime_env_vars(
+        &self,
+        config: ServiceConfig,
+        project_id: &str,
+        environment: &str,
+    ) -> Result<HashMap<String, String>> {
+        let bucket_name = format!("{}-{}", project_id, environment)
+            .replace('_', "-")
+            .to_lowercase();
+
+        self.ensure_bucket(config.clone(), &bucket_name).await?;
+
+        let effective_host = self.get_container_name();
+        let effective_port = DEFAULT_RUSTFS_API_PORT.to_string();
+        let endpoint = format!("http://{}:{}", effective_host, effective_port);
+
+        let access_key = config
+            .parameters
+            .get("access_key")
+            .and_then(|v| v.as_str())
+            .context("Missing RustFS access_key parameter")?;
+        let secret_key = config
+            .parameters
+            .get("secret_key")
+            .and_then(|v| v.as_str())
+            .context("Missing RustFS secret_key parameter")?;
+        let region = config
+            .parameters
+            .get("region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("us-east-1");
+
+        let mut env_vars = HashMap::new();
+
+        env_vars.insert("S3_BUCKET".to_string(), bucket_name);
+        env_vars.insert("S3_ENDPOINT".to_string(), endpoint.clone());
+        env_vars.insert("S3_HOST".to_string(), effective_host.clone());
+        env_vars.insert("S3_PORT".to_string(), effective_port);
+        env_vars.insert("S3_ACCESS_KEY".to_string(), access_key.to_string());
+        env_vars.insert("S3_SECRET_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("S3_REGION".to_string(), region.to_string());
+
+        env_vars.insert("AWS_ACCESS_KEY_ID".to_string(), access_key.to_string());
+        env_vars.insert("AWS_SECRET_ACCESS_KEY".to_string(), secret_key.to_string());
+        env_vars.insert("AWS_DEFAULT_REGION".to_string(), region.to_string());
+        env_vars.insert("AWS_ENDPOINT_URL".to_string(), endpoint);
+
+        Ok(env_vars)
     }
 
     fn get_local_address(&self, service_config: ServiceConfig) -> Result<String> {

@@ -137,10 +137,15 @@ impl AiCliProvider for ClaudeCliProvider {
             let mut c = Command::new("su");
             c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
             // Build the claude command as a single string for su -c
+            let model_arg = match config.model.as_deref() {
+                Some(m) if !m.is_empty() => format!(" --model {}", shell_escape(m)),
+                _ => String::new(),
+            };
             let claude_args = format!(
-                "claude --print {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose",
+                "claude --print {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose{}",
                 shell_escape(&config.prompt),
                 config.max_turns,
+                model_arg,
             );
             c.arg(&claude_args);
             c
@@ -154,6 +159,11 @@ impl AiCliProvider for ClaudeCliProvider {
                 .arg(config.max_turns.to_string())
                 .arg("--dangerously-skip-permissions")
                 .arg("--verbose");
+            if let Some(m) = config.model.as_deref() {
+                if !m.is_empty() {
+                    c.arg("--model").arg(m);
+                }
+            }
             c
         };
         cmd.current_dir(&config.work_dir)
@@ -273,10 +283,15 @@ impl AiCliProvider for ClaudeCliProvider {
             };
             let mut c = Command::new("su");
             c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
+            let model_arg = match config.model.as_deref() {
+                Some(m) if !m.is_empty() => format!(" --model {}", shell_escape(m)),
+                _ => String::new(),
+            };
             let claude_args = format!(
-                "claude --print --continue {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose",
+                "claude --print --continue {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose{}",
                 shell_escape(&config.prompt),
                 config.max_turns,
+                model_arg,
             );
             c.arg(&claude_args);
             c
@@ -291,6 +306,11 @@ impl AiCliProvider for ClaudeCliProvider {
                 .arg(config.max_turns.to_string())
                 .arg("--dangerously-skip-permissions")
                 .arg("--verbose");
+            if let Some(m) = config.model.as_deref() {
+                if !m.is_empty() {
+                    c.arg("--model").arg(m);
+                }
+            }
             c
         };
         cmd.current_dir(&config.work_dir)
