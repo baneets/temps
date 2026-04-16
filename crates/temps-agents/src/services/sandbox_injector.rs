@@ -489,11 +489,25 @@ pub async fn inject(
 
     // ── Phase 3: Skills ─────────────────────────────────────────────
     if has_skills {
+        // Each AI CLI reads skills from a different directory. Writing to
+        // the provider's native location means no AGENTS.md pointer and no
+        // per-skill hacks — the CLI discovers them the same way it would
+        // for a user-installed skill.
+        //
+        // - claude: `/workspace/.claude/skills/<slug>/SKILL.md` (project-local)
+        // - codex:  `/home/temps/.codex/skills/<slug>/SKILL.md` (user-level; repo root is irrelevant)
+        // - opencode: no native skills system — falls back to claude's dir
+        //   (opencode reads `AGENTS.md` at the repo root, which the project
+        //   itself owns; we don't overwrite it).
+        let skills_base = match provider {
+            "codex_cli" => "/home/temps/.codex/skills",
+            _ => "/workspace/.claude/skills",
+        };
         let _ = fs
             .exec(vec![
                 "mkdir".to_string(),
                 "-p".to_string(),
-                "/workspace/.claude/skills".to_string(),
+                skills_base.to_string(),
             ])
             .await;
 
@@ -503,9 +517,9 @@ pub async fn inject(
 
         for def in &skill_defs {
             if let Some(archive_data) = &def.archive {
-                inject_skill_archive(fs, &def.slug, archive_data).await?;
+                inject_skill_archive(fs, skills_base, &def.slug, archive_data).await?;
             } else {
-                let dir_path = format!("/workspace/.claude/skills/{}", def.slug);
+                let dir_path = format!("{}/{}", skills_base, def.slug);
                 let _ = fs
                     .exec(vec![
                         "mkdir".to_string(),
@@ -533,6 +547,7 @@ pub async fn inject(
 
 async fn inject_skill_archive(
     fs: &dyn SandboxFs,
+    skills_base: &str,
     slug: &str,
     archive_data: &[u8],
 ) -> Result<(), AgentError> {
@@ -605,7 +620,7 @@ async fn inject_skill_archive(
         }
     }
 
-    let target_path = format!("/workspace/.claude/skills/{}", slug);
+    let target_path = format!("{}/{}", skills_base, slug);
     fs.write_directory(tmp_dir.path(), &target_path).await?;
     Ok(())
 }

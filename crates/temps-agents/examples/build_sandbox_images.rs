@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use temps_agents::sandbox::docker::{dockerfile_for_runtime, image_name_for_runtime};
+use temps_agents::sandbox::pty_agent_bundle::BUNDLE as PTY_AGENT_BUNDLE;
 
 const RUNTIMES: &[&str] = &["node", "bun", "python", "rust", "go", "full"];
 
@@ -122,6 +123,32 @@ fn build_one(runtime: &str, image: &str, dockerfile: &str, no_cache: bool) -> Re
             .map_err(|e| format!("write dockerfile: {}", e))?;
     }
     println!("(dockerfile written to {})", dockerfile_path.display());
+
+    // Materialize the pty-agent bundle into the build context. Matches the
+    // in-memory tar the server would ship to the Docker daemon — keeping
+    // the local `docker build` path semantically identical to production
+    // `build_image_locally`.
+    for file in PTY_AGENT_BUNDLE {
+        let dest = tmpdir.join(file.path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        }
+        let mut out = std::fs::File::create(&dest)
+            .map_err(|e| format!("create {}: {}", dest.display(), e))?;
+        out.write_all(file.contents)
+            .map_err(|e| format!("write {}: {}", dest.display(), e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&dest)
+                .map_err(|e| format!("stat {}: {}", dest.display(), e))?
+                .permissions();
+            perms.set_mode(file.mode);
+            std::fs::set_permissions(&dest, perms)
+                .map_err(|e| format!("chmod {}: {}", dest.display(), e))?;
+        }
+    }
 
     let mut cmd = Command::new("docker");
     cmd.arg("build")

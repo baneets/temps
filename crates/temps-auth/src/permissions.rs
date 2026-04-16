@@ -223,6 +223,13 @@ pub enum Permission {
     StacksWrite,
     StacksDelete,
     StacksCreate,
+
+    // Sandbox permissions (Vercel-compatible `/v1/sandbox/*` API).
+    // Split from ProjectsRead/ProjectsWrite so sandbox-only API tokens
+    // don't grant broader project access.
+    SandboxesRead,
+    SandboxesWrite,
+    SandboxesExec,
 }
 
 impl fmt::Display for Permission {
@@ -364,6 +371,9 @@ impl fmt::Display for Permission {
             Permission::StacksWrite => "stacks:write",
             Permission::StacksDelete => "stacks:delete",
             Permission::StacksCreate => "stacks:create",
+            Permission::SandboxesRead => "sandboxes:read",
+            Permission::SandboxesWrite => "sandboxes:write",
+            Permission::SandboxesExec => "sandboxes:exec",
         };
         write!(f, "{}", name)
     }
@@ -509,6 +519,9 @@ impl Permission {
             "stacks:write" => Some(Permission::StacksWrite),
             "stacks:delete" => Some(Permission::StacksDelete),
             "stacks:create" => Some(Permission::StacksCreate),
+            "sandboxes:read" => Some(Permission::SandboxesRead),
+            "sandboxes:write" => Some(Permission::SandboxesWrite),
+            "sandboxes:exec" => Some(Permission::SandboxesExec),
             _ => None,
         }
     }
@@ -650,6 +663,9 @@ impl Permission {
             Permission::StacksWrite,
             Permission::StacksDelete,
             Permission::StacksCreate,
+            Permission::SandboxesRead,
+            Permission::SandboxesWrite,
+            Permission::SandboxesExec,
         ]
     }
 }
@@ -847,6 +863,9 @@ impl Role {
                 Permission::StacksWrite,
                 Permission::StacksDelete,
                 Permission::StacksCreate,
+                Permission::SandboxesRead,
+                Permission::SandboxesWrite,
+                Permission::SandboxesExec,
             ],
             Role::User => &[
                 Permission::ProjectsRead,
@@ -948,6 +967,9 @@ impl Role {
                 Permission::StacksRead,
                 Permission::StacksWrite,
                 Permission::StacksCreate,
+                Permission::SandboxesRead,
+                Permission::SandboxesWrite,
+                Permission::SandboxesExec,
             ],
             Role::Reader => &[
                 Permission::ProjectsRead,
@@ -988,6 +1010,7 @@ impl Role {
                 Permission::OtelRead,
                 Permission::AiGatewayRead,
                 Permission::StacksRead,
+                Permission::SandboxesRead,
             ],
             Role::Mcp => &[
                 Permission::ProjectsRead,

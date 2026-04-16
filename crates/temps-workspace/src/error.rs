@@ -50,10 +50,14 @@ pub enum WorkspaceError {
 }
 
 impl From<sea_orm::DbErr> for WorkspaceError {
+    /// Generic `From` impl for the `?` operator — preserves the original
+    /// error message. Callers that know which resource was missing (session,
+    /// project, workflow, memory fact, etc.) MUST construct the correct
+    /// typed `NotFound` variant themselves with the real ID, instead of
+    /// relying on this fallback. Mapping every `RecordNotFound` to
+    /// `SessionNotFound{session_id: 0}` here would mislabel missing
+    /// projects, workflows, and memory rows as "session 0 not found".
     fn from(error: sea_orm::DbErr) -> Self {
-        match &error {
-            sea_orm::DbErr::RecordNotFound(_) => WorkspaceError::SessionNotFound { session_id: 0 },
-            _ => WorkspaceError::Database(error),
-        }
+        WorkspaceError::Database(error)
     }
 }

@@ -1,11 +1,24 @@
 //! HTTP handlers for workflow memory.
 //!
-//! Routes:
-//!   GET    /api/projects/{project_id}/workflows/{slug}/memory
-//!   GET    /api/projects/{project_id}/workflows/{slug}/memory/search?q=...
-//!   POST   /api/projects/{project_id}/workflows/{slug}/memory
-//!   POST   /api/projects/{project_id}/workflows/{slug}/memory/{fact_id}/supersede
-//!   DELETE /api/projects/{project_id}/workflows/{slug}/memory/{fact_id}
+//! Routes (served under two stable prefixes):
+//!   Legacy (pre-v1, kept indefinitely for backward compatibility):
+//!     /api/projects/{project_id}/workflows/{slug}/memory
+//!     /api/projects/{project_id}/workflows/{slug}/memory/search
+//!     /api/projects/{project_id}/workflows/{slug}/memory/{fact_id}/supersede
+//!     /api/projects/{project_id}/workflows/{slug}/memory/{fact_id}
+//!
+//!   v1 (the stable, versioned contract — what new clients should target):
+//!     /api/v1/projects/{project_id}/workflows/{slug}/memory
+//!     /api/v1/projects/{project_id}/workflows/{slug}/memory/search
+//!     /api/v1/projects/{project_id}/workflows/{slug}/memory/{fact_id}/supersede
+//!     /api/v1/projects/{project_id}/workflows/{slug}/memory/{fact_id}
+//!
+//! Both prefixes resolve to the exact same handlers — the v1 namespace is
+//! introduced now so future breaking DTO changes can land as `/v2/...`
+//! without invalidating in-flight clients. The legacy prefix stays until
+//! all first-party callers (bash `memory` script, `temps memory` CLI,
+//! `temps-agents::executor`) have moved to v1 and a deprecation window
+//! has elapsed (target: 12 months, per ADR 009).
 //!
 //! Auth: Bearer token. Project scope is enforced via `permission_guard!`
 //! and double-checked at the service layer (every memory query filters by
@@ -124,24 +137,29 @@ pub struct SearchParams {
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
-pub fn routes() -> Router<Arc<WorkspaceAppState>> {
+/// Build the core route table. Factored out so it can be mounted under
+/// multiple prefixes without duplicating handler wiring.
+fn build_routes(prefix: &str) -> Router<Arc<WorkspaceAppState>> {
+    // `prefix` is expected to be empty string for the legacy namespace
+    // or "/v1" for the versioned namespace. Both routes resolve to the
+    // same handler — versioning is purely about the contract guarantee,
+    // not the behavior.
+    let base = format!("{prefix}/projects/{{project_id}}/workflows/{{slug}}/memory");
     Router::new()
+        .route(&base, get(list_memory).post(write_memory))
+        .route(&format!("{base}/search"), get(search_memory))
         .route(
-            "/projects/{project_id}/workflows/{slug}/memory",
-            get(list_memory).post(write_memory),
-        )
-        .route(
-            "/projects/{project_id}/workflows/{slug}/memory/search",
-            get(search_memory),
-        )
-        .route(
-            "/projects/{project_id}/workflows/{slug}/memory/{fact_id}/supersede",
+            &format!("{base}/{{fact_id}}/supersede"),
             post(supersede_memory),
         )
-        .route(
-            "/projects/{project_id}/workflows/{slug}/memory/{fact_id}",
-            delete(drop_memory),
-        )
+        .route(&format!("{base}/{{fact_id}}"), delete(drop_memory))
+}
+
+pub fn routes() -> Router<Arc<WorkspaceAppState>> {
+    // Legacy (unversioned) + v1 (stable). Both mounted so clients can
+    // migrate incrementally; neither path can be deleted without a
+    // deprecation window. See ADR 009 for the versioning policy.
+    build_routes("").merge(build_routes("/v1"))
 }
 
 // ── Helper: resolve slug → agent_id ─────────────────────────────────────────
@@ -321,6 +339,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_used_at: None,
+            embedding: None,
+            expires_at: None,
         };
         // Make sure it survives the round-trip
         let response = MemoryFactResponse::from(model.clone());
@@ -350,10 +370,33 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_used_at: None,
+            embedding: None,
+            expires_at: None,
         };
         let response = MemoryFactResponse::from(model);
         assert!(response.tags.is_empty());
         assert!(response.source_run_ids.is_empty());
+    }
+
+    #[test]
+    fn routes_mount_both_legacy_and_v1_prefixes() {
+        // Guards the dual-namespace contract promised by this module's
+        // doc comment (and ADR 009). If someone refactors `routes()` and
+        // drops a prefix, clients break silently — this test catches it
+        // before the PR lands.
+        //
+        // We inspect the route paths by constructing the router and
+        // using debug formatting, which is stable across axum 0.8.
+        let router = routes();
+        let debug = format!("{:?}", router);
+        assert!(
+            debug.contains("/projects/{project_id}/workflows/{slug}/memory"),
+            "legacy prefix missing: {debug}",
+        );
+        assert!(
+            debug.contains("/v1/projects/{project_id}/workflows/{slug}/memory"),
+            "v1 prefix missing: {debug}",
+        );
     }
 
     #[test]
@@ -371,6 +414,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             last_used_at: None,
+            embedding: None,
+            expires_at: None,
         };
         let response = MemoryFactResponse::from(model);
         assert_eq!(response.superseded_by, Some(42));

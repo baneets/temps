@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown,
   ChevronRight,
@@ -22,6 +22,7 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 
 import {
+  getSandboxStats,
   regeneratePreviewPassword,
   restartSandbox,
   refreshSandbox,
@@ -148,23 +149,60 @@ export function SessionPreviewCard({
     onError: (e: Error) => toast.error(e.message),
   })
 
-  // Per-session resource overrides — empty input falls back to server default.
-  const [cpuInput, setCpuInput] = useState<string>(
-    session.cpu_limit != null ? String(session.cpu_limit) : '',
-  )
-  const [memInput, setMemInput] = useState<string>(
-    session.memory_limit_mb != null ? String(session.memory_limit_mb) : '',
-  )
-  const [pidsInput, setPidsInput] = useState<string>(
-    session.pids_limit != null ? String(session.pids_limit) : '',
-  )
+  // Live sandbox stats give us the *actually applied* CPU and memory limits
+  // (from cgroups) — useful when the DB columns are null because the session
+  // inherited the platform default, so the form still pre-fills with what
+  // the container is really running with, not a hardcoded UI guess.
+  const sandboxAttached = !!session.sandbox_container_id
+  const sessionClosed = session.status === 'closed'
+  const effectiveLimits = useQuery({
+    queryKey: ['workspace', projectId, 'sessions', session.id, 'sandbox-stats'],
+    queryFn: () => getSandboxStats(projectId, session.id),
+    enabled: sandboxAttached && !sessionClosed,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  // Per-session resource overrides. Priority for the initial value shown:
+  //   1. DB override on the session (user previously customized)
+  //   2. Live cgroup limits from the running sandbox (platform default applied)
+  //   3. Empty string — shows the placeholder hint
+  const initialCpu =
+    session.cpu_limit != null
+      ? String(session.cpu_limit)
+      : effectiveLimits.data?.cpu_limit_cores != null
+        ? String(effectiveLimits.data.cpu_limit_cores)
+        : ''
+  const initialMem =
+    session.memory_limit_mb != null
+      ? String(session.memory_limit_mb)
+      : effectiveLimits.data?.memory_limit_bytes != null
+        ? String(
+            Math.round(effectiveLimits.data.memory_limit_bytes / (1024 * 1024)),
+          )
+        : ''
+  const initialPids =
+    session.pids_limit != null ? String(session.pids_limit) : ''
+
+  const [cpuInput, setCpuInput] = useState<string>(initialCpu)
+  const [memInput, setMemInput] = useState<string>(initialMem)
+  const [pidsInput, setPidsInput] = useState<string>(initialPids)
+
+  // Reseed when either the DB override or the live limits resolve. We only
+  // overwrite the input when it is still empty — never clobber an in-progress
+  // edit the user is typing.
   useEffect(() => {
-    setCpuInput(session.cpu_limit != null ? String(session.cpu_limit) : '')
-    setMemInput(
-      session.memory_limit_mb != null ? String(session.memory_limit_mb) : '',
-    )
-    setPidsInput(session.pids_limit != null ? String(session.pids_limit) : '')
-  }, [session.cpu_limit, session.memory_limit_mb, session.pids_limit])
+    setCpuInput((prev) => (prev === '' ? initialCpu : prev))
+    setMemInput((prev) => (prev === '' ? initialMem : prev))
+    setPidsInput((prev) => (prev === '' ? initialPids : prev))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    session.cpu_limit,
+    session.memory_limit_mb,
+    session.pids_limit,
+    effectiveLimits.data?.cpu_limit_cores,
+    effectiveLimits.data?.memory_limit_bytes,
+  ])
 
   const saveResources = useMutation({
     mutationFn: (body: {
@@ -190,8 +228,6 @@ export function SessionPreviewCard({
 
   const lifecycleBusy =
     stop.isPending || start.isPending || restart.isPending || refresh.isPending
-  const sandboxAttached = !!session.sandbox_container_id
-  const sessionClosed = session.status === 'closed'
   const passwordRevealed = revealedPassword !== null
 
   // Free-form port input — lets users open arbitrary ports beyond the
@@ -217,7 +253,7 @@ export function SessionPreviewCard({
             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
           )}
           <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-          Preview &amp; sandbox
+          Sandbox
         </div>
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           {sandboxAttached ? (

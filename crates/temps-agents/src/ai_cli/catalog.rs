@@ -154,11 +154,20 @@ pub const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
         ],
         // Model IDs the Codex CLI exposes via its `Select Model and Effort`
         // picker (run `codex` then `/model`). Verified against the CLI's
-        // interactive menu: only `gpt-5-codex` and `gpt-5` are accepted —
-        // the older `gpt-4o` family was dropped when the CLI moved to the
-        // GPT-5 family. `gpt-5-codex` is the default for coding work;
-        // `gpt-5` is the general-reasoning fallback.
-        models: &["gpt-5-codex", "gpt-5"],
+        // interactive menu — GPT-5.4 is the current frontier family, with
+        // the `-codex` variants tuned for coding and `-max` trading latency
+        // for depth. The `5.1` family is kept as a cheaper/faster fallback.
+        // `gpt-5-codex` is kept as a legacy option but fails on many
+        // ChatGPT accounts ("model not supported"), so it's not the default.
+        models: &[
+            "gpt-5.4",
+            "gpt-5.4-codex",
+            "gpt-5.4-codex-max",
+            "gpt-5.2",
+            "gpt-5.1-codex",
+            "gpt-5.1-codex-mini",
+            "gpt-5-codex",
+        ],
     },
     ProviderCatalogEntry {
         id: "opencode",

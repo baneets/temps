@@ -1976,7 +1976,7 @@ impl PostgresService {
         let metadata = serde_json::json!({
             "service_type": "postgres",
             "service_name": self.name,
-            "backup_tool": "pg_dump",
+            "backup_tool": "pg_dumpall",
         });
 
         let backup_record = external_service_backups::ActiveModel {
@@ -2103,11 +2103,13 @@ impl PostgresService {
             self.name, db_container_name
         );
 
-        // Run pg_dump | gzip inside the sidecar, writing directly to the bind-mounted
+        // Run pg_dumpall | gzip inside the sidecar, writing directly to the bind-mounted
         // host filesystem. This keeps the Temps process memory flat regardless of DB size.
+        // pg_dumpall dumps the entire cluster (all databases, roles, tablespaces) instead
+        // of a single database. `--database` is only the bootstrap connection target.
         let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
         let pg_dump_shell_cmd = format!(
-            "pg_dump --format=plain --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
+            "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
             shell_escape(&db_container_name), shell_escape(&port_str), shell_escape(&postgres_config.username), shell_escape(&postgres_config.database),
             stderr_path, container_backup_path
         );

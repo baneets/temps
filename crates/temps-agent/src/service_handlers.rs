@@ -815,10 +815,13 @@ pub async fn backup_service(
             (cmd, Some("postgres"))
         }
         ("postgres", _) => {
+            // pg_dumpall dumps the entire cluster (all databases, roles, tablespaces).
+            // Output is plain SQL (custom format is not supported by pg_dumpall), so the
+            // restore path must use `psql -f` rather than `pg_restore`.
             let cmd = vec![
                 "bash".to_string(),
                 "-c".to_string(),
-                "pg_dump -Fc --no-acl --no-owner -U postgres postgres | gzip > /tmp/backup.sql.gz && echo 'dump_complete'"
+                "pg_dumpall --clean --if-exists --no-acl --no-owner -U postgres | gzip > /tmp/backup.sql.gz && echo 'dump_complete'"
                     .to_string(),
             ];
             (cmd, Some("postgres"))

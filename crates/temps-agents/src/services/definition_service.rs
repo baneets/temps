@@ -155,16 +155,35 @@ impl DefinitionService {
             });
         }
 
+        // Pre-check existence so we return a typed 409 instead of a 500 that
+        // leaks the PG unique-constraint name. The `From<DbErr>` fallback
+        // still catches the race where two inserts arrive concurrently.
+        if project_skill_definitions::Entity::find()
+            .filter(project_skill_definitions::Column::ProjectId.eq(project_id))
+            .filter(project_skill_definitions::Column::Slug.eq(&request.slug))
+            .one(self.db.as_ref())
+            .await?
+            .is_some()
+        {
+            return Err(AgentError::SkillDefinitionAlreadyExists {
+                project_id: Some(project_id),
+                slug: request.slug,
+            });
+        }
+
         let active = project_skill_definitions::ActiveModel {
             project_id: Set(Some(project_id)),
-            slug: Set(request.slug),
+            slug: Set(request.slug.clone()),
             name: Set(request.name),
             description: Set(request.description),
             content: Set(request.content),
             archive: Set(request.archive),
             ..Default::default()
         };
-        let model = active.insert(self.db.as_ref()).await?;
+        let model = active
+            .insert(self.db.as_ref())
+            .await
+            .map_err(|e| fold_skill_dup(e, Some(project_id), &request.slug))?;
         Ok(model)
     }
 
@@ -240,16 +259,32 @@ impl DefinitionService {
             });
         }
 
+        if project_skill_definitions::Entity::find()
+            .filter(project_skill_definitions::Column::ProjectId.is_null())
+            .filter(project_skill_definitions::Column::Slug.eq(&request.slug))
+            .one(self.db.as_ref())
+            .await?
+            .is_some()
+        {
+            return Err(AgentError::SkillDefinitionAlreadyExists {
+                project_id: None,
+                slug: request.slug,
+            });
+        }
+
         let active = project_skill_definitions::ActiveModel {
             project_id: Set(None),
-            slug: Set(request.slug),
+            slug: Set(request.slug.clone()),
             name: Set(request.name),
             description: Set(request.description),
             content: Set(request.content),
             archive: Set(request.archive),
             ..Default::default()
         };
-        let model = active.insert(self.db.as_ref()).await?;
+        let model = active
+            .insert(self.db.as_ref())
+            .await
+            .map_err(|e| fold_skill_dup(e, None, &request.slug))?;
         Ok(model)
     }
 
@@ -359,15 +394,31 @@ impl DefinitionService {
     ) -> Result<project_mcp_definitions::Model, AgentError> {
         validate_slug(&request.slug, "MCP server")?;
 
+        if project_mcp_definitions::Entity::find()
+            .filter(project_mcp_definitions::Column::ProjectId.eq(project_id))
+            .filter(project_mcp_definitions::Column::Slug.eq(&request.slug))
+            .one(self.db.as_ref())
+            .await?
+            .is_some()
+        {
+            return Err(AgentError::McpDefinitionAlreadyExists {
+                project_id: Some(project_id),
+                slug: request.slug,
+            });
+        }
+
         let active = project_mcp_definitions::ActiveModel {
             project_id: Set(Some(project_id)),
-            slug: Set(request.slug),
+            slug: Set(request.slug.clone()),
             name: Set(request.name),
             description: Set(request.description),
             config: Set(request.config),
             ..Default::default()
         };
-        let model = active.insert(self.db.as_ref()).await?;
+        let model = active
+            .insert(self.db.as_ref())
+            .await
+            .map_err(|e| fold_mcp_dup(e, Some(project_id), &request.slug))?;
         Ok(model)
     }
 
@@ -435,15 +486,31 @@ impl DefinitionService {
     ) -> Result<project_mcp_definitions::Model, AgentError> {
         validate_slug(&request.slug, "MCP server")?;
 
+        if project_mcp_definitions::Entity::find()
+            .filter(project_mcp_definitions::Column::ProjectId.is_null())
+            .filter(project_mcp_definitions::Column::Slug.eq(&request.slug))
+            .one(self.db.as_ref())
+            .await?
+            .is_some()
+        {
+            return Err(AgentError::McpDefinitionAlreadyExists {
+                project_id: None,
+                slug: request.slug,
+            });
+        }
+
         let active = project_mcp_definitions::ActiveModel {
             project_id: Set(None),
-            slug: Set(request.slug),
+            slug: Set(request.slug.clone()),
             name: Set(request.name),
             description: Set(request.description),
             config: Set(request.config),
             ..Default::default()
         };
-        let model = active.insert(self.db.as_ref()).await?;
+        let model = active
+            .insert(self.db.as_ref())
+            .await
+            .map_err(|e| fold_mcp_dup(e, None, &request.slug))?;
         Ok(model)
     }
 
@@ -496,4 +563,35 @@ impl DefinitionService {
             .await?;
         Ok(items)
     }
+}
+
+/// Map a Sea-ORM insert error to a typed `AlreadyExists` variant when the
+/// underlying cause is a Postgres unique-constraint violation. The generic
+/// `From<DbErr>` impl already detects this but can't attach the authoritative
+/// project_id/slug — do that here at the call site and fall through to the
+/// default conversion for anything else.
+fn fold_skill_dup(err: sea_orm::DbErr, project_id: Option<i32>, slug: &str) -> AgentError {
+    if err
+        .to_string()
+        .contains("duplicate key value violates unique constraint")
+    {
+        return AgentError::SkillDefinitionAlreadyExists {
+            project_id,
+            slug: slug.to_string(),
+        };
+    }
+    AgentError::from(err)
+}
+
+fn fold_mcp_dup(err: sea_orm::DbErr, project_id: Option<i32>, slug: &str) -> AgentError {
+    if err
+        .to_string()
+        .contains("duplicate key value violates unique constraint")
+    {
+        return AgentError::McpDefinitionAlreadyExists {
+            project_id,
+            slug: slug.to_string(),
+        };
+    }
+    AgentError::from(err)
 }

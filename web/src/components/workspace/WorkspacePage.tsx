@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Expand,
   GitBranch,
   Loader2,
   PanelLeft,
@@ -11,6 +12,7 @@ import {
   RotateCcw,
   Send,
   Settings,
+  Shrink,
   Sparkles,
   Trash2,
   MoreHorizontal,
@@ -106,7 +108,6 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   // panel header. The mobile-style session Select in the chat header always
   // works regardless of sidebar state.
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [previewOpenMobile, setPreviewOpenMobile] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const eventSourceRef = useRef<EventSource | null>(null)
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
@@ -131,7 +132,9 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
     navigate('new', { relative: 'path' })
   }
 
-  // Close session mutation
+  // Close session mutation — wrapped in toast.promise at the call site so the
+  // user sees loading → success → error transitions without a disconnected
+  // trailing toast.
   const closeActiveSession = useMutation({
     mutationFn: (sessionId: number) => closeSession(project.id, sessionId),
     onSuccess: () => {
@@ -140,12 +143,16 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
       queryClient.invalidateQueries({
         queryKey: ['workspace', project.id, 'sessions'],
       })
-      toast.success('Session closed')
-    },
-    onError: (error: Error) => {
-      toast.error(`Failed to close session: ${error.message}`)
     },
   })
+
+  const handleCloseActiveSession = (sessionId: number) => {
+    toast.promise(closeActiveSession.mutateAsync(sessionId), {
+      loading: 'Closing session…',
+      success: 'Session closed',
+      error: (error: Error) => `Failed to close session: ${error.message}`,
+    })
+  }
 
   // Delete session mutation (hard delete: cancels run, destroys sandbox,
   // cascades messages).
@@ -174,7 +181,39 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   // attaches directly to the AI CLI running inside the sandbox via tmux,
   // with zero abstraction. Chat is kept for legacy users and will be
   // removed once terminal usage is proven in production.
-  const [viewMode, setViewMode] = useState<'terminal' | 'chat'>('terminal')
+  const [viewMode, setViewMode] = useState<'terminal' | 'chat' | 'settings'>(
+    'terminal',
+  )
+  // Fullscreen lifts the terminal pane out of the page layout and covers
+  // the viewport — the app header, session list, tabs, everything. Useful
+  // on mobile where the terminal is otherwise squeezed into a narrow pane.
+  // The xterm instance stays mounted; only CSS positioning changes, so no
+  // scrollback/PTY state is lost.
+  const [terminalFullscreen, setTerminalFullscreen] = useState(false)
+  // Flipping fullscreen changes the wrapper's size without triggering a
+  // layout event xterm sees, so we reuse the same show-event the view-mode
+  // flip uses to force a refit.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const id = requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent('temps:terminal-show'))
+    })
+    return () => cancelAnimationFrame(id)
+  }, [terminalFullscreen])
+  // Esc exits fullscreen. Capture-phase so we beat the terminal's own
+  // Esc handling (it forwards Esc to the PTY) — only when we're in
+  // fullscreen, otherwise pass through so Claude/Codex still see Esc.
+  useEffect(() => {
+    if (!terminalFullscreen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      setTerminalFullscreen(false)
+    }
+    window.addEventListener('keydown', onKey, { capture: true })
+    return () => window.removeEventListener('keydown', onKey, { capture: true })
+  }, [terminalFullscreen])
 
   // When flipping back to the terminal view, the wrapper goes from
   // `display: none` to `display: flex`. ResizeObserver doesn't fire for
@@ -517,27 +556,6 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                       )}
                     </span>
                   )}
-                  {activeSessionQuery.data?.session.skills?.map((slug) => (
-                    <a
-                      key={`skill-${slug}`}
-                      href={`/settings/skills/${slug}`}
-                      title={`Skill: ${slug}`}
-                      className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded shrink-0 hover:bg-muted/80"
-                    >
-                      <Sparkles className="h-3 w-3" />
-                      {slug}
-                    </a>
-                  ))}
-                  {activeSessionQuery.data?.session.mcp_servers?.map((slug) => (
-                    <a
-                      key={`mcp-${slug}`}
-                      href={`/settings/mcp-servers/${slug}`}
-                      title={`MCP server: ${slug}`}
-                      className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded shrink-0 hover:bg-muted/80"
-                    >
-                      {'{mcp}'} {slug}
-                    </a>
-                  ))}
                 </h3>
                 <p className="text-xs text-muted-foreground hidden lg:block">
                   {activeSessionQuery.data?.session.ai_provider ?? 'claude_cli'}
@@ -548,6 +566,26 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                {viewMode === 'terminal' && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => {
+                      setTerminalFullscreen((v) => !v)
+                      terminalRef.current?.focus()
+                    }}
+                    title={
+                      terminalFullscreen ? 'Exit fullscreen' : 'Fullscreen terminal'
+                    }
+                    aria-pressed={terminalFullscreen}
+                  >
+                    {terminalFullscreen ? (
+                      <Shrink className="h-4 w-4" />
+                    ) : (
+                      <Expand className="h-4 w-4" />
+                    )}
+                  </Button>
+                )}
                 <Button
                   size="icon"
                   variant="ghost"
@@ -559,9 +597,9 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 <Button
                   size="icon"
                   variant="ghost"
-                  onClick={() => setPreviewOpenMobile((v) => !v)}
-                  title="Preview & sandbox settings"
-                  aria-pressed={previewOpenMobile}
+                  onClick={() => setViewMode('settings')}
+                  title="Sandbox settings"
+                  aria-pressed={viewMode === 'settings'}
                 >
                   <Settings className="h-4 w-4" />
                 </Button>
@@ -585,7 +623,7 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                     ) : (
                       <DropdownMenuItem
                         onSelect={() =>
-                          closeActiveSession.mutate(activeSessionId)
+                          handleCloseActiveSession(activeSessionId)
                         }
                         disabled={closeActiveSession.isPending}
                       >
@@ -638,15 +676,6 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
               </div>
             </div>
 
-            {activeSessionQuery.data?.session && previewOpenMobile && (
-              <div className="px-2 pt-2 lg:px-4 lg:pt-3">
-                <SessionPreviewCard
-                  projectId={project.id}
-                  session={activeSessionQuery.data.session}
-                  defaultExpanded
-                />
-              </div>
-            )}
 
             {/* When the session is closed, replace both the view toggle and
                 the terminal/chat panes with a single centered Reopen action.
@@ -696,6 +725,17 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
               >
                 Chat <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">Alpha</span>
               </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('settings')}
+                className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                  viewMode === 'settings'
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Settings
+              </button>
             </div>
 
             {/* Both panes are always mounted — only visibility toggles. This
@@ -704,9 +744,15 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 (which loses scrollback, drops the PTY connection, and forces
                 tmux to re-render the whole screen). */}
             <div
-              className={`relative flex-1 min-w-0 min-h-0 w-full overflow-hidden ${
-                viewMode === 'terminal' ? 'flex' : 'hidden'
-              }`}
+              className={
+                terminalFullscreen
+                  ? `fixed inset-0 z-[100] bg-[#0b0b0f] ${
+                      viewMode === 'terminal' ? 'flex' : 'hidden'
+                    }`
+                  : `relative flex-1 min-w-0 min-h-0 w-full overflow-hidden ${
+                      viewMode === 'terminal' ? 'flex' : 'hidden'
+                    }`
+              }
             >
               {activeSessionId != null &&
               activeSessionQuery.data?.session.sandbox_container_id ? (
@@ -725,6 +771,23 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                   <div className="absolute bottom-2 right-2 z-50">
                     <TerminalKeysMenu terminalRef={terminalRef} />
                   </div>
+                  {/* Exit-fullscreen affordance — only visible in fullscreen.
+                      Without this the session header's fullscreen toggle is
+                      covered by the pane, leaving users with no way out. */}
+                  {terminalFullscreen && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTerminalFullscreen(false)
+                        terminalRef.current?.focus()
+                      }}
+                      className="absolute top-2 right-2 z-50 flex h-8 w-8 items-center justify-center rounded-md border border-white/10 bg-[#1f1f23] text-zinc-300 shadow-lg hover:bg-[#2a2a30] hover:text-zinc-100"
+                      aria-label="Exit fullscreen"
+                      title="Exit fullscreen (Esc)"
+                    >
+                      <Shrink className="h-4 w-4" />
+                    </button>
+                  )}
                 </>
               ) : (
                 <div className="h-full w-full flex items-center justify-center text-sm text-muted-foreground p-4 text-center">
@@ -756,6 +819,88 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 <div ref={messagesEndRef} />
               </div>
             </div>
+            {/* Settings pane — preview URLs, idle timeout, resource limits,
+                show-once password. Mounted only when active so live cgroup
+                stats are only fetched when the user is looking at the form. */}
+            {viewMode === 'settings' &&
+              activeSessionQuery.data?.session && (
+                <div className="flex-1 min-w-0 min-h-0 w-full overflow-y-auto overflow-x-hidden p-2 lg:p-4">
+                  <div className="w-full space-y-6">
+                    <SessionPreviewCard
+                      projectId={project.id}
+                      session={activeSessionQuery.data.session}
+                      defaultExpanded
+                    />
+                    <section className="space-y-3 px-1">
+                      <div className="flex items-center gap-2 text-xs font-medium">
+                        <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
+                        Skills & MCP servers
+                      </div>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            Skills
+                          </div>
+                          {(activeSessionQuery.data.session.skills?.length ?? 0) > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {activeSessionQuery.data.session.skills?.map((slug) => (
+                                <a
+                                  key={`skill-${slug}`}
+                                  href={`/settings/skills/${slug}`}
+                                  title={`Skill: ${slug}`}
+                                  className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded hover:bg-muted/80"
+                                >
+                                  <Sparkles className="h-3 w-3" />
+                                  {slug}
+                                </a>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-muted-foreground">
+                              No skills attached.{' '}
+                              <a
+                                href="/settings/skills"
+                                className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                              >
+                                Manage
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            MCP servers
+                          </div>
+                          {(activeSessionQuery.data.session.mcp_servers?.length ?? 0) > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {activeSessionQuery.data.session.mcp_servers?.map((slug) => (
+                                <a
+                                  key={`mcp-${slug}`}
+                                  href={`/settings/mcp-servers/${slug}`}
+                                  title={`MCP server: ${slug}`}
+                                  className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded hover:bg-muted/80"
+                                >
+                                  {'{mcp}'} {slug}
+                                </a>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-muted-foreground">
+                              No MCP servers attached.{' '}
+                              <a
+                                href="/settings/mcp-servers"
+                                className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                              >
+                                Manage
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              )}
               </>
             )}
 
@@ -1069,7 +1214,7 @@ function mergeMessages(
 // ── Tool event timeline ────────────────────────────────────────────────────
 
 interface ToolEvent {
-  kind: 'call' | 'result'
+  kind: 'call' | 'result' | 'thinking'
   toolUseId: string
   name?: string
   summary: string
@@ -1106,6 +1251,166 @@ function extractToolEvent(line: string): ToolEvent | null {
           summary: summarizeToolInput(name, input),
           detail: input ? JSON.stringify(input, null, 2) : undefined,
         }
+      }
+      // Claude emits extended-thinking as a `thinking` block inside the
+      // assistant message. Render the full text inline so the user can read
+      // the model's chain-of-thought alongside tool calls.
+      if (b.type === 'thinking') {
+        const text = (b.thinking as string) ?? ''
+        if (!text.trim()) continue
+        return {
+          kind: 'thinking',
+          toolUseId: '',
+          summary: text,
+        }
+      }
+    }
+    return null
+  }
+  // OpenCode `--format json` emits reasoning as its own top-level event
+  // (`{type:"reasoning", part:{type:"reasoning", text:"..."}}`) when the
+  // model is configured with --thinking / reasoning support.
+  if (type === 'reasoning') {
+    const part = obj.part as Record<string, unknown> | undefined
+    const text = (part?.text as string) ?? ''
+    if (!text.trim()) return null
+    return {
+      kind: 'thinking',
+      toolUseId: '',
+      summary: text,
+    }
+  }
+  // Codex wraps reasoning inside an item envelope just like agent_message.
+  // Emit on item.completed to get the finalised text (item.started carries
+  // an incremental snapshot we'd otherwise duplicate on the next event).
+  if (type === 'item.completed' || type === 'item.started') {
+    const item = obj.item as Record<string, unknown> | undefined
+    if (item && item.type === 'reasoning') {
+      const text = (item.text as string) ?? ''
+      if (!text.trim()) return null
+      return {
+        kind: 'thinking',
+        toolUseId: '',
+        summary: text,
+      }
+    }
+    // Codex tool/command/mcp invocations. Surface started as the "call" row
+    // and completed as the matching "result" row so the user sees a
+    // two-entry timeline for every tool the agent runs. We emit on both
+    // events; de-dup in the UI is OK because toolUseId differs.
+    if (item) {
+      const itemType = item.type as string | undefined
+      const isCommand = itemType === 'command_execution'
+      const isMcp = itemType === 'mcp_tool_call'
+      const isFile = itemType === 'file_change'
+      const isWebSearch = itemType === 'web_search'
+      if (isCommand || isMcp || isFile || isWebSearch) {
+        const id = (item.id as string) ?? ''
+        if (type === 'item.started') {
+          let summary = ''
+          let detail: string | undefined
+          if (isCommand) {
+            const cmd = (item.command as string) ?? ''
+            summary = `$ ${cmd.length > 100 ? cmd.slice(0, 100) + '…' : cmd}`
+            detail = cmd
+          } else if (isMcp) {
+            const server = (item.server as string) ?? ''
+            const tool = (item.tool as string) ?? ''
+            const args = item.arguments ?? item.args
+            summary = server ? `${server}::${tool}` : tool
+            detail = args ? JSON.stringify(args, null, 2) : undefined
+          } else if (isFile) {
+            const path = (item.path as string) ?? ''
+            const op = (item.operation as string) ?? 'edit'
+            summary = `${op} ${path}`
+          } else if (isWebSearch) {
+            summary = `Search ${(item.query as string) ?? ''}`
+          }
+          return {
+            kind: 'call',
+            toolUseId: id,
+            name: itemType ?? 'tool',
+            summary,
+            detail,
+          }
+        }
+        if (type === 'item.completed') {
+          let summary = ''
+          let detail: string | undefined
+          let isError = false
+          if (isCommand) {
+            const exit = item.exit_code ?? item.status
+            const stdout = (item.stdout as string) ?? ''
+            const stderr = (item.stderr as string) ?? ''
+            summary =
+              stdout.trim().slice(0, 120) ||
+              stderr.trim().slice(0, 120) ||
+              `exit ${exit ?? '?'}`
+            detail = [stdout, stderr].filter(Boolean).join('\n---\n') || undefined
+            isError = typeof exit === 'number' && exit !== 0
+          } else if (isMcp) {
+            const result = item.result ?? item.output
+            const resultStr =
+              typeof result === 'string' ? result : JSON.stringify(result ?? '')
+            summary = resultStr.slice(0, 120)
+            detail = resultStr
+            isError = (item.is_error as boolean) === true
+          } else if (isFile) {
+            summary = `ok ${(item.path as string) ?? ''}`
+          } else if (isWebSearch) {
+            const results = item.results
+            summary = Array.isArray(results)
+              ? `${results.length} result(s)`
+              : 'done'
+            detail = results ? JSON.stringify(results, null, 2) : undefined
+          }
+          return {
+            kind: 'result',
+            toolUseId: id,
+            summary,
+            detail,
+            isError,
+          }
+        }
+      }
+    }
+    return null
+  }
+  // OpenCode `--format json` emits tool invocations as their own top-level
+  // event (`{type:"tool", part:{type:"tool", tool:"...", state:{status,
+  // input, output, metadata}, callID}}`). The state transitions pending →
+  // running → completed on the same part/callID. Rather than render every
+  // tick, we emit a call row on running (first signal with inputs) and a
+  // result row on completed.
+  if (type === 'tool') {
+    const part = obj.part as Record<string, unknown> | undefined
+    if (!part) return null
+    const tool = (part.tool as string) ?? 'tool'
+    const callId = (part.callID as string) ?? ''
+    const state = part.state as Record<string, unknown> | undefined
+    const status = state?.status as string | undefined
+    if (status === 'running' || status === 'pending') {
+      const input = state?.input as Record<string, unknown> | undefined
+      return {
+        kind: 'call',
+        toolUseId: callId,
+        name: tool,
+        summary: summarizeToolInput(tool, input),
+        detail: input ? JSON.stringify(input, null, 2) : undefined,
+      }
+    }
+    if (status === 'completed') {
+      const output = state?.output
+      const outStr =
+        typeof output === 'string' ? output : JSON.stringify(output ?? '')
+      const trimmed = outStr.trim()
+      return {
+        kind: 'result',
+        toolUseId: callId,
+        summary:
+          trimmed.length > 120 ? trimmed.slice(0, 120) + '…' : trimmed,
+        detail: outStr,
+        isError: state?.error != null,
       }
     }
     return null
@@ -1180,6 +1485,23 @@ function summarizeToolInput(
 function ToolEventItem({ event }: { event: ToolEvent }) {
   const [open, setOpen] = useState(false)
   const isCall = event.kind === 'call'
+  const isThinking = event.kind === 'thinking'
+
+  // Thinking blocks render their full text inline — no click-to-expand —
+  // so the user can actually read the chain-of-thought in-place. Styled
+  // in a dimmer italic purple so it's visually distinct from the final
+  // answer bubble and the blue tool-call rows.
+  if (isThinking) {
+    return (
+      <div className="flex w-full min-w-0 justify-start">
+        <div className="max-w-[85%] min-w-0 text-xs border-l-2 border-purple-500/30 pl-2 py-1 text-purple-700 dark:text-purple-300 italic whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+          <span className="mr-1 not-italic">💭</span>
+          {event.summary}
+        </div>
+      </div>
+    )
+  }
+
   const colorClass = event.isError
     ? 'border-destructive/40 text-destructive'
     : isCall

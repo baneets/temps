@@ -2097,14 +2097,19 @@ impl ProxyHttp for LoadBalancer {
                 // be scoped to the preview domain. They must come BEFORE
                 // `check_preview_auth` so unauthenticated GET /login works.
 
+                // Sandbox preview hosts don't have a password wall — the 16-hex
+                // public_id *is* the capability. The login/logout paths below
+                // only apply to workspace sessions, so short-circuit sandboxes
+                // straight to the auth check.
+                let workspace_session_id = preview_host.workspace_session_id();
+
                 // POST /__temps/preview/login → verify password, mint cookie
-                if ctx.path == PREVIEW_LOGIN_PATH && ctx.method == "POST" {
-                    if self
-                        .preview_auth_limiter
-                        .is_blocked(client_ip, preview_host.session_id)
-                    {
+                if let Some(session_id) = workspace_session_id
+                    .filter(|_| ctx.path == PREVIEW_LOGIN_PATH && ctx.method == "POST")
+                {
+                    if self.preview_auth_limiter.is_blocked(client_ip, session_id) {
                         warn!(
-                            session_id = preview_host.session_id,
+                            session_id = session_id,
                             client_ip = %client_ip,
                             "preview-auth: login POST rate limited"
                         );
@@ -2127,29 +2132,26 @@ impl ProxyHttp for LoadBalancer {
                         return Ok(true);
                     }
 
-                    let stored_hash =
-                        match lookup_preview_session(&self.db, preview_host.session_id).await {
-                            PreviewSessionLookup::Found { password_hash } => password_hash,
-                            PreviewSessionLookup::NotFound => {
-                                let mut response =
-                                    ResponseHeader::build(StatusCode::NOT_FOUND, None)?;
-                                response.insert_header("Cache-Control", "no-store")?;
-                                response.insert_header("X-Request-ID", &ctx.request_id)?;
-                                response
-                                    .insert_header("Content-Type", "text/plain; charset=utf-8")?;
-                                session
-                                    .write_response_header(Box::new(response), false)
-                                    .await?;
-                                session
-                                    .write_response_body(
-                                        Some(Bytes::from_static(b"Workspace preview not found\n")),
-                                        true,
-                                    )
-                                    .await?;
-                                ctx.routing_status = "preview_not_found".to_string();
-                                return Ok(true);
-                            }
-                        };
+                    let stored_hash = match lookup_preview_session(&self.db, session_id).await {
+                        PreviewSessionLookup::Found { password_hash } => password_hash,
+                        PreviewSessionLookup::NotFound => {
+                            let mut response = ResponseHeader::build(StatusCode::NOT_FOUND, None)?;
+                            response.insert_header("Cache-Control", "no-store")?;
+                            response.insert_header("X-Request-ID", &ctx.request_id)?;
+                            response.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+                            session
+                                .write_response_header(Box::new(response), false)
+                                .await?;
+                            session
+                                .write_response_body(
+                                    Some(Bytes::from_static(b"Workspace preview not found\n")),
+                                    true,
+                                )
+                                .await?;
+                            ctx.routing_status = "preview_not_found".to_string();
+                            return Ok(true);
+                        }
+                    };
 
                     // Read the form-encoded body.
                     let body = session.read_request_body().await.map_err(|e| {
@@ -2178,10 +2180,10 @@ impl ProxyHttp for LoadBalancer {
 
                     if verify_argon2(password, &stored_hash) {
                         self.preview_auth_limiter
-                            .record_success(client_ip, preview_host.session_id);
+                            .record_success(client_ip, session_id);
                         let cookie_value = encode_preview_cookie(
                             &self.crypto,
-                            preview_host.session_id,
+                            session_id,
                             &stored_hash,
                             std::time::SystemTime::now(),
                         );
@@ -2204,16 +2206,13 @@ impl ProxyHttp for LoadBalancer {
                             return Ok(true);
                         };
                         let set_cookie = build_set_cookie(
-                            preview_host.session_id,
+                            session_id,
                             &cookie_value,
                             &settings.preview_domain,
                             self.is_tls_connection(session),
                         );
 
-                        info!(
-                            session_id = preview_host.session_id,
-                            "preview-auth: login succeeded"
-                        );
+                        info!(session_id = session_id, "preview-auth: login succeeded");
                         let mut response = ResponseHeader::build(303, None)?;
                         response.insert_header("Location", &next)?;
                         response.insert_header("Set-Cookie", &set_cookie)?;
@@ -2226,17 +2225,13 @@ impl ProxyHttp for LoadBalancer {
                         return Ok(true);
                     } else {
                         self.preview_auth_limiter
-                            .record_failure(client_ip, preview_host.session_id);
+                            .record_failure(client_ip, session_id);
                         debug!(
-                            session_id = preview_host.session_id,
+                            session_id = session_id,
                             "preview-auth: login failed (bad password)"
                         );
-                        let html = generate_preview_form_html(
-                            preview_host.session_id,
-                            preview_host.port,
-                            &next,
-                            true,
-                        );
+                        let html =
+                            generate_preview_form_html(session_id, preview_host.port, &next, true);
                         let html_bytes = Bytes::from(html);
                         let mut response = ResponseHeader::build(StatusCode::UNAUTHORIZED, None)?;
                         response.insert_header("Content-Type", "text/html; charset=utf-8")?;
@@ -2252,7 +2247,9 @@ impl ProxyHttp for LoadBalancer {
                 }
 
                 // GET/HEAD /__temps/preview/login → render empty form
-                if ctx.path == PREVIEW_LOGIN_PATH && (ctx.method == "GET" || ctx.method == "HEAD") {
+                if let Some(session_id) = workspace_session_id.filter(|_| {
+                    ctx.path == PREVIEW_LOGIN_PATH && (ctx.method == "GET" || ctx.method == "HEAD")
+                }) {
                     let next_raw = ctx
                         .query_string
                         .as_deref()
@@ -2263,12 +2260,8 @@ impl ProxyHttp for LoadBalancer {
                         })
                         .unwrap_or_else(|| "/".to_string());
                     let next = sanitize_next(&next_raw);
-                    let html = generate_preview_form_html(
-                        preview_host.session_id,
-                        preview_host.port,
-                        &next,
-                        false,
-                    );
+                    let html =
+                        generate_preview_form_html(session_id, preview_host.port, &next, false);
                     let html_bytes = Bytes::from(html);
                     let mut response = ResponseHeader::build(StatusCode::OK, None)?;
                     response.insert_header("Content-Type", "text/html; charset=utf-8")?;
@@ -2287,9 +2280,11 @@ impl ProxyHttp for LoadBalancer {
                 }
 
                 // POST /__temps/preview/logout → clear cookie, redirect /
-                if ctx.path == PREVIEW_LOGOUT_PATH && ctx.method == "POST" {
+                if let Some(session_id) = workspace_session_id
+                    .filter(|_| ctx.path == PREVIEW_LOGOUT_PATH && ctx.method == "POST")
+                {
                     let set_cookie = build_logout_cookie(
-                        preview_host.session_id,
+                        session_id,
                         &settings.preview_domain,
                         self.is_tls_connection(session),
                     );
@@ -2326,7 +2321,7 @@ impl ProxyHttp for LoadBalancer {
                 match outcome {
                     PreviewAuthOutcome::Allow { host } => {
                         info!(
-                            session_id = host.session_id,
+                            target = %host.target.label(),
                             port = host.port,
                             "preview-auth: allowed"
                         );
@@ -2351,7 +2346,7 @@ impl ProxyHttp for LoadBalancer {
                     }
                     PreviewAuthOutcome::LoginRequired { host } => {
                         debug!(
-                            session_id = host.session_id,
+                            target = %host.target.label(),
                             "preview-auth: redirecting to login"
                         );
                         // Build the original path + query to stash as `next`.
@@ -2383,7 +2378,7 @@ impl ProxyHttp for LoadBalancer {
                     }
                     PreviewAuthOutcome::RateLimited { host } => {
                         warn!(
-                            session_id = host.session_id,
+                            target = %host.target.label(),
                             client_ip = %client_ip,
                             "preview-auth: rate limited"
                         );
@@ -2407,8 +2402,8 @@ impl ProxyHttp for LoadBalancer {
                     }
                     PreviewAuthOutcome::NotFound { host } => {
                         debug!(
-                            session_id = host.session_id,
-                            "preview-auth: session not found or no password"
+                            target = %host.target.label(),
+                            "preview-auth: target not found or no password"
                         );
                         let mut response = ResponseHeader::build(StatusCode::NOT_FOUND, None)?;
                         response.insert_header("Cache-Control", "no-store")?;

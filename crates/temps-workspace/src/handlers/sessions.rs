@@ -9,8 +9,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use bollard::container::LogOutput;
 use bollard::exec::StartExecResults;
-use bytes::Bytes;
 use futures::stream::Stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use utoipa::ToSchema;
 
+use sea_orm::EntityTrait;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
 use temps_core::{AuditContext, AuditOperation, RequestMetadata};
@@ -57,16 +58,18 @@ pub struct PreviewUrlParts {
 }
 
 impl PreviewUrlParts {
-    fn host_for(&self, session_id: i32, port: u16) -> String {
-        let host = format!("ws-{}-{}.{}", session_id, port, self.domain);
+    fn host_for(&self, public_id: &str, port: u16) -> String {
+        let label = crate::services::public_id::hex_label(public_id);
+        let host = format!("ws-{}-{}.{}", label, port, self.domain);
         match self.port {
             Some(external_port) => format!("{}:{}", host, external_port),
             None => host,
         }
     }
 
-    fn host_template(&self, session_id: i32) -> String {
-        let host = format!("ws-{}-{{port}}.{}", session_id, self.domain);
+    fn host_template(&self, public_id: &str) -> String {
+        let label = crate::services::public_id::hex_label(public_id);
+        let host = format!("ws-{}-{{port}}.{}", label, self.domain);
         match self.port {
             Some(external_port) => format!("{}:{}", host, external_port),
             None => host,
@@ -74,20 +77,20 @@ impl PreviewUrlParts {
     }
 }
 
-fn build_preview_urls(session_id: i32, parts: &PreviewUrlParts) -> Vec<PreviewPortUrl> {
+fn build_preview_urls(public_id: &str, parts: &PreviewUrlParts) -> Vec<PreviewPortUrl> {
     COMMON_PREVIEW_PORTS
         .iter()
         .map(|p| PreviewPortUrl {
             port: *p,
-            url: format!("{}://{}", parts.protocol, parts.host_for(session_id, *p)),
+            url: format!("{}://{}", parts.protocol, parts.host_for(public_id, *p)),
         })
         .collect()
 }
 
 /// Build the URL *template* — the UI substitutes `{port}` client-side so
 /// users can also enter arbitrary ports.
-fn build_preview_url_template(session_id: i32, parts: &PreviewUrlParts) -> String {
-    format!("{}://{}", parts.protocol, parts.host_template(session_id))
+fn build_preview_url_template(public_id: &str, parts: &PreviewUrlParts) -> String {
+    format!("{}://{}", parts.protocol, parts.host_template(public_id))
 }
 
 // ── Error → Problem conversion ──────────────────────────────────────────────
@@ -179,6 +182,10 @@ pub struct StartSessionRequest {
     /// at session start. Resolved from `project_mcp_definitions` (falls back
     /// to global).
     pub mcp_servers: Option<Vec<String>>,
+    /// CPU limit in vCPU cores (e.g. 2.0). `None` → server default applies.
+    pub cpu_limit: Option<f32>,
+    /// Memory limit in MB. `None` → server default applies.
+    pub memory_limit_mb: Option<i32>,
 }
 
 /// Body for `PATCH /projects/{project_id}/workspace/sessions/{session_id}`.
@@ -229,6 +236,9 @@ pub struct PaginationParams {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SessionResponse {
     pub id: i32,
+    /// Opaque external identifier (`wss_<16hex>`). Used in preview URLs
+    /// so sessions can't be enumerated by walking numeric ids.
+    pub public_id: String,
     pub project_id: i32,
     pub user_id: i32,
     pub status: String,
@@ -276,8 +286,11 @@ pub struct SessionResponse {
 impl SessionResponse {
     pub fn from_model(s: workspace_sessions::Model, parts: &PreviewUrlParts) -> Self {
         let id = s.id;
+        let preview_urls = build_preview_urls(&s.public_id, parts);
+        let preview_url_template = build_preview_url_template(&s.public_id, parts);
         Self {
             id,
+            public_id: s.public_id,
             project_id: s.project_id,
             user_id: s.user_id,
             status: s.status,
@@ -297,8 +310,8 @@ impl SessionResponse {
             sandbox_container_id: s.sandbox_container_id,
             preview_password_hint: s.preview_password_hint,
             preview_password: None,
-            preview_urls: build_preview_urls(id, parts),
-            preview_url_template: build_preview_url_template(id, parts),
+            preview_urls,
+            preview_url_template,
             idle_timeout_minutes: s.idle_timeout_minutes,
             title: s.title,
             cpu_limit: s.cpu_milli.map(|m| m as f32 / 1000.0),
@@ -707,14 +720,28 @@ async fn delete_terminal_tab(
     let (docker, container_id) =
         resolve_terminal_container(&app_state, project_id, session_id).await?;
 
-    let session_name = format!("temps-{}-{}", kind, id);
+    // Kill every tmux session that matches this tab across providers.
+    //
+    // The actual tmux session name depends on which CLI is active for the
+    // workspace session: `temps-<ai_provider>-temps-<kind>-<id>` (see the
+    // attach path — the provider is prepended so swapping CLIs doesn't
+    // reattach to the wrong agent). But callers of this endpoint only know
+    // `{kind}-{id}`, so we enumerate tmux sessions and nuke any whose name
+    // ends in our `temps-<kind>-<id>` suffix. This also cleans up orphans
+    // from a previous provider if the user swapped mid-session.
+    let suffix = format!("temps-{}-{}", kind, id);
     let _ = exec_capture(
         &docker,
         &container_id,
         vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            format!("tmux kill-session -t {} 2>/dev/null || true", session_name),
+            format!(
+                "tmux ls -F '#S' 2>/dev/null | grep -E '(^|-){suffix}$' | while read s; do \
+                   tmux kill-session -t \"$s\" 2>/dev/null || true; \
+                 done",
+                suffix = suffix,
+            ),
         ],
     )
     .await;
@@ -978,6 +1005,7 @@ async fn session_terminal_ws(
     };
 
     let ai_provider = session.ai_provider.clone();
+    let ai_model = session.ai_model.clone();
 
     // Resolve tab kind + id. Defaults: kind=claude, tab=main. The tmux session
     // name baked from these is what makes multi-tab work — same {kind,tab} →
@@ -1054,6 +1082,7 @@ async fn session_terminal_ws(
             session_id,
             project_id,
             ai_provider,
+            ai_model,
             kind,
             tab_id,
             tmux_session_name,
@@ -1064,6 +1093,23 @@ async fn session_terminal_ws(
     }))
 }
 
+/// Single-quote a string for safe embedding in `/bin/sh`. Any existing
+/// single quote is closed, escaped as `\'`, and reopened. Matches the
+/// conservative shell-quoting convention used by coreutils / shlex.
+fn shell_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Validates a user-supplied tab id so it's safe to interpolate into a tmux
 /// session name and shell command. We accept lowercase alphanumerics and `-`,
 /// up to 32 chars. Anything else falls back to "main".
@@ -1072,6 +1118,161 @@ fn is_safe_tab_id(s: &str) -> bool {
         && s.len() <= 32
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Capture the current visible contents of a tmux pane as an ANSI byte
+/// stream, ready to write straight into a terminal emulator. Used to
+/// "prime" the browser terminal on reattach so the user sees the exact
+/// frame tmux has server-side instead of waiting for an incremental
+/// redraw (which tmux only emits for cells it thinks changed — so
+/// regions outside the previous client's geometry stay blank).
+///
+/// The flags:
+///   `-p`  write to stdout
+///   `-e`  include escape sequences for colors/attributes
+///   `-J`  join wrapped lines (so a long line that wrapped to the next
+///         row doesn't get a hard `\n` inserted on capture)
+///   `-N`  preserve trailing spaces on short lines (needed so background
+///         color runs all the way to the right edge for TUIs)
+///
+/// Returns `None` when the tmux session doesn't exist yet (fresh
+/// create — nothing to capture) or capture fails for any other reason.
+/// Callers log and proceed; the live PTY stream will paint eventually.
+async fn capture_tmux_pane(
+    docker: &Arc<bollard::Docker>,
+    container_id: &str,
+    tmux_session: &str,
+) -> Option<Vec<u8>> {
+    use bollard::exec::StartExecResults;
+    // `-t <session>:` targets the active pane of the active window in
+    // that session (tmux's default selector).
+    //
+    // `-S -2000`: capture from 2000 lines of scrollback above the
+    // viewport. Without this, `capture-pane` only dumps the current
+    // visible 80×24 (or whatever the geometry is) and the user's
+    // history disappears on browser reload. 2000 covers a normal
+    // session without shipping megabytes on every reconnect.
+    //
+    // We also prepend `\x1b[H\x1b[2J` so the client's emulator starts
+    // from a known home-cursor cleared-screen state — tmux's own
+    // capture doesn't emit a clear, it assumes you're painting into an
+    // already-blank grid.
+    let cmd = vec![
+        "tmux".to_string(),
+        "capture-pane".to_string(),
+        "-t".to_string(),
+        format!("{}:", tmux_session),
+        "-p".to_string(),
+        "-e".to_string(),
+        "-J".to_string(),
+        "-N".to_string(),
+        "-S".to_string(),
+        "-2000".to_string(),
+    ];
+    let exec = match docker
+        .create_exec(
+            container_id,
+            bollard::models::ExecConfig {
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(false),
+                user: Some("temps".to_string()),
+                cmd: Some(cmd),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("capture-pane: create_exec failed: {}", e);
+            return None;
+        }
+    };
+    let start_opts = bollard::exec::StartExecOptions {
+        detach: false,
+        tty: false,
+        ..Default::default()
+    };
+    let mut output = match docker.start_exec(&exec.id, Some(start_opts)).await {
+        Ok(StartExecResults::Attached { output, .. }) => output,
+        Ok(StartExecResults::Detached) => return None,
+        Err(e) => {
+            tracing::debug!("capture-pane: start_exec failed: {}", e);
+            return None;
+        }
+    };
+    // Prime with a clear-screen + home so the emulator starts from a
+    // known state. Without this, a short capture overlays on top of
+    // whatever was last painted and looks garbled.
+    let mut buf: Vec<u8> = b"\x1b[H\x1b[2J".to_vec();
+    while let Some(chunk) = output.next().await {
+        match chunk {
+            Ok(bollard::container::LogOutput::StdOut { message }) => {
+                buf.extend_from_slice(&message)
+            }
+            Ok(bollard::container::LogOutput::StdErr { message }) => {
+                // capture-pane writes errors ("can't find session ...")
+                // to stderr. Treat any stderr as a soft-fail — the live
+                // stream will recover.
+                tracing::debug!(
+                    "capture-pane: stderr: {}",
+                    String::from_utf8_lossy(&message).trim()
+                );
+                return None;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!("capture-pane: read error: {}", e);
+                return None;
+            }
+        }
+    }
+    // Sanity: if we only have the priming bytes, the pane was blank
+    // (fresh tmux session, nothing painted yet). Skip — no point
+    // shipping a clear-screen that erases the banner the CLI is about
+    // to print.
+    if buf.len() <= 7 {
+        return None;
+    }
+    // Also skip if the captured pane is effectively blank (fresh tmux
+    // sessions return a grid full of spaces). Without this, the user
+    // sees the `\x1b[H\x1b[2J` clear-screen prefix land first — the
+    // cursor parks at top-left on an empty frame — and then the real
+    // CLI output paints over it a few hundred ms later. The
+    // clear-then-blank transient is what shows up as "cursor at top
+    // left" right after opening a tab.
+    {
+        let content = &buf[7..];
+        let is_blank = content
+            .iter()
+            .all(|&b| matches!(b, b' ' | b'\n' | b'\r' | b'\t'));
+        if is_blank {
+            return None;
+        }
+    }
+    // Translate bare LF to CRLF. tmux capture-pane emits each row
+    // separated by `\n` only; a terminal emulator receiving a bare
+    // `\n` advances one row but keeps the same column, so each
+    // captured line drifts further right than the last. The symptom:
+    // stair-step duplicated content on reconnect. Writing `\r\n`
+    // resets the column to 0 on every row break, matching what a
+    // normal PTY would emit.
+    //
+    // We do this in-place over the content portion (skipping the 7-
+    // byte ESC[H ESC[2J prefix, which has no LFs of its own).
+    let prefix_len = 7;
+    let mut translated: Vec<u8> = Vec::with_capacity(buf.len() + 32);
+    translated.extend_from_slice(&buf[..prefix_len]);
+    let mut prev = 0u8;
+    for &b in &buf[prefix_len..] {
+        if b == b'\n' && prev != b'\r' {
+            translated.push(b'\r');
+        }
+        translated.push(b);
+        prev = b;
+    }
+    Some(translated)
 }
 
 /// The CLI command to run inside the tmux session for a given provider.
@@ -1088,6 +1289,15 @@ fn tmux_cli_for_provider(provider: &str) -> &'static str {
     }
 }
 
+/// Agent-path terminal handler. Uses the in-sandbox `temps-pty-agent` over
+/// its Unix socket, reached through `docker exec socat`. The agent owns
+/// every PTY for this container's lifetime, so reconnects are a pure
+/// client-side operation (no new PTY, no orphan processes) — this is the
+/// durable replacement for the `docker exec + dtach` approach.
+///
+/// Compatibility: this function is only called after [`agent_socket_available`]
+/// confirms the socket and `socat` are present. The dtach-path handler
+/// keeps working for containers built from images that predate task #42.
 #[allow(clippy::too_many_arguments)]
 async fn handle_session_terminal(
     socket: WebSocket,
@@ -1096,6 +1306,7 @@ async fn handle_session_terminal(
     session_id: i32,
     project_id: i32,
     ai_provider: String,
+    ai_model: Option<String>,
     kind: String,
     tab_id: String,
     tmux_session_name: String,
@@ -1104,103 +1315,88 @@ async fn handle_session_terminal(
     app_state: Arc<WorkspaceAppState>,
 ) {
     use futures::SinkExt;
+    use temps_pty_agent::protocol::{
+        encode_resize, read_frame, write_frame, write_json_frame, ErrorPayload, OpenRequest,
+        OP_ERROR, OP_EXIT, OP_INPUT, OP_KILL, OP_OPEN, OP_OPENED, OP_OUTPUT, OP_PING, OP_PONG,
+        OP_RESIZE,
+    };
     let attach_started = std::time::Instant::now();
 
     let cli = tmux_cli_for_provider(&ai_provider);
 
-    // The "inner" command tmux runs when creating a new session. For claude
-    // tabs, launch the AI CLI; for shell tabs, just drop into bash. Either
-    // way, the fallback chain (`|| exec bash`) keeps the tmux session alive
-    // if the launched program exits, so the user can recover.
-    // Workspace sandboxes are isolated, ephemeral, and dedicated to a single
-    // user — exactly the threat model `--dangerously-skip-permissions` was
-    // designed for. Without it, the user has to approve every file edit and
-    // shell command interactively, which is a non-starter inside a tmux pane
-    // streamed over a websocket. The chat-mode path
-    // (`session_manager::build_cli_cmd`) already passes this flag
-    // unconditionally, so the terminal path now matches.
-    //
-    // The flag only applies to `claude` (other CLIs have their own
-    // equivalents — codex uses `--approval-mode full-auto` baked into
-    // `build_cli_cmd`, opencode has no concept of approvals).
-    let cli_args = if cli == "claude" {
-        " --dangerously-skip-permissions"
-    } else {
-        ""
+    // Resolve the effective model: session-level override, then the
+    // provider's default_model from settings, then None (CLI picks).
+    let effective_model = {
+        let session_m = ai_model.as_deref().filter(|m| !m.is_empty());
+        if session_m.is_some() {
+            session_m.map(|s| s.to_string())
+        } else {
+            let settings_row = temps_entities::settings::Entity::find_by_id(1)
+                .one(app_state.db.as_ref())
+                .await
+                .ok()
+                .flatten();
+            settings_row
+                .as_ref()
+                .and_then(|row| row.data.get("agent_sandbox"))
+                .and_then(|v| {
+                    serde_json::from_value::<temps_core::AgentSandboxSettings>(v.clone()).ok()
+                })
+                .and_then(|sandbox| {
+                    sandbox
+                        .provider_config(&ai_provider)
+                        .default_model
+                        .filter(|m| !m.is_empty())
+                })
+        }
     };
-    // Terminal session supervision uses `dtach` instead of tmux. Why:
-    //
-    //   tmux-via-`docker exec` was unreliable across reconnects. Each exec
-    //   spawned a fresh tmux client, and when the websocket dropped the
-    //   exec's controlling sh would die — sometimes taking the tmux server
-    //   with it. A new reconnect would find no server, run `new-session`,
-    //   and spawn a *second* claude process that had no knowledge of the
-    //   first one's background shells. We saw up to 5 claudes in a single
-    //   container. The fundamental problem: tmux's server lifetime was
-    //   entangled with the exec stream's lifetime.
-    //
-    //   `dtach` fixes this by design. It double-forks a "master" on first
-    //   attach (`-A`) that owns the PTY and the child program, then the
-    //   attach client just proxies bytes over a Unix socket. When the
-    //   client dies (websocket closes), the master is untouched — it keeps
-    //   running until the program inside exits or the container stops.
-    //   Reconnect runs `dtach -A <same.sock>` which finds the existing
-    //   master and re-attaches. Claude is launched exactly once per
-    //   sandbox lifetime because the shell command that *creates* the
-    //   master only runs on the very first `-A` call.
-    //
-    //   Flags:
-    //     -A  = attach existing, or create new (the key flag)
-    //     -E  = disable detach character (no `Ctrl-\` swallowing — we want
-    //           every keystroke to reach the child program)
-    //     -z  = ignore suspend, pass ^Z through
-    //     -r winch = on attach, send SIGWINCH to child so its TUI redraws
-    //                at the new client's size. This is how scrollback is
-    //                "recovered" on reconnect — claude/codex/opencode all
-    //                redraw their full TUI state on SIGWINCH.
-    //
-    // The socket lives in /run/temps-pty/{kind}-{tab}.sock. That directory
-    // is created in the sandbox Dockerfile with `temps:temps` ownership.
-    //
-    // Stale-socket hygiene: if the container was stopped and restarted,
-    // the old master process is gone but the socket file persists in the
-    // writable layer. We detect this by comparing /proc/1's mtime
-    // (effectively the container's boot time) against a marker file —
-    // if they don't match, we wipe the directory and start fresh. This
-    // runs once per container boot; subsequent exec invocations in the
-    // same boot are a no-op.
-    // Socket path is scoped by the active provider so switching from
-    // claude_cli → codex_cli (or vice versa) starts a fresh dtach master
-    // instead of re-attaching to the old one and showing the wrong CLI.
-    // Shape: `temps-{provider}-{kind}-{tab}.sock`.
-    let sock_path = format!("/run/temps-pty/{}-{}.sock", ai_provider, tmux_session_name);
-
-    // Provider-specific resume plumbing. Claude writes per-project JSONL
-    // session files under ~/.claude/projects/-workspace/; `codex` and
-    // `opencode` don't, so checking that path for them is a false-negative.
-    // The `.agent-session-id` marker is written by the chat-mode flow and
-    // only applies to claude's `--resume <id>` protocol.
-    let resume_snippet = if cli == "claude" {
-        format!(
+    let model_flag = effective_model
+        .as_deref()
+        .map(|m| format!(" --model '{}'", m))
+        .unwrap_or_default();
+    let cli_args = if cli == "claude" {
+        format!(" --dangerously-skip-permissions{}", model_flag)
+    } else if cli == "codex" {
+        // `--no-alt-screen` keeps codex on the primary screen so its output
+        // accumulates in tmux's scrollback (history-limit 50000). Without
+        // this, codex enters the alt-screen and every render paints over
+        // the previous frame, leaving no scrollback — users can't scroll
+        // up through a conversation. Per `codex --help`:
+        //   "Runs the TUI in inline mode, preserving terminal scrollback
+        //    history. This is useful in scrollback in alternate screen
+        //    buffers."
+        format!(" --no-alt-screen{}", model_flag)
+    } else {
+        model_flag.clone()
+    };
+    // Resume snippet: launch the CLI in resume mode when possible so the
+    // "Restart AI" button and first-launch fall through into the prior
+    // conversation instead of a cold session. Each provider has its own
+    // resume semantics — claude uses a session-id marker, codex has
+    // `--last`, opencode has `--continue`. If resume fails (nothing to
+    // resume, corrupt state), we fall back to a fresh session.
+    let resume_snippet = match cli {
+        "claude" => format!(
             "if [ -f /tmp/.agent-session-id ]; then {cli}{args} --resume \"$(cat /tmp/.agent-session-id)\" || {cli}{args} --continue || {cli}{args}; rm -f /tmp/.agent-session-id; elif ls /home/temps/.claude/projects/-workspace/*.jsonl >/dev/null 2>&1; then {cli}{args} --continue || {cli}{args}; else {cli}{args}; fi",
             cli = cli,
             args = cli_args,
-        )
-    } else {
-        // codex/opencode: just launch the CLI. They keep their own local
-        // conversation state keyed by cwd, so a fresh process already
-        // resumes the right session if one exists.
-        format!("{cli}{args}", cli = cli, args = cli_args)
+        ),
+        "codex" => format!(
+            "{cli} resume --last{args} || {cli}{args}",
+            cli = cli,
+            args = cli_args,
+        ),
+        "opencode" => format!(
+            "{cli} --continue{args} || {cli}{args}",
+            cli = cli,
+            args = cli_args,
+        ),
+        _ => format!("{cli}{args}", cli = cli, args = cli_args),
     };
-
-    // `inner_cmd` is the script dtach runs ONCE on master creation. After the
-    // CLI exits (or if it fails to launch), we fall through to bash so the
-    // user still has a live shell inside the dtach master — they can fix
-    // whatever went wrong and relaunch manually without losing the tab.
-    //
-    // Note we don't use `exec` on the CLI invocations here — if the CLI fails
-    // with a non-zero exit we want the `||` chain to fire. Only the final
-    // `exec bash` replaces the shell (there's nothing after it).
+    // Inner command: shell tabs drop into bash, CLI tabs launch the resume
+    // chain then fall through to bash on exit.
+    let cli_path_prefix =
+        "/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/bun/bin";
     let inner_cmd = match kind.as_str() {
         "shell" => "exec bash".to_string(),
         _ => format!(
@@ -1208,54 +1404,107 @@ async fn handle_session_terminal(
             resume = resume_snippet
         ),
     };
-
-    // PATH hardening: the dockerfile sets `ENV PATH=/home/temps/.local/bin:...`,
-    // but Docker's explicit Config.Env on container creation replaces the
-    // image PATH entirely (see `session_manager::build_env_vars`), and the
-    // non-interactive `sh -c` dtach runs does not source .bashrc. So we must
-    // list every AI CLI install dir here explicitly:
-    //   - /home/temps/.local/bin       → claude
-    //   - /home/temps/.bun/bin         → codex (installed via `bun add -g`)
-    //   - /home/temps/.opencode/bin    → opencode (installer hardcodes this)
-    // Also keep /usr/local/bun/bin for backwards compat with older images
-    // that installed bun system-wide.
-    let cli_path_prefix =
-        "/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/bun/bin";
-    let exec_script = format!(
-        r#"export PATH={path_prefix}:$PATH; \
-. ~/.env 2>/dev/null; \
-BOOT_ID=$(stat -c %Y /proc/1 2>/dev/null || echo unknown); \
-if [ "$(cat /run/temps-pty/.boot 2>/dev/null)" != "$BOOT_ID" ]; then \
-  rm -f /run/temps-pty/*.sock 2>/dev/null; \
-  echo "$BOOT_ID" > /run/temps-pty/.boot 2>/dev/null; \
-fi; \
-if command -v dtach >/dev/null 2>&1; then \
-  exec dtach -A {sock} -E -z -r winch /bin/sh -c 'export PATH={path_prefix}:$PATH; . ~/.env 2>/dev/null; cd /workspace && {inner}'; \
-else \
-  cd /workspace && {inner}; \
-fi"#,
+    // Wrap the inner shell command in a `tmux new-session -A -s <name>`.
+    // Why tmux: the agent's ring-buffer replay can't safely reproduce a
+    // full-screen TUI's state (stale OSC/CSI response bytes and half-drawn
+    // frames corrupt the render). Tmux maintains a parsed virtual terminal
+    // grid server-side; every attach gets a clean repaint from that grid
+    // instead of raw byte replay. This is the same trick tmux/mosh/screen
+    // use to make reattach correct.
+    //
+    // `-A`  = attach if session exists, otherwise create.
+    // `-s`  = session name (one per agent tab_id).
+    // The trailing command runs only on session creation; subsequent
+    // attaches ignore it.
+    //
+    // We write the inner command into a tempfile under /tmp and tell tmux
+    // to run `bash <script>` so we don't have to quote-escape the inner
+    // command for tmux's word-splitting.
+    let tmux_session = format!("temps-{}-{}", ai_provider, tmux_session_name);
+    // Tmux config: `mouse off` is critical. With mouse on, tmux intercepts
+    // wheel events and enters its own copy-mode scroll — TUIs that handle
+    // their own mouse (opencode, claude) work around it by sending their
+    // own mouse-enable sequences, but TUIs that rely on the terminal's
+    // native scroll (codex) never see the events. Turning mouse off lets
+    // wheel events flow straight to xterm.js as native scroll. We also
+    // disable the status bar (cosmetic clutter) and raise history-limit
+    // so the parsed-grid replay on reattach covers a useful window.
+    // focus-events is a SERVER-scope option (`-s`): it must be applied
+    //   before any session is created. If an older tmux server is already
+    //   running in the container without this set, later attaches inherit
+    //   `focus-events off` and Claude CLI warns about it. We explicitly
+    //   `start-server` with the config below so the option takes effect
+    //   before `new-session` is evaluated.
+    // default-terminal: `tmux-256color` is tmux's preferred value (enables
+    //   extended keys, true-color passthrough via `Tc`/RGB). `terminal-
+    //   overrides` forwards truecolor to xterm.js even if the outer TERM
+    //   isn't a truecolor variant.
+    // mouse off: hand wheel events to xterm.js instead of tmux. On the
+    //   primary screen xterm.js scrolls its own buffer; on the alt-screen
+    //   (full-screen TUI like claude/codex/opencode) xterm.js correctly
+    //   does nothing — matching native terminal behavior (iTerm,
+    //   Alacritty). TUIs that want their own wheel-handling enable mouse
+    //   tracking themselves; xterm.js forwards accordingly.
+    //
+    //   Tmux is still valuable here even without mouse: its parsed-grid
+    //   model is what makes reattach correct. We just don't let it
+    //   intercept wheel events.
+    // xterm-keys on: tmux translates keys to the xterm-style sequences
+    //   (CSI 1;<mod>H for modified Home, CSI 5~/6~ for PgUp/PgDn, etc.)
+    //   that readline, vim, claude, and codex actually listen for.
+    //   Without this, tmux downgrades to its own simplified set and the
+    //   CLI sees nothing for Home/End/PgUp/PgDn.
+    // extended-keys on + CSI u: tells tmux to pass through the Kitty
+    //   keyboard protocol (modified Enter, Ctrl-Shift-letters, etc.) so
+    //   the inner CLI can distinguish keys native terminals already do.
+    let tmux_conf = "set -s focus-events on\n\
+                     set -s extended-keys on\n\
+                     set -as terminal-features \",*:extkeys\"\n\
+                     set -g xterm-keys on\n\
+                     set -g mouse off\n\
+                     set -g status off\n\
+                     set -g history-limit 50000\n\
+                     set -g default-terminal \"tmux-256color\"\n\
+                     set -ag terminal-overrides \",*256col*:RGB\"\n";
+    let cmd = format!(
+        "export PATH={path_prefix}:$PATH; . ~/.env 2>/dev/null; \
+         SCRIPT=$(mktemp /tmp/temps-tab-XXXXXX.sh); \
+         printf '%s\\n' {inner_quoted} > \"$SCRIPT\"; \
+         chmod +x \"$SCRIPT\"; \
+         CONF=$(mktemp /tmp/temps-tmux-XXXXXX.conf); \
+         printf '%s' {conf_quoted} > \"$CONF\"; \
+         exec tmux -u -f \"$CONF\" new-session -A -s {session} bash \"$SCRIPT\"",
         path_prefix = cli_path_prefix,
-        sock = sock_path,
-        inner = inner_cmd,
+        inner_quoted = shell_single_quote(&inner_cmd),
+        conf_quoted = shell_single_quote(tmux_conf),
+        session = tmux_session,
     );
 
-    let exec_config = bollard::models::ExecConfig {
+    // Tab id scoped by provider so switching CLIs starts a fresh agent tab
+    // instead of re-attaching the wrong one.
+    let agent_tab_id = format!("{}-{}", ai_provider, tmux_session_name);
+
+    // Open the socat bridge. No tty — the framed protocol is binary and
+    // stdin/stdout are already raw byte pipes. The agent itself is the one
+    // that spawns the PTY inside the container.
+    let exec_cfg = bollard::models::ExecConfig {
         attach_stdin: Some(true),
         attach_stdout: Some(true),
         attach_stderr: Some(true),
-        tty: Some(true),
+        tty: Some(false),
         user: Some("temps".to_string()),
-        working_dir: Some("/workspace".to_string()),
-        env: Some(vec!["TERM=xterm-256color".to_string()]),
-        cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), exec_script]),
+        cmd: Some(vec![
+            "/usr/bin/socat".to_string(),
+            "-".to_string(),
+            "UNIX-CONNECT:/run/temps-pty/agent.sock".to_string(),
+        ]),
         ..Default::default()
     };
-
-    let exec = match docker.create_exec(&container_id, exec_config).await {
+    let exec = match docker.create_exec(&container_id, exec_cfg).await {
         Ok(e) => e,
         Err(e) => {
             tracing::error!(
-                "Failed to create terminal exec for session {}: {}",
+                "agent terminal: create_exec failed for session {}: {}",
                 session_id,
                 e
             );
@@ -1263,26 +1512,24 @@ fi"#,
         }
     };
     let exec_id = exec.id.clone();
-
     let start_opts = bollard::exec::StartExecOptions {
         detach: false,
-        tty: true,
+        tty: false,
         ..Default::default()
     };
-
     let (mut pty_output, mut pty_input) = match docker.start_exec(&exec_id, Some(start_opts)).await
     {
         Ok(StartExecResults::Attached { output, input }) => (output, input),
         Ok(StartExecResults::Detached) => {
             tracing::error!(
-                "Terminal exec for session {} started detached unexpectedly",
+                "agent terminal: exec started detached unexpectedly (session {})",
                 session_id
             );
             return;
         }
         Err(e) => {
             tracing::error!(
-                "Failed to start terminal exec for session {}: {}",
+                "agent terminal: start_exec failed for session {}: {}",
                 session_id,
                 e
             );
@@ -1290,104 +1537,268 @@ fi"#,
         }
     };
 
+    // Bridge bollard's LogOutput stream into a byte pipe so the protocol
+    // reader (which expects AsyncRead) can parse frames incrementally.
+    // stderr from socat is surfaced as a warning — it shouldn't normally
+    // emit anything on a healthy connection.
+    let (mut agent_read, mut agent_read_writer) = tokio::io::duplex(128 * 1024);
+    let session_for_bridge = session_id;
+    let bridge_task = tokio::spawn(async move {
+        while let Some(chunk) = pty_output.next().await {
+            match chunk {
+                Ok(LogOutput::StdOut { message }) | Ok(LogOutput::Console { message }) => {
+                    if agent_read_writer.write_all(&message).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(LogOutput::StdErr { message }) => {
+                    tracing::warn!(
+                        "agent terminal: socat stderr on session {}: {}",
+                        session_for_bridge,
+                        String::from_utf8_lossy(&message).trim()
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        "agent terminal: socat output stream error on session {}: {}",
+                        session_for_bridge,
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+    });
+
+    // Send OPEN frame first — the agent answers OPENED (or ERROR).
+    // cols/rows will be refined by the client's first `resize` control
+    // message. Start conservative so the CLI banner fits.
+    //
+    // Replay disabled: we run every tab inside tmux now (`tmux new-session
+    // -A`), which maintains a correct parsed-grid model server-side. On
+    // reattach tmux repaints the grid authoritatively, so the agent's raw
+    // byte ring is not only unnecessary but actively harmful (stale
+    // OSC/CSI responses would render as text). The tmux attach itself
+    // is what "replays" the screen.
+    let replay_bytes: u32 = 0;
+    let open_req = OpenRequest {
+        tab_id: agent_tab_id.clone(),
+        kind: kind.clone(),
+        cmd,
+        cols: 80,
+        rows: 24,
+        replay_bytes,
+        label: Some(format!("{}-{}", ai_provider, kind)),
+        cwd: Some("/workspace".to_string()),
+        env: Some(vec![
+            ("TERM".into(), "xterm-256color".into()),
+            (
+                "PATH".into(),
+                format!("{cli_path_prefix}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+            ),
+            ("HOME".into(), "/home/temps".into()),
+        ]),
+    };
+    if let Err(e) = write_json_frame(&mut pty_input, OP_OPEN, &open_req).await {
+        tracing::error!(
+            "agent terminal: failed to send OPEN for session {}: {}",
+            session_id,
+            e
+        );
+        bridge_task.abort();
+        return;
+    }
+
+    // Wait for OPENED. Any other frame type at this point means the agent
+    // rejected us (ERROR) or something else is on the wire — log and bail.
+    match read_frame(&mut agent_read).await {
+        Ok(Some((OP_OPENED, _payload))) => {
+            tracing::debug!(
+                "agent terminal: OPENED session={} tab={} after {}ms",
+                session_id,
+                tab_id,
+                attach_started.elapsed().as_millis()
+            );
+        }
+        Ok(Some((OP_ERROR, payload))) => {
+            let err: ErrorPayload = serde_json::from_slice(&payload).unwrap_or(ErrorPayload {
+                code: "unknown".into(),
+                message: String::from_utf8_lossy(&payload).into_owned(),
+            });
+            tracing::error!(
+                "agent terminal: agent rejected OPEN for session {}: {} ({})",
+                session_id,
+                err.message,
+                err.code
+            );
+            bridge_task.abort();
+            return;
+        }
+        Ok(Some((ty, _))) => {
+            tracing::error!(
+                "agent terminal: unexpected first frame 0x{:02x} for session {}",
+                ty,
+                session_id
+            );
+            bridge_task.abort();
+            return;
+        }
+        Ok(None) => {
+            tracing::error!(
+                "agent terminal: socat closed before OPENED (session {})",
+                session_id
+            );
+            bridge_task.abort();
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                "agent terminal: frame read error waiting for OPENED (session {}): {}",
+                session_id,
+                e
+            );
+            bridge_task.abort();
+            return;
+        }
+    }
+
     let (ws_sender, mut ws_receiver) = socket.split();
-    // Shared across PTY-output task AND the keepalive ping task so both can
-    // push frames to the same websocket. A websocket sink is single-writer,
-    // so the mutex just serializes access — contention is trivial in practice
-    // (ping every 20s vs PTY writes that are already batched).
     let ws_sender = Arc::new(tokio::sync::Mutex::new(ws_sender));
 
-    // Keepalive: send a WebSocket Ping frame every 20s. Pingora's upstream
-    // read_timeout is 1h for WS upgrades (see temps-proxy), but middleboxes
-    // between the client and Pingora (mobile NATs, corporate proxies) still
-    // drop idle TCP after ~60s. The ping keeps every hop warm and also lets
-    // us notice a dead client early so the docker exec is torn down
-    // promptly instead of lingering until the next user keystroke.
-    let ping_sender = ws_sender.clone();
+    // Prime the browser with tmux's current pane contents before any
+    // live OP_OUTPUT flows. Why: tmux's attach-redraw only emits cells
+    // it thinks changed from the last client's view. On a fresh browser
+    // reconnect the emulator is empty, so regions outside the previous
+    // client's geometry (or any cell tmux believes is unchanged) stay
+    // blank — the symptom users see as "TUI not fully re-rendered."
+    // `capture-pane -p -e -J -N` dumps the authoritative grid as ANSI,
+    // guaranteeing a complete frame. Fresh-session and capture-failure
+    // cases return `None` and we silently skip; the live stream will
+    // paint normally. This must happen before `output_task` starts
+    // reading from the agent so the primed bytes hit the socket first.
+    if let Some(primed) = capture_tmux_pane(&docker, &container_id, &tmux_session).await {
+        let mut guard = ws_sender.lock().await;
+        if let Err(e) = guard.send(Message::Binary(primed.into())).await {
+            tracing::debug!(
+                "agent terminal: failed to send primed frame for session {}: {}",
+                session_id,
+                e
+            );
+        }
+    }
+
+    // Keepalive: agent PING every 20s keeps the socket and the docker exec
+    // warm. We reuse the websocket ping for the client side — middleboxes
+    // on the browser → Pingora hop still drop idle TCP.
+    let ping_ws = ws_sender.clone();
     let ping_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(20));
-        // Skip the immediate tick — we've just opened the socket.
         interval.tick().await;
         loop {
             interval.tick().await;
-            let mut guard = ping_sender.lock().await;
+            let mut guard = ping_ws.lock().await;
             if guard.send(Message::Ping(Vec::new().into())).await.is_err() {
                 break;
             }
         }
     });
 
-    // PTY → websocket
-    let exec_id_out = exec_id.clone();
-    let docker_out = docker.clone();
-    let output_sender = ws_sender.clone();
+    // Agent → WebSocket: parse framed stream and forward OP_OUTPUT payloads
+    // as websocket Binary. OP_EXIT sends a JSON text message and closes the
+    // socket. Other control frames are debug-logged.
+    let output_ws = ws_sender.clone();
     let heartbeat_state = app_state.clone();
+    let kind_for_out = kind.clone();
+    let tab_id_for_out = tab_id.clone();
     let output_task = tokio::spawn(async move {
-        // Throttled activity heartbeat: whenever the PTY emits output we
-        // know the sandbox is alive and (most likely) an agent is working,
-        // even if the user hasn't pressed a key. Bumping last_activity_at
-        // keeps the idle reaper from closing background runs. At most one
-        // UPDATE per 60s to avoid hammering the DB during chatty TUIs.
         let heartbeat_interval = Duration::from_secs(60);
         let mut last_heartbeat = std::time::Instant::now()
             .checked_sub(heartbeat_interval)
             .unwrap_or_else(std::time::Instant::now);
-        while let Some(chunk) = pty_output.next().await {
-            let bytes: Bytes = match chunk {
-                Ok(bollard::container::LogOutput::StdOut { message }) => message,
-                Ok(bollard::container::LogOutput::StdErr { message }) => message,
-                Ok(bollard::container::LogOutput::Console { message }) => message,
-                Ok(_) => continue,
+        let mut first_byte_seen = false;
+        loop {
+            match read_frame(&mut agent_read).await {
+                Ok(Some((OP_OUTPUT, payload))) => {
+                    if !first_byte_seen {
+                        first_byte_seen = true;
+                        tracing::debug!(
+                            "agent terminal: first OUTPUT at {}ms (session={} kind={} tab={} bytes={})",
+                            attach_started.elapsed().as_millis(),
+                            session_id,
+                            kind_for_out,
+                            tab_id_for_out,
+                            payload.len()
+                        );
+                    }
+                    if last_heartbeat.elapsed() >= heartbeat_interval {
+                        last_heartbeat = std::time::Instant::now();
+                        let svc = heartbeat_state.workspace_service.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = svc.touch_activity(session_id).await {
+                                tracing::debug!(
+                                    "touch_activity failed for session {}: {}",
+                                    session_id,
+                                    e
+                                );
+                            }
+                        });
+                    }
+                    let mut guard = output_ws.lock().await;
+                    if guard.send(Message::Binary(payload.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Some((OP_EXIT, payload))) => {
+                    // Forward the exit code in the same JSON shape the
+                    // dtach path uses so the frontend doesn't need to know
+                    // which backend served this tab.
+                    let code = serde_json::from_slice::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|v| v.get("code").cloned())
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(-1);
+                    let exit_msg = format!(r#"{{"type":"exit","code":{}}}"#, code);
+                    let mut guard = output_ws.lock().await;
+                    let _ = guard.send(Message::Text(exit_msg.into())).await;
+                    let _ = guard.close().await;
+                    break;
+                }
+                Ok(Some((OP_PONG, _))) => {
+                    // Keepalive echo — nothing to do.
+                }
+                Ok(Some((ty, _))) => {
+                    tracing::debug!(
+                        "agent terminal: ignoring frame 0x{:02x} on session {}",
+                        ty,
+                        session_id
+                    );
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        "agent terminal: agent stream ended for session {}",
+                        session_id
+                    );
+                    let mut guard = output_ws.lock().await;
+                    let _ = guard.close().await;
+                    break;
+                }
                 Err(e) => {
                     tracing::debug!(
-                        "Terminal pty stream error for session {}: {}",
+                        "agent terminal: frame read error for session {}: {}",
                         session_id,
                         e
                     );
                     break;
                 }
-            };
-            if last_heartbeat.elapsed() >= heartbeat_interval {
-                last_heartbeat = std::time::Instant::now();
-                let svc = heartbeat_state.workspace_service.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = svc.touch_activity(session_id).await {
-                        tracing::debug!("touch_activity failed for session {}: {}", session_id, e);
-                    }
-                });
-            }
-            let mut guard = output_sender.lock().await;
-            if guard
-                .send(Message::Binary(bytes.to_vec().into()))
-                .await
-                .is_err()
-            {
-                break;
             }
         }
-
-        let exit_code = docker_out
-            .inspect_exec(&exec_id_out)
-            .await
-            .ok()
-            .and_then(|i| i.exit_code)
-            .unwrap_or(-1);
-        let exit_msg = format!(r#"{{"type":"exit","code":{}}}"#, exit_code);
-        let mut guard = output_sender.lock().await;
-        let _ = guard.send(Message::Text(exit_msg.into())).await;
-        let _ = guard.close().await;
     });
 
-    // websocket → PTY (+ resize control messages)
-    // Idle timeout is intentionally generous: a tmux-attached terminal where
-    // the user is reading CLI output may sit silent for a long time.
-    let idle_timeout = tokio::time::Duration::from_secs(60 * 60);
-
-    // Token-bucket rate limit on stdin: 2 MiB/s sustained, 8 MiB burst.
-    // Large pastes (up to 8 MiB instantly) pass through unthrottled; a
-    // sustained flood gets the excess frames dropped rather than
-    // disconnected, so pathological input never wedges the PTY or
-    // saturates the Docker API stream.
+    // WebSocket → Agent: Binary frames become OP_INPUT, Text control
+    // messages become OP_RESIZE / OP_INPUT. Token-bucket keeps a flood
+    // from saturating the socat pipe.
+    let idle_timeout = Duration::from_secs(60 * 60);
     const RATE_BYTES_PER_SEC: u64 = 2 * 1024 * 1024;
     const BUCKET_CAPACITY: u64 = 8 * 1024 * 1024;
     let mut bucket_tokens: u64 = BUCKET_CAPACITY;
@@ -1409,18 +1820,14 @@ fi"#,
                 let needed = data.len() as u64;
                 if needed > bucket_tokens {
                     tracing::warn!(
-                        "Terminal stdin rate limit exceeded for session {} ({} bytes, {} available) — dropping frame",
+                        "agent terminal: stdin rate limit exceeded session {} ({} bytes) — dropping",
                         session_id,
-                        needed,
-                        bucket_tokens
+                        needed
                     );
                     continue;
                 }
                 bucket_tokens -= needed;
-                if pty_input.write_all(&data).await.is_err() {
-                    break;
-                }
-                if pty_input.flush().await.is_err() {
+                if write_frame(&mut pty_input, OP_INPUT, &data).await.is_err() {
                     break;
                 }
             }
@@ -1429,16 +1836,12 @@ fi"#,
                     match ctrl.r#type.as_str() {
                         "resize" => {
                             if let (Some(cols), Some(rows)) = (ctrl.cols, ctrl.rows) {
-                                let opts = bollard::exec::ResizeExecOptions {
-                                    width: cols,
-                                    height: rows,
-                                };
-                                if let Err(e) = docker.resize_exec(&exec_id, opts).await {
-                                    tracing::debug!(
-                                        "resize_exec failed for session {}: {}",
-                                        session_id,
-                                        e
-                                    );
+                                let payload = encode_resize(cols, rows);
+                                if write_frame(&mut pty_input, OP_RESIZE, &payload)
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
                                 }
                             }
                         }
@@ -1448,33 +1851,50 @@ fi"#,
                                 let needed = data.len() as u64;
                                 if needed > bucket_tokens {
                                     tracing::warn!(
-                                        "Terminal stdin rate limit exceeded for session {} ({} bytes, {} available) — dropping input",
+                                        "agent terminal: stdin rate limit exceeded session {} ({} bytes) — dropping",
                                         session_id,
-                                        needed,
-                                        bucket_tokens
+                                        needed
                                     );
                                 } else {
                                     bucket_tokens -= needed;
-                                    if pty_input.write_all(data.as_bytes()).await.is_err() {
+                                    if write_frame(&mut pty_input, OP_INPUT, data.as_bytes())
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
-                                    let _ = pty_input.flush().await;
                                 }
                             }
                         }
+                        "ping" => {
+                            let _ = write_frame(&mut pty_input, OP_PING, b"").await;
+                        }
+                        "kill" => {
+                            let _ = write_frame(&mut pty_input, OP_KILL, b"").await;
+                        }
                         _ => {}
                     }
-                } else if pty_input.write_all(text.as_bytes()).await.is_err() {
-                    break;
+                } else {
+                    // Free-form text: treat as raw input for parity with
+                    // the dtach path's fallback.
+                    if write_frame(&mut pty_input, OP_INPUT, text.as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
-                tracing::debug!("Terminal closed by client for session {}", session_id);
+                tracing::debug!(
+                    "agent terminal: client closed websocket for session {}",
+                    session_id
+                );
                 break;
             }
             Err(_) => {
                 tracing::info!(
-                    "Terminal idle timeout for session {} — closing websocket",
+                    "agent terminal: idle timeout for session {} — closing websocket",
                     session_id
                 );
                 break;
@@ -1483,19 +1903,22 @@ fi"#,
         }
     }
 
+    // Tear down. No orphan-cleanup scan needed here — the agent itself
+    // holds the PTY; dropping `pty_input` closes our side of the socat
+    // bridge, the agent unregisters this subscriber, and the PTY survives
+    // for the next reconnect. That is the whole point of task #42+#43.
     output_task.abort();
     ping_task.abort();
+    drop(pty_input);
+    bridge_task.abort();
 
     let duration_secs = attach_started.elapsed().as_secs();
     tracing::info!(
-        "Terminal session ended for workspace session {} after {}s",
+        "agent terminal: session {} detached after {}s",
         session_id,
         duration_secs
     );
 
-    // Emit the matching detach audit. Best-effort: a missing detach row
-    // (with the attach row present) tells an auditor "server crashed mid-
-    // session" which is itself useful signal.
     let detach_audit = WorkspaceTerminalDetachAudit {
         context: audit_context,
         project_id,
@@ -1779,6 +2202,8 @@ async fn start_session(
             metadata: request.metadata,
             skills: request.skills,
             mcp_servers: request.mcp_servers,
+            cpu_limit: request.cpu_limit,
+            memory_limit_mb: request.memory_limit_mb,
         })
         .await?;
 

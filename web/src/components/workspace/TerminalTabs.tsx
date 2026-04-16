@@ -20,6 +20,7 @@ import {
   Terminal as TerminalIcon,
   Sparkles,
   RotateCw,
+  RotateCcw,
 } from 'lucide-react'
 
 import {
@@ -58,7 +59,11 @@ function providerTabLabel(providerId: string): string {
   }
 }
 
-export type TerminalTabsHandle = SessionTerminalHandle
+export interface TerminalTabsHandle extends SessionTerminalHandle {
+  /** Kill the server-side tmux session for the active tab and reconnect.
+   *  Useful when the TUI is wedged or the user wants a fresh AI session. */
+  restartActive: () => void
+}
 
 interface LocalTab {
   kind: 'claude' | 'shell'
@@ -92,6 +97,32 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     focus: () => {
       const h = handlesRef.current.get(activeKeyRef.current)
       h?.focus()
+    },
+    scrollLines: (lines: number) => {
+      const h = handlesRef.current.get(activeKeyRef.current)
+      h?.scrollLines(lines)
+    },
+    scrollToBottom: () => {
+      const h = handlesRef.current.get(activeKeyRef.current)
+      h?.scrollToBottom()
+    },
+    restartActive: () => {
+      const key = activeKeyRef.current
+      // key shape: `${kind}-${id}` — split on first dash.
+      const dash = key.indexOf('-')
+      if (dash < 0) return
+      const kind = key.slice(0, dash) as 'claude' | 'shell'
+      const id = key.slice(dash + 1)
+      // Kill server tmux session first, then bump reconnect so the client
+      // drops the websocket. The reattach path auto-spawns a fresh tmux
+      // session via `new-session -A`, which re-runs the provider's start
+      // command — giving the user a clean AI session.
+      void deleteTerminalTab(projectId, sessionId, kind, id).catch(() => {
+        // Best-effort. If the session was already dead, the reconnect
+        // below still produces a fresh one.
+      }).finally(() => {
+        reconnect(key)
+      })
     },
   }))
   // The default primary tab always exists. Its label tracks the session's
@@ -235,7 +266,17 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
             >
               <button
                 type="button"
-                onClick={() => setActiveKey(key)}
+                onClick={() => {
+                  setActiveKey(key)
+                  // Tabs within the terminal pane use visibility:hidden, which
+                  // leaves xterm's renderer in a degenerate state if the tab
+                  // was hidden when it mounted — SessionTerminal listens for
+                  // temps:terminal-show to refit and refresh, dispatch it
+                  // after layout so the newly-visible tab paints.
+                  requestAnimationFrame(() => {
+                    window.dispatchEvent(new Event('temps:terminal-show'))
+                  })
+                }}
                 className="flex items-center gap-1.5"
               >
                 <Icon className="h-3 w-3" />
@@ -258,6 +299,37 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
                   title="Reconnect websocket"
                 >
                   <RotateCw className="h-3 w-3" />
+                </button>
+              )}
+              {/* Restart AI: only on the primary AI tab. Kills the server
+                  tmux session and reconnects — the sandbox re-runs the
+                  provider's start command, giving a fresh CLI session. */}
+              {t.kind === 'claude' && t.id === 'main' && (
+                <button
+                  type="button"
+                  onClick={async (e) => {
+                    e.stopPropagation()
+                    const ok = window.confirm(
+                      `Restart ${t.label}? The current session will be killed and a fresh one will start.`
+                    )
+                    if (!ok) return
+                    try {
+                      await deleteTerminalTab(
+                        projectId,
+                        sessionId,
+                        t.kind,
+                        t.id
+                      )
+                    } catch {
+                      // Best-effort — reconnect still produces a fresh session.
+                    }
+                    reconnect(key)
+                  }}
+                  className="ml-0.5 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:bg-white/10 hover:text-zinc-300 group-hover:opacity-100"
+                  aria-label={`Restart ${t.label}`}
+                  title={`Restart ${t.label}`}
+                >
+                  <RotateCcw className="h-3 w-3" />
                 </button>
               )}
               {closable && (

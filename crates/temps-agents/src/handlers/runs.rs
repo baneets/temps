@@ -63,14 +63,28 @@ pub struct AgentRunResponse {
     pub ai_session_id: Option<String>,
 }
 
-impl From<agent_runs::Model> for AgentRunResponse {
-    fn from(model: agent_runs::Model) -> Self {
+impl AgentRunResponse {
+    /// Build from a run model, enriched with the agent's slug, name, and
+    /// whether the run executed in a sandbox.
+    ///
+    /// This is the only public constructor on purpose. A `From<agent_runs::Model>`
+    /// impl existed historically but always defaulted `sandbox_enabled: false`
+    /// and left `agent_slug` / `agent_name` as `None`, which silently produced
+    /// incomplete responses for any caller using plain `.into()`. Callers MUST
+    /// resolve these three fields explicitly; see `resolve_sandbox_for_run`
+    /// below for the standard lookup pattern.
+    pub fn from_with_agent(
+        model: agent_runs::Model,
+        agent_slug: Option<String>,
+        agent_name: Option<String>,
+        sandbox_enabled: bool,
+    ) -> Self {
         Self {
             id: model.id,
             project_id: model.project_id,
             config_id: model.config_id,
-            agent_slug: None,
-            agent_name: None,
+            agent_slug,
+            agent_name,
             trigger_type: model.trigger_type,
             trigger_source_id: model.trigger_source_id,
             trigger_source_type: model.trigger_source_type,
@@ -93,27 +107,43 @@ impl From<agent_runs::Model> for AgentRunResponse {
             started_at: model.started_at.map(|t| t.to_rfc3339()),
             completed_at: model.completed_at.map(|t| t.to_rfc3339()),
             created_at: model.created_at.to_rfc3339(),
-            sandbox_enabled: false,
+            sandbox_enabled,
             user_context: model.user_context,
             ai_session_id: model.ai_session_id,
         }
     }
 }
 
-impl AgentRunResponse {
-    /// Build from a run model, enriched with the agent's slug and name.
-    pub fn from_with_agent(
-        model: agent_runs::Model,
-        agent_slug: Option<String>,
-        agent_name: Option<String>,
-        sandbox_enabled: bool,
-    ) -> Self {
-        let mut resp = Self::from(model);
-        resp.agent_slug = agent_slug;
-        resp.agent_name = agent_name;
-        resp.sandbox_enabled = sandbox_enabled;
-        resp
-    }
+/// Resolve the effective `sandbox_enabled` flag for a run, falling back from
+/// the agent's explicit setting to the global `agent_sandbox.enabled` default.
+/// Also returns the matching agent (if any) so callers can read its slug/name.
+async fn resolve_sandbox_for_run<'a>(
+    app_state: &Arc<AppState>,
+    project_id: i32,
+    run: &agent_runs::Model,
+    agents: &'a [temps_entities::project_agents::Model],
+) -> (Option<&'a temps_entities::project_agents::Model>, bool) {
+    use sea_orm::EntityTrait;
+    let _ = project_id;
+
+    let global_sandbox_enabled = temps_entities::settings::Entity::find_by_id(1)
+        .one(app_state.db.as_ref())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            s.data
+                .get("agent_sandbox")
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false);
+
+    let agent = agents.iter().find(|a| a.id == run.config_id);
+    let sandbox = agent
+        .and_then(|a| a.sandbox_enabled)
+        .unwrap_or(global_sandbox_enabled);
+    (agent, sandbox)
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -588,13 +618,26 @@ async fn stream_run_events(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream).keep_alive(sse_keep_alive()))
+}
+
+/// Shared SSE keep-alive: sends `: heartbeat` comment every 15s so that
+/// mobile/proxy-behind clients detect dropped connections quickly. The
+/// EventSource API's built-in reconnect fires when no bytes arrive for
+/// `retry` milliseconds; a regular heartbeat keeps idle connections
+/// flowing and bounds the gap between "network dropped" and "client
+/// notices". The text label (vs axum's empty-comment default) also makes
+/// the heartbeat visible in browser devtools for debugging.
+fn sse_keep_alive() -> KeepAlive {
+    KeepAlive::new()
+        .interval(std::time::Duration::from_secs(15))
+        .text("heartbeat")
 }
 
 async fn cancel_run(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
-    Path((_project_id, run_id)): Path<(i32, i32)>,
+    Path((project_id, run_id)): Path<(i32, i32)>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ProjectsWrite);
 
@@ -604,7 +647,19 @@ async fn cancel_run(
         .await
         .map_err(Problem::from)?;
 
-    Ok(Json(AgentRunResponse::from(run)))
+    let agents = app_state
+        .config_service
+        .list_agents(project_id)
+        .await
+        .map_err(Problem::from)?;
+    let (agent, sandbox) = resolve_sandbox_for_run(&app_state, project_id, &run, &agents).await;
+
+    Ok(Json(AgentRunResponse::from_with_agent(
+        run,
+        agent.map(|a| a.slug.clone()),
+        agent.map(|a| a.name.clone()),
+        sandbox,
+    )))
 }
 
 /// Retry a completed, failed, cancelled, or no_fix run with the same trigger context.

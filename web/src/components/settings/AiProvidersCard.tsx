@@ -184,7 +184,8 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
   const [serverModel, setServerModel] = useState(initialModel)
   const [modelDraft, setModelDraft] = useState(initialModel)
   const [customMode, setCustomMode] = useState(
-    initialModel !== '' && !provider.models.includes(initialModel)
+    provider.models.length === 0 ||
+    (initialModel !== '' && !provider.models.includes(initialModel))
   )
   const [savingModel, setSavingModel] = useState(false)
 
@@ -196,7 +197,10 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
     if (fresh !== serverModel) {
       setServerModel(fresh)
       setModelDraft(fresh)
-      setCustomMode(fresh !== '' && !provider.models.includes(fresh))
+      setCustomMode(
+        provider.models.length === 0 ||
+        (fresh !== '' && !provider.models.includes(fresh))
+      )
     }
     // We deliberately key off the canonical fresh value, not the whole
     // provider object, so spurious referential changes don't clobber edits.
@@ -224,7 +228,8 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
         // Roll the draft back so the UI matches the server.
         setModelDraft(serverModel)
         setCustomMode(
-          serverModel !== '' && !provider.models.includes(serverModel)
+          provider.models.length === 0 ||
+          (serverModel !== '' && !provider.models.includes(serverModel))
         )
         return
       }

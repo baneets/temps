@@ -237,13 +237,13 @@ async fn handle_client(mut client: TcpStream, peer: SocketAddr, config: Config) 
 
     let upstream_host = config
         .sandbox_host_template
-        .replace("{sid}", &route.session_id.to_string());
+        .replace("{sid}", &route.session_id);
     let upstream_addr = format!("{}:{}", upstream_host, route.port);
 
     info!(
         client = %peer,
         host = %host,
-        session_id = route.session_id,
+        session_id = %route.session_id,
         port = route.port,
         upstream = %upstream_addr,
         "routing preview connection"
@@ -350,13 +350,30 @@ fn parse_host_header(head: &[u8]) -> Option<&str> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct PreviewRoute {
-    session_id: i64,
+    /// Opaque session identifier extracted from the hostname label.
+    ///
+    /// Historically this was an `i64` workspace session id. It's now a
+    /// string because standalone sandboxes embed the 16-hex suffix of a
+    /// `sbx_<hex>` public_id (`ws-<hex>-<port>.domain`) to avoid leaking
+    /// enumeration order across tenants.
+    ///
+    /// The validation rule is: every character must be in
+    /// `[A-Za-z0-9]` — DNS labels forbid most other characters anyway,
+    /// and constraining the charset protects the upstream host template
+    /// against any accidental template injection via the host header.
+    session_id: String,
     port: u16,
 }
 
 /// Parse a hostname of the form `ws-<session_id>-<port>.<rest>` (or with no
 /// `.<rest>` at all). Returns None for anything else, including any host that
 /// doesn't start with the literal `ws-` prefix.
+///
+/// `session_id` may be either:
+/// - a positive integer (workspace session id)
+/// - a 16-character hex string (standalone sandbox public_id suffix)
+///
+/// Any other shape is rejected.
 fn parse_preview_host(host: &str) -> Option<PreviewRoute> {
     // Strip an optional port suffix on the host header (`example.com:8080`).
     let host_only = host.split(':').next()?;
@@ -365,12 +382,29 @@ fn parse_preview_host(host: &str) -> Option<PreviewRoute> {
     // rest is `<sid>-<port>`. Split on the LAST '-' so a future label scheme
     // like `ws-<sid>-<label>-<port>` would be a non-breaking change here.
     let (sid_str, port_str) = rest.rsplit_once('-')?;
-    let session_id: i64 = sid_str.parse().ok()?;
     let port: u16 = port_str.parse().ok()?;
-    if session_id <= 0 || port == 0 {
+    if port == 0 {
         return None;
     }
-    Some(PreviewRoute { session_id, port })
+    if sid_str.is_empty() {
+        return None;
+    }
+    if !sid_str.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    // Reject `0` as an integer session id — keeps the old invariant that
+    // `session_id > 0` for numeric ids while still accepting hex strings
+    // that happen to start with '0'.
+    if sid_str.chars().all(|c| c.is_ascii_digit()) {
+        let parsed: i64 = sid_str.parse().ok()?;
+        if parsed <= 0 {
+            return None;
+        }
+    }
+    Some(PreviewRoute {
+        session_id: sid_str.to_string(),
+        port,
+    })
 }
 
 /// Case-insensitive lookup of a single header value from a buffered HTTP head.
@@ -463,7 +497,7 @@ mod tests {
         assert_eq!(
             r,
             PreviewRoute {
-                session_id: 11,
+                session_id: "11".to_string(),
                 port: 3000
             }
         );
@@ -475,7 +509,7 @@ mod tests {
         assert_eq!(
             r,
             PreviewRoute {
-                session_id: 11,
+                session_id: "11".to_string(),
                 port: 3000
             }
         );
@@ -487,8 +521,22 @@ mod tests {
         assert_eq!(
             r,
             PreviewRoute {
-                session_id: 7,
+                session_id: "7".to_string(),
                 port: 5173
+            }
+        );
+    }
+
+    #[test]
+    fn parses_hex_public_id_suffix() {
+        // Standalone sandboxes embed the 16-char hex suffix of their
+        // `sbx_<hex>` public_id — the gateway must route these too.
+        let r = parse_preview_host("ws-abcd1234ef567890-3000.localho.st").unwrap();
+        assert_eq!(
+            r,
+            PreviewRoute {
+                session_id: "abcd1234ef567890".to_string(),
+                port: 3000
             }
         );
     }
@@ -506,16 +554,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_garbage_numbers() {
-        assert!(parse_preview_host("ws-abc-3000.localho.st").is_none());
+    fn rejects_invalid_chars_in_sid() {
+        // Underscores and other special chars are forbidden — only
+        // `[A-Za-z0-9]` allowed.
+        assert!(parse_preview_host("ws-sbx_abcdef-3000.localho.st").is_none());
         assert!(parse_preview_host("ws-11-xxx.localho.st").is_none());
     }
 
     #[test]
     fn future_label_scheme_currently_rejected() {
-        // ws-<sid>-<label>-<port> is not yet supported; sid would parse as
-        // "11-web" which is not an i64. When we add label support, update
-        // parse_preview_host and this test together.
+        // ws-<sid>-<label>-<port> is not yet supported — rsplit_once('-')
+        // would give sid="11-web" which contains a '-' (not alphanumeric).
+        // When we add label support, update parse_preview_host and this
+        // test together.
         assert!(parse_preview_host("ws-11-web-3000.localho.st").is_none());
     }
 

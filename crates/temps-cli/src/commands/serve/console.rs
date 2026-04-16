@@ -55,6 +55,7 @@ use temps_projects::ProjectsPlugin;
 use temps_providers::ProvidersPlugin;
 use temps_proxy::ProxyPlugin;
 use temps_queue::QueuePlugin;
+use temps_sandbox::plugin::SandboxPlugin;
 use temps_screenshots::ScreenshotsPlugin;
 use temps_static_files::StaticFilesPlugin;
 use temps_status_page::StatusPagePlugin;
@@ -807,6 +808,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering WorkspacePlugin");
     let workspace_plugin = Box::new(WorkspacePlugin::new());
     plugin_manager.register_plugin(workspace_plugin);
+
+    // 8.8. SandboxPlugin - Vercel-compatible `/v1/sandbox/*` API.
+    // Consumes the shared SandboxProvider registered by AgentsPlugin.
+    debug!("Registering SandboxPlugin");
+    let sandbox_plugin = Box::new(SandboxPlugin::new());
+    plugin_manager.register_plugin(sandbox_plugin);
 
     // 9.1. LogAggregatorPlugin - structured log collection, storage, search, and streaming
     // Depends on database, Docker (from DeployerPlugin), and AuditLogger (from AuditPlugin)

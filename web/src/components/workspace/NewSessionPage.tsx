@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Bot,
   Check,
+  Cpu,
   GitBranch,
   Loader2,
   Plus,
@@ -84,6 +85,14 @@ function mergeProjectAndGlobal<T extends { slug: string }>(
   ]
 }
 
+// Mirrors the Docker provider defaults at
+// crates/temps-agents/src/sandbox/docker.rs (lines ~251-252). When the user
+// leaves these unchanged we omit them from the request and the backend
+// applies the same defaults — so the inputs are purely informational until
+// the user types over them.
+const DEFAULT_CPU_LIMIT = 4
+const DEFAULT_MEMORY_LIMIT_MB = 8192
+
 export function NewSessionPage({ project }: NewSessionPageProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -103,6 +112,13 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
   const [selectedMcpServers, setSelectedMcpServers] = useState<string[]>([])
   const [skillFilter, setSkillFilter] = useState('')
   const [mcpFilter, setMcpFilter] = useState('')
+  // Pre-fill with the platform defaults so the inputs are never empty —
+  // users can override or leave as-is. Stored as strings to allow partial
+  // edits ("8.") without immediately failing parse; we re-parse on submit.
+  const [cpuLimit, setCpuLimit] = useState<string>(String(DEFAULT_CPU_LIMIT))
+  const [memoryLimitMb, setMemoryLimitMb] = useState<string>(
+    String(DEFAULT_MEMORY_LIMIT_MB),
+  )
   // Whether the initial "select-all" default has been applied. Users can
   // still deselect everything after that — we only touch this once, when
   // the lists first land.
@@ -324,6 +340,31 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
       if (selectedModel && selectedModel.trim() !== '') {
         body.ai_model = selectedModel.trim()
       }
+
+      // Sandbox resources: send whatever the user sees in the input — even
+      // when it matches the UI's own DEFAULT constants. Previously we
+      // omitted the field in that case and the backend fell through to its
+      // *own* configured default (AgentSandboxSettings.memory_limit_mb),
+      // which on some installs is 2048 MB. The form then displayed "8192"
+      // but the container actually got 2 GB — a silent mismatch between
+      // what the user saw and what the sandbox enforced. An empty field
+      // still means "use the platform default" (deliberate escape hatch).
+      const cpuStr = cpuLimit.trim()
+      if (cpuStr !== '') {
+        const parsed = Number(cpuStr)
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error('CPU limit must be a positive number')
+        }
+        body.cpu_limit = parsed
+      }
+      const memStr = memoryLimitMb.trim()
+      if (memStr !== '') {
+        const parsed = Number(memStr)
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          throw new Error('Memory limit must be a positive integer (MB)')
+        }
+        body.memory_limit_mb = parsed
+      }
       return startSession(project.id, body)
     },
     onSuccess: (session) => {
@@ -463,6 +504,7 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
                     {p.id === providerCatalogQuery.data?.default_provider
                       ? ' · default'
                       : ''}
+                    {p.default_model ? ` · ${p.default_model}` : ''}
                   </p>
                 </button>
               )
@@ -516,13 +558,15 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
                     value={selectedModel ?? ''}
                     onChange={(e) => setSelectedModel(e.target.value)}
                     placeholder={
-                      selectedProviderEntry.id === 'claude_cli'
-                        ? 'e.g. claude-sonnet-4-6'
-                        : selectedProviderEntry.id === 'codex_cli'
-                          ? 'e.g. gpt-5-codex'
-                          : selectedProviderEntry.id === 'opencode'
-                            ? 'e.g. anthropic/claude-sonnet-4-6'
-                            : 'Model id'
+                      selectedProviderEntry.default_model
+                        ? `${selectedProviderEntry.default_model} (default)`
+                        : selectedProviderEntry.id === 'claude_cli'
+                          ? 'e.g. claude-sonnet-4-6'
+                          : selectedProviderEntry.id === 'codex_cli'
+                            ? 'e.g. gpt-5-codex'
+                            : selectedProviderEntry.id === 'opencode'
+                              ? 'e.g. anthropic/claude-sonnet-4-6'
+                              : 'Model id'
                     }
                     className="w-full sm:w-[420px]"
                   />
@@ -552,6 +596,61 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
           )}
         </Card>
       )}
+
+      {/* Sandbox resources */}
+      <Card className="p-4 space-y-4">
+        <div>
+          <h2 className="text-sm font-semibold flex items-center gap-2">
+            <Cpu className="h-4 w-4" />
+            Sandbox resources
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            CPU and memory granted to the sandbox container. Defaults:{' '}
+            <code className="text-[11px]">{DEFAULT_CPU_LIMIT} cores</code>,{' '}
+            <code className="text-[11px]">{DEFAULT_MEMORY_LIMIT_MB} MB</code>.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="cpu-limit" className="text-xs font-medium">
+              CPU (vCPU cores)
+            </label>
+            <Input
+              id="cpu-limit"
+              type="number"
+              inputMode="decimal"
+              min="0.5"
+              step="0.5"
+              value={cpuLimit}
+              onChange={(e) => setCpuLimit(e.target.value)}
+              placeholder={String(DEFAULT_CPU_LIMIT)}
+              className="w-full sm:w-[200px]"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              e.g. <code className="text-[11px]">2</code> for 2 vCPUs.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="memory-limit" className="text-xs font-medium">
+              Memory (MB)
+            </label>
+            <Input
+              id="memory-limit"
+              type="number"
+              inputMode="numeric"
+              min="256"
+              step="256"
+              value={memoryLimitMb}
+              onChange={(e) => setMemoryLimitMb(e.target.value)}
+              placeholder={String(DEFAULT_MEMORY_LIMIT_MB)}
+              className="w-full sm:w-[200px]"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              e.g. <code className="text-[11px]">4096</code> for 4 GB.
+            </p>
+          </div>
+        </div>
+      </Card>
 
       {/* Branch */}
       <Card className="p-4 space-y-4">

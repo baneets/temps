@@ -1,7 +1,7 @@
 ---
 name: temps-cli
 description: |
-  Complete command-line reference for managing the Temps deployment platform. Covers all 54+ CLI commands including projects, deployments, environments, services, domains, monitoring, backups, security scanning, error tracking, and platform administration. Use when the user wants to: (1) Find CLI command syntax, (2) Manage projects and deployments via CLI, (3) Configure services and infrastructure, (4) Set up monitoring and logging, (5) Automate deployments with CI/CD, (6) Manage domains and DNS, (7) Configure notifications and webhooks. Triggers: "temps cli", "temps command", "how to use temps", "@temps-sdk/cli", "bunx temps", "npx temps", "temps deploy", "temps projects", "temps services".
+  Complete command-line reference for managing the Temps deployment platform. Covers all 56+ CLI commands including projects, deployments, environments, services, domains, monitoring, backups, security scanning, error tracking, analytics, and platform administration. Use when the user wants to: (1) Find CLI command syntax, (2) Manage projects and deployments via CLI, (3) Configure services and infrastructure, (4) Set up monitoring and logging, (5) Automate deployments with CI/CD, (6) Manage domains and DNS, (7) Configure notifications and webhooks, (8) View project analytics and traffic breakdowns. Triggers: "temps cli", "temps command", "how to use temps", "@temps-sdk/cli", "bunx temps", "npx temps", "temps deploy", "temps projects", "temps services", "temps analytics", "temps stats".
 ---
 
 # Temps CLI - Complete Reference
@@ -1228,6 +1228,60 @@ bunx @temps-sdk/cli funnels remove --project-id 5 --funnel-id 1 -f
 
 ---
 
+## Analytics
+
+**Alias**: `stats`
+
+**Use `analytics` for**: page views, visitors, sessions, top pages, referrers, browsers, countries, cities, events, traffic breakdowns, UTM campaigns — anything about user/visitor behavior and marketing metrics.
+
+View project analytics from the terminal with dashboard overviews and detailed breakdowns.
+
+### Analytics Overview
+
+```bash
+# Show analytics dashboard (key metrics, sparkline, top pages, events, locations)
+bunx @temps-sdk/cli analytics overview -p my-app --period 24h
+bunx @temps-sdk/cli analytics overview -p my-app --period 7d --json
+
+# Short form (overview is the default)
+bunx @temps-sdk/cli analytics -p my-app --period 7d
+bunx @temps-sdk/cli stats -p my-app
+```
+
+**Periods**: `today`, `24h`, `7d`, `30d`, `90d`
+
+### Analytics Top (Breakdowns)
+
+```bash
+# Top pages by visit count
+bunx @temps-sdk/cli analytics top pages -p my-app --period 7d
+
+# Traffic sources
+bunx @temps-sdk/cli analytics top referrers -p my-app --period 30d
+
+# Browser breakdown
+bunx @temps-sdk/cli analytics top browsers -p my-app --json
+
+# Country breakdown
+bunx @temps-sdk/cli analytics top countries -p my-app --period 30d --limit 50
+
+# All events with counts
+bunx @temps-sdk/cli analytics top events -p my-app --period 7d
+
+# Other dimensions
+bunx @temps-sdk/cli analytics top os -p my-app           # Operating systems
+bunx @temps-sdk/cli analytics top devices -p my-app       # Device types
+bunx @temps-sdk/cli analytics top channels -p my-app      # Traffic channels
+bunx @temps-sdk/cli analytics top languages -p my-app     # Visitor languages
+bunx @temps-sdk/cli analytics top utm_source -p my-app    # UTM sources
+bunx @temps-sdk/cli analytics top utm_medium -p my-app    # UTM mediums
+bunx @temps-sdk/cli analytics top utm_campaign -p my-app  # UTM campaigns
+```
+
+**Available dimensions**: `pages`, `referrers`, `browsers`, `os`, `devices`, `countries`, `channels`, `events`, `languages`, `utm_source`, `utm_medium`, `utm_campaign`
+
+---
+
 ## Email
 
 ### Email Providers
@@ -1639,6 +1693,8 @@ bunx @temps-sdk/cli audit show --id 1 --json
 ## Proxy Logs
 
 **Alias**: `plogs`
+
+**Use `proxy-logs` only for**: raw HTTP request/response logs, status codes, response times, debugging specific requests. NOT for page views, visitors, or analytics — use `analytics` instead.
 
 ```bash
 # List proxy logs
@@ -2311,6 +2367,7 @@ bunx @temps-sdk/cli deployments status -p my-app -d 42 --json | jq '.status'
 | `bunx @temps-sdk/cli platform` | `bunx @temps-sdk/cli plat` |
 | `bunx @temps-sdk/cli scans` | `bunx @temps-sdk/cli scan` |
 | `bunx @temps-sdk/cli errors` | `bunx @temps-sdk/cli error` |
+| `bunx @temps-sdk/cli analytics` | `bunx @temps-sdk/cli stats` |
 | `bunx @temps-sdk/cli funnels` | `bunx @temps-sdk/cli funnel` |
 | `bunx @temps-sdk/cli incidents` | `bunx @temps-sdk/cli incident` |
 | `bunx @temps-sdk/cli emails` | `bunx @temps-sdk/cli email` |

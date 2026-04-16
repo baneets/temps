@@ -1,0 +1,27 @@
+[package]
+name = "temps-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+# Evergreen memory primitives for Temps workflows and agents.
+# Owns: the `WorkflowMemoryProvider` trait, plain data types
+# (`WorkflowMemoryFact`, `WorkflowMemoryError`), and the bash script
+# that gets installed into sandboxes so AI processes can read/write
+# workflow memory over HTTP.
+#
+# Deliberately free of DB, HTTP, or service dependencies — this crate is
+# the contract. Implementations live in `temps-workspace`; consumers
+# (`temps-agents`, future `temps-sandbox` bash binary) depend only on
+# this crate. Keeping it light means we never have to break API stability
+# to avoid circular deps.
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

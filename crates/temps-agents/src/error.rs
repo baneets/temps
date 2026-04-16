@@ -83,10 +83,50 @@ pub enum AgentError {
 
     #[error("MCP definition '{slug}' not found in project {project_id}")]
     McpDefinitionNotFound { project_id: i32, slug: String },
+
+    #[error("A skill with slug '{slug}' already exists{}", scope_label(*project_id))]
+    SkillDefinitionAlreadyExists {
+        project_id: Option<i32>,
+        slug: String,
+    },
+
+    #[error("An MCP server with slug '{slug}' already exists{}", scope_label(*project_id))]
+    McpDefinitionAlreadyExists {
+        project_id: Option<i32>,
+        slug: String,
+    },
+}
+
+fn scope_label(project_id: Option<i32>) -> String {
+    match project_id {
+        Some(id) => format!(" in project {}", id),
+        None => " (global)".to_string(),
+    }
 }
 
 impl From<sea_orm::DbErr> for AgentError {
     fn from(error: sea_orm::DbErr) -> Self {
+        // Postgres unique-constraint violations surface as `DbErr::Exec` /
+        // `DbErr::Query` carrying the raw libpq error string. Detect them so
+        // race-condition duplicates (two concurrent inserts slip past the
+        // service-layer existence check) don't leak as opaque 500s.
+        let msg = error.to_string();
+        if msg.contains("duplicate key value violates unique constraint") {
+            if let Some(slug) = extract_dup_slug(&msg) {
+                if msg.contains("skill_definitions") {
+                    return AgentError::SkillDefinitionAlreadyExists {
+                        project_id: None,
+                        slug,
+                    };
+                }
+                if msg.contains("mcp_definitions") {
+                    return AgentError::McpDefinitionAlreadyExists {
+                        project_id: None,
+                        slug,
+                    };
+                }
+            }
+        }
         match &error {
             sea_orm::DbErr::RecordNotFound(_) => AgentError::RunNotFound { run_id: 0 },
             sea_orm::DbErr::RecordNotInserted => AgentError::Validation {
@@ -95,4 +135,15 @@ impl From<sea_orm::DbErr> for AgentError {
             _ => AgentError::Database(error),
         }
     }
+}
+
+/// Try to pull the slug out of a Postgres unique-violation message.
+/// Postgres includes `DETAIL: Key (slug)=(foo) already exists.` in its
+/// error body. Missing DETAIL just means we fall back to `None`.
+fn extract_dup_slug(msg: &str) -> Option<String> {
+    let key_idx = msg.find("Key (")?;
+    let rest = &msg[key_idx + 5..];
+    let val_start = rest.find(")=(")? + 3;
+    let val_end = rest[val_start..].find(')')?;
+    Some(rest[val_start..val_start + val_end].to_string())
 }

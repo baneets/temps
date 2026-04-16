@@ -4114,6 +4114,60 @@ Preview funnel metrics without saving
 | `-s, --steps <json>` | Funnel steps as JSON array | -       | Yes      |
 | `--json`             | Output in JSON format      | -       | No       |
 
+## `analytics` (alias: `stats`)
+
+View project analytics from the terminal. Displays key metrics, top pages, events, locations, and more.
+
+**Subcommands:**
+
+- `overview` (`o`) - Show analytics dashboard overview
+- `top <dimension>` - Show breakdown by dimension
+
+### `analytics overview` (alias: `o`)
+
+Show analytics dashboard overview with key metrics (unique visitors, sessions, page views), hourly sparkline, top pages, top events, and top locations.
+
+**Options:**
+
+| Flag                          | Description                            | Default | Required |
+| ----------------------------- | -------------------------------------- | ------- | -------- |
+| `-p, --project <project>`     | Project slug or ID                     | -       | No       |
+| `--period <period>`           | Time period: today, 24h, 7d, 30d, 90d | `24h`   | No       |
+| `--json`                      | Output in JSON format                  | -       | No       |
+
+**Examples:**
+
+```bash
+temps analytics overview -p my-app --period 7d
+temps stats -p my-app                          # alias
+```
+
+### `analytics top <dimension>`
+
+Show breakdown of analytics data by a specific dimension. Displays a ranked list with counts, percentages, and visual distribution bars.
+
+**Available dimensions:** `pages`, `referrers`, `browsers`, `os`, `devices`, `countries`, `channels`, `events`, `languages`, `utm_source`, `utm_medium`, `utm_campaign`
+
+**Options:**
+
+| Flag                          | Description                            | Default | Required |
+| ----------------------------- | -------------------------------------- | ------- | -------- |
+| `-p, --project <project>`     | Project slug or ID                     | -       | No       |
+| `--period <period>`           | Time period: today, 24h, 7d, 30d, 90d | `24h`   | No       |
+| `--limit <n>`                 | Number of results                      | `20`    | No       |
+| `--json`                      | Output in JSON format                  | -       | No       |
+
+**Examples:**
+
+```bash
+temps analytics top pages -p my-app --period 30d
+temps analytics top referrers --period 7d
+temps analytics top browsers --json
+temps analytics top countries --limit 50
+temps analytics top events -p my-app
+temps analytics top utm_source --period 90d
+```
+
 ## `notification-preferences` (alias: `notif-prefs`)
 
 Manage notification preferences

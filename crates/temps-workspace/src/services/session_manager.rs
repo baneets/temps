@@ -79,6 +79,38 @@ fn oauth_expires_at_ms() -> i64 {
     now_ms + 365 * 24 * 60 * 60 * 1000
 }
 
+/// Build the body of the per-sandbox `~/.env` file.
+///
+/// Emits:
+/// 1. `export KEY='value'` for every entry in `env`, keys sorted for
+///    determinism so refreshes produce stable diffs.
+/// 2. A final `export PATH=<memory-bin-dir>:$PATH` so `memory write "..."`
+///    resolves as a bare command in any shell that sources `~/.env`.
+///
+/// Extracted into a free function so it can be tested without constructing
+/// a full [`WorkspaceSessionManager`] and sandbox provider. The output is
+/// the ground truth — changes to ordering or escaping are visible in a
+/// unit test, not just at runtime.
+fn build_env_file_body(env: &HashMap<String, String>) -> String {
+    let mut body = String::new();
+    body.push_str("# Managed by Temps. Refreshed automatically — do not edit by hand.\n");
+    let mut keys: Vec<&String> = env.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = env.get(key).map(|v| v.as_str()).unwrap_or("");
+        let escaped = value.replace('\'', "'\\''");
+        body.push_str(&format!("export {}='{}'\n", key, escaped));
+    }
+    // Prepend (not append) the memory bin dir so a project that vendors
+    // its own `memory` binary doesn't silently shadow ours — that would
+    // break workflow memory writes and be painful to debug.
+    body.push_str(&format!(
+        "export PATH='{}:'\"$PATH\"\n",
+        temps_core::MEMORY_SCRIPT_DIR,
+    ));
+    body
+}
+
 /// Manages sandbox containers for workspace sessions.
 ///
 /// Wraps the existing SandboxProvider with workspace-specific concerns:
@@ -118,6 +150,7 @@ impl WorkspaceSessionManager {
     pub async fn create_sandbox(
         &self,
         session_id: i32,
+        public_id: &str,
         project_id: i32,
         host_work_dir: PathBuf,
         env_vars: HashMap<String, String>,
@@ -126,8 +159,15 @@ impl WorkspaceSessionManager {
         pids_limit: Option<i32>,
     ) -> Result<SandboxHandle, WorkspaceError> {
         let host_work_dir_for_session = host_work_dir.clone();
+        // Name the container after the hex label of the public id so the
+        // preview gateway's `temps-sandbox-{sid}` DNS lookup resolves when
+        // users hit `ws-<hex>-<port>.<domain>`. Container name is internal
+        // (Docker network only), so using the hex label here has no
+        // external surface — the security win is on the URL side.
+        let container_label = crate::services::public_id::hex_label(public_id).to_string();
         let config = SandboxCreateConfig {
             run_id: session_id, // Reuse run_id field for session_id
+            container_name_override: Some(container_label),
             host_work_dir,
             image: None,
             cpu_limit: cpu_limit.map(|v| v as f64),
@@ -421,6 +461,7 @@ impl WorkspaceSessionManager {
         max_turns: i32,
         continue_conversation: bool,
         provider: &str,
+        model: Option<&str>,
     ) -> Vec<String> {
         // Reuse the existing build_claude_cmd from temps-agents executor
         match provider {
@@ -438,26 +479,45 @@ impl WorkspaceSessionManager {
                     "--dangerously-skip-permissions".to_string(),
                     "--verbose".to_string(),
                 ]);
+                if let Some(m) = model {
+                    if !m.is_empty() {
+                        cmd.push("--model".to_string());
+                        cmd.push(m.to_string());
+                    }
+                }
                 cmd
             }
             "codex_cli" => {
-                vec![
-                    "codex".to_string(),
-                    "exec".to_string(),
-                    "--dangerously-bypass-approvals-and-sandbox".to_string(),
-                    "--json".to_string(),
-                    prompt.to_string(),
-                ]
+                let mut cmd = vec!["codex".to_string(), "exec".to_string()];
+                if let Some(m) = model {
+                    if !m.is_empty() {
+                        cmd.push("--model".to_string());
+                        cmd.push(m.to_string());
+                    }
+                }
+                cmd.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+                cmd.push("--json".to_string());
+                cmd.push(prompt.to_string());
+                cmd
             }
             "opencode" => {
-                let mut cmd = vec!["opencode".to_string(), "run".to_string()];
-                if continue_conversation {
-                    cmd.push("--continue".to_string());
+                // OpenCode's `run [message..]` does an lstat on the first
+                // positional arg (checking if it's a directory). Long agent
+                // prompts exceed NAME_MAX (255 bytes), causing ENAMETOOLONG.
+                // Workaround: write the prompt to /tmp/.temps-prompt (done by
+                // run_claude_once) and read it via `$(cat ...)` in a shell.
+                let mut parts = vec!["opencode run".to_string()];
+                if let Some(m) = model {
+                    if !m.is_empty() {
+                        parts.push(format!("--model '{}'", m));
+                    }
                 }
-                cmd.push(prompt.to_string());
-                cmd.push("--format".to_string());
-                cmd.push("json".to_string());
-                cmd
+                if continue_conversation {
+                    parts.push("--continue".to_string());
+                }
+                parts.push("--format json".to_string());
+                parts.push("\"$(cat /tmp/.temps-prompt)\"".to_string());
+                vec!["bash".to_string(), "-lc".to_string(), parts.join(" ")]
             }
             other => {
                 vec![other.to_string(), prompt.to_string()]
@@ -711,16 +771,30 @@ impl WorkspaceSessionManager {
 
     /// Write the Temps platform skill file into the sandbox's workspace.
     /// This teaches the AI how to use the Temps CLI.
-    pub async fn inject_skill_file(&self, session_id: i32) -> Result<(), WorkspaceError> {
+    ///
+    /// Each CLI reads skills from a different directory, so we route the
+    /// skill to whichever provider is active for this session:
+    /// - claude/opencode: `/workspace/.claude/skills/temps-cli/SKILL.md`
+    /// - codex: `/home/temps/.codex/skills/temps-cli/SKILL.md`
+    pub async fn inject_skill_file(
+        &self,
+        session_id: i32,
+        ai_provider: &str,
+    ) -> Result<(), WorkspaceError> {
+        // Codex has its own user-level skills directory. Everything else
+        // (claude_cli, opencode, and any unknown provider) goes to claude's
+        // project-local path.
+        let skills_base = match ai_provider {
+            "codex_cli" => "/home/temps/.codex/skills",
+            _ => "/workspace/.claude/skills",
+        };
+        let skill_dir = format!("{}/temps-cli", skills_base);
+        let skill_path = format!("{}/SKILL.md", skill_dir);
+
         // Claude's skill discovery requires the directory (or filename) to match
         // the frontmatter `name:` field. The canonical skill declares
-        // `name: temps-cli`, so we install it as
-        // `/workspace/.claude/skills/temps-cli/SKILL.md`.
-        let mkdir_cmd = vec![
-            "mkdir".to_string(),
-            "-p".to_string(),
-            "/workspace/.claude/skills/temps-cli".to_string(),
-        ];
+        // `name: temps-cli`.
+        let mkdir_cmd = vec!["mkdir".to_string(), "-p".to_string(), skill_dir.clone()];
         self.exec(session_id, mkdir_cmd, HashMap::new(), None)
             .await?;
 
@@ -738,13 +812,17 @@ impl WorkspaceSessionManager {
         // bollard exec phantom-stream hang on silent heredoc writes).
         self.write_file(
             session_id,
-            "/workspace/.claude/skills/temps-cli/SKILL.md",
+            &skill_path,
             TEMPS_PLATFORM_SKILL.as_bytes(),
             0o644,
         )
         .await?;
 
-        tracing::debug!("Injected Temps platform skill into session {}", session_id);
+        tracing::debug!(
+            "Injected Temps platform skill into session {} at {}",
+            session_id,
+            skill_path
+        );
         Ok(())
     }
 
@@ -1158,7 +1236,7 @@ impl WorkspaceSessionManager {
         Ok(())
     }
 
-    /// Write `/root/.env` inside the sandbox containing the given key/value
+    /// Write `/home/temps/.env` inside the sandbox containing the given key/value
     /// pairs and install a global `~/.claude/CLAUDE.md` that instructs Claude
     /// to source it before running commands. Tokens (git providers, linked
     /// services, etc.) are stored here so they can be refreshed by simply
@@ -1172,17 +1250,7 @@ impl WorkspaceSessionManager {
         env: &HashMap<String, String>,
         project_context: Option<&ProjectContext<'_>>,
     ) -> Result<(), WorkspaceError> {
-        // Build the .env body. Single-quote each value, escaping embedded
-        // single quotes via the `'\''` shell idiom.
-        let mut body = String::new();
-        body.push_str("# Managed by Temps. Refreshed automatically — do not edit by hand.\n");
-        let mut keys: Vec<&String> = env.keys().collect();
-        keys.sort();
-        for key in keys {
-            let value = env.get(key).map(|v| v.as_str()).unwrap_or("");
-            let escaped = value.replace('\'', "'\\''");
-            body.push_str(&format!("export {}='{}'\n", key, escaped));
-        }
+        let body = build_env_file_body(env);
 
         // Native tar upload (mode 0o600 — secrets). HOME is /home/temps for
         // the non-root sandbox user defined in the Dockerfile.
@@ -1356,6 +1424,7 @@ mod tests {
             Ok(SandboxExecResult {
                 exit_code: 0,
                 stdout: format!("executed: {:?}", cmd),
+                stderr: String::new(),
             })
         }
 
@@ -1445,6 +1514,7 @@ mod tests {
         let result = manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1465,6 +1535,7 @@ mod tests {
         let result = manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1487,6 +1558,7 @@ mod tests {
         manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1532,6 +1604,7 @@ mod tests {
         manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1553,6 +1626,7 @@ mod tests {
         manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1581,6 +1655,7 @@ mod tests {
         manager
             .create_sandbox(
                 1,
+                "wss_00000000000000bb",
                 10,
                 PathBuf::from("/tmp/t1"),
                 HashMap::new(),
@@ -1593,6 +1668,7 @@ mod tests {
         manager
             .create_sandbox(
                 2,
+                "wss_00000000000000cc",
                 10,
                 PathBuf::from("/tmp/t2"),
                 HashMap::new(),
@@ -1744,12 +1820,62 @@ mod tests {
         assert!(!env.contains_key("TEMPS_WORKFLOW_SLUG"));
     }
 
+    #[test]
+    fn env_file_body_prepends_memory_bin_to_path() {
+        // The bash `memory` script must resolve as a bare command in any
+        // shell that sources ~/.env. Guarded in a unit test so the next
+        // contributor to refactor env injection gets immediate feedback.
+        let mut env = HashMap::new();
+        env.insert("TEMPS_API_URL".to_string(), "http://api".to_string());
+        env.insert("TEMPS_API_TOKEN".to_string(), "tok".to_string());
+
+        let body = build_env_file_body(&env);
+        assert!(
+            body.contains(&format!(
+                "export PATH='{}:'\"$PATH\"",
+                temps_core::MEMORY_SCRIPT_DIR
+            )),
+            "PATH export missing or malformed. Full body:\n{body}",
+        );
+        // Prepend, not append: the memory dir must come first.
+        let path_line = body
+            .lines()
+            .find(|l| l.starts_with("export PATH="))
+            .expect("PATH line missing");
+        assert!(
+            path_line.contains(&format!("'{}:'", temps_core::MEMORY_SCRIPT_DIR)),
+            "memory bin dir must be prepended, not appended: {path_line}",
+        );
+    }
+
+    #[test]
+    fn env_file_body_escapes_single_quotes() {
+        let mut env = HashMap::new();
+        env.insert("EVIL".to_string(), "it's \"bad\"".to_string());
+        let body = build_env_file_body(&env);
+        assert!(body.contains("export EVIL='it'\\''s \"bad\"'"));
+    }
+
+    #[test]
+    fn env_file_body_is_deterministic() {
+        // Refreshes happen often; identical input must produce identical
+        // output so diffs on disk are empty-op when nothing changed.
+        let mut a = HashMap::new();
+        a.insert("B".to_string(), "2".to_string());
+        a.insert("A".to_string(), "1".to_string());
+        let mut b = HashMap::new();
+        b.insert("A".to_string(), "1".to_string());
+        b.insert("B".to_string(), "2".to_string());
+        assert_eq!(build_env_file_body(&a), build_env_file_body(&b));
+    }
+
     #[tokio::test]
     async fn test_inject_memory_script() {
         let manager = make_manager(false);
         manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1772,6 +1898,7 @@ mod tests {
         manager
             .create_sandbox(
                 1,
+                "wss_00000000000000aa",
                 10,
                 PathBuf::from("/tmp/test"),
                 HashMap::new(),
@@ -1783,7 +1910,7 @@ mod tests {
             .unwrap();
 
         // This should succeed — FakeSandboxProvider just returns success
-        let result = manager.inject_skill_file(1).await;
+        let result = manager.inject_skill_file(1, "claude_cli").await;
         assert!(result.is_ok());
     }
 
@@ -1813,19 +1940,20 @@ mod tests {
     #[test]
     fn test_build_chat_cmd_claude_first_message() {
         let manager = make_manager(false);
-        let cmd = manager.build_chat_cmd("fix the bug", 25, false, "claude_cli");
+        let cmd = manager.build_chat_cmd("fix the bug", 25, false, "claude_cli", None);
 
         assert_eq!(cmd[0], "claude");
         assert_eq!(cmd[1], "--print");
         assert_eq!(cmd[2], "fix the bug");
         assert!(!cmd.contains(&"--continue".to_string()));
         assert!(cmd.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!cmd.contains(&"--model".to_string()));
     }
 
     #[test]
     fn test_build_chat_cmd_claude_continue() {
         let manager = make_manager(false);
-        let cmd = manager.build_chat_cmd("follow up", 25, true, "claude_cli");
+        let cmd = manager.build_chat_cmd("follow up", 25, true, "claude_cli", None);
 
         assert_eq!(cmd[0], "claude");
         assert_eq!(cmd[1], "--print");
@@ -1834,9 +1962,19 @@ mod tests {
     }
 
     #[test]
+    fn test_build_chat_cmd_claude_with_model() {
+        let manager = make_manager(false);
+        let cmd =
+            manager.build_chat_cmd("fix it", 25, false, "claude_cli", Some("claude-sonnet-4-6"));
+
+        assert!(cmd.contains(&"--model".to_string()));
+        assert!(cmd.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
     fn test_build_chat_cmd_codex() {
         let manager = make_manager(false);
-        let cmd = manager.build_chat_cmd("do stuff", 25, false, "codex_cli");
+        let cmd = manager.build_chat_cmd("do stuff", 25, false, "codex_cli", None);
 
         assert_eq!(cmd[0], "codex");
         assert_eq!(cmd[1], "exec");
@@ -1845,11 +1983,37 @@ mod tests {
     }
 
     #[test]
+    fn test_build_chat_cmd_codex_with_model() {
+        let manager = make_manager(false);
+        let cmd = manager.build_chat_cmd("do stuff", 25, false, "codex_cli", Some("gpt-5-codex"));
+
+        assert!(cmd.contains(&"--model".to_string()));
+        assert!(cmd.contains(&"gpt-5-codex".to_string()));
+    }
+
+    #[test]
     fn test_build_chat_cmd_opencode() {
         let manager = make_manager(false);
-        let cmd = manager.build_chat_cmd("help", 25, true, "opencode");
+        let cmd = manager.build_chat_cmd("help", 25, true, "opencode", None);
 
-        assert_eq!(cmd[0], "opencode");
-        assert!(cmd.contains(&"--continue".to_string()));
+        // OpenCode uses a bash wrapper to avoid ENAMETOOLONG on long prompts.
+        assert_eq!(cmd[0], "bash");
+        assert_eq!(cmd[1], "-lc");
+        let shell_cmd = &cmd[2];
+        assert!(shell_cmd.contains("opencode run"));
+        assert!(shell_cmd.contains("--continue"));
+        assert!(shell_cmd.contains("--format json"));
+        assert!(shell_cmd.contains("$(cat /tmp/.temps-prompt)"));
+    }
+
+    #[test]
+    fn test_build_chat_cmd_opencode_with_model() {
+        let manager = make_manager(false);
+        let cmd = manager.build_chat_cmd("help", 25, false, "opencode", Some("openai/gpt-5.4"));
+
+        assert_eq!(cmd[0], "bash");
+        let shell_cmd = &cmd[2];
+        assert!(shell_cmd.contains("--model 'openai/gpt-5.4'"));
+        assert!(!shell_cmd.contains("--continue"));
     }
 }

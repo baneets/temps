@@ -66,16 +66,59 @@ interface CatalogResponse {
   providers: CatalogEntry[]
 }
 
+// localStorage cache for the last successful smoke-test result. Keyed by
+// provider so switching providers doesn't surface a stale green checkmark
+// for a different CLI. The test endpoint itself is fast but runs a real
+// container — we cache so a reload doesn't reset the "Ready" state for
+// users who already verified setup.
+const SMOKE_CACHE_PREFIX = 'temps.quickstart.smoke.'
+const smokeCacheKey = (provider: string) => `${SMOKE_CACHE_PREFIX}${provider}`
+
+function loadCachedSmoke(provider: string): SmokeTestResult | null {
+  try {
+    const raw = localStorage.getItem(smokeCacheKey(provider))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as SmokeTestResult
+    // Defensive: the shape might evolve. Require `passed` to be a boolean
+    // before trusting the cache, otherwise drop it so a stale entry from
+    // an older build can't poison the UI.
+    if (typeof parsed?.passed !== 'boolean') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function saveCachedSmoke(provider: string, result: SmokeTestResult) {
+  try {
+    localStorage.setItem(smokeCacheKey(provider), JSON.stringify(result))
+  } catch {
+    // Quota/private-mode — losing the cache is acceptable.
+  }
+}
+
 export function AiQuickstart({
   provider,
   sandboxEnabled,
 }: AiQuickstartProps) {
   const [collapsed, setCollapsed] = useState(false)
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
-  const [smokeResult, setSmokeResult] = useState<SmokeTestResult | null>(null)
+  // Seed from localStorage so a reload after a successful test keeps the
+  // step green without re-running the test. `useState(fn)` runs the init
+  // exactly once; provider-change rehydration is handled by the effect below.
+  const [smokeResult, setSmokeResult] = useState<SmokeTestResult | null>(() =>
+    loadCachedSmoke(provider),
+  )
   const [testing, setTesting] = useState(false)
   const [statusChecked, setStatusChecked] = useState(false)
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null)
+
+  // Re-hydrate when the user switches providers — each provider has its
+  // own cache entry, and a stale Claude result must not linger when the
+  // card re-renders under Codex.
+  useEffect(() => {
+    setSmokeResult(loadCachedSmoke(provider))
+  }, [provider])
 
   // The credentials step needs to know whether *this* provider has a saved
   // credential — pulled from the same catalog endpoint the AiProvidersCard
@@ -121,7 +164,12 @@ export function AiQuickstart({
         method: 'POST',
       })
       if (response.ok) {
-        setSmokeResult(await response.json())
+        const result = (await response.json()) as SmokeTestResult
+        setSmokeResult(result)
+        // Cache every result — including failures — so the UI reflects
+        // the last known state on reload instead of snapping back to
+        // "pending" and asking the user to re-run the test.
+        saveCachedSmoke(provider, result)
       }
     } catch {
       // Failed

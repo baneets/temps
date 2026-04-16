@@ -1,0 +1,37 @@
+[package]
+name = "temps-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+temps-core = { path = "../temps-core" }
+temps-entities = { path = "../temps-entities" }
+temps-auth = { path = "../temps-auth" }
+temps-agents = { path = "../temps-agents" }
+temps-config = { path = "../temps-config" }
+temps-git = { path = "../temps-git" }
+base64 = { workspace = true }
+sea-orm = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+utoipa = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+rand = { workspace = true }
+hex = "0.4"
+url = { workspace = true }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true }

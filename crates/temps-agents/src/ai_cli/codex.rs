@@ -214,4 +214,76 @@ mod tests {
         let provider = CodexCliProvider;
         assert_eq!(provider.name(), "codex_cli");
     }
+
+    #[test]
+    fn test_parse_codex_output_multi_line_stream() {
+        // Real Codex --json output is one event per line. The parser should
+        // find usage on any line and model on the first line that has it.
+        let output = "\
+{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n\
+{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hi\"}}\n\
+{\"type\":\"turn.completed\",\"model\":\"gpt-5-codex\",\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":567}}\n";
+        let (input, output_tokens, model) = parse_codex_output(output);
+        assert_eq!(input, Some(1234));
+        assert_eq!(output_tokens, Some(567));
+        assert_eq!(model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn test_parse_codex_output_prefers_first_usage() {
+        // Parser keeps the first non-None value it sees; later usage events
+        // (e.g. per-turn counts in a multi-turn session) should not clobber
+        // the first one. This documents current behavior so a future refactor
+        // to "accumulate" doesn't silently change the contract.
+        let output = "\
+{\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50}}\n\
+{\"usage\":{\"prompt_tokens\":999,\"completion_tokens\":888}}\n";
+        let (input, output_tokens, _model) = parse_codex_output(output);
+        assert_eq!(input, Some(100));
+        assert_eq!(output_tokens, Some(50));
+    }
+
+    #[test]
+    fn test_parse_codex_output_accepts_input_output_token_aliases() {
+        // Some Codex builds emit input_tokens/output_tokens instead of the
+        // prompt_tokens/completion_tokens aliases. The parser accepts both.
+        let output = r#"{"model":"gpt-5","usage":{"input_tokens":77,"output_tokens":88}}"#;
+        let (input, output_tokens, model) = parse_codex_output(output);
+        assert_eq!(input, Some(77));
+        assert_eq!(output_tokens, Some(88));
+        assert_eq!(model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn test_parse_codex_output_skips_non_json_lines() {
+        // Stderr/debug lines intermixed with JSON must not crash or confuse
+        // the parser.
+        let output = "\
+Warning: unable to contact upstream\n\
+{\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":21},\"model\":\"gpt-5\"}\n\
+not json either\n";
+        let (input, output_tokens, model) = parse_codex_output(output);
+        assert_eq!(input, Some(42));
+        assert_eq!(output_tokens, Some(21));
+        assert_eq!(model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn test_parse_codex_output_missing_usage_still_captures_model() {
+        // Model can appear on events without usage; we still want to learn it.
+        let output = "{\"type\":\"thread.started\",\"model\":\"gpt-5-codex\"}\n";
+        let (input, output_tokens, model) = parse_codex_output(output);
+        assert!(input.is_none());
+        assert!(output_tokens.is_none());
+        assert_eq!(model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn test_parse_codex_output_malformed_json_is_ignored() {
+        let output =
+            "{not valid json}\n{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n";
+        let (input, output_tokens, _model) = parse_codex_output(output);
+        assert_eq!(input, Some(10));
+        assert_eq!(output_tokens, Some(5));
+    }
 }

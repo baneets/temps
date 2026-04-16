@@ -5,7 +5,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use temps_agents::ai_cli::OnEventCallback;
-use temps_core::EncryptionService;
+use temps_core::{EncryptionService, WorkflowMemoryProvider};
 use temps_deployments::services::deployment_token_service::{
     CreateDeploymentTokenRequest, DeploymentTokenService,
 };
@@ -14,7 +14,6 @@ use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_providers::ExternalServiceManager;
 
 use crate::error::WorkspaceError;
-use crate::services::memory_service::WorkflowMemoryService;
 use crate::services::session_manager::WorkspaceSessionManager;
 use crate::services::workspace_service::{
     SendMessageRequest, UpdateSessionFields, WorkspaceService,
@@ -35,12 +34,18 @@ pub struct MessageExecutor {
     encryption_service: Arc<EncryptionService>,
     deployment_token_service: Arc<DeploymentTokenService>,
     external_service_manager: Arc<ExternalServiceManager>,
-    /// Optional memory service. When set, the executor pre-loads relevant
+    /// Optional memory provider. When set, the executor pre-loads relevant
     /// workflow memory into the prompt before spawning the harness.
     /// Workspace chat sessions don't currently use this (they have no
     /// associated workflow), but the field is here so that future workflow-run
     /// executors can be wired up the same way.
-    memory_service: Option<Arc<WorkflowMemoryService>>,
+    ///
+    /// Typed as `Arc<dyn WorkflowMemoryProvider>` (not the concrete
+    /// `WorkflowMemoryService`) so this consumer stays on the abstract
+    /// boundary — any provider passing the `temps-memory` eval harness
+    /// can be swapped in (in-memory for tests, DB-backed in prod, a
+    /// remote-cache shim tomorrow). See PR 3.2.
+    memory_provider: Option<Arc<dyn WorkflowMemoryProvider>>,
     /// Per-session execution locks. Ensures only one Claude CLI run is in
     /// flight per session at a time — concurrent `--continue` invocations
     /// race on the on-disk session state file and silently hang. Holding a
@@ -89,7 +94,7 @@ impl MessageExecutor {
             encryption_service,
             deployment_token_service,
             external_service_manager,
-            memory_service: None,
+            memory_provider: None,
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             active_runs: Arc::new(RwLock::new(HashMap::new())),
             dirty_sessions: Arc::new(RwLock::new(HashSet::new())),
@@ -287,10 +292,13 @@ impl MessageExecutor {
             .clone()
     }
 
-    /// Attach a workflow memory service so future runs can pre-load relevant
+    /// Attach a workflow memory provider so future runs can pre-load relevant
     /// memory into the prompt before spawning the AI harness.
-    pub fn with_memory_service(mut self, memory: Arc<WorkflowMemoryService>) -> Self {
-        self.memory_service = Some(memory);
+    ///
+    /// Typed as `Arc<dyn WorkflowMemoryProvider>` rather than the concrete
+    /// service — see field doc for rationale.
+    pub fn with_memory_provider(mut self, memory: Arc<dyn WorkflowMemoryProvider>) -> Self {
+        self.memory_provider = Some(memory);
         self
     }
 
@@ -306,7 +314,7 @@ impl MessageExecutor {
         relevant_tags: Vec<String>,
     ) -> String {
         build_chat_prompt_with_memory(
-            self.memory_service.as_deref(),
+            self.memory_provider.as_deref(),
             user_content,
             is_first_message,
             workflow_agent_id,
@@ -317,10 +325,18 @@ impl MessageExecutor {
     }
 }
 
-/// Free-function variant of `build_chat_prompt` that takes the memory service
-/// as a parameter. Easier to unit-test in isolation.
+/// Default per-trigger memory budget — matches the concrete service's cap.
+/// Small enough to fit comfortably in prompts; large enough to surface the
+/// most-relevant handful of facts.
+const PROMPT_MEMORY_LOAD_LIMIT: usize = 10;
+
+/// Free-function variant of `build_chat_prompt` that takes a memory
+/// provider trait object as a parameter. Easier to unit-test in isolation —
+/// and by consuming the trait (not the concrete service) the tests can
+/// run against any `WorkflowMemoryProvider` impl (in-memory for unit
+/// tests, DB-backed in integration).
 pub(crate) async fn build_chat_prompt_with_memory(
-    memory_service: Option<&WorkflowMemoryService>,
+    memory_provider: Option<&dyn WorkflowMemoryProvider>,
     user_content: &str,
     is_first_message: bool,
     workflow_agent_id: Option<i32>,
@@ -333,19 +349,21 @@ pub(crate) async fn build_chat_prompt_with_memory(
         return user_content.to_string();
     }
 
-    let memory_section = match (memory_service, workflow_agent_id) {
-        (Some(svc), Some(agent_id)) => {
-            let ctx = crate::services::memory_service::TriggerContext {
-                project_id,
-                agent_id,
-                relevant_tags,
-                limit: None,
-            };
-            match svc.render_for_prompt(&ctx).await {
-                Ok(text) => text,
+    let memory_section = match (memory_provider, workflow_agent_id) {
+        (Some(provider), Some(agent_id)) => {
+            match provider
+                .load_for_trigger(
+                    project_id,
+                    agent_id,
+                    relevant_tags,
+                    PROMPT_MEMORY_LOAD_LIMIT,
+                )
+                .await
+            {
+                Ok(facts) => provider.render_for_prompt(&facts),
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to render memory for prompt (agent={}): {}. Continuing without memory.",
+                        "Failed to load memory for prompt (agent={}): {}. Continuing without memory.",
                         agent_id,
                         e
                     );
@@ -460,7 +478,17 @@ impl MessageExecutor {
     /// messages into one prompt — fewer turns, lower cost, matches user
     /// mental model of "I'm adding to my thought".
     async fn drain_loop(&self, session_id: i32) -> Result<(), WorkspaceError> {
-        let mut last_processed_user_id: i64 = 0;
+        // Seed the watermark so we only drain user messages that haven't been
+        // answered yet. Without this we'd start from 0 and re-concatenate the
+        // entire session transcript into every prompt — the AI CLI already
+        // has prior history via --continue, so re-sending it doubles context
+        // and produces cumulative answers ("3+3, 2+2, 4+4 = …") when the user
+        // only asked for the latest turn.
+        let mut last_processed_user_id: i64 = self
+            .workspace_service
+            .last_answered_user_message_id(session_id)
+            .await
+            .unwrap_or(0);
         loop {
             // Pull all user messages on this session newer than the last one
             // we processed. Filter out non-user roles to avoid re-running on
@@ -638,7 +666,11 @@ impl MessageExecutor {
         {
             tracing::warn!("refresh_sandbox: inject_env_file failed: {}", e);
         }
-        if let Err(e) = self.session_manager.inject_skill_file(session.id).await {
+        if let Err(e) = self
+            .session_manager
+            .inject_skill_file(session.id, &session.ai_provider)
+            .await
+        {
             tracing::warn!("refresh_sandbox: inject_skill_file failed: {}", e);
         }
 
@@ -831,12 +863,24 @@ impl MessageExecutor {
             )
             .await;
 
+        // Resolve the effective model: session-level override takes
+        // precedence, then the provider's default_model from settings.
+        let effective_model = self
+            .resolve_effective_model(session.ai_model.as_deref(), &session.ai_provider)
+            .await;
+
         // Run claude with a fallback path: if --continue fails because the
         // jsonl is unrepairable (tool_use/tool_result mismatch), delete the
         // jsonl and retry once without --continue. User loses prior context
         // but at least gets an answer this turn.
         let (result, buffer) = self
-            .run_claude_with_fallback(session_id, &final_prompt, !is_first, &session.ai_provider)
+            .run_claude_with_fallback(
+                session_id,
+                &final_prompt,
+                !is_first,
+                &session.ai_provider,
+                effective_model.as_deref(),
+            )
             .await;
 
         // Mark first message sent regardless of success
@@ -942,14 +986,34 @@ impl MessageExecutor {
         prompt: &str,
         continue_conversation: bool,
         provider: &str,
+        model: Option<&str>,
     ) -> (
         Result<temps_agents::sandbox::SandboxExecResult, WorkspaceError>,
         Arc<Mutex<String>>,
     ) {
+        // OpenCode's `run [message..]` tries to lstat the first positional arg
+        // as a path, which fails with ENAMETOOLONG on long agent prompts. Write
+        // the prompt to a temp file inside the sandbox and have `build_chat_cmd`
+        // reference it via `$(cat ...)` so the prompt never hits the filesystem
+        // as a path component.
+        if provider == "opencode" {
+            if let Err(e) = self
+                .session_manager
+                .write_file(session_id, "/tmp/.temps-prompt", prompt.as_bytes(), 0o644)
+                .await
+            {
+                tracing::warn!(
+                    "run_claude_once: failed to write prompt file for opencode session {}: {}",
+                    session_id,
+                    e
+                );
+            }
+        }
+
         let env = std::collections::HashMap::new();
-        let cmd = self
-            .session_manager
-            .build_chat_cmd(prompt, 25, continue_conversation, provider);
+        let cmd =
+            self.session_manager
+                .build_chat_cmd(prompt, 25, continue_conversation, provider, model);
 
         let buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
         let workspace_service_for_callback = self.workspace_service.clone();
@@ -1039,12 +1103,13 @@ impl MessageExecutor {
         prompt: &str,
         continue_conversation: bool,
         provider: &str,
+        model: Option<&str>,
     ) -> (
         Result<temps_agents::sandbox::SandboxExecResult, WorkspaceError>,
         Arc<Mutex<String>>,
     ) {
         let (first_result, first_buffer) = self
-            .run_claude_once(session_id, prompt, continue_conversation, provider)
+            .run_claude_once(session_id, prompt, continue_conversation, provider, model)
             .await;
 
         // Only consider a fallback if we actually tried to --continue. A
@@ -1114,7 +1179,7 @@ impl MessageExecutor {
 
         // Second attempt: fresh session (no --continue).
         let (second_result, second_buffer) = self
-            .run_claude_once(session_id, prompt, false, provider)
+            .run_claude_once(session_id, prompt, false, provider, model)
             .await;
         (second_result, second_buffer)
     }
@@ -1279,6 +1344,7 @@ impl MessageExecutor {
         self.session_manager
             .create_sandbox(
                 session.id,
+                &session.public_id,
                 session.project_id,
                 work_dir.clone(),
                 env_vars,
@@ -1289,7 +1355,10 @@ impl MessageExecutor {
             .await?;
 
         // Inject the Temps platform skill file
-        let _ = self.session_manager.inject_skill_file(session.id).await;
+        let _ = self
+            .session_manager
+            .inject_skill_file(session.id, &session.ai_provider)
+            .await;
 
         // Inject per-session skills + MCP servers + secrets via the shared
         // agent-sandbox injector. Skipped cleanly if the agents plugin is not
@@ -1668,6 +1737,40 @@ impl MessageExecutor {
         Ok((provider_id, auth_type, decrypted))
     }
 
+    /// Resolve the effective model for a workspace message. Returns the
+    /// session-level override if set, otherwise the provider's configured
+    /// `default_model` from the global settings. Returns `None` when neither
+    /// is set (the CLI will use its own built-in default).
+    async fn resolve_effective_model(
+        &self,
+        session_model: Option<&str>,
+        provider_id: &str,
+    ) -> Option<String> {
+        // Session-level override takes precedence.
+        if let Some(m) = session_model {
+            if !m.is_empty() {
+                return Some(m.to_string());
+            }
+        }
+        // Fall back to the provider's default_model from settings.
+        let settings_row = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten();
+        let sandbox = settings_row
+            .as_ref()
+            .and_then(|row| row.data.get("agent_sandbox"))
+            .and_then(|v| {
+                serde_json::from_value::<temps_core::AgentSandboxSettings>(v.clone()).ok()
+            })
+            .unwrap_or_default();
+        sandbox
+            .provider_config(provider_id)
+            .default_model
+            .filter(|m| !m.is_empty())
+    }
+
     /// Resolve credentials for **every** configured provider, not just the
     /// active/default one. Workspaces let the user open a terminal tab per
     /// provider (claude tab, codex tab, shell tab), so each provider that has
@@ -1850,17 +1953,130 @@ impl MessageExecutor {
 
 /// Extract the final result text from Claude stream-json output.
 /// Returns the content of the `{"type":"result","result":"..."}` line if present.
+/// Extract the final assistant-visible text from a CLI's stream-json output.
+/// Handles all three providers we run in chat sessions:
+///   - Claude: `{"type":"result","result":"..."}` OR
+///     `{"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}`
+///   - Codex:  `{"type":"item.started|item.completed","item":{"type":"agent_message","text":"..."}}`
+///   - OpenCode: `{"type":"text","part":{"text":"..."}}`
+///
+/// Strategy: walk the output forward, collect every assistant text segment
+/// from any recognised event, and join them. If none match we return None so
+/// the caller can decide how to surface the empty case.
 fn extract_final_result(output: &str) -> Option<String> {
+    // Claude's `result` event is authoritative when present — it's the final
+    // consolidated answer after all assistant turns. Prefer it.
     for line in output.lines().rev() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
             if value.get("type").and_then(|v| v.as_str()) == Some("result") {
                 if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
-                    return Some(result.to_string());
+                    if !result.is_empty() {
+                        return Some(result.to_string());
+                    }
                 }
             }
         }
     }
-    None
+
+    // Otherwise accumulate assistant text from whichever provider shape we see.
+    //
+    // OpenCode's `--format json` with `--continue` replays every historical
+    // text part in the session before emitting the current turn (it filters
+    // events by sessionID, not messageID). So a naive accumulator produces
+    // a transcript of every prior answer. Track the latest opencode messageID
+    // separately and only keep text parts that share it.
+    let mut parts: Vec<String> = Vec::new();
+    let mut opencode_texts: Vec<(String, String)> = Vec::new(); // (messageID, text)
+    let mut latest_opencode_message_id: Option<String> = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let event_type = match v.get("type").and_then(|t| t.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+        match event_type {
+            // Claude stream-json assistant turn.
+            "assistant" => {
+                if let Some(content) = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    parts.push(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Codex: agent message can arrive on started OR completed. Dedupe
+            // against what we've already captured so newer builds that emit
+            // both don't produce a doubled answer.
+            "item.started" | "item.completed" => {
+                if let Some(item) = v.get("item") {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("agent_message") {
+                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() && !parts.iter().any(|p| p == text) {
+                                parts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // OpenCode `--format json`: one `text` event per assistant segment.
+            // `part.messageID` groups segments by turn; `--continue` replays
+            // historical turns too, so we stash every text part and its
+            // messageID, remember the most-recently-seen messageID, and at
+            // the end only keep parts whose messageID matches that latest
+            // turn. Parts without a messageID (shouldn't happen per the
+            // opencode SDK types, but defensively) are ignored.
+            "text" => {
+                let part = match v.get("part") {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let text = part.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                if let Some(message_id) = part.get("messageID").and_then(|m| m.as_str()) {
+                    latest_opencode_message_id = Some(message_id.to_string());
+                    opencode_texts.push((message_id.to_string(), text.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Fold opencode's filtered-by-messageID text parts into the output.
+    if let Some(latest_id) = latest_opencode_message_id {
+        for (mid, text) in opencode_texts {
+            if mid == latest_id {
+                parts.push(text);
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 /// Parse cumulative token usage from a stream-json output buffer.
@@ -2038,6 +2254,101 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_final_result_opencode_text_event() {
+        // OpenCode emits `{"type":"text","part":{"text":"..."}}` per segment.
+        // Before the fix, no `result` event was present and the chat UI
+        // showed "(no result text)" even though opencode had answered.
+        let output = "\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m1\",\"text\":\"3 + 3 = 6\"}}\n";
+        assert_eq!(extract_final_result(output), Some("3 + 3 = 6".to_string()));
+    }
+
+    #[test]
+    fn test_extract_final_result_opencode_skips_historical_messages_on_continue() {
+        // `opencode run --continue --format json` replays every historical
+        // text part in the session before emitting the new turn. We group by
+        // messageID and only surface parts from the latest turn; otherwise the
+        // user sees a cumulative transcript ("3+3=6, 2+2=4, 4+4=8") when they
+        // only asked for the latest answer.
+        let output = "\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m1\",\"text\":\"3+3 = 6\"}}\n\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m2\",\"text\":\"2+2 = 4\"}}\n\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m3\",\"text\":\"4+4 = 8\"}}\n";
+        assert_eq!(extract_final_result(output), Some("4+4 = 8".to_string()));
+    }
+
+    #[test]
+    fn test_extract_final_result_opencode_multiple_parts_same_message() {
+        // A single turn can emit multiple text parts (e.g. before/after a
+        // tool call). All parts with the latest messageID should be joined.
+        let output = "\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m_old\",\"text\":\"prior turn\"}}\n\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m_new\",\"text\":\"Part one.\"}}\n\
+{\"type\":\"text\",\"part\":{\"type\":\"text\",\"messageID\":\"m_new\",\"text\":\"Part two.\"}}\n";
+        assert_eq!(
+            extract_final_result(output),
+            Some("Part one.\n\nPart two.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_final_result_codex_agent_message_completed() {
+        let output = "\
+{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n\
+{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"The answer is 6.\"}}\n\
+{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}\n";
+        assert_eq!(
+            extract_final_result(output),
+            Some("The answer is 6.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_final_result_codex_agent_message_started() {
+        // gpt-5-codex streams the answer on item.started, not item.completed.
+        let output = "\
+{\"type\":\"item.started\",\"item\":{\"type\":\"agent_message\",\"text\":\"Reading input...\"}}\n";
+        assert_eq!(
+            extract_final_result(output),
+            Some("Reading input...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_final_result_codex_dedupes_started_and_completed() {
+        // Newer codex builds may emit the same message on both events — only
+        // surface it once in the final chat reply.
+        let output = "\
+{\"type\":\"item.started\",\"item\":{\"type\":\"agent_message\",\"text\":\"Hi.\"}}\n\
+{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Hi.\"}}\n";
+        assert_eq!(extract_final_result(output), Some("Hi.".to_string()));
+    }
+
+    #[test]
+    fn test_extract_final_result_claude_assistant_text_fallback() {
+        // No `result` event (e.g. claude was interrupted mid-turn); fall back
+        // to the last assistant text block so the user still sees something.
+        let output = "\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial answer\"}]}}\n";
+        assert_eq!(
+            extract_final_result(output),
+            Some("partial answer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_final_result_prefers_result_over_assistant() {
+        // When both are present, the authoritative `result` wins.
+        let output = "\
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"thinking\"}]}}\n\
+{\"type\":\"result\",\"result\":\"final answer\"}\n";
+        assert_eq!(
+            extract_final_result(output),
+            Some("final answer".to_string())
+        );
+    }
+
+    #[test]
     fn test_parse_token_usage_top_level() {
         let output = r#"{"type":"result","usage":{"input_tokens":100,"output_tokens":50}}"#;
         let (input, output_t) = parse_token_usage(output);
@@ -2077,43 +2388,65 @@ mod tests {
     // the full MessageExecutor with all its dependencies. The MessageExecutor
     // method just delegates to this function.
 
-    use sea_orm::{DatabaseBackend, MockDatabase};
-    use temps_entities::workflow_memory;
+    use async_trait::async_trait;
+    use temps_core::{WorkflowMemoryError, WorkflowMemoryFact};
 
-    fn mock_memory_service(facts: Vec<workflow_memory::Model>) -> Arc<WorkflowMemoryService> {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results(vec![facts])
-            .into_connection();
-        Arc::new(WorkflowMemoryService::new(Arc::new(db)))
+    /// Minimal in-memory `WorkflowMemoryProvider` for prompt-building tests.
+    ///
+    /// Tests used to mock `WorkflowMemoryService` via Sea-ORM `MockDatabase`,
+    /// which was over-specified: we don't care about SQL here, we care about
+    /// the trait contract. Swapping to the trait makes these tests portable
+    /// to any provider that satisfies the `temps-memory` eval harness.
+    struct FakeMemoryProvider {
+        facts: Vec<WorkflowMemoryFact>,
     }
 
-    fn make_test_fact(id: i64, fact: &str) -> workflow_memory::Model {
-        let now = chrono::Utc::now();
-        workflow_memory::Model {
-            id,
-            project_id: 10,
-            agent_id: 5,
-            fact: fact.to_string(),
-            tags: serde_json::json!([]),
-            confidence: 0.9,
-            times_used: 0,
-            source_run_ids: serde_json::json!([]),
-            superseded_by: None,
-            created_at: now,
-            updated_at: now,
-            last_used_at: None,
+    #[async_trait]
+    impl WorkflowMemoryProvider for FakeMemoryProvider {
+        async fn load_for_trigger(
+            &self,
+            _project_id: i32,
+            _agent_id: i32,
+            _relevant_tags: Vec<String>,
+            _limit: usize,
+        ) -> Result<Vec<WorkflowMemoryFact>, WorkflowMemoryError> {
+            Ok(self.facts.clone())
+        }
+
+        fn render_for_prompt(&self, facts: &[WorkflowMemoryFact]) -> String {
+            if facts.is_empty() {
+                return String::new();
+            }
+            let mut out = String::from("## Things you've learned about this from past runs\n\n");
+            for f in facts {
+                out.push_str(&format!("- {}\n", f.fact));
+            }
+            out
         }
     }
 
+    fn make_test_fact(id: i64, fact: &str) -> WorkflowMemoryFact {
+        WorkflowMemoryFact {
+            id,
+            fact: fact.to_string(),
+            confidence: 0.9,
+            times_used: 0,
+        }
+    }
+
+    fn provider_with(facts: Vec<WorkflowMemoryFact>) -> FakeMemoryProvider {
+        FakeMemoryProvider { facts }
+    }
+
     #[tokio::test]
-    async fn test_build_chat_prompt_no_memory_service_returns_user_content() {
+    async fn test_build_chat_prompt_no_memory_provider_returns_user_content() {
         let result = build_chat_prompt_with_memory(None, "hello", true, Some(5), 10, vec![]).await;
         assert_eq!(result, "hello");
     }
 
     #[tokio::test]
     async fn test_build_chat_prompt_no_agent_id_returns_user_content() {
-        let memory = mock_memory_service(vec![]);
+        let memory = provider_with(vec![]);
         let result = build_chat_prompt_with_memory(
             Some(&memory),
             "hello",
@@ -2129,7 +2462,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_chat_prompt_subsequent_message_skips_memory() {
         // Even if memory has facts, is_first_message=false skips them.
-        let memory = mock_memory_service(vec![make_test_fact(1, "should not appear")]);
+        let memory = provider_with(vec![make_test_fact(1, "should not appear")]);
         let result = build_chat_prompt_with_memory(
             Some(&memory),
             "follow-up",
@@ -2144,7 +2477,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_chat_prompt_first_message_with_memory_includes_section() {
-        let memory = mock_memory_service(vec![make_test_fact(1, "OAuth state cookie missing")]);
+        let memory = provider_with(vec![make_test_fact(1, "OAuth state cookie missing")]);
 
         let result = build_chat_prompt_with_memory(
             Some(&memory),
@@ -2171,11 +2504,142 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_chat_prompt_empty_memory_returns_user_content() {
-        // Memory service is set but the load query returns no rows.
-        let memory = mock_memory_service(vec![]);
+        // Provider is set but returns no facts.
+        let memory = provider_with(vec![]);
         let result =
             build_chat_prompt_with_memory(Some(&memory), "hello", true, Some(5), 10, vec![]).await;
         // No memory rows → no section → user content as-is
+        assert_eq!(result, "hello");
+    }
+
+    /// ADR-010 swap-in proof (PR 3.4).
+    ///
+    /// The consumer holds `Option<&dyn WorkflowMemoryProvider>`, never a
+    /// concrete type. This test demonstrates that two **different** provider
+    /// impls — a tag-aware ranker and a pass-through one — both wire into
+    /// the exact same consumer code path and produce the expected prompt
+    /// shape. If this test stops compiling, it means the consumer has grown
+    /// a dependency on a concrete type (a boundary regression); if it stops
+    /// passing, the trait contract has drifted.
+    ///
+    /// This is the live counterpart to the `temps-memory` eval harness: the
+    /// harness pins the contract *as viewed by the trait*, and this test
+    /// pins the contract *as viewed by the consumer*.
+    #[tokio::test]
+    async fn test_message_executor_accepts_any_trait_impl() {
+        /// Tag-aware impl: returns only facts whose tags overlap the request.
+        struct TagMatchingProvider {
+            facts: Vec<(WorkflowMemoryFact, Vec<String>)>,
+        }
+
+        #[async_trait]
+        impl WorkflowMemoryProvider for TagMatchingProvider {
+            async fn load_for_trigger(
+                &self,
+                _project_id: i32,
+                _agent_id: i32,
+                relevant_tags: Vec<String>,
+                _limit: usize,
+            ) -> Result<Vec<WorkflowMemoryFact>, WorkflowMemoryError> {
+                Ok(self
+                    .facts
+                    .iter()
+                    .filter(|(_, tags)| tags.iter().any(|t| relevant_tags.contains(t)))
+                    .map(|(f, _)| f.clone())
+                    .collect())
+            }
+            fn render_for_prompt(&self, facts: &[WorkflowMemoryFact]) -> String {
+                if facts.is_empty() {
+                    return String::new();
+                }
+                let mut out = String::from("## Things you've learned\n\n");
+                for f in facts {
+                    out.push_str(&format!("- {}\n", f.fact));
+                }
+                out
+            }
+        }
+
+        let tag_matching = TagMatchingProvider {
+            facts: vec![
+                (
+                    make_test_fact(1, "oauth fact"),
+                    vec!["error_group:42".into()],
+                ),
+                (make_test_fact(2, "unrelated fact"), vec!["other".into()]),
+            ],
+        };
+        let pass_through = provider_with(vec![make_test_fact(3, "passthrough fact")]);
+
+        // Both providers are held as `Arc<dyn WorkflowMemoryProvider>` —
+        // this is the shape the real wiring uses (see plugin.rs). If the
+        // trait stopped being object-safe, this line would fail to compile.
+        let providers: Vec<Arc<dyn WorkflowMemoryProvider>> =
+            vec![Arc::new(tag_matching), Arc::new(pass_through)];
+
+        // First provider returns the tag-matched fact; second returns its
+        // single fact regardless of tags. Both go through the same consumer
+        // code path. If either trait method were bypassed by the consumer,
+        // this test would fail to compile or diverge in behavior.
+        let result0 = build_chat_prompt_with_memory(
+            Some(providers[0].as_ref()),
+            "fix it",
+            true,
+            Some(5),
+            10,
+            vec!["error_group:42".into()],
+        )
+        .await;
+        assert!(
+            result0.contains("oauth fact"),
+            "tag-matching provider must surface oauth fact; got: {result0}"
+        );
+        assert!(
+            !result0.contains("unrelated fact"),
+            "unrelated fact must be filtered out; got: {result0}"
+        );
+
+        let result1 = build_chat_prompt_with_memory(
+            Some(providers[1].as_ref()),
+            "fix it",
+            true,
+            Some(5),
+            10,
+            vec![],
+        )
+        .await;
+        assert!(
+            result1.contains("passthrough fact"),
+            "pass-through provider must surface its fact; got: {result1}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_chat_prompt_load_error_degrades_gracefully() {
+        // If the provider errors, the executor must not fail the turn — the
+        // user message goes through without the memory section.
+        struct FailingProvider;
+
+        #[async_trait]
+        impl WorkflowMemoryProvider for FailingProvider {
+            async fn load_for_trigger(
+                &self,
+                _: i32,
+                _: i32,
+                _: Vec<String>,
+                _: usize,
+            ) -> Result<Vec<WorkflowMemoryFact>, WorkflowMemoryError> {
+                Err(WorkflowMemoryError::new("boom"))
+            }
+            fn render_for_prompt(&self, _: &[WorkflowMemoryFact]) -> String {
+                unreachable!("render is not called when load errors")
+            }
+        }
+
+        let provider = FailingProvider;
+        let result =
+            build_chat_prompt_with_memory(Some(&provider), "hello", true, Some(5), 10, vec![])
+                .await;
         assert_eq!(result, "hello");
     }
 }

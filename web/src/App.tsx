@@ -32,15 +32,14 @@ import { EditNotificationProvider } from './pages/EditNotificationProvider'
 import { Monitoring } from './pages/Monitoring'
 import { PluginPage } from './pages/plugins/PluginPage'
 // Lazy load all pages
-const Dashboard = lazy(() =>
-  import('./pages/Dashboard').then((m) => ({ default: m.Dashboard }))
-)
 const Account = lazy(() =>
   import('./pages/Account').then((m) => ({ default: m.Account }))
 )
 const Projects = lazy(() =>
   import('./pages/Projects').then((m) => ({ default: m.Projects }))
 )
+const Sandboxes = lazy(() => import('./pages/Sandboxes'))
+const SandboxDetail = lazy(() => import('./pages/SandboxDetail'))
 const Storage = lazy(() =>
   import('./pages/Storage').then((m) => ({ default: m.Storage }))
 )
@@ -299,10 +298,12 @@ const FullAppRoutes = () => {
           >
             <div className="h-full overflow-y-auto py-2 px-0 sm:p-4">
               <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/" element={<Navigate to="/projects" replace />} />
+                <Route path="/dashboard" element={<Navigate to="/projects" replace />} />
                 <Route path="/account" element={<Account />} />
                 <Route path="/projects" element={<Projects />} />
+                <Route path="/sandboxes" element={<Sandboxes />} />
+                <Route path="/sandboxes/:sandboxId" element={<SandboxDetail />} />
                 <Route path="/monitoring" element={<Monitoring />}>
                   <Route index element={<Navigate to="resources" replace />} />
                   <Route path="providers/add" element={<AddNotificationProvider />} />

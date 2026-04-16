@@ -658,6 +658,8 @@ mod tests {
             created_at: now,
             updated_at: now,
             last_used_at: None,
+            embedding: None,
+            expires_at: None,
         }
     }
 

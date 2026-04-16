@@ -98,7 +98,7 @@ impl TempsPlugin for WorkspacePlugin {
                     deployment_token_service,
                     external_service_manager,
                 )
-                .with_memory_service(memory_service);
+                .with_memory_provider(memory_service.clone() as Arc<dyn WorkflowMemoryProvider>);
 
                 // Wire agents-plugin services so workspace sandboxes get the
                 // same skill / MCP / secret injection pipeline as agent runs.

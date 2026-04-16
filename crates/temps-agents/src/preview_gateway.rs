@@ -29,7 +29,7 @@ use bollard::query_parameters::{
 use bollard::Docker;
 use futures::StreamExt;
 use futures::TryStreamExt;
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -171,7 +171,7 @@ impl PreviewGatewaySpec {
             container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
             network: PREVIEW_GATEWAY_NETWORK.to_string(),
             host_port,
-            shared_secret: String::new(),
+            shared_secret: settings.shared_secret.clone(),
         }
     }
 }
@@ -286,6 +286,7 @@ struct ExistingContainer {
     running: bool,
     host_port_binding: Option<(String, String)>, // (host_ip, host_port)
     network_attached: bool,
+    has_shared_secret_env: bool,
 }
 
 async fn inspect(docker: &Docker, name: &str) -> Result<Option<ExistingContainer>> {
@@ -339,11 +340,25 @@ async fn inspect(docker: &Docker, name: &str) -> Result<Option<ExistingContainer
         .map(|nets| nets.contains_key(PREVIEW_GATEWAY_NETWORK))
         .unwrap_or(false);
 
+    let has_shared_secret_env = inspected
+        .config
+        .as_ref()
+        .and_then(|c| c.env.as_ref())
+        .map(|env| {
+            env.iter().any(|v| {
+                v.strip_prefix("PREVIEW_GATEWAY_SHARED_SECRET=")
+                    .map(|val| !val.is_empty())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
     Ok(Some(ExistingContainer {
         image,
         running,
         host_port_binding,
         network_attached,
+        has_shared_secret_env,
     }))
 }
 
@@ -352,6 +367,13 @@ fn container_matches(existing: &ExistingContainer, spec: &PreviewGatewaySpec) ->
         return false;
     }
     if !existing.network_attached {
+        return false;
+    }
+    // If the spec has a shared secret (it should in all non-legacy boots),
+    // the running container MUST have it in its env — otherwise the gateway
+    // crash-loops on startup with an empty-secret error and restart_policy
+    // masks it as "running".
+    if !spec.shared_secret.is_empty() && !existing.has_shared_secret_env {
         return false;
     }
     match &existing.host_port_binding {
@@ -440,11 +462,130 @@ async fn create_and_start(docker: &Docker, spec: &PreviewGatewaySpec) -> Result<
     Ok(())
 }
 
+/// Ensure the shared secret is persisted in the DB, generating one if missing.
+///
+/// Precedence:
+/// 1. If `settings.preview_gateway.shared_secret` is non-empty → use it.
+/// 2. Else, if a legacy `preview_gateway.secret` file exists under `data_dir`
+///    → adopt its contents, persist to DB (backwards-compat migration).
+/// 3. Else, generate a fresh 32-byte hex secret and persist it.
+///
+/// Always exports the secret into `PREVIEW_GATEWAY_SHARED_SECRET` for the
+/// current process so the in-process Pingora can read it via `std::env::var`.
+///
+/// Never fails hard: on any DB error we fall back to the legacy file helper
+/// so workspace previews keep working even if the settings row is unreachable.
+pub async fn ensure_shared_secret_db(
+    db: &DatabaseConnection,
+    data_dir: &std::path::Path,
+) -> String {
+    // Load current settings row.
+    let row = match temps_entities::settings::Entity::find_by_id(1)
+        .one(db)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                "failed to load settings row for preview-gateway secret: {} — falling back to file",
+                e
+            );
+            return ensure_shared_secret(data_dir).unwrap_or_default();
+        }
+    };
+
+    let mut full: serde_json::Value = row
+        .as_ref()
+        .map(|r| r.data.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let mut pg: PreviewGatewaySettings = full
+        .get("preview_gateway")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    // Short-circuit: already have one in DB.
+    if !pg.shared_secret.is_empty() {
+        export_env(&pg.shared_secret);
+        return pg.shared_secret;
+    }
+
+    // Adopt legacy file if present. Only read — do not create a new file.
+    let legacy_path = data_dir.join(PREVIEW_GATEWAY_SECRET_FILE);
+    let secret = match std::fs::read_to_string(&legacy_path) {
+        Ok(contents) => {
+            let trimmed = contents.trim().to_string();
+            if !trimmed.is_empty() {
+                info!(
+                    path = %legacy_path.display(),
+                    "adopting legacy preview gateway secret file into DB"
+                );
+                trimmed
+            } else {
+                generate_secret()
+            }
+        }
+        Err(_) => generate_secret(),
+    };
+
+    pg.shared_secret = secret.clone();
+
+    // Persist back.
+    full.as_object_mut()
+        .map(|m| m.insert("preview_gateway".into(), serde_json::to_value(&pg).unwrap()));
+
+    let now = chrono::Utc::now();
+    let persist_result = match row {
+        Some(existing) => {
+            let mut am: temps_entities::settings::ActiveModel = existing.into();
+            am.data = Set(full);
+            am.updated_at = Set(now);
+            am.update(db).await.map(|_| ())
+        }
+        None => {
+            let am = temps_entities::settings::ActiveModel {
+                id: Set(1),
+                data: Set(full),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+            am.insert(db).await.map(|_| ())
+        }
+    };
+
+    if let Err(e) = persist_result {
+        warn!(
+            "failed to persist preview-gateway secret to DB: {} — continuing with in-memory value",
+            e
+        );
+    }
+
+    export_env(&secret);
+    secret
+}
+
+fn generate_secret() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn export_env(secret: &str) {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var("PREVIEW_GATEWAY_SHARED_SECRET", secret);
+    }
+}
+
 /// Spawn the reconciler on the given runtime. Logs failures but never panics.
 /// Returns immediately — the actual reconcile runs in the background so the
 /// caller (the proxy server bootstrap) is never blocked.
 ///
 /// Behavior:
+/// - Ensures the gateway shared secret exists in the DB (generating one on
+///   first boot, adopting the legacy file if present).
 /// - Reads PreviewGatewaySettings from the DB (or defaults if missing).
 /// - If `auto_upgrade = true` (default), applies the settings image directly.
 /// - If `auto_upgrade = false`, leaves the *image* of an existing container
@@ -457,24 +598,17 @@ pub fn spawn_reconcile(
     db: Arc<DatabaseConnection>,
     data_dir: std::path::PathBuf,
 ) {
-    // Ensure the shared secret exists BEFORE spawning the reconciler so that
-    // the proxy (which reads the env var at request time) sees it even if the
-    // reconcile task hasn't run yet. A reconcile failure should not leave the
-    // proxy open — but secret-generation errors MUST not crash the server, so
-    // we log loudly and continue (the gateway container will then refuse to
-    // start and preview URLs just stay down).
-    let shared_secret = match ensure_shared_secret(&data_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                "❌ failed to ensure preview gateway shared secret: {} — workspace previews disabled",
-                e
-            );
-            String::new()
-        }
-    };
-
     rt.spawn(async move {
+        // DB-backed secret so the value is stable across restarts, cwd
+        // changes, and `TEMPS_DATA_DIR` overrides. Falls back to the legacy
+        // file path for migration.
+        let shared_secret = ensure_shared_secret_db(&db, &data_dir).await;
+        if shared_secret.is_empty() {
+            warn!(
+                "❌ preview gateway shared secret is empty after DB+file resolution — workspace previews disabled"
+            );
+        }
+
         let settings = load_settings(&db).await;
         let mut spec = PreviewGatewaySpec::from_settings(&settings);
         spec.shared_secret = shared_secret;
@@ -521,6 +655,9 @@ pub struct GatewayStatus {
     pub present: bool,
     /// Whether the container is currently running.
     pub running: bool,
+    /// Higher-level health label: "running" | "restarting" | "crash_looping"
+    /// | "stopped" | "missing". UI should prefer this over `running`.
+    pub health: String,
     /// Image reference the container was created with (e.g.
     /// `kfsoftware/temps-preview-gateway:dev`).
     pub image: Option<String>,
@@ -536,6 +673,10 @@ pub struct GatewayStatus {
     pub started_at: Option<String>,
     /// Number of times Docker has restarted the container.
     pub restart_count: Option<i64>,
+    /// Exit code of the last run, if the container is not currently running.
+    pub last_exit_code: Option<i64>,
+    /// Error string Docker recorded for the container (e.g. startup failure).
+    pub last_error: Option<String>,
     /// The image the supervisor *expects* (from settings/constant). If this
     /// differs from `image`, the UI shows a "drift" badge.
     pub expected_image: String,
@@ -568,6 +709,7 @@ pub async fn inspect_status(
             return Ok(GatewayStatus {
                 present: false,
                 running: false,
+                health: "missing".to_string(),
                 image: None,
                 image_digest: None,
                 container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
@@ -575,6 +717,8 @@ pub async fn inspect_status(
                 host_port: None,
                 started_at: None,
                 restart_count: None,
+                last_exit_code: None,
+                last_error: None,
                 expected_image,
                 drift: false,
                 auto_upgrade: settings.auto_upgrade,
@@ -590,12 +734,39 @@ pub async fn inspect_status(
         .as_ref()
         .and_then(|s| s.running)
         .unwrap_or(false);
+    let restarting = inspected
+        .state
+        .as_ref()
+        .and_then(|s| s.restarting)
+        .unwrap_or(false);
     let started_at = inspected
         .state
         .as_ref()
         .and_then(|s| s.started_at.clone())
         .filter(|s| !s.is_empty() && s != "0001-01-01T00:00:00Z");
     let restart_count = inspected.restart_count;
+    let last_exit_code = inspected.state.as_ref().and_then(|s| s.exit_code);
+    let last_error = inspected
+        .state
+        .as_ref()
+        .and_then(|s| s.error.clone())
+        .filter(|s| !s.is_empty());
+
+    // Infer a sensible health label. Docker's `running` flag stays true
+    // across restart policies even when the process exits immediately, so
+    // we treat any container that has restarted AND exited non-zero as
+    // crash-looping. Pure `restarting` state is also surfaced distinctly.
+    let health = if restarting {
+        "restarting"
+    } else if running {
+        match (restart_count, last_exit_code) {
+            (Some(n), Some(code)) if n > 0 && code != 0 => "crash_looping",
+            _ => "running",
+        }
+    } else {
+        "stopped"
+    }
+    .to_string();
 
     let network = inspected
         .network_settings
@@ -619,6 +790,7 @@ pub async fn inspect_status(
     Ok(GatewayStatus {
         present: true,
         running,
+        health,
         image,
         image_digest,
         container_name: PREVIEW_GATEWAY_CONTAINER.to_string(),
@@ -626,6 +798,8 @@ pub async fn inspect_status(
         host_port,
         started_at,
         restart_count,
+        last_exit_code,
+        last_error,
         expected_image,
         drift,
         auto_upgrade: settings.auto_upgrade,

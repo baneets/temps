@@ -362,6 +362,15 @@ pub struct PreviewGatewaySettings {
     /// from the settings UI.
     #[schema(example = true)]
     pub auto_upgrade: bool,
+    /// Shared secret the host-side Pingora sends on every forwarded preview
+    /// request via `X-Temps-Preview-Token`; the gateway rejects requests
+    /// without it. Auto-generated on first boot, persisted in DB so the
+    /// secret is stable across `temps serve` restarts regardless of cwd,
+    /// `TEMPS_DATA_DIR`, or data-dir changes. MUST be masked (`***`) in any
+    /// API response — never expose it over HTTP.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schema(example = "")]
+    pub shared_secret: String,
 }
 
 impl Default for PreviewGatewaySettings {
@@ -370,6 +379,7 @@ impl Default for PreviewGatewaySettings {
             image: "kfsoftware/temps-preview-gateway:dev".to_string(),
             host_port: 8090,
             auto_upgrade: true,
+            shared_secret: String::new(),
         }
     }
 }

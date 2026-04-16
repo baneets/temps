@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::{SandboxCreateConfig, SandboxExecResult, SandboxHandle, SandboxProvider};
+use super::{
+    ExecStream, OnStreamEventCallback, SandboxCreateConfig, SandboxExecResult, SandboxHandle,
+    SandboxProvider,
+};
 use crate::ai_cli::OnEventCallback;
 use crate::error::AgentError;
 
@@ -64,17 +67,17 @@ pub fn dockerfile_for_runtime(runtime: &str) -> String {
     let (base, extra_packages, extra_run) = match runtime {
         "bun" => (
             "oven/bun:latest",
-            "git ca-certificates curl jq sudo unzip dtach",
+            "git ca-certificates curl jq sudo unzip dtach socat",
             "true",
         ),
         "python" => (
             "python:3.12-slim",
-            "git ca-certificates curl jq sudo unzip dtach",
+            "git ca-certificates curl jq sudo unzip dtach socat",
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
         ),
         "rust" => (
             "rust:1-slim",
-            "git ca-certificates curl jq sudo unzip dtach",
+            "git ca-certificates curl jq sudo unzip dtach socat",
             "true",
         ),
         "go" => (
@@ -82,12 +85,12 @@ pub fn dockerfile_for_runtime(runtime: &str) -> String {
             // debian-based tag which is still published. (Slim variants
             // for golang don't exist for 1.23+.)
             "golang:1.23-bookworm",
-            "git ca-certificates curl jq sudo unzip dtach",
+            "git ca-certificates curl jq sudo unzip dtach socat",
             "true",
         ),
         "full" => (
             "ubuntu:24.04",
-            "git ca-certificates curl jq nodejs npm python3 python3-pip golang-go sudo unzip dtach",
+            "git ca-certificates curl jq nodejs npm python3 python3-pip golang-go sudo unzip dtach socat",
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
         ),
         // "node" or anything else — Ubuntu-based with Node 20 from NodeSource
@@ -95,7 +98,7 @@ pub fn dockerfile_for_runtime(runtime: &str) -> String {
         // longer rides on top of npm.
         _ => (
             "ubuntu:24.04",
-            "git ca-certificates curl jq sudo unzip gnupg dtach",
+            "git ca-certificates curl jq sudo unzip gnupg dtach socat",
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
                 && apt-get install -y --no-install-recommends nodejs",
         ),
@@ -126,8 +129,26 @@ pub fn dockerfile_for_runtime(runtime: &str) -> String {
     // from `docker exec`, tmux panes, and login shells alike — without this,
     // the bare-bash and tmux-wrapped paths would silently miss the installer
     // location and fall back to "claude not found".
+    // Stage 1: Build the temps-pty-agent binary from sources packed into
+    // the build context by `pty_agent_bundle`. Isolated in its own stage so
+    // the Rust toolchain doesn't bloat the final image. The binary is a
+    // ~few-MB statically-linkable agent; we keep the default glibc dynamic
+    // link since every base image here has a libc.
+    //
+    // The host's terminal handler connects to /run/temps-pty/agent.sock
+    // inside the container — sandbox-entrypoint.sh supervises the agent so
+    // it's respawned if it ever dies.
+    let pty_agent_stage = r#"FROM rust:1-slim AS pty-agent-builder
+WORKDIR /build
+# Copy the whole pty-agent context at once — Cargo needs the manifest and
+# the src tree in a consistent state before it'll resolve anything.
+COPY pty-agent/ ./
+RUN cargo build --release --bin temps-pty-agent \
+    && strip target/release/temps-pty-agent
+"#;
+
     format!(
-        r#"FROM {base}
+        r#"{pty_agent_stage}FROM {base}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/home/temps/.local/bin:/usr/local/bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 RUN apt-get update && apt-get install -y --no-install-recommends {extra_packages} wget tmux bubblewrap && rm -rf /var/lib/apt/lists/*
@@ -200,10 +221,59 @@ RUN mkdir -p /opt/claude-backup \
     && cp -a /home/temps/.local /opt/claude-backup/local \
     && cp -a /home/temps/.bun /opt/claude-backup/bun \
     && cp -a /home/temps/.opencode /opt/claude-backup/opencode
+USER root
+# In-sandbox PTY agent: a single long-lived process that owns every
+# interactive terminal in this container. See ADR-008 for rationale.
+# The entrypoint supervises it — if it crashes, it's respawned. Existing
+# images without this binary still work via the dtach fallback path in
+# the terminal handler.
+COPY --from=pty-agent-builder /build/target/release/temps-pty-agent /usr/local/bin/temps-pty-agent
+COPY pty-agent/sandbox-entrypoint.sh /usr/local/bin/sandbox-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/temps-pty-agent /usr/local/bin/sandbox-entrypoint.sh
 USER temps
 WORKDIR /workspace
+# The container's CMD is whatever the caller passes (usually `sleep infinity`).
+# The entrypoint starts the agent supervisor and then execs CMD. docker-init
+# (enabled via HostConfig.init=true) reaps any zombies the agent leaves behind.
+ENTRYPOINT ["/usr/local/bin/sandbox-entrypoint.sh"]
 "#
     )
+}
+
+/// Build the tar archive that goes to `docker build` as the build context.
+/// Contains the Dockerfile plus every file in [`pty_agent_bundle::BUNDLE`]
+/// so the `pty-agent-builder` stage has sources to compile from.
+fn build_context_tar(dockerfile: &str) -> Result<Vec<u8>, AgentError> {
+    let map_tar_err = |what: &str| {
+        let what = what.to_string();
+        move |e: std::io::Error| AgentError::SandboxProviderUnavailable {
+            provider: "docker".to_string(),
+            reason: format!("Failed to {what}: {e}"),
+        }
+    };
+
+    let mut tar_buf = Vec::new();
+    {
+        let mut tar_builder = tar::Builder::new(&mut tar_buf);
+
+        let dockerfile_bytes = dockerfile.as_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(dockerfile_bytes.len() as u64);
+        header
+            .set_path("Dockerfile")
+            .map_err(map_tar_err("set Dockerfile path"))?;
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder
+            .append(&header, dockerfile_bytes)
+            .map_err(map_tar_err("append Dockerfile"))?;
+
+        super::pty_agent_bundle::append_to_tar(&mut tar_builder)
+            .map_err(map_tar_err("append pty-agent bundle"))?;
+
+        tar_builder.finish().map_err(map_tar_err("finish tar"))?;
+    }
+    Ok(tar_buf)
 }
 
 /// Local image name for a runtime preset.
@@ -378,36 +448,7 @@ impl DockerSandboxProvider {
         send(format!("Building {} (runtime: {})...", image_name, runtime)).await;
 
         let dockerfile_content = dockerfile_for_runtime(runtime);
-
-        // Create tar archive with Dockerfile
-        let mut header = tar::Header::new_gnu();
-        let dockerfile_bytes = dockerfile_content.as_bytes();
-        header.set_size(dockerfile_bytes.len() as u64);
-        header
-            .set_path("Dockerfile")
-            .map_err(|e| AgentError::SandboxProviderUnavailable {
-                provider: "docker".to_string(),
-                reason: format!("Failed to create tar header: {}", e),
-            })?;
-        header.set_mode(0o644);
-        header.set_cksum();
-
-        let mut tar_buf = Vec::new();
-        {
-            let mut tar_builder = tar::Builder::new(&mut tar_buf);
-            tar_builder.append(&header, dockerfile_bytes).map_err(|e| {
-                AgentError::SandboxProviderUnavailable {
-                    provider: "docker".to_string(),
-                    reason: format!("Failed to build tar: {}", e),
-                }
-            })?;
-            tar_builder
-                .finish()
-                .map_err(|e| AgentError::SandboxProviderUnavailable {
-                    provider: "docker".to_string(),
-                    reason: format!("Failed to finish tar: {}", e),
-                })?;
-        }
+        let tar_buf = build_context_tar(&dockerfile_content)?;
 
         let options = bollard::query_parameters::BuildImageOptionsBuilder::new()
             .t(&image_name)
@@ -482,35 +523,7 @@ impl DockerSandboxProvider {
         .await;
 
         let dockerfile_content = dockerfile_for_runtime(runtime);
-
-        let mut header = tar::Header::new_gnu();
-        let dockerfile_bytes = dockerfile_content.as_bytes();
-        header.set_size(dockerfile_bytes.len() as u64);
-        header
-            .set_path("Dockerfile")
-            .map_err(|e| AgentError::SandboxProviderUnavailable {
-                provider: "docker".to_string(),
-                reason: format!("Failed to create tar header: {}", e),
-            })?;
-        header.set_mode(0o644);
-        header.set_cksum();
-
-        let mut tar_buf = Vec::new();
-        {
-            let mut tar_builder = tar::Builder::new(&mut tar_buf);
-            tar_builder.append(&header, dockerfile_bytes).map_err(|e| {
-                AgentError::SandboxProviderUnavailable {
-                    provider: "docker".to_string(),
-                    reason: format!("Failed to build tar: {}", e),
-                }
-            })?;
-            tar_builder
-                .finish()
-                .map_err(|e| AgentError::SandboxProviderUnavailable {
-                    provider: "docker".to_string(),
-                    reason: format!("Failed to finish tar: {}", e),
-                })?;
-        }
+        let tar_buf = build_context_tar(&dockerfile_content)?;
 
         let options = bollard::query_parameters::BuildImageOptionsBuilder::new()
             .t(&image_name)
@@ -624,6 +637,207 @@ impl DockerSandboxProvider {
     fn container_name(run_id: i32) -> String {
         format!("{}{}", SANDBOX_NAME_PREFIX, run_id)
     }
+
+    /// Shared recovery by absolute container name — looks up the container,
+    /// returns a handle if it's running, cleans up if it exists but is
+    /// stopped. Used by both `recover(run_id)` (numeric naming for agent
+    /// runs / workspace sessions) and `recover_by_name(id)` (public_id
+    /// naming for standalone sandboxes).
+    async fn recover_container(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<SandboxHandle>, AgentError> {
+        match self
+            .docker
+            .inspect_container(
+                container_name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(info) => {
+                let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
+                let container_id = info.id.unwrap_or_default();
+
+                if running {
+                    tracing::info!("Recovered running sandbox {}", container_name);
+                    Ok(Some(SandboxHandle {
+                        sandbox_id: container_id,
+                        sandbox_name: container_name.to_string(),
+                        work_dir: PathBuf::from(CONTAINER_WORK_DIR),
+                    }))
+                } else {
+                    tracing::info!("Found stopped sandbox {}, removing", container_name);
+                    let _ = self
+                        .docker
+                        .remove_container(
+                            container_name,
+                            Some(bollard::query_parameters::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await;
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Shared exec implementation — one place that owns the bollard
+    /// StartExec stream handling and the IDLE_POLL phantom-stream guard.
+    /// Both `exec` (legacy stdout-only callback) and `exec_streamed`
+    /// (stream-tagged callback) funnel through here so the two paths
+    /// can't drift apart.
+    ///
+    /// When `on_event` is present, every stdout/stderr line is dispatched
+    /// through the callback as it arrives. The returned `SandboxExecResult`
+    /// has `stdout` containing **stdout only** and `stderr` containing
+    /// **stderr only** — the bollard-side aggregation that used to fold
+    /// stderr into `stdout` is gone. Callers that still want the combined
+    /// view can concatenate at the call site.
+    async fn exec_inner(
+        &self,
+        handle: &SandboxHandle,
+        cmd: Vec<String>,
+        env: HashMap<String, String>,
+        on_event: Option<OnStreamEventCallback>,
+    ) -> Result<SandboxExecResult, AgentError> {
+        let env_vars: Vec<String> = env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+
+        let exec_config = bollard::models::ExecConfig {
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            cmd: Some(cmd.clone()),
+            working_dir: Some(handle.work_dir.to_string_lossy().to_string()),
+            env: if env_vars.is_empty() {
+                None
+            } else {
+                Some(env_vars)
+            },
+            ..Default::default()
+        };
+
+        let exec = self
+            .docker
+            .create_exec(&handle.sandbox_id, exec_config)
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("Failed to create exec: {}", e),
+            })?;
+
+        let start_config = bollard::exec::StartExecOptions {
+            detach: false,
+            ..Default::default()
+        };
+
+        let output = self
+            .docker
+            .start_exec(&exec.id, Some(start_config))
+            .await
+            .map_err(|e| AgentError::SandboxExecFailed {
+                run_id: 0,
+                sandbox_id: handle.sandbox_id.clone(),
+                reason: format!("Failed to start exec: {}", e),
+            })?;
+
+        let mut stdout_output = String::new();
+        let mut stderr_output = String::new();
+
+        match output {
+            StartExecResults::Attached { mut output, .. } => {
+                // See comment in prior implementation: bollard's exec stream
+                // can park forever on phantom completions. IDLE_POLL + an
+                // `inspect_exec` check lets us detect and break out of that.
+                const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+                loop {
+                    match tokio::time::timeout(IDLE_POLL, output.next()).await {
+                        Ok(Some(Ok(LogOutput::StdOut { message }))) => {
+                            let text = String::from_utf8_lossy(&message);
+                            for line in text.lines() {
+                                stdout_output.push_str(line);
+                                stdout_output.push('\n');
+                                if let Some(ref cb) = on_event {
+                                    cb(ExecStream::Stdout, line.to_string()).await;
+                                }
+                            }
+                        }
+                        Ok(Some(Ok(LogOutput::StdErr { message }))) => {
+                            let text = String::from_utf8_lossy(&message);
+                            for line in text.lines() {
+                                stderr_output.push_str(line);
+                                stderr_output.push('\n');
+                                if let Some(ref cb) = on_event {
+                                    cb(ExecStream::Stderr, line.to_string()).await;
+                                }
+                            }
+                        }
+                        Ok(Some(Ok(_))) => {}
+                        Ok(Some(Err(e))) => {
+                            tracing::warn!(
+                                "Sandbox {} exec stream error: {}",
+                                handle.sandbox_name,
+                                e
+                            );
+                            break;
+                        }
+                        Ok(None) => {
+                            // Stream closed cleanly — exec is done.
+                            break;
+                        }
+                        Err(_) => match self.docker.inspect_exec(&exec.id).await {
+                            Ok(info) if info.running == Some(true) => {
+                                tracing::debug!(
+                                    "Sandbox {} exec idle (still running), continuing to wait",
+                                    handle.sandbox_name
+                                );
+                                continue;
+                            }
+                            Ok(_) => {
+                                tracing::warn!(
+                                        "Sandbox {} exec stream went idle and the exec is no longer running — bailing out to avoid permanent hang",
+                                        handle.sandbox_name
+                                    );
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                        "Sandbox {} inspect_exec failed during idle check: {} — bailing out",
+                                        handle.sandbox_name,
+                                        e
+                                    );
+                                break;
+                            }
+                        },
+                    }
+                }
+            }
+            StartExecResults::Detached => {
+                return Err(AgentError::SandboxExecFailed {
+                    run_id: 0,
+                    sandbox_id: handle.sandbox_id.clone(),
+                    reason: "Exec started in detached mode unexpectedly".to_string(),
+                });
+            }
+        }
+
+        let exit_code = self
+            .docker
+            .inspect_exec(&exec.id)
+            .await
+            .ok()
+            .and_then(|i| i.exit_code)
+            .unwrap_or(-1) as i32;
+
+        Ok(SandboxExecResult {
+            exit_code,
+            stdout: stdout_output,
+            stderr: stderr_output,
+        })
+    }
 }
 
 #[async_trait]
@@ -631,7 +845,11 @@ impl SandboxProvider for DockerSandboxProvider {
     async fn create(&self, config: SandboxCreateConfig) -> Result<SandboxHandle, AgentError> {
         self.ensure_network().await?;
 
-        let container_name = Self::container_name(config.run_id);
+        let container_name = config
+            .container_name_override
+            .clone()
+            .map(|id| format!("{}{}", SANDBOX_NAME_PREFIX, id))
+            .unwrap_or_else(|| Self::container_name(config.run_id));
 
         // Remove existing container with the same name if any (leftover from crash)
         let _ = self
@@ -767,6 +985,17 @@ impl SandboxProvider for DockerSandboxProvider {
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             pids_limit: Some(config.pids_limit.unwrap_or(512)),
             init: Some(true),
+            // Survive Docker daemon restarts (reboot, `systemctl restart docker`,
+            // Mac sleep/wake). Without this the default is "no" and a daemon
+            // bounce permanently kills the container, leaving the DB row stuck
+            // in `running` with nothing behind it. `unless-stopped` means an
+            // explicit `docker stop` (including our own pause/destroy paths)
+            // still keeps the container stopped — we only auto-restart after
+            // daemon-level events.
+            restart_policy: Some(bollard::models::RestartPolicy {
+                name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                maximum_retry_count: None,
+            }),
             ..Default::default()
         };
 
@@ -947,143 +1176,36 @@ impl SandboxProvider for DockerSandboxProvider {
         env: HashMap<String, String>,
         on_output: Option<OnEventCallback>,
     ) -> Result<SandboxExecResult, AgentError> {
-        let env_vars: Vec<String> = env.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
-
-        let exec_config = bollard::models::ExecConfig {
-            attach_stdout: Some(true),
-            attach_stderr: Some(true),
-            cmd: Some(cmd.clone()),
-            working_dir: Some(handle.work_dir.to_string_lossy().to_string()),
-            env: if env_vars.is_empty() {
-                None
-            } else {
-                Some(env_vars)
-            },
-            ..Default::default()
-        };
-
-        let exec = self
-            .docker
-            .create_exec(&handle.sandbox_id, exec_config)
-            .await
-            .map_err(|e| AgentError::SandboxExecFailed {
-                run_id: 0,
-                sandbox_id: handle.sandbox_id.clone(),
-                reason: format!("Failed to create exec: {}", e),
-            })?;
-
-        let start_config = bollard::exec::StartExecOptions {
-            detach: false,
-            ..Default::default()
-        };
-
-        let output = self
-            .docker
-            .start_exec(&exec.id, Some(start_config))
-            .await
-            .map_err(|e| AgentError::SandboxExecFailed {
-                run_id: 0,
-                sandbox_id: handle.sandbox_id.clone(),
-                reason: format!("Failed to start exec: {}", e),
-            })?;
-
-        let mut all_output = String::new();
-
-        match output {
-            StartExecResults::Attached { mut output, .. } => {
-                // Bollard's exec stream has a known failure mode: if the
-                // underlying process exits without producing output (or the
-                // docker daemon drops the trailing close frame), `output.next()`
-                // parks forever instead of returning `None`. To avoid hanging
-                // the entire workspace executor on a phantom stream, we poll
-                // with an idle timeout: if no chunk arrives within the window
-                // AND the exec is no longer running per `inspect_exec`, we
-                // break out and return whatever we collected.
-                const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(15);
-                loop {
-                    match tokio::time::timeout(IDLE_POLL, output.next()).await {
-                        Ok(Some(Ok(LogOutput::StdOut { message }))) => {
-                            let text = String::from_utf8_lossy(&message);
-                            for line in text.lines() {
-                                all_output.push_str(line);
-                                all_output.push('\n');
-                                if let Some(ref cb) = on_output {
-                                    cb(line.to_string()).await;
-                                }
+        // Wrap the legacy stdout-only callback into a stream-aware one that
+        // discards stderr events, then delegate to the unified inner impl.
+        // Keeping one implementation avoids drift between `exec` and
+        // `exec_streamed`.
+        let stream_cb: Option<OnStreamEventCallback> = on_output.map(|cb| {
+            let cb = cb.clone();
+            let f: OnStreamEventCallback =
+                std::sync::Arc::new(move |stream: ExecStream, line: String| {
+                    let cb = cb.clone();
+                    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+                        Box::pin(async move {
+                            if matches!(stream, ExecStream::Stdout) {
+                                cb(line).await;
                             }
-                        }
-                        Ok(Some(Ok(LogOutput::StdErr { message }))) => {
-                            let text = String::from_utf8_lossy(&message);
-                            all_output.push_str(&text);
-                        }
-                        Ok(Some(Ok(_))) => {}
-                        Ok(Some(Err(e))) => {
-                            tracing::warn!(
-                                "Sandbox {} exec stream error: {}",
-                                handle.sandbox_name,
-                                e
-                            );
-                            break;
-                        }
-                        Ok(None) => {
-                            // Stream closed cleanly — exec is done.
-                            break;
-                        }
-                        Err(_) => {
-                            // Idle timeout: check whether the exec is still
-                            // running. If it is, keep waiting (long-running
-                            // claude calls are normal). If it isn't, the
-                            // stream is phantom — bail out.
-                            match self.docker.inspect_exec(&exec.id).await {
-                                Ok(info) if info.running == Some(true) => {
-                                    tracing::debug!(
-                                        "Sandbox {} exec idle (still running), continuing to wait",
-                                        handle.sandbox_name
-                                    );
-                                    continue;
-                                }
-                                Ok(_) => {
-                                    tracing::warn!(
-                                        "Sandbox {} exec stream went idle and the exec is no longer running — bailing out to avoid permanent hang",
-                                        handle.sandbox_name
-                                    );
-                                    break;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Sandbox {} inspect_exec failed during idle check: {} — bailing out",
-                                        handle.sandbox_name,
-                                        e
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            StartExecResults::Detached => {
-                return Err(AgentError::SandboxExecFailed {
-                    run_id: 0,
-                    sandbox_id: handle.sandbox_id.clone(),
-                    reason: "Exec started in detached mode unexpectedly".to_string(),
+                        });
+                    fut
                 });
-            }
-        }
+            f
+        });
+        self.exec_inner(handle, cmd, env, stream_cb).await
+    }
 
-        // Get exit code
-        let exit_code = self
-            .docker
-            .inspect_exec(&exec.id)
-            .await
-            .ok()
-            .and_then(|i| i.exit_code)
-            .unwrap_or(-1) as i32;
-
-        Ok(SandboxExecResult {
-            exit_code,
-            stdout: all_output,
-        })
+    async fn exec_streamed(
+        &self,
+        handle: &SandboxHandle,
+        cmd: Vec<String>,
+        env: HashMap<String, String>,
+        on_event: Option<OnStreamEventCallback>,
+    ) -> Result<SandboxExecResult, AgentError> {
+        self.exec_inner(handle, cmd, env, on_event).await
     }
 
     async fn is_alive(&self, handle: &SandboxHandle) -> Result<bool, AgentError> {
@@ -1593,53 +1715,15 @@ impl SandboxProvider for DockerSandboxProvider {
 
     async fn recover(&self, run_id: i32) -> Result<Option<SandboxHandle>, AgentError> {
         let container_name = Self::container_name(run_id);
+        self.recover_container(&container_name).await
+    }
 
-        match self
-            .docker
-            .inspect_container(
-                &container_name,
-                None::<bollard::query_parameters::InspectContainerOptions>,
-            )
-            .await
-        {
-            Ok(info) => {
-                let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
-
-                let container_id = info.id.unwrap_or_default();
-
-                if running {
-                    tracing::info!(
-                        "Recovered running sandbox {} for run {}",
-                        container_name,
-                        run_id
-                    );
-                    Ok(Some(SandboxHandle {
-                        sandbox_id: container_id,
-                        sandbox_name: container_name,
-                        work_dir: PathBuf::from(CONTAINER_WORK_DIR),
-                    }))
-                } else {
-                    // Container exists but is stopped — clean it up
-                    tracing::info!(
-                        "Found stopped sandbox {} for run {}, removing",
-                        container_name,
-                        run_id
-                    );
-                    let _ = self
-                        .docker
-                        .remove_container(
-                            &container_name,
-                            Some(bollard::query_parameters::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
-                        )
-                        .await;
-                    Ok(None)
-                }
-            }
-            Err(_) => Ok(None),
-        }
+    async fn recover_by_name(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<SandboxHandle>, AgentError> {
+        let full_name = format!("{}{}", SANDBOX_NAME_PREFIX, container_name);
+        self.recover_container(&full_name).await
     }
 
     fn name(&self) -> &str {
@@ -1912,6 +1996,7 @@ mod tests {
         // 1. Create sandbox
         let create_config = SandboxCreateConfig {
             run_id,
+            container_name_override: None,
             host_work_dir: work_dir.clone(),
             image: None,
             cpu_limit: Some(1.0),
@@ -2152,6 +2237,7 @@ mod tests {
 
         let create_config = SandboxCreateConfig {
             run_id,
+            container_name_override: None,
             host_work_dir: work_dir.clone(),
             image: None,
             cpu_limit: Some(1.0),

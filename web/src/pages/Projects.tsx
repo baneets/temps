@@ -5,18 +5,81 @@ import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { ExternalConnectivityAlert } from '@/components/alerts/ExternalConnectivityAlert'
+import { MetricCard } from '@/components/dashboard/MetricCard'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
+import { ImprovedOnboardingDashboard } from '@/components/onboarding/ImprovedOnboardingDashboard'
+import { MetricCardSkeleton } from '@/components/skeletons/MetricCardSkeleton'
 import { ProjectCardSkeleton } from '@/components/skeletons/ProjectCardSkeleton'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { KbdBadge } from '@/components/ui/kbd-badge'
 import {
+  getGeneralStatsOptions,
   getProjectsOptions,
   listGitProvidersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { useQuery } from '@tanstack/react-query'
 import { subDays } from 'date-fns'
-import { Plus, FolderPlus, GitBranch, Upload } from 'lucide-react'
+import {
+  DollarSign,
+  Eye,
+  FolderGit2,
+  FolderPlus,
+  GitBranch,
+  Minus,
+  Plus,
+  TrendingDown,
+  TrendingUp,
+  Upload,
+  Users,
+} from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
+
+function formatTrendChange(trendPercentage: number | null | undefined): {
+  change: string
+  changeDisplay: {
+    icon: React.ReactNode
+    className: string
+    isPositive?: boolean
+  }
+} | null {
+  if (trendPercentage == null) return null
+
+  const rounded = Math.round(trendPercentage)
+
+  if (rounded === 0) {
+    return {
+      change: '0% vs prev. period',
+      changeDisplay: {
+        icon: <Minus className="mr-1 h-3 w-3" />,
+        className: 'text-xs text-muted-foreground flex items-center mt-1',
+      },
+    }
+  }
+
+  if (rounded > 0) {
+    return {
+      change: `+${rounded}% vs prev. period`,
+      changeDisplay: {
+        icon: <TrendingUp className="mr-1 h-3 w-3" />,
+        className:
+          'text-xs text-emerald-600 dark:text-emerald-400 flex items-center mt-1',
+        isPositive: true,
+      },
+    }
+  }
+
+  return {
+    change: `${rounded}% vs prev. period`,
+    changeDisplay: {
+      icon: <TrendingDown className="mr-1 h-3 w-3" />,
+      className:
+        'text-xs text-red-600 dark:text-red-400 flex items-center mt-1',
+      isPositive: false,
+    },
+  }
+}
 
 const ITEMS_PER_PAGE = 8
 
@@ -103,8 +166,109 @@ export function Projects() {
 
   const dashboardHealth = useDashboardHealth(projectIds)
 
+  // Stats for the header metric cards (merged in from the former Dashboard
+  // page). Only fetched when at least one project exists — the onboarding
+  // view replaces the metrics otherwise.
+  const hasProjects = (projectsData?.projects?.length || 0) > 0
+  const generalStatsQuery = useQuery({
+    ...getGeneralStatsOptions({
+      query: { start_date: startDate, end_date: endDate },
+    }),
+    enabled: hasProjects,
+  })
+
+  const statsData = generalStatsQuery.data as
+    | (typeof generalStatsQuery.data & {
+        visitors_trend_percentage?: number | null
+        page_views_trend_percentage?: number | null
+      })
+    | undefined
+  const visitorsTrend = formatTrendChange(statsData?.visitors_trend_percentage)
+  const pageViewsTrend = formatTrendChange(
+    statsData?.page_views_trend_percentage
+  )
+
+  // When the user has no projects and isn't in demo mode, surface the full
+  // onboarding guide instead of an empty list. Demo mode falls through to
+  // the regular empty state below.
+  if (!isLoading && !hasProjects && !isDemoMode) {
+    return (
+      <div className="sm:p-8">
+        <ImprovedOnboardingDashboard />
+      </div>
+    )
+  }
+
   return (
     <div className="sm:p-8 space-y-6">
+      <ExternalConnectivityAlert showInDashboard dismissible />
+
+      {/* Metric cards (merged from former Dashboard page). */}
+      <div className="grid gap-6 md:grid-cols-4">
+        {generalStatsQuery.isLoading ? (
+          <MetricCardSkeleton />
+        ) : (
+          <MetricCard
+            title="Projects"
+            value={
+              generalStatsQuery.data?.total_projects ??
+              projectsData?.total ??
+              0
+            }
+            change=""
+            icon={<FolderGit2 className="h-5 w-5" />}
+          />
+        )}
+
+        {generalStatsQuery.isLoading ? (
+          <MetricCardSkeleton />
+        ) : (
+          <MetricCard
+            title="Visitors"
+            value={
+              generalStatsQuery.data?.total_unique_visitors?.toLocaleString() ??
+              (generalStatsQuery.error ? 'N/A' : 0)
+            }
+            change={visitorsTrend?.change ?? 'vs prev. period'}
+            changeDisplay={visitorsTrend?.changeDisplay}
+            icon={<Users className="h-5 w-5" />}
+          />
+        )}
+
+        {generalStatsQuery.isLoading ? (
+          <MetricCardSkeleton />
+        ) : (
+          <MetricCard
+            title="Page Views"
+            value={
+              generalStatsQuery.data?.total_page_views?.toLocaleString() ??
+              (generalStatsQuery.error ? 'N/A' : 0)
+            }
+            change={pageViewsTrend?.change ?? 'vs prev. period'}
+            changeDisplay={pageViewsTrend?.changeDisplay}
+            icon={<Eye className="h-5 w-5" />}
+          />
+        )}
+
+        <div className="relative">
+          {generalStatsQuery.isLoading ? (
+            <MetricCardSkeleton />
+          ) : (
+            <MetricCard
+              title="Revenue"
+              value="$0"
+              change=""
+              icon={<DollarSign className="h-5 w-5" />}
+            />
+          )}
+          <div className="absolute inset-0 bg-background/80 rounded-lg flex items-center justify-center">
+            <Badge variant="secondary" className="text-xs">
+              Coming Soon
+            </Badge>
+          </div>
+        </div>
+      </div>
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>

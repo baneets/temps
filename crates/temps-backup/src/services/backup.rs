@@ -1194,8 +1194,10 @@ impl BackupService {
         // growth (19+ GB) even when we weren't reading stdout data.
         // Instead we redirect stderr to a file inside the container and poll for completion.
         let stderr_path = format!("/backup/{}.stderr", uuid::Uuid::new_v4());
+        // pg_dumpall dumps the entire cluster: all databases, roles, and tablespaces.
+        // `--database` is only the bootstrap connection target used to enumerate DBs.
         let pg_dump_shell_cmd = format!(
-            "pg_dump --format=plain --clean --if-exists --no-password --host={} --port={} --username={} --dbname={} 2>{} | gzip > {}",
+            "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
             shell_escape(host), shell_escape(&port_str), shell_escape(username), shell_escape(database), stderr_path, container_backup_path
         );
 
@@ -2235,7 +2237,7 @@ impl BackupService {
         // Build the restore command based on backup format
         let (restore_tool, restore_cmd) = if is_plain_format {
             // Plain SQL: use psql to execute the dump.
-            // NOTE: We intentionally do NOT use ON_ERROR_STOP=on because pg_dump --clean
+            // NOTE: We intentionally do NOT use ON_ERROR_STOP=on because pg_dumpall --clean
             // generates "DROP ... ONLY" statements that TimescaleDB rejects for hypertables.
             // These errors are benign — the actual CREATE TABLE and COPY statements succeed.
             let cmd = format!(
@@ -2343,7 +2345,7 @@ impl BackupService {
             // is common for --clean on existing schemas.
             if is_plain_format && exit_code == 1 {
                 // psql exit 1 = some SQL statements failed. This is expected when
-                // pg_dump --clean generates "DROP ... ONLY" on TimescaleDB hypertables.
+                // pg_dumpall --clean generates "DROP ... ONLY" on TimescaleDB hypertables.
                 // Log as warning, not error.
                 warn!(
                     "{} completed with warnings (exit code {}): {}",

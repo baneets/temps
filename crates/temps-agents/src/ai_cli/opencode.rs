@@ -96,16 +96,23 @@ impl AiCliProvider for OpenCodeCliProvider {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let mut cmd = Command::new("opencode");
-        cmd.arg("run")
-            .arg(&config.prompt)
-            .arg("--format")
+        cmd.arg("run");
+        // Flags must come *before* the positional message, since everything
+        // after the first positional is treated as part of the prompt.
+        if let Some(m) = config.model.as_deref() {
+            if !m.is_empty() {
+                cmd.arg("--model").arg(m);
+            }
+        }
+        cmd.arg("--format")
             .arg("json")
+            .arg(&config.prompt)
             .current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         if !config.api_key.is_empty() {
-            cmd.env("ANTHROPIC_API_KEY", &config.api_key);
+            cmd.env(env_var_for_model(config.model.as_deref()), &config.api_key);
         }
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -202,17 +209,21 @@ impl AiCliProvider for OpenCodeCliProvider {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let mut cmd = Command::new("opencode");
-        cmd.arg("run")
-            .arg("--continue")
-            .arg(&config.prompt)
-            .arg("--format")
+        cmd.arg("run").arg("--continue");
+        if let Some(m) = config.model.as_deref() {
+            if !m.is_empty() {
+                cmd.arg("--model").arg(m);
+            }
+        }
+        cmd.arg("--format")
             .arg("json")
+            .arg(&config.prompt)
             .current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         if !config.api_key.is_empty() {
-            cmd.env("ANTHROPIC_API_KEY", &config.api_key);
+            cmd.env(env_var_for_model(config.model.as_deref()), &config.api_key);
         }
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -305,32 +316,56 @@ impl AiCliProvider for OpenCodeCliProvider {
     }
 }
 
-/// Parse OpenCode JSON output for token usage and model info.
+/// Parse OpenCode `--format json` output for accumulated token usage and
+/// model info.
+///
+/// OpenCode emits one JSON object per line. Token counts live on
+/// `step_finish` events at `part.tokens.{input,output}`, and the model
+/// identifier appears on `step_start` events at `part.providerID` +
+/// `part.modelID` (combined as `provider/model`). There may be multiple
+/// `step_finish` events per run (one per reasoning/tool step), so we sum
+/// the counts.
 pub fn parse_opencode_output(output: &str) -> (Option<i32>, Option<i32>, Option<String>) {
-    let mut tokens_input = None;
-    let mut tokens_output = None;
-    let mut model = None;
+    let mut total_input: i64 = 0;
+    let mut total_output: i64 = 0;
+    let mut saw_tokens = false;
+    let mut model: Option<String> = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
         if !trimmed.starts_with('{') {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            // Look for result/summary event with token usage
-            if let Some(input) = v
-                .get("tokens_input")
-                .or_else(|| v.get("input_tokens"))
-                .and_then(|v| v.as_i64())
-            {
-                tokens_input = Some(input as i32);
+        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        if event_type == "step_finish" {
+            if let Some(tokens) = v.get("part").and_then(|p| p.get("tokens")) {
+                if let Some(input) = tokens.get("input").and_then(|n| n.as_i64()) {
+                    total_input += input;
+                    saw_tokens = true;
+                }
+                if let Some(output) = tokens.get("output").and_then(|n| n.as_i64()) {
+                    total_output += output;
+                    saw_tokens = true;
+                }
             }
-            if let Some(output) = v
-                .get("tokens_output")
-                .or_else(|| v.get("output_tokens"))
-                .and_then(|v| v.as_i64())
-            {
-                tokens_output = Some(output as i32);
+        }
+
+        // Capture the model from the first event that mentions it.
+        if model.is_none() {
+            if let Some(part) = v.get("part") {
+                let provider = part.get("providerID").and_then(|v| v.as_str());
+                let model_id = part.get("modelID").and_then(|v| v.as_str());
+                match (provider, model_id) {
+                    (Some(p), Some(m)) => model = Some(format!("{}/{}", p, m)),
+                    (_, Some(m)) => model = Some(m.to_string()),
+                    _ => {}
+                }
             }
             if model.is_none() {
                 model = v.get("model").and_then(|v| v.as_str()).map(String::from);
@@ -338,7 +373,38 @@ pub fn parse_opencode_output(output: &str) -> (Option<i32>, Option<i32>, Option<
         }
     }
 
+    let tokens_input = if saw_tokens {
+        Some(total_input as i32)
+    } else {
+        None
+    };
+    let tokens_output = if saw_tokens {
+        Some(total_output as i32)
+    } else {
+        None
+    };
+
     (tokens_input, tokens_output, model)
+}
+
+/// Map an OpenCode `provider/model` identifier to the env var OpenCode
+/// expects for that provider's credential. Falls back to
+/// `ANTHROPIC_API_KEY` when the provider prefix is missing or unknown —
+/// matches historical behavior.
+fn env_var_for_model(model: Option<&str>) -> &'static str {
+    let provider = model
+        .and_then(|m| m.split_once('/').map(|(p, _)| p))
+        .unwrap_or("");
+    match provider {
+        "openai" | "openrouter" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "google" | "gemini" => "GOOGLE_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "xai" => "XAI_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        _ => "ANTHROPIC_API_KEY",
+    }
 }
 
 #[cfg(test)]
@@ -361,11 +427,41 @@ mod tests {
 
     #[test]
     fn test_parse_opencode_output_with_usage() {
-        let output = r#"{"type":"message","content":"hello"}
-{"type":"result","tokens_input":1000,"tokens_output":500,"model":"anthropic/claude-sonnet-4-20250514"}"#;
+        // Real OpenCode `--format json` shape: tokens on step_finish.part.tokens,
+        // model assembled from providerID/modelID on step_start.part.
+        let output = r#"{"type":"step_start","part":{"type":"step-start","providerID":"anthropic","modelID":"claude-sonnet-4-20250514"}}
+{"type":"text","part":{"type":"text","text":"hello"}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"stop","tokens":{"input":1000,"output":500},"cost":0.01}}"#;
         let (input, output_tokens, model) = parse_opencode_output(output);
         assert_eq!(input, Some(1000));
         assert_eq!(output_tokens, Some(500));
         assert_eq!(model.as_deref(), Some("anthropic/claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn test_parse_opencode_output_accumulates_multiple_steps() {
+        let output = r#"{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":100,"output":50}}}
+{"type":"step_finish","part":{"type":"step-finish","tokens":{"input":200,"output":75}}}"#;
+        let (input, output_tokens, _model) = parse_opencode_output(output);
+        assert_eq!(input, Some(300));
+        assert_eq!(output_tokens, Some(125));
+    }
+
+    #[test]
+    fn test_env_var_for_model() {
+        assert_eq!(env_var_for_model(Some("openai/gpt-5")), "OPENAI_API_KEY");
+        assert_eq!(
+            env_var_for_model(Some("anthropic/claude-sonnet-4")),
+            "ANTHROPIC_API_KEY"
+        );
+        assert_eq!(
+            env_var_for_model(Some("google/gemini-2.0")),
+            "GOOGLE_API_KEY"
+        );
+        // Unknown provider → Anthropic fallback (matches pre-fix default).
+        assert_eq!(env_var_for_model(Some("unknown/x")), "ANTHROPIC_API_KEY");
+        assert_eq!(env_var_for_model(None), "ANTHROPIC_API_KEY");
+        // No slash → also falls back.
+        assert_eq!(env_var_for_model(Some("bare-model")), "ANTHROPIC_API_KEY");
     }
 }

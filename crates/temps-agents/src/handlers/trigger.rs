@@ -522,7 +522,16 @@ async fn rebuild_sandbox_image(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream).keep_alive(sse_keep_alive()))
+}
+
+/// Shared SSE keep-alive: sends `: heartbeat` every 15s so clients behind
+/// slow networks or idle proxies detect dropped connections quickly. See
+/// `handlers::runs::sse_keep_alive` for the full rationale.
+fn sse_keep_alive() -> KeepAlive {
+    KeepAlive::new()
+        .interval(std::time::Duration::from_secs(15))
+        .text("heartbeat")
 }
 
 // ── Smoke Test ───────────────────────────────────────────────────────────────
@@ -619,6 +628,7 @@ async fn smoke_test_agent(
         let image = format!("temps-sandbox-{}:latest", global_sandbox.runtime);
         let sandbox_config = crate::sandbox::SandboxCreateConfig {
             run_id: test_run_id,
+            container_name_override: None,
             host_work_dir: work_dir.clone(),
             image: Some(image),
             cpu_limit: Some(1.0),

@@ -27,6 +27,7 @@ temps-audit = { path = "../temps-audit" }
 temps-auth = { path = "../temps-auth" }
 temps-agents = { path = "../temps-agents" }
 temps-workspace = { path = "../temps-workspace" }
+temps-sandbox = { path = "../temps-sandbox" }
 temps-backup = { path = "../temps-backup" }
 temps-config = { path = "../temps-config" }
 temps-core = { path = "../temps-core" }

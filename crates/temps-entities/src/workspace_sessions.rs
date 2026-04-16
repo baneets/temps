@@ -9,6 +9,12 @@ use temps_core::DBDateTime;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    /// Opaque external identifier (`wss_<16hex>`). Embedded in preview
+    /// hostnames in place of the sequential `id` so URLs can't be
+    /// enumerated. API routes still key off `id` — this is a display-only
+    /// identifier.
+    #[sea_orm(unique)]
+    pub public_id: String,
     pub project_id: i32,
     pub user_id: i32,
     /// Optional user-provided title. When null the UI shows "Session #{id}".

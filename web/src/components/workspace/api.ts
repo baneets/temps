@@ -7,6 +7,9 @@ export interface PreviewPortUrl {
 
 export interface WorkspaceSession {
   id: number
+  /** Opaque public identifier (`wss_<16hex>`). Used only in preview URLs so
+   *  sessions can't be enumerated by walking `id`. API routes still use `id`. */
+  public_id: string
   project_id: number
   user_id: number
   status: string // "active" | "idle" | "closed"
@@ -89,6 +92,10 @@ export interface StartSessionRequest {
   skills?: string[]
   /** MCP-server slugs to inject into the sandbox. */
   mcp_servers?: string[]
+  /** CPU limit in vCPU cores (e.g. 2.0). Omit to use the server default. */
+  cpu_limit?: number
+  /** Memory limit in MB. Omit to use the server default. */
+  memory_limit_mb?: number
 }
 
 export interface SendMessageRequest {

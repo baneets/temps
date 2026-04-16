@@ -1,5 +1,5 @@
 import ora, { type Ora } from 'ora'
-import { colors, icons } from './output.js'
+import { colors } from './output.js'
 
 export interface SpinnerOptions {
   text: string
@@ -7,6 +7,20 @@ export interface SpinnerOptions {
 }
 
 let currentSpinner: Ora | null = null
+
+// When a command is rendering machine-readable JSON, any spinner output on
+// stdout (including the final ✓/✖ line ora prints) corrupts the result.
+// Commands with `--json` call `setQuietMode(true)` at entry; the spinner
+// helpers then become no-ops.
+let quietMode = false
+
+export function setQuietMode(quiet: boolean): void {
+  quietMode = quiet
+}
+
+export function isQuietMode(): boolean {
+  return quietMode
+}
 
 export function startSpinner(options: SpinnerOptions | string): Ora {
   const opts = typeof options === 'string' ? { text: options } : options
@@ -16,12 +30,20 @@ export function startSpinner(options: SpinnerOptions | string): Ora {
     currentSpinner.stop()
   }
 
-  currentSpinner = ora({
+  // In quiet mode we still construct an Ora instance (so callers that hold
+  // the reference can call .text/.succeed/.fail without crashing) but we
+  // never `.start()` it, so nothing is ever written to the terminal.
+  const spinner = ora({
     text: opts.text,
     color: opts.color ?? 'cyan',
     spinner: 'dots',
-  }).start()
+  })
 
+  if (!quietMode) {
+    spinner.start()
+  }
+
+  currentSpinner = spinner
   return currentSpinner
 }
 
@@ -34,27 +56,30 @@ export function stopSpinner(): void {
 
 export function succeedSpinner(text?: string): void {
   if (currentSpinner) {
-    currentSpinner.succeed(text)
+    if (quietMode) currentSpinner.stop()
+    else currentSpinner.succeed(text)
     currentSpinner = null
   }
 }
 
 export function failSpinner(text?: string): void {
   if (currentSpinner) {
-    currentSpinner.fail(text)
+    if (quietMode) currentSpinner.stop()
+    else currentSpinner.fail(text)
     currentSpinner = null
   }
 }
 
 export function warnSpinner(text?: string): void {
   if (currentSpinner) {
-    currentSpinner.warn(text)
+    if (quietMode) currentSpinner.stop()
+    else currentSpinner.warn(text)
     currentSpinner = null
   }
 }
 
 export function updateSpinner(text: string): void {
-  if (currentSpinner) {
+  if (currentSpinner && !quietMode) {
     currentSpinner.text = text
   }
 }
@@ -70,6 +95,12 @@ export async function withSpinner<T>(
     failText?: string | ((error: Error) => string)
   }
 ): Promise<T> {
+  // Fast-path: no terminal chrome at all in quiet mode. Never construct
+  // an Ora instance so there's zero risk of it writing to stdout/stderr.
+  if (quietMode) {
+    return fn()
+  }
+
   const spinner = startSpinner(text)
 
   try {
@@ -103,6 +134,13 @@ export async function withProgress<T>(
 ): Promise<void> {
   const total = items.length
   if (total === 0) return
+
+  if (quietMode) {
+    for (let i = 0; i < items.length; i++) {
+      await fn(items[i] as T, i)
+    }
+    return
+  }
 
   const firstItem = items[0] as T
   const spinner = startSpinner(options.text(firstItem, 0, total))

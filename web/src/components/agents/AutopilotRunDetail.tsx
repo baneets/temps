@@ -117,7 +117,6 @@ interface ConversationEvent {
 /** Detect whether the output contains Codex-format JSON events.
  *  Codex emits `type: "item.completed"`, `type: "turn.completed"`, etc. */
 function isCodexFormat(output: string): boolean {
-  // Check first few JSON lines for Codex-specific event types
   for (const line of output.split('\n').slice(0, 10)) {
     const trimmed = line.trim()
     if (!trimmed.startsWith('{')) continue
@@ -131,6 +130,130 @@ function isCodexFormat(output: string): boolean {
     }
   }
   return false
+}
+
+/** Detect whether the output contains OpenCode-format JSON events.
+ *  OpenCode emits `type: "step_start"`, `type: "text"`, `type: "step_finish"`, etc. */
+function isOpenCodeFormat(output: string): boolean {
+  for (const line of output.split('\n').slice(0, 15)) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('{')) continue
+
+    const hasStepEvent =
+      trimmed.includes('"step_start"') ||
+      trimmed.includes('"step_finish"') ||
+      trimmed.includes('"message.part.updated"')
+    const hasTextEventWithPart =
+      (trimmed.includes('"type":"text"') || trimmed.includes('"type": "text"')) &&
+      trimmed.includes('"part"')
+
+    if (hasStepEvent || hasTextEventWithPart) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Parse OpenCode CLI --format json output into conversation events.
+ *
+ *  OpenCode format:
+ *  - {"type":"step_start","sessionID":"...","part":{"type":"step-start",...}}
+ *  - {"type":"text","sessionID":"...","part":{"type":"text","text":"..."}}
+ *  - {"type":"message.part.updated","part":{"type":"tool","name":"bash","state":"running",...}}
+ *  - {"type":"message.part.updated","part":{"type":"tool","name":"bash","state":"completed","result":"...",...}}
+ *  - {"type":"step_finish","part":{"type":"step-finish","reason":"stop"|"tool-calls","cost":N,"tokens":{...}}}
+ */
+function parseOpenCodeOutput(output: string): ConversationEvent[] {
+  const events: ConversationEvent[] = []
+  let totalInputTokens = 0
+  let totalOutputTokens = 0
+  let totalCost = 0
+
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || !trimmed.startsWith('{')) continue
+    try {
+      const parsed = JSON.parse(trimmed)
+      const part = parsed.part
+
+      if (parsed.type === 'text' && part?.type === 'text' && part.text) {
+        // Assistant text — accumulate consecutive text events
+        const lastEvent = events[events.length - 1]
+        if (lastEvent?.type === 'assistant_text') {
+          lastEvent.content = (lastEvent.content || '') + part.text
+        } else {
+          events.push({ type: 'assistant_text', content: part.text })
+        }
+      } else if (parsed.type === 'message.part.updated' && part?.type === 'tool') {
+        const toolName = part.name || 'unknown'
+        // Capitalize first letter to match Claude/Codex rendering (bash → Bash)
+        const displayName = toolName.charAt(0).toUpperCase() + toolName.slice(1)
+
+        if (part.state === 'running' || part.state === 'pending') {
+          // Tool started
+          events.push({
+            type: 'tool_call',
+            tool: displayName,
+            toolUseId: part.id,
+            toolInput: part.input ?? (part.args ? JSON.parse(part.args) : {}),
+            toolStatus: 'in_progress',
+          })
+        } else if (part.state === 'completed' || part.state === 'error') {
+          // Tool finished — merge into existing in_progress event or create new
+          const existing = part.id
+            ? events.find((e) => e.type === 'tool_call' && e.toolUseId === part.id)
+            : [...events].reverse().find(
+                (e) => e.type === 'tool_call' && e.tool === displayName && e.toolStatus === 'in_progress',
+              )
+
+          const resultText = typeof part.result === 'string'
+            ? part.result
+            : part.output ?? ''
+
+          if (existing) {
+            existing.toolResult = resultText
+            existing.toolStatus = part.state === 'error' ? 'failed' : 'completed'
+            // Backfill input if the started event didn't have it
+            if (!existing.toolInput || Object.keys(existing.toolInput).length === 0) {
+              existing.toolInput = part.input ?? (part.args ? JSON.parse(part.args) : {})
+            }
+          } else {
+            events.push({
+              type: 'tool_call',
+              tool: displayName,
+              toolUseId: part.id,
+              toolInput: part.input ?? (part.args ? JSON.parse(part.args) : {}),
+              toolResult: resultText,
+              toolStatus: part.state === 'error' ? 'failed' : 'completed',
+            })
+          }
+        }
+      } else if (parsed.type === 'step_finish' && part?.type === 'step-finish') {
+        // Accumulate tokens and cost from each step
+        if (part.tokens) {
+          totalInputTokens += part.tokens.input || 0
+          totalOutputTokens += part.tokens.output || 0
+        }
+        if (part.cost != null) {
+          totalCost += part.cost
+        }
+      }
+    } catch {
+      // Not valid JSON
+    }
+  }
+
+  // Add a synthetic result event with accumulated usage
+  if (events.length > 0 && (totalInputTokens > 0 || totalOutputTokens > 0 || totalCost > 0)) {
+    events.push({
+      type: 'result',
+      tokensInput: totalInputTokens,
+      tokensOutput: totalOutputTokens,
+      costUsd: totalCost > 0 ? totalCost : undefined,
+    })
+  }
+
+  return events
 }
 
 /** Parse Codex CLI --json output into conversation events.
@@ -301,9 +424,11 @@ function parseClaudeOutput(output: string): ConversationEvent[] {
 }
 
 /** Parse stream output from any AI provider into conversation events.
- *  Auto-detects Codex vs Claude format. */
+ *  Auto-detects OpenCode vs Codex vs Claude format. */
 function parseStreamOutput(output: string): ConversationEvent[] {
-  return isCodexFormat(output) ? parseCodexOutput(output) : parseClaudeOutput(output)
+  if (isOpenCodeFormat(output)) return parseOpenCodeOutput(output)
+  if (isCodexFormat(output)) return parseCodexOutput(output)
+  return parseClaudeOutput(output)
 }
 
 /** Render the full AI conversation */

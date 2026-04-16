@@ -37,6 +37,19 @@ pub struct Model {
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
     pub last_used_at: Option<DBDateTime>,
+    /// Raw little-endian f32 vector embedding of `fact`, if computed.
+    /// `None` means the fact hasn't been embedded yet (fresh row, or the
+    /// embedding provider was offline). Consumers should never try to
+    /// interpret this as a pgvector — stock Postgres has no such type.
+    /// Use `temps-embeddings` to read/write it.
+    #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
+    pub embedding: Option<Vec<u8>>,
+    /// When set, the fact is eligible for compaction and may be removed
+    /// by the periodic sweep. `None` means "keep indefinitely" (the
+    /// default for facts written by the AI — expiry is only set
+    /// explicitly when the caller knows the fact has a shelf life, e.g.
+    /// "deploy failing because of ongoing incident X").
+    pub expires_at: Option<DBDateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

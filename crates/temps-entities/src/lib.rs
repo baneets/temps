@@ -112,6 +112,9 @@ pub mod vulnerability_scans;
 pub mod log_chunks;
 pub mod log_events;
 
+// Standalone sandbox API (Vercel-compatible)
+pub mod sandboxes;
+
 // Workspace entities
 pub mod workspace_messages;
 pub mod workspace_sessions;

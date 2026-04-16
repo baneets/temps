@@ -11,6 +11,7 @@ temps-core = { path = "../temps-core" }
 temps-auth = { path = "../temps-auth" }
 temps-entities = { path = "../temps-entities" }
 temps-agents = { path = "../temps-agents" }
+temps-pty-agent = { path = "../temps-pty-agent" }
 temps-projects = { path = "../temps-projects" }
 temps-git = { path = "../temps-git" }
 temps-deployments = { path = "../temps-deployments" }

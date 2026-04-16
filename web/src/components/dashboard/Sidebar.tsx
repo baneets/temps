@@ -17,6 +17,7 @@ import {
 import {
   Activity,
   BadgeCheck,
+  Box,
   ChevronsUpDown,
   Folder,
   LogOut,
@@ -54,15 +55,15 @@ import {
 // Main navigation items - all items
 const navMainAll = [
   {
-    title: 'Dashboard',
-    url: '/dashboard',
-    icon: SquareTerminal,
-    isActive: true,
-  },
-  {
     title: 'Projects',
     url: '/projects',
     icon: Folder,
+    isActive: true,
+  },
+  {
+    title: 'Sandboxes',
+    url: '/sandboxes',
+    icon: Box,
   },
   {
     title: 'Monitoring',

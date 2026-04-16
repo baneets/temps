@@ -190,6 +190,7 @@ impl AutofixerService {
         // Create sandbox for this run (persists across analysis → fix → PR phases)
         let sandbox_config = SandboxCreateConfig {
             run_id,
+            container_name_override: None,
             host_work_dir: work_dir.clone(),
             image: Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime)),
             cpu_limit: Some(global_sandbox.cpu_limit),
@@ -588,9 +589,41 @@ impl AutofixerService {
     // ── Phase 3: Create PR ─────────────────────────────────────────────────────
 
     /// Push the fix branch and create a pull request.
-    /// The run must be in phase "fix_ready".
+    /// The run must be in phase "fix_ready". Idempotent against double-click:
+    /// if the run already has a `pr_url`, returns the existing PR without
+    /// re-pushing; if a push is already in flight (`status == "pushing"`),
+    /// rejects with a conflict-style validation error so the caller knows to
+    /// wait instead of racing.
     pub async fn create_pr(&self, run_id: i32) -> Result<PullRequest, AgentError> {
         let run = self.run_service.get_run(run_id).await?;
+
+        // Idempotency: if we already created a PR for this run, return it
+        // instead of doing the whole push/create dance a second time.
+        if let (Some(url), Some(number)) = (run.pr_url.as_deref(), run.pr_number) {
+            tracing::info!(
+                "Autofixer run {}: create_pr called but PR already exists at {} — returning existing PR",
+                run_id,
+                url
+            );
+            return Ok(PullRequest {
+                number,
+                url: url.to_string(),
+                title: String::new(),
+                head_branch: run.branch_name.clone().unwrap_or_default(),
+                base_branch: String::new(),
+                head_sha: run.commit_sha.clone(),
+            });
+        }
+
+        if run.status == "pushing" {
+            return Err(AgentError::Validation {
+                message: format!(
+                    "Autofixer run {} is already creating a PR (status: pushing). \
+                     Wait for the in-flight request to finish before retrying.",
+                    run_id
+                ),
+            });
+        }
 
         if run.phase.as_deref() != Some("fix_ready") {
             return Err(AgentError::Validation {

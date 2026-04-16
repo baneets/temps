@@ -1352,6 +1352,7 @@ impl AgentExecutor {
 
             let sandbox_config = SandboxCreateConfig {
                 run_id,
+                container_name_override: None,
                 host_work_dir: work_dir.clone(),
                 image: resolved_image,
                 cpu_limit: Some(global_sandbox.cpu_limit),
@@ -1718,6 +1719,23 @@ impl AgentExecutor {
             };
             override_provider.run(ai_config).await?
         } else if use_sandbox {
+            // OpenCode lstats the first positional arg as a path — long
+            // prompts exceed NAME_MAX (255). Write to a temp file so the
+            // shell wrapper can `$(cat ...)` it instead.
+            if config.ai_provider == "opencode" {
+                if let Err(e) = self
+                    .sandbox_registry
+                    .write_file(run_id, "/tmp/.temps-prompt", prompt.as_bytes(), 0o644)
+                    .await
+                {
+                    tracing::warn!(
+                        "run {}: failed to write opencode prompt file: {}",
+                        run_id,
+                        e
+                    );
+                }
+            }
+
             // Sandbox path: execute AI CLI inside isolated container
             let cmd = build_claude_cmd(
                 &config.ai_provider,
@@ -1760,18 +1778,30 @@ impl AgentExecutor {
             }
 
             // Parse output based on provider format
-            let parsed = if config.ai_provider == "codex_cli" {
-                let (tokens_input, tokens_output, model) =
-                    crate::ai_cli::codex::parse_codex_output(&exec_result.stdout);
-                crate::ai_cli::claude::ParsedClaudeOutput {
-                    tokens_input,
-                    tokens_output,
-                    model,
-                    session_id: None,
-                    is_max_turns_error: false,
+            let parsed = match config.ai_provider.as_str() {
+                "codex_cli" => {
+                    let (tokens_input, tokens_output, model) =
+                        crate::ai_cli::codex::parse_codex_output(&exec_result.stdout);
+                    crate::ai_cli::claude::ParsedClaudeOutput {
+                        tokens_input,
+                        tokens_output,
+                        model,
+                        session_id: None,
+                        is_max_turns_error: false,
+                    }
                 }
-            } else {
-                crate::ai_cli::claude::parse_claude_output(&exec_result.stdout)
+                "opencode" => {
+                    let (tokens_input, tokens_output, model) =
+                        crate::ai_cli::opencode::parse_opencode_output(&exec_result.stdout);
+                    crate::ai_cli::claude::ParsedClaudeOutput {
+                        tokens_input,
+                        tokens_output,
+                        model,
+                        session_id: None,
+                        is_max_turns_error: false,
+                    }
+                }
+                _ => crate::ai_cli::claude::parse_claude_output(&exec_result.stdout),
             };
 
             AiRunResult {
@@ -1861,6 +1891,24 @@ impl AgentExecutor {
                 };
                 override_provider.continue_conversation(ai_config).await?
             } else if use_sandbox {
+                if config.ai_provider == "opencode" {
+                    if let Err(e) = self
+                        .sandbox_registry
+                        .write_file(
+                            run_id,
+                            "/tmp/.temps-prompt",
+                            continue_prompt.as_bytes(),
+                            0o644,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "run {}: failed to write opencode prompt file (continue): {}",
+                            run_id,
+                            e
+                        );
+                    }
+                }
                 let cmd = build_claude_cmd(
                     &config.ai_provider,
                     &continue_prompt,
@@ -2009,58 +2057,9 @@ impl AgentExecutor {
         // Report deliverable: store the AI output as the report and complete.
         // No branch, no PR, no deployment.
         if config.deliverable == "report" {
-            // Extract all assistant text blocks from stream-json output to build the full report.
-            // The "result" event only contains a brief summary — the actual report content
-            // is in the assistant message text blocks throughout the conversation.
-            let mut assistant_texts: Vec<String> = Vec::new();
-            for line in ai_result.output.lines() {
-                let trimmed = line.trim();
-                if !trimmed.starts_with('{') {
-                    continue;
-                }
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    if v.get("type").and_then(|t| t.as_str()) == Some("assistant") {
-                        if let Some(content) = v
-                            .get("message")
-                            .and_then(|m| m.get("content"))
-                            .and_then(|c| c.as_array())
-                        {
-                            for block in content {
-                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                        assistant_texts.push(text.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            let report_text = if assistant_texts.is_empty() {
-                // Fallback: try the result summary, then raw output
-                ai_result
-                    .output
-                    .lines()
-                    .filter_map(|line| {
-                        let trimmed = line.trim();
-                        if !trimmed.starts_with('{') {
-                            return None;
-                        }
-                        serde_json::from_str::<serde_json::Value>(trimmed)
-                            .ok()
-                            .and_then(|v| {
-                                if v.get("type")?.as_str()? == "result" {
-                                    v.get("result")?.as_str().map(String::from)
-                                } else {
-                                    None
-                                }
-                            })
-                    })
-                    .next()
-                    .unwrap_or_else(|| ai_result.output.clone())
-            } else {
-                assistant_texts.join("\n\n")
-            };
+            // Extract all assistant text blocks from the AI output to build the full report.
+            // Supports both Claude stream-json and Codex --json formats.
+            let report_text = extract_report_text(&ai_result.output);
 
             self.run_service
                 .update_status(
@@ -3002,10 +3001,119 @@ pub fn build_claude_cmd(
             cmd.push(prompt.to_string());
             cmd
         }
+        "opencode" => {
+            // OpenCode's `run [message..]` does an lstat on the first
+            // positional arg (checking if it's a directory). Long agent
+            // prompts exceed NAME_MAX (255). The caller writes the prompt
+            // to /tmp/.temps-prompt; here we emit a bash wrapper that
+            // reads it via `$(cat ...)`.
+            let mut parts = vec!["opencode run".to_string()];
+            if let Some(m) = model {
+                if !m.is_empty() {
+                    parts.push(format!("--model '{}'", m));
+                }
+            }
+            parts.push("--format json".to_string());
+            parts.push("\"$(cat /tmp/.temps-prompt)\"".to_string());
+            vec!["bash".to_string(), "-lc".to_string(), parts.join(" ")]
+        }
         _ => {
             vec![provider_name.to_string(), prompt.to_string()]
         }
     }
+}
+
+/// Extract human-readable report text from AI output. Supports both Claude
+/// stream-json (`type: "assistant"` with `message.content[].text`) and Codex
+/// `--json` (`type: "item.completed"` with `item.type: "agent_message"`).
+/// Falls back to a Claude `type: "result"` summary, then raw output.
+pub fn extract_report_text(output: &str) -> String {
+    let mut assistant_texts: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = match v.get("type").and_then(|t| t.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        match event_type {
+            // Claude stream-json: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+            "assistant" => {
+                if let Some(content) = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                assistant_texts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // Codex --json emits agent messages on EITHER `item.started` (newer
+            // gpt-5-codex streams the whole message up front) OR `item.completed`
+            // (older builds emit only on completion). Dedupe below so a message
+            // present in both events is not repeated.
+            "item.started" | "item.completed" => {
+                if let Some(item) = v.get("item") {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("agent_message") {
+                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() && !assistant_texts.iter().any(|t| t == text) {
+                                assistant_texts.push(text.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // OpenCode --format json: {"type":"text","part":{"type":"text","text":"..."}}
+            "text" => {
+                if let Some(text) = v
+                    .get("part")
+                    .and_then(|p| p.get("text"))
+                    .and_then(|t| t.as_str())
+                {
+                    if !text.is_empty() {
+                        assistant_texts.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !assistant_texts.is_empty() {
+        return assistant_texts.join("\n\n");
+    }
+
+    // Fallback: try the Claude "result" summary
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("result") {
+                if let Some(result) = v.get("result").and_then(|r| r.as_str()) {
+                    return result.to_string();
+                }
+            }
+        }
+    }
+
+    // Last resort: raw output
+    output.to_string()
 }
 
 #[cfg(test)]
@@ -4336,99 +4444,82 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Feature: report text extraction from stream-json
+    // Feature: report text extraction (extract_report_text)
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn test_report_text_extracted_from_stream_json_result_line() {
-        // This mirrors the extraction logic in executor.rs at the "report" branch.
-        // Use actual newlines (not escaped \n) so .lines() splits correctly.
-        let output = "{\"type\":\"assistant\",\"text\":\"thinking...\"}\n{\"type\":\"result\",\"result\":\"Found the root cause: null pointer in UserList\"}\n".to_string();
-
-        let report_text = output
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if !trimmed.starts_with('{') {
-                    return None;
-                }
-                serde_json::from_str::<serde_json::Value>(trimmed)
-                    .ok()
-                    .and_then(|v| {
-                        if v.get("type")?.as_str()? == "result" {
-                            v.get("result")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .next()
-            .unwrap_or_else(|| output.clone());
-
-        assert_eq!(
-            report_text, "Found the root cause: null pointer in UserList",
-            "should extract text from the 'result' type entry"
+    fn test_extract_report_claude_assistant_text() {
+        let output = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"First paragraph.\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Second paragraph.\"}]}}\n",
         );
+        let report = extract_report_text(output);
+        assert_eq!(report, "First paragraph.\n\nSecond paragraph.");
     }
 
     #[test]
-    fn test_report_text_falls_back_to_raw_output_when_no_result_entry() {
-        let output = "Plain text output without stream-json".to_string();
-
-        let report_text = output
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if !trimmed.starts_with('{') {
-                    return None;
-                }
-                serde_json::from_str::<serde_json::Value>(trimmed)
-                    .ok()
-                    .and_then(|v| {
-                        if v.get("type")?.as_str()? == "result" {
-                            v.get("result")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .next()
-            .unwrap_or_else(|| output.clone());
-
-        assert_eq!(
-            report_text, output,
-            "should fall back to full output when no result entry found"
-        );
+    fn test_extract_report_claude_result_fallback() {
+        // No assistant text blocks — falls back to result summary.
+        let output =
+            "{\"type\":\"result\",\"result\":\"Found the root cause: null pointer in UserList\"}\n";
+        let report = extract_report_text(output);
+        assert_eq!(report, "Found the root cause: null pointer in UserList");
     }
 
     #[test]
-    fn test_report_text_ignores_non_result_type_entries() {
-        // Use actual newlines so .lines() splits correctly.
-        let output = "{\"type\":\"assistant\",\"text\":\"analysis...\"}\n{\"type\":\"tool_use\",\"name\":\"read_file\"}\n".to_string();
+    fn test_extract_report_raw_fallback() {
+        let output = "Plain text output without JSON";
+        let report = extract_report_text(output);
+        assert_eq!(report, output);
+    }
 
-        let report_text: Option<String> = output
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if !trimmed.starts_with('{') {
-                    return None;
-                }
-                serde_json::from_str::<serde_json::Value>(trimmed)
-                    .ok()
-                    .and_then(|v| {
-                        if v.get("type")?.as_str()? == "result" {
-                            v.get("result")?.as_str().map(String::from)
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .next();
-
-        assert!(
-            report_text.is_none(),
-            "should not extract text when no result-type entry exists"
+    #[test]
+    fn test_extract_report_codex_agent_messages() {
+        let output = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Checking funnels...\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"ls\",\"aggregated_output\":\"foo\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Conversions are healthy.\"}}\n",
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1000,\"output_tokens\":200}}\n",
         );
+        let report = extract_report_text(output);
+        assert_eq!(report, "Checking funnels...\n\nConversions are healthy.");
+    }
+
+    #[test]
+    fn test_extract_report_codex_skips_commands() {
+        // Only agent_message items should be extracted, not command_execution.
+        let output = "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"pwd\",\"aggregated_output\":\"/workspace\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n";
+        let report = extract_report_text(output);
+        // Falls back to raw output since no assistant texts found
+        assert_eq!(report, output);
+    }
+
+    #[test]
+    fn test_extract_report_codex_item_started_agent_message() {
+        // Newer gpt-5-codex streams the agent message on item.started and
+        // the parser must pick it up (previously it only matched item.completed
+        // and would fall back to dumping raw JSON).
+        let output = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"abc\"}\n",
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"item.started\",\"item\":{\"type\":\"agent_message\",\"text\":\"Reading input...\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"command\":\"ls\",\"aggregated_output\":\"foo\\n\",\"exit_code\":0,\"status\":\"completed\"}}\n",
+        );
+        let report = extract_report_text(output);
+        assert_eq!(report, "Reading input...");
+    }
+
+    #[test]
+    fn test_extract_report_codex_dedupes_started_and_completed() {
+        // When codex emits the same agent_message on both item.started AND
+        // item.completed, the extractor should only surface it once.
+        let output = concat!(
+            "{\"type\":\"item.started\",\"item\":{\"type\":\"agent_message\",\"text\":\"Done.\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Done.\"}}\n",
+        );
+        let report = extract_report_text(output);
+        assert_eq!(report, "Done.");
     }
 
     #[tokio::test]

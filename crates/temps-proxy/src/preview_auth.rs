@@ -51,18 +51,86 @@ const MAX_FAILURES: u32 = 10;
 /// Sliding window for rate limiting failed auth attempts.
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
+/// Which preview target a `ws-<label>-<port>` host points to.
+///
+/// The two variants share the same URL scheme on purpose — they both land
+/// on the same preview gateway container, which routes by `ws-<label>-<port>`
+/// to `temps-sandbox-<label>:<port>`. The distinction here matters only for
+/// auth: workspace sessions run a per-session password wall; standalone
+/// sandboxes rely on their 16-hex public_id being unguessable (plus the
+/// gateway's own shared-secret gate).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewTarget {
+    /// Workspace session. The integer is the DB row id.
+    WorkspaceSession(i32),
+    /// Standalone sandbox. The string is the 16-hex suffix of `sbx_<hex>`.
+    /// Stored lowercase to avoid case-sensitivity bugs in cookie names and
+    /// log output.
+    Sandbox(String),
+}
+
+impl PreviewTarget {
+    /// Rate-limit key for this target. Uses `0` as a sentinel session id for
+    /// sandbox targets — collisions are fine because the limiter is keyed on
+    /// (ip, session_id) and sandboxes don't share state with session #0.
+    ///
+    /// Long-term we should switch the limiter to a string key; this is the
+    /// pragmatic shim until we do.
+    fn rate_limit_key(&self) -> i32 {
+        match self {
+            PreviewTarget::WorkspaceSession(id) => *id,
+            PreviewTarget::Sandbox(_) => 0,
+        }
+    }
+
+    /// Human-readable label for logs.
+    pub fn label(&self) -> String {
+        match self {
+            PreviewTarget::WorkspaceSession(id) => id.to_string(),
+            PreviewTarget::Sandbox(hex) => hex.clone(),
+        }
+    }
+}
+
 /// Parsed preview hostname components.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewHost {
-    pub session_id: i32,
+    pub target: PreviewTarget,
     pub port: u16,
 }
 
-/// Parse a hostname against `ws-<session_id>-<port>.<preview_domain>`.
+impl PreviewHost {
+    /// Short helper for the old hot-path call sites that only want an i32
+    /// rate-limit key. Does NOT round-trip sandbox ids.
+    pub fn rate_limit_key(&self) -> i32 {
+        self.target.rate_limit_key()
+    }
+
+    /// Is this a standalone sandbox (vs a workspace session)?
+    pub fn is_sandbox(&self) -> bool {
+        matches!(self.target, PreviewTarget::Sandbox(_))
+    }
+
+    /// Back-compat accessor: returns the legacy integer session id iff the
+    /// target is a workspace session. `None` for sandboxes. Intended for the
+    /// few places in the login/logout flow that still assume integer ids —
+    /// all of which are workspace-only.
+    pub fn workspace_session_id(&self) -> Option<i32> {
+        match &self.target {
+            PreviewTarget::WorkspaceSession(id) => Some(*id),
+            PreviewTarget::Sandbox(_) => None,
+        }
+    }
+}
+
+/// Parse a hostname against `ws-<label>-<port>.<preview_domain>`.
 ///
 /// `preview_domain` may start with `*.` (wildcard form) — the leading `*.` is
-/// stripped before comparison. The session id must be a positive `i32` and the
-/// port must be a non-zero `u16`.
+/// stripped before comparison. The label is either:
+///   - a positive `i32` (workspace session id), or
+///   - exactly 16 hex chars (standalone sandbox public_id suffix).
+///
+/// The port must be a non-zero `u16`.
 pub fn parse_preview_host(host: &str, preview_domain: &str) -> Option<PreviewHost> {
     let domain = preview_domain.trim_start_matches("*.");
     let host_no_port = host.split(':').next()?.to_ascii_lowercase();
@@ -73,16 +141,25 @@ pub fn parse_preview_host(host: &str, preview_domain: &str) -> Option<PreviewHos
     let rest = label.strip_prefix("ws-")?;
     let (sid_str, port_str) = rest.rsplit_once('-')?;
 
-    let session_id: i32 = sid_str.parse().ok()?;
-    if session_id <= 0 {
-        return None;
-    }
     let port: u16 = port_str.parse().ok()?;
     if port == 0 {
         return None;
     }
 
-    Some(PreviewHost { session_id, port })
+    // Disambiguate: pure digits → workspace session; exactly 16 hex → sandbox.
+    let target = if sid_str.chars().all(|c| c.is_ascii_digit()) {
+        let id: i32 = sid_str.parse().ok()?;
+        if id <= 0 {
+            return None;
+        }
+        PreviewTarget::WorkspaceSession(id)
+    } else if sid_str.len() == 16 && sid_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        PreviewTarget::Sandbox(sid_str.to_ascii_lowercase())
+    } else {
+        return None;
+    };
+
+    Some(PreviewHost { target, port })
 }
 
 /// Outcome of preview auth processing.
@@ -342,6 +419,43 @@ pub async fn lookup_preview_session(
     }
 }
 
+/// Confirm a sandbox with the given 16-hex public_id suffix exists and is
+/// in a state where preview traffic makes sense (i.e. not destroyed).
+///
+/// Returns true iff the sandbox row exists and `status != "destroyed"`. The
+/// check is intentionally liberal — `"stopped"` (paused) sandboxes still
+/// resolve so the gateway can surface a 502 from the dev-server side rather
+/// than a 404 from the auth side, which matches what workspace sessions do.
+pub async fn lookup_sandbox(db: &Arc<DbConnection>, public_id_suffix: &str) -> bool {
+    use sea_orm::{ColumnTrait, QueryFilter};
+    use temps_entities::sandboxes;
+
+    // The DB stores the full `sbx_<hex>` public_id; rebuild it here.
+    let full_public_id = format!("sbx_{}", public_id_suffix);
+    match sandboxes::Entity::find()
+        .filter(sandboxes::Column::PublicId.eq(full_public_id.clone()))
+        .one(db.as_ref())
+        .await
+    {
+        Ok(Some(row)) => row.status != "destroyed",
+        Ok(None) => {
+            debug!(
+                public_id = %full_public_id,
+                "preview-auth: sandbox not found"
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                public_id = %full_public_id,
+                error = %e,
+                "preview-auth: failed to load sandbox"
+            );
+            false
+        }
+    }
+}
+
 /// Run the preview auth check for a parsed preview host (cookie-only).
 ///
 /// Order of operations:
@@ -361,26 +475,39 @@ pub async fn check_preview_auth(
     client_ip: IpAddr,
     cookie_header: Option<&str>,
 ) -> PreviewAuthOutcome {
-    if limiter.is_blocked(client_ip, host.session_id) {
+    // Standalone sandboxes bypass the password wall — their security model
+    // is the unguessable 16-hex public_id plus the preview-gateway shared
+    // secret. Only check existence so we can return a clean NotFound for
+    // typo'd URLs instead of letting the gateway 502.
+    if let PreviewTarget::Sandbox(hex) = &host.target {
+        if lookup_sandbox(db, hex).await {
+            return PreviewAuthOutcome::Allow { host };
+        }
+        return PreviewAuthOutcome::NotFound { host };
+    }
+
+    let session_id = match host.target {
+        PreviewTarget::WorkspaceSession(id) => id,
+        // Unreachable — the sandbox arm returns above. Keeps the match
+        // exhaustive without adding a catch-all that would drop future
+        // variants silently.
+        PreviewTarget::Sandbox(_) => unreachable!(),
+    };
+
+    if limiter.is_blocked(client_ip, session_id) {
         return PreviewAuthOutcome::RateLimited { host };
     }
 
-    let stored_hash = match lookup_preview_session(db, host.session_id).await {
+    let stored_hash = match lookup_preview_session(db, session_id).await {
         PreviewSessionLookup::Found { password_hash } => password_hash,
         PreviewSessionLookup::NotFound => return PreviewAuthOutcome::NotFound { host },
     };
 
-    let cookie_name = format!("{}{}", PREVIEW_COOKIE_PREFIX, host.session_id);
+    let cookie_name = format!("{}{}", PREVIEW_COOKIE_PREFIX, session_id);
     if let Some(header) = cookie_header {
         if let Some(value) = extract_cookie(header, &cookie_name) {
-            if verify_preview_cookie(
-                crypto,
-                value,
-                host.session_id,
-                &stored_hash,
-                SystemTime::now(),
-            ) {
-                limiter.record_success(client_ip, host.session_id);
+            if verify_preview_cookie(crypto, value, session_id, &stored_hash, SystemTime::now()) {
+                limiter.record_success(client_ip, session_id);
                 return PreviewAuthOutcome::Allow { host };
             }
         }
@@ -411,7 +538,7 @@ mod tests {
     #[test]
     fn parse_preview_host_basic() {
         let h = parse_preview_host("ws-14-3000.localho.st", "localho.st").unwrap();
-        assert_eq!(h.session_id, 14);
+        assert_eq!(h.target, PreviewTarget::WorkspaceSession(14));
         assert_eq!(h.port, 3000);
     }
 
@@ -419,15 +546,47 @@ mod tests {
     fn parse_preview_host_strips_wildcard_prefix() {
         let h =
             parse_preview_host("ws-7-8080.preview.example.com", "*.preview.example.com").unwrap();
-        assert_eq!(h.session_id, 7);
+        assert_eq!(h.target, PreviewTarget::WorkspaceSession(7));
         assert_eq!(h.port, 8080);
     }
 
     #[test]
     fn parse_preview_host_strips_request_port() {
         let h = parse_preview_host("ws-1-3000.localho.st:8443", "localho.st").unwrap();
-        assert_eq!(h.session_id, 1);
+        assert_eq!(h.target, PreviewTarget::WorkspaceSession(1));
         assert_eq!(h.port, 3000);
+    }
+
+    #[test]
+    fn parse_preview_host_accepts_sandbox_hex() {
+        let h = parse_preview_host("ws-7702c56bfb804b49-3000.localho.st", "localho.st").unwrap();
+        assert_eq!(
+            h.target,
+            PreviewTarget::Sandbox("7702c56bfb804b49".to_string())
+        );
+        assert_eq!(h.port, 3000);
+    }
+
+    #[test]
+    fn parse_preview_host_lowercases_sandbox_hex() {
+        let h = parse_preview_host("ws-7702C56BFB804B49-3000.localho.st", "localho.st").unwrap();
+        assert_eq!(
+            h.target,
+            PreviewTarget::Sandbox("7702c56bfb804b49".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_preview_host_rejects_wrong_hex_length() {
+        // 15 chars, 17 chars: must be exactly 16.
+        assert!(parse_preview_host("ws-7702c56bfb804b4-3000.localho.st", "localho.st").is_none());
+        assert!(parse_preview_host("ws-7702c56bfb804b49a-3000.localho.st", "localho.st").is_none());
+    }
+
+    #[test]
+    fn parse_preview_host_rejects_non_hex_mixed_label() {
+        // Mixed alpha+digit but not valid hex (contains `g`) — must be rejected.
+        assert!(parse_preview_host("ws-gggggggggggggggg-3000.localho.st", "localho.st").is_none());
     }
 
     #[test]

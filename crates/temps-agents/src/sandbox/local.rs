@@ -99,7 +99,11 @@ impl SandboxProvider for LocalSandboxProvider {
         let stdout = stream_task.await.unwrap_or_default();
         let exit_code = status.code().unwrap_or(-1);
 
-        Ok(SandboxExecResult { exit_code, stdout })
+        Ok(SandboxExecResult {
+            exit_code,
+            stdout,
+            stderr: String::new(),
+        })
     }
 
     async fn is_alive(&self, handle: &SandboxHandle) -> Result<bool, AgentError> {
@@ -283,6 +287,7 @@ mod tests {
     fn test_config(run_id: i32, work_dir: PathBuf) -> SandboxCreateConfig {
         SandboxCreateConfig {
             run_id,
+            container_name_override: None,
             host_work_dir: work_dir,
             image: None,
             cpu_limit: None,

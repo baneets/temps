@@ -1,7 +1,9 @@
 import {
   deleteServiceMutation,
+  getProjectsOptions,
   getServiceOptions,
   getServicePreviewEnvironmentVariablesMaskedOptions,
+  linkServiceToProjectMutation,
   listServiceProjectsOptions,
   startServiceMutation,
   stopServiceMutation,
@@ -20,6 +22,14 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -27,6 +37,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 import { EnvVariablesDisplay } from '@/components/ui/env-variables-display'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { TimeAgo } from '@/components/utils/TimeAgo'
@@ -52,6 +67,7 @@ import {
   Loader2,
   MoreVertical,
   Pencil,
+  Plus,
   RefreshCcw,
   Server,
   Trash2,
@@ -106,13 +122,33 @@ export function ServiceDetail() {
   })
 
   // Query for linked projects
-  const { data: linkedProjectsResponse, isLoading: linkedProjectsLoading } =
-    useQuery({
-      ...listServiceProjectsOptions({
-        path: { id: parseInt(id!) },
-      }),
-      enabled: !!id,
-    })
+  const {
+    data: linkedProjectsResponse,
+    isLoading: linkedProjectsLoading,
+    refetch: refetchLinkedProjects,
+  } = useQuery({
+    ...listServiceProjectsOptions({
+      path: { id: parseInt(id!) },
+    }),
+    enabled: !!id,
+  })
+
+  // All projects for the link popover
+  const { data: allProjectsData } = useQuery({
+    ...getProjectsOptions({ query: { page: 1, per_page: 100 } }),
+  })
+
+  const [isLinkPopoverOpen, setIsLinkPopoverOpen] = useState(false)
+
+  const linkService = useMutation({
+    ...linkServiceToProjectMutation(),
+    meta: { errorTitle: 'Failed to link project' },
+    onSuccess: () => {
+      toast.success('Project linked successfully')
+      refetchLinkedProjects()
+      setIsLinkPopoverOpen(false)
+    },
+  })
 
   useEffect(() => {
     if (service) {
@@ -412,19 +448,65 @@ export function ServiceDetail() {
           {/* Linked Projects Section */}
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <span>Linked Projects</span>
-                <Badge variant="outline">
-                  {linkedProjectsLoading ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    linkedProjectsResponse?.length || 0
-                  )}
-                </Badge>
-              </CardTitle>
-              <CardDescription>
-                Projects that are using this service
-              </CardDescription>
+              <div className="flex items-center justify-between">
+                <div className="space-y-1.5">
+                  <CardTitle className="flex items-center gap-2">
+                    <span>Linked Projects</span>
+                    <Badge variant="outline">
+                      {linkedProjectsLoading ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        linkedProjectsResponse?.length || 0
+                      )}
+                    </Badge>
+                  </CardTitle>
+                  <CardDescription>
+                    Projects that are using this service
+                  </CardDescription>
+                </div>
+                <Popover
+                  open={isLinkPopoverOpen}
+                  onOpenChange={setIsLinkPopoverOpen}
+                >
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" size="sm" className="gap-2">
+                      <Plus className="h-4 w-4" />
+                      Link Project
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[250px] p-0" align="end">
+                    <Command>
+                      <CommandInput placeholder="Search projects..." />
+                      <CommandList>
+                        <CommandEmpty>No projects found.</CommandEmpty>
+                        <CommandGroup>
+                          {allProjectsData?.projects
+                            ?.filter(
+                              (p) =>
+                                !linkedProjectsResponse?.some(
+                                  (lp) => lp.project.id === p.id
+                                )
+                            )
+                            .map((project) => (
+                              <CommandItem
+                                key={project.id}
+                                value={project.slug}
+                                onSelect={() => {
+                                  linkService.mutate({
+                                    path: { id: parseInt(id!) },
+                                    body: { project_id: project.id },
+                                  })
+                                }}
+                              >
+                                {project.slug}
+                              </CommandItem>
+                            ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              </div>
             </CardHeader>
             <CardContent>
               {linkedProjectsLoading ? (

@@ -38,6 +38,10 @@ pub struct CreateSessionRequest {
     /// `/home/temps/.claude.json`. Resolved from `project_mcp_definitions`
     /// (falls back to global).
     pub mcp_servers: Option<Vec<String>>,
+    /// CPU limit in vCPU cores (e.g. 2.0). `None` → server default applies.
+    pub cpu_limit: Option<f32>,
+    /// Memory limit in MB. `None` → server default applies.
+    pub memory_limit_mb: Option<i32>,
 }
 
 /// Request to send a message in a workspace session.
@@ -126,6 +130,21 @@ impl WorkspaceService {
             });
         }
 
+        if let Some(cpu) = request.cpu_limit {
+            if !cpu.is_finite() || cpu <= 0.0 {
+                return Err(WorkspaceError::Validation {
+                    message: "cpu_limit must be a positive number".to_string(),
+                });
+            }
+        }
+        if let Some(mem) = request.memory_limit_mb {
+            if mem <= 0 {
+                return Err(WorkspaceError::Validation {
+                    message: "memory_limit_mb must be a positive integer".to_string(),
+                });
+            }
+        }
+
         // Generate the preview password up front so we can store the hash
         // and return the plaintext in a single round trip to the caller.
         // If hashing fails, we fail the whole create — a session without
@@ -139,6 +158,7 @@ impl WorkspaceService {
 
         let now = Utc::now();
         let session = workspace_sessions::ActiveModel {
+            public_id: Set(crate::services::public_id::generate()),
             project_id: Set(request.project_id),
             user_id: Set(request.user_id),
             status: Set("active".to_string()),
@@ -153,6 +173,8 @@ impl WorkspaceService {
             mcp_servers_config: Set(request.mcp_servers.filter(|v| !v.is_empty()).map(|v| {
                 serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect())
             })),
+            cpu_milli: Set(request.cpu_limit.map(|v| (v * 1000.0).round() as i32)),
+            memory_limit_mb: Set(request.memory_limit_mb),
             last_activity_at: Set(now),
             started_at: Set(now),
             created_at: Set(now),
@@ -415,6 +437,33 @@ impl WorkspaceService {
         Ok(messages)
     }
 
+    /// Highest user-message id on this session that has already been answered —
+    /// i.e., there is some non-user message with a greater id. A fresh drain
+    /// loop seeds its watermark from this so it only concatenates *unanswered*
+    /// pending user messages rather than replaying the whole transcript.
+    pub async fn last_answered_user_message_id(
+        &self,
+        session_id: i32,
+    ) -> Result<i64, WorkspaceError> {
+        let last_non_user = workspace_messages::Entity::find()
+            .filter(workspace_messages::Column::SessionId.eq(session_id))
+            .filter(workspace_messages::Column::Role.ne("user"))
+            .order_by_desc(workspace_messages::Column::Id)
+            .one(self.db.as_ref())
+            .await?;
+        let Some(last) = last_non_user else {
+            return Ok(0);
+        };
+        let prior_user = workspace_messages::Entity::find()
+            .filter(workspace_messages::Column::SessionId.eq(session_id))
+            .filter(workspace_messages::Column::Role.eq("user"))
+            .filter(workspace_messages::Column::Id.lt(last.id))
+            .order_by_desc(workspace_messages::Column::Id)
+            .one(self.db.as_ref())
+            .await?;
+        Ok(prior_user.map(|m| m.id).unwrap_or(0))
+    }
+
     /// Count active sessions for a project (for concurrency limits).
     pub async fn count_active_sessions(&self, project_id: i32) -> Result<u64, WorkspaceError> {
         let count = workspace_sessions::Entity::find()
@@ -580,6 +629,7 @@ mod tests {
         let now = Utc::now();
         workspace_sessions::Model {
             id,
+            public_id: format!("wss_{:016x}", id as u64),
             project_id,
             user_id: 1,
             title: None,
@@ -645,6 +695,8 @@ mod tests {
                 metadata: None,
                 skills: None,
                 mcp_servers: None,
+                cpu_limit: None,
+                memory_limit_mb: None,
             })
             .await;
 
@@ -670,6 +722,8 @@ mod tests {
                 metadata: None,
                 skills: None,
                 mcp_servers: None,
+                cpu_limit: None,
+                memory_limit_mb: None,
             })
             .await;
 

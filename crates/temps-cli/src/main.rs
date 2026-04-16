@@ -8,8 +8,9 @@ mod commands;
 use clap::{Parser, Subcommand};
 use commands::{
     AgentCommand, ApiKeyCommand, BackupCommand, BuildCommand, DeployCommand, DoctorCommand,
-    DomainCommand, EdgeCommand, JoinCommand, NodeCommand, ProxyCommand, ResetPasswordCommand,
-    ServeCommand, ServicesCommand, SetupCommand, UpgradeCommand,
+    DomainCommand, EdgeCommand, JoinCommand, MemoryCommand, NodeCommand, ProxyCommand,
+    ResetPasswordCommand, SandboxCommand, ServeCommand, ServicesCommand, SetupCommand,
+    UpgradeCommand,
 };
 use tracing_subscriber::{layer::SubscriberExt, Layer};
 
@@ -75,6 +76,10 @@ enum Commands {
     Node(NodeCommand),
     /// Start an edge CDN proxy node (caches static assets, proxies dynamic requests to origin)
     Edge(EdgeCommand),
+    /// Manage standalone sandboxes via the Vercel-compatible `/v1/sandbox/*` API
+    Sandbox(SandboxCommand),
+    /// Read/write workflow memory via the versioned `/api/v1/.../memory` API
+    Memory(MemoryCommand),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -202,5 +207,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Agent(agent_cmd) => agent_cmd.execute(),
         Commands::Node(node_cmd) => node_cmd.execute(),
         Commands::Edge(edge_cmd) => edge_cmd.execute(),
+        Commands::Sandbox(sandbox_cmd) => sandbox_cmd.execute(),
+        Commands::Memory(memory_cmd) => memory_cmd.execute(),
     }
 }
