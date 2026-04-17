@@ -17,6 +17,7 @@ pub struct Model {
     pub access_key_id: String,
     pub secret_key: String,
     pub force_path_style: Option<bool>,
+    pub is_default: bool,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

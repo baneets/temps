@@ -62,6 +62,9 @@ impl From<BackupError> for Problem {
         get_s3_source,
         update_s3_source,
         delete_s3_source,
+        set_default_s3_source,
+        test_s3_source_connection,
+        test_s3_connection_preview,
         list_backup_schedules,
         create_backup_schedule,
         get_backup_schedule,
@@ -82,6 +85,7 @@ impl From<BackupError> for Problem {
             RunBackupRequest,
             RunExternalServiceBackupRequest,
             S3SourceResponse,
+            S3ConnectionTestResponse,
             BackupScheduleResponse,
             BackupResponse,
             ExternalServiceBackupResponse,
@@ -115,6 +119,10 @@ pub struct CreateS3SourceRequest {
     /// Whether to use path-style addressing (default: true)
     #[schema(example = true)]
     pub force_path_style: Option<bool>,
+    /// When true, make this the default source (will swap out any existing default).
+    /// The very first S3 source is always created as default regardless of this flag.
+    #[schema(example = false)]
+    pub is_default: Option<bool>,
 }
 
 #[derive(Deserialize, ToSchema, Clone)]
@@ -145,7 +153,8 @@ pub struct CreateBackupScheduleRequest {
     pub name: String,
     pub backup_type: String,
     pub retention_period: i32,
-    pub s3_source_id: i32,
+    /// Optional S3 source. If omitted, the current default S3 source is used.
+    pub s3_source_id: Option<i32>,
     pub schedule_expression: String,
     pub enabled: bool,
     pub description: Option<String>,
@@ -161,9 +170,9 @@ pub struct RunBackupRequest {
 
 #[derive(Deserialize, ToSchema, Clone)]
 pub struct RunExternalServiceBackupRequest {
-    /// ID of the S3 source to store the backup
+    /// ID of the S3 source to store the backup. If omitted, the current default S3 source is used.
     #[schema(example = 1)]
-    pub s3_source_id: i32,
+    pub s3_source_id: Option<i32>,
     /// Type of backup to perform (e.g., "full", "incremental")
     #[schema(example = "full")]
     pub backup_type: Option<String>,
@@ -229,8 +238,18 @@ pub struct S3SourceResponse {
     #[schema(example = "http://minio.example.com:9000")]
     pub endpoint: Option<String>,
     pub force_path_style: Option<bool>,
+    pub is_default: bool,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Response body for an S3 connection test.
+#[derive(Serialize, ToSchema)]
+pub struct S3ConnectionTestResponse {
+    /// Whether the connection and credentials worked.
+    pub ok: bool,
+    /// Human-readable message (success confirmation or error detail).
+    pub message: String,
 }
 
 /// Response type for backup schedule
@@ -328,6 +347,7 @@ impl From<temps_entities::s3_sources::Model> for S3SourceResponse {
             region: source.region,
             endpoint: source.endpoint,
             force_path_style: source.force_path_style,
+            is_default: source.is_default,
             created_at: source.created_at.timestamp_millis(),
             updated_at: source.updated_at.timestamp_millis(),
         }
@@ -463,6 +483,15 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
                 .patch(update_s3_source)
                 .delete(delete_s3_source),
         )
+        .route(
+            "/backups/s3-sources/{id}/set-default",
+            post(set_default_s3_source),
+        )
+        .route(
+            "/backups/s3-sources/{id}/test",
+            post(test_s3_source_connection),
+        )
+        .route("/backups/s3-sources/test", post(test_s3_connection_preview))
         .route("/backups/s3-sources/{id}/run", post(run_backup_for_source))
         .route(
             "/backups/schedules",
@@ -705,6 +734,111 @@ async fn delete_s3_source(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Mark an S3 source as the default. All new backups/schedules/services that do not
+/// explicitly reference a source will use the default. Returns the updated source.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/s3-sources/{id}/set-default",
+    responses(
+        (status = 200, description = "S3 source marked as default", body = S3SourceResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 404, description = "S3 source not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn set_default_s3_source(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsWrite);
+
+    let source = app_state
+        .backup_service
+        .set_default_s3_source(id)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(S3SourceResponse::from(source)))
+}
+
+/// Test connectivity to an existing S3 source using its stored credentials.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/s3-sources/{id}/test",
+    responses(
+        (status = 200, description = "Connection test result", body = S3ConnectionTestResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 404, description = "S3 source not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn test_s3_source_connection(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+
+    match app_state.backup_service.test_s3_source_connection(id).await {
+        Ok(()) => Ok(Json(S3ConnectionTestResponse {
+            ok: true,
+            message: "Connection successful".to_string(),
+        })),
+        Err(BackupError::NotFound { .. }) => Err(Problem::from(BackupError::NotFound {
+            resource: "S3Source".to_string(),
+            detail: format!("S3 source {} not found", id),
+        })),
+        Err(e) => Ok(Json(S3ConnectionTestResponse {
+            ok: false,
+            message: e.to_string(),
+        })),
+    }
+}
+
+/// Test S3 connectivity against a prospective source configuration (before creating it).
+/// The credentials are NOT persisted. Useful for validating the form in the UI.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/s3-sources/test",
+    request_body = CreateS3SourceRequest,
+    responses(
+        (status = 200, description = "Connection test result", body = S3ConnectionTestResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 400, description = "Invalid request", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails)
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn test_s3_connection_preview(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Json(request): Json<CreateS3SourceRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsCreate);
+
+    match app_state
+        .backup_service
+        .test_s3_connection_from_request(&request)
+        .await
+    {
+        Ok(()) => Ok(Json(S3ConnectionTestResponse {
+            ok: true,
+            message: "Credentials valid and bucket reachable".to_string(),
+        })),
+        Err(BackupError::Validation(msg)) => Err(Problem::from(BackupError::Validation(msg))),
+        Err(e) => Ok(Json(S3ConnectionTestResponse {
+            ok: false,
+            message: e.to_string(),
+        })),
+    }
 }
 
 /// List all backup schedules
@@ -1055,10 +1189,16 @@ async fn run_external_service_backup(
 
     let backup_type = request.backup_type.as_deref().unwrap_or("full");
 
+    let s3_source_id = app_state
+        .backup_service
+        .resolve_s3_source_id(request.s3_source_id)
+        .await
+        .map_err(Problem::from)?;
+
     // Run the backup
     let backup = app_state
         .backup_service
-        .backup_external_service(&service, request.s3_source_id, backup_type, auth.user_id())
+        .backup_external_service(&service, s3_source_id, backup_type, auth.user_id())
         .await
         .map_err(|e| {
             error!(

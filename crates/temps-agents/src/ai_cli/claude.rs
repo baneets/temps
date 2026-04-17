@@ -5,12 +5,6 @@ use tokio::process::Command;
 use super::{AiCliProvider, AiCliStatus, AiRunConfig, AiRunResult};
 use crate::error::AgentError;
 
-/// Escape a string for safe use inside a shell command (single-quoted).
-fn shell_escape(s: &str) -> String {
-    // Wrap in single quotes, escaping any embedded single quotes
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// Check if a Unix user exists by name.
 fn user_exists(name: &str) -> bool {
     std::process::Command::new("id")
@@ -126,46 +120,42 @@ impl AiCliProvider for ClaudeCliProvider {
 
         let is_root = unsafe { libc::geteuid() } == 0;
 
-        // When running as root, Claude CLI refuses --dangerously-skip-permissions.
-        // Use `su` to drop to a non-root user (temps or nobody).
+        // Build the claude argv exactly the same in both branches. Each
+        // arg goes through Command::arg, so no shell ever parses
+        // user-controlled prompts/model/api_key data — values stay in
+        // their own argv slot and are passed straight to execve().
+        //
+        // When running as root, Claude CLI refuses
+        // --dangerously-skip-permissions. We drop privileges via
+        // `runuser -u <user> -- claude <args...>`. `runuser` is the
+        // recommended replacement for `su -c`: it preserves separate
+        // argv slots, has no shell-string parameter, and is available
+        // on every Linux distro temps targets (util-linux).
         let mut cmd = if is_root {
             let run_user = if user_exists("temps") {
                 "temps"
             } else {
                 "nobody"
             };
-            let mut c = Command::new("su");
-            c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
-            // Build the claude command as a single string for su -c
-            let model_arg = match config.model.as_deref() {
-                Some(m) if !m.is_empty() => format!(" --model {}", shell_escape(m)),
-                _ => String::new(),
-            };
-            let claude_args = format!(
-                "claude --print {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose{}",
-                shell_escape(&config.prompt),
-                config.max_turns,
-                model_arg,
-            );
-            c.arg(&claude_args);
+            let mut c = Command::new("runuser");
+            c.arg("-u").arg(run_user).arg("--").arg("claude");
             c
         } else {
-            let mut c = Command::new("claude");
-            c.arg("--print")
-                .arg(&config.prompt)
-                .arg("--output-format")
-                .arg("stream-json")
-                .arg("--max-turns")
-                .arg(config.max_turns.to_string())
-                .arg("--dangerously-skip-permissions")
-                .arg("--verbose");
-            if let Some(m) = config.model.as_deref() {
-                if !m.is_empty() {
-                    c.arg("--model").arg(m);
-                }
-            }
-            c
+            Command::new("claude")
         };
+        cmd.arg("--print")
+            .arg(&config.prompt)
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--max-turns")
+            .arg(config.max_turns.to_string())
+            .arg("--dangerously-skip-permissions")
+            .arg("--verbose");
+        if let Some(m) = config.model.as_deref() {
+            if !m.is_empty() {
+                cmd.arg("--model").arg(m);
+            }
+        }
         cmd.current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -275,44 +265,34 @@ impl AiCliProvider for ClaudeCliProvider {
 
         let is_root = unsafe { libc::geteuid() } == 0;
 
+        // Same shell-free pattern as `run`: argv slots all the way down,
+        // never a single `su -c '<string>'` that re-parses user data.
         let mut cmd = if is_root {
             let run_user = if user_exists("temps") {
                 "temps"
             } else {
                 "nobody"
             };
-            let mut c = Command::new("su");
-            c.arg("-s").arg("/bin/sh").arg(run_user).arg("-c");
-            let model_arg = match config.model.as_deref() {
-                Some(m) if !m.is_empty() => format!(" --model {}", shell_escape(m)),
-                _ => String::new(),
-            };
-            let claude_args = format!(
-                "claude --print --continue {} --output-format stream-json --max-turns {} --dangerously-skip-permissions --verbose{}",
-                shell_escape(&config.prompt),
-                config.max_turns,
-                model_arg,
-            );
-            c.arg(&claude_args);
+            let mut c = Command::new("runuser");
+            c.arg("-u").arg(run_user).arg("--").arg("claude");
             c
         } else {
-            let mut c = Command::new("claude");
-            c.arg("--print")
-                .arg("--continue")
-                .arg(&config.prompt)
-                .arg("--output-format")
-                .arg("stream-json")
-                .arg("--max-turns")
-                .arg(config.max_turns.to_string())
-                .arg("--dangerously-skip-permissions")
-                .arg("--verbose");
-            if let Some(m) = config.model.as_deref() {
-                if !m.is_empty() {
-                    c.arg("--model").arg(m);
-                }
-            }
-            c
+            Command::new("claude")
         };
+        cmd.arg("--print")
+            .arg("--continue")
+            .arg(&config.prompt)
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--max-turns")
+            .arg(config.max_turns.to_string())
+            .arg("--dangerously-skip-permissions")
+            .arg("--verbose");
+        if let Some(m) = config.model.as_deref() {
+            if !m.is_empty() {
+                cmd.arg("--model").arg(m);
+            }
+        }
         cmd.current_dir(&config.work_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

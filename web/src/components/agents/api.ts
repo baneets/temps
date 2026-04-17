@@ -43,10 +43,15 @@ export interface Agent {
 export interface AgentRun {
   id: number
   project_id: number
-  config_id: number
+  /** Null for CLI ephemeral runs (`source = "cli_ephemeral"`) — those carry their config inline in `ephemeral_yaml`. */
+  config_id: number | null
   agent_id: number | null
   agent_slug: string | null
   agent_name: string | null
+  /** "committed" (config lives in project_agents) or "cli_ephemeral" (config uploaded once via the CLI). */
+  source: string
+  /** Full WorkflowYamlConfig as YAML text. Populated only for ephemeral runs; surfaced in a "View YAML" modal. */
+  ephemeral_yaml: string | null
   trigger_type: string
   trigger_source_id: number | null
   trigger_source_type: string | null
@@ -72,6 +77,7 @@ export interface AgentRun {
   sandbox_enabled: boolean
   user_context: string | null
   ai_session_id: string | null
+  prompt_text: string | null
 }
 
 export interface AgentRunLog {

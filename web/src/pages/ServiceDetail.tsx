@@ -9,8 +9,10 @@ import {
   stopServiceMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
+import { MajorUpgradeDialog } from '@/components/storage/MajorUpgradeDialog'
 import { TriggerBackupDialog } from '@/components/storage/TriggerBackupDialog'
 import { UpgradeServiceDialog } from '@/components/storage/UpgradeServiceDialog'
+import { listPgUpgrades, phaseIndex, PG_UPGRADE_PHASES, isTerminal } from '@/lib/pg-upgrades'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -83,6 +85,7 @@ export function ServiceDetail() {
   const queryClient = useQueryClient()
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
   const [isUpgradeDialogOpen, setIsUpgradeDialogOpen] = useState(false)
+  const [isMajorUpgradeDialogOpen, setIsMajorUpgradeDialogOpen] = useState(false)
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isBackupDialogOpen, setIsBackupDialogOpen] = useState(false)
   const [isStopDialogOpen, setIsStopDialogOpen] = useState(false)
@@ -105,6 +108,22 @@ export function ServiceDetail() {
     refetchInterval: (query) => {
       const status = query.state.data?.service?.status
       return status === 'creating' ? 2000 : false
+    },
+  })
+
+  // Query for PostgreSQL major-version upgrades. Only relevant for postgres
+  // services; harmless for others (the query is enabled conditionally below).
+  const isPostgres = service?.service?.service_type === 'postgres'
+  const { data: pgUpgrades } = useQuery({
+    queryKey: ['pg-upgrades', id],
+    queryFn: () => listPgUpgrades(parseInt(id!)),
+    enabled: !!id && isPostgres,
+    // Poll every 3s while any upgrade is still running so the card reflects
+    // phase progression without a manual refresh.
+    refetchInterval: (query) => {
+      const rows = query.state.data
+      if (!rows) return false
+      return rows.some((u) => !isTerminal(u.status)) ? 3000 : false
     },
   })
 
@@ -397,6 +416,14 @@ export function ServiceDetail() {
                   <ArrowUpCircle className="h-4 w-4 mr-2" />
                   Upgrade
                 </DropdownMenuItem>
+                {service.service.service_type === 'postgres' ? (
+                  <DropdownMenuItem
+                    onClick={() => setIsMajorUpgradeDialogOpen(true)}
+                  >
+                    <ArrowUpCircle className="h-4 w-4 mr-2" />
+                    Major Version Upgrade…
+                  </DropdownMenuItem>
+                ) : null}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={handleServiceAction}
@@ -807,6 +834,95 @@ export function ServiceDetail() {
               ) : null}
             </CardContent>
           </Card>
+
+          {isPostgres && pgUpgrades && pgUpgrades.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <ArrowUpCircle className="h-5 w-5" />
+                  Major Version Upgrades
+                </CardTitle>
+                <CardDescription>
+                  History of PostgreSQL major-version upgrades for this service.
+                  Click a row to see phase progress and logs.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {pgUpgrades.map((u) => {
+                    const totalPhases = PG_UPGRADE_PHASES.length - 1 // exclude "completed"
+                    const pct =
+                      u.status === 'completed'
+                        ? 100
+                        : Math.round(
+                            (phaseIndex(u.phase) / totalPhases) * 100,
+                          )
+                    const statusVariant =
+                      u.status === 'completed'
+                        ? 'default'
+                        : u.status === 'failed'
+                        ? 'destructive'
+                        : u.status === 'cancelled' ||
+                          u.status === 'rolled_back'
+                        ? 'secondary'
+                        : 'outline'
+                    const isActive = !isTerminal(u.status)
+                    return (
+                      <Link
+                        key={u.id}
+                        to={`/settings/storage/${id}/upgrades/${u.id}`}
+                        className="block rounded-lg border p-3 hover:bg-muted/50 transition-colors"
+                      >
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex flex-wrap items-center gap-2 min-w-0">
+                            <span className="font-medium text-sm">
+                              #{u.id}
+                            </span>
+                            <span className="text-sm text-muted-foreground truncate">
+                              {u.from_version} → {u.to_version}
+                            </span>
+                            {isActive ? (
+                              <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant={statusVariant} className="text-xs">
+                              {u.status}
+                            </Badge>
+                            <span className="text-xs text-muted-foreground whitespace-nowrap">
+                              <TimeAgo date={u.created_at} />
+                            </span>
+                          </div>
+                        </div>
+                        {isActive ? (
+                          <div className="mt-2">
+                            <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                              <span className="truncate">
+                                Phase: {u.phase}
+                              </span>
+                              <span className="whitespace-nowrap ml-2">
+                                {pct}%
+                              </span>
+                            </div>
+                            <div className="h-1.5 bg-muted rounded overflow-hidden">
+                              <div
+                                className="h-full bg-primary transition-all"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                          </div>
+                        ) : u.error_message ? (
+                          <p className="mt-2 text-xs text-destructive line-clamp-2">
+                            {u.error_message}
+                          </p>
+                        ) : null}
+                      </Link>
+                    )
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
       </div>
 
@@ -881,6 +997,14 @@ export function ServiceDetail() {
         serviceName={service.service.name}
         currentImage={service.current_parameters?.docker_image || undefined}
         serviceType={service.service.service_type}
+      />
+
+      <MajorUpgradeDialog
+        open={isMajorUpgradeDialogOpen}
+        onOpenChange={setIsMajorUpgradeDialogOpen}
+        serviceId={parseInt(id!)}
+        serviceName={service.service.name}
+        currentImage={service.current_parameters?.docker_image || ''}
       />
 
       <EditServiceDialog

@@ -677,7 +677,6 @@ pub enum Role {
     Reader,
     Mcp,
     ApiReader,
-    Demo,   // For demo mode with limited read-only access
     Custom, // For API keys with custom permissions
 }
 
@@ -689,7 +688,6 @@ impl fmt::Display for Role {
             Role::Reader => "reader",
             Role::Mcp => "mcp",
             Role::ApiReader => "api_reader",
-            Role::Demo => "demo",
             Role::Custom => "custom",
         };
         write!(f, "{}", name)
@@ -705,7 +703,6 @@ impl Role {
             "reader" => Some(Role::Reader),
             "mcp" => Some(Role::Mcp),
             "api_reader" => Some(Role::ApiReader),
-            "demo" => Some(Role::Demo),
             "custom" => Some(Role::Custom),
             _ => None,
         }
@@ -718,7 +715,6 @@ impl Role {
             Role::Reader,
             Role::Mcp,
             Role::ApiReader,
-            Role::Demo,
             Role::Custom,
         ]
     }
@@ -1028,11 +1024,6 @@ impl Role {
                 Permission::ProjectsRead,
                 Permission::DeploymentsRead,
                 Permission::AnalyticsRead,
-            ],
-            Role::Demo => &[
-                Permission::ProjectsRead,
-                Permission::AnalyticsRead,
-                Permission::StatusPageRead,
             ],
             Role::Custom => &[], // Custom role has no default permissions
         }

@@ -108,7 +108,7 @@ impl SandboxExpirationSweeper {
         // this sandbox (server restart + recovery miss, or container was
         // removed externally) we still flip the status so subsequent
         // listings don't show a zombie "running" entry.
-        if let Err(e) = self.registry.stop(row.id).await {
+        if let Err(e) = self.registry.stop(row.id, &row.public_id).await {
             tracing::warn!(
                 "Expiration sweep: provider stop failed for sandbox {} (internal {}): {} \
                  — marking stopped anyway",
@@ -156,6 +156,8 @@ mod tests {
             created_at: now,
             last_activity_at: now,
             expires_at: now + chrono::Duration::seconds(expires_in_secs),
+            preview_password_hash: None,
+            preview_password_hint: None,
         }
     }
 

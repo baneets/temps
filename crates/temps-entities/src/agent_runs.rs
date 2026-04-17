@@ -10,7 +10,10 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub project_id: i32,
-    pub config_id: i32,
+    /// Pointer into project_agents. Nullable because ephemeral runs (source =
+    /// "cli_ephemeral") and historical autofixer runs do not have a parent
+    /// agent record. Prefer reading `agent_id` instead.
+    pub config_id: Option<i32>,
     /// The agent that created this run (replaces config_id for new runs)
     pub agent_id: Option<i32>,
     pub trigger_type: String,
@@ -43,6 +46,18 @@ pub struct Model {
     pub started_at: Option<DBDateTime>,
     pub completed_at: Option<DBDateTime>,
     pub created_at: DBDateTime,
+    /// Where this run's config came from. `committed` (default — read from
+    /// `project_agents`) or `cli_ephemeral` (read from `ephemeral_yaml`).
+    pub source: String,
+    /// Full WorkflowYamlConfig as YAML text. Only set when source =
+    /// "cli_ephemeral". Lets the executor build a synthetic config without a
+    /// project_agents row.
+    pub ephemeral_yaml: Option<String>,
+    /// The final assembled prompt the AI CLI actually saw (trigger context
+    /// block + YAML prompt, with error-group fields interpolated). Captured
+    /// once per run, immediately before the CLI invocation. Nullable because
+    /// historical rows never persisted it.
+    pub prompt_text: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -10470,6 +10470,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tar",
  "tempfile",
  "temps-agents-mcp-proxy",
@@ -10740,6 +10741,7 @@ dependencies = [
  "temps-core",
  "temps-database",
  "temps-entities",
+ "temps-logs",
  "temps-notifications",
  "temps-providers",
  "testcontainers",
@@ -12004,6 +12006,7 @@ dependencies = [
  "temps-core",
  "temps-database",
  "temps-entities",
+ "temps-logs",
  "temps-query",
  "temps-query-mongodb",
  "temps-query-postgres",
@@ -12232,6 +12235,7 @@ dependencies = [
 name = "temps-sandbox"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "async-trait",
  "axum 0.8.6",
  "base64 0.22.1",

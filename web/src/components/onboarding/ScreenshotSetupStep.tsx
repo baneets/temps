@@ -40,8 +40,6 @@ export function ScreenshotSetupStep({
   const updateSettings = useMutation({
     mutationFn: async (screenshotsEnabled: boolean) => {
       return await updatePlatformSettings({
-        allow_readonly_external_access:
-          settings?.allow_readonly_external_access ?? false,
         dns_provider: settings?.dns_provider ?? {
           provider: 'manual',
           cloudflare_api_key: null,

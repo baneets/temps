@@ -262,6 +262,7 @@ impl From<StatsQuery> for StatsFilters {
             request_source: query.request_source,
             is_bot: query.is_bot,
             device_type: query.device_type,
+            has_project: None,
         }
     }
 }
@@ -303,6 +304,10 @@ pub struct TimeBucketStatsQuery {
     pub is_bot: Option<bool>,
     /// Filter by device type
     pub device_type: Option<String>,
+    /// When true, only count requests that matched a project
+    /// (project_id IS NOT NULL). Makes chart totals line up with the
+    /// per-project health cards.
+    pub has_project: Option<bool>,
 }
 
 fn default_bucket_interval() -> String {
@@ -392,6 +397,7 @@ async fn get_time_bucket_stats(
         || query.request_source.is_some()
         || query.is_bot.is_some()
         || query.device_type.is_some()
+        || query.has_project.is_some()
     {
         Some(StatsFilters {
             method: query.method,
@@ -406,6 +412,7 @@ async fn get_time_bucket_stats(
             request_source: query.request_source,
             is_bot: query.is_bot,
             device_type: query.device_type,
+            has_project: query.has_project,
         })
     } else {
         None
@@ -434,6 +441,14 @@ async fn get_time_bucket_stats(
 pub struct ProjectsHealthQuery {
     /// Comma-separated list of project IDs
     pub project_ids: String,
+    /// Optional start time (ISO 8601). Defaults to `end_time - 1h`.
+    #[param(value_type = Option<String>, example = "2025-10-23T00:00:00Z")]
+    pub start_time: Option<UtcDateTime>,
+    /// Optional end time (ISO 8601). Defaults to now.
+    #[param(value_type = Option<String>, example = "2025-10-23T23:59:59Z")]
+    pub end_time: Option<UtcDateTime>,
+    /// Filter by bot detection. Pass `false` to exclude bots, `true` for bots only.
+    pub is_bot: Option<bool>,
 }
 
 /// Batch health summary response
@@ -479,11 +494,20 @@ async fn get_projects_health(
         ));
     }
 
-    let end_time = chrono::Utc::now();
-    let start_time = end_time - chrono::Duration::hours(1);
+    let end_time = query.end_time.unwrap_or_else(chrono::Utc::now);
+    let start_time = query
+        .start_time
+        .unwrap_or_else(|| end_time - chrono::Duration::hours(1));
+
+    if start_time >= end_time {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "start_time must be before end_time".to_string(),
+        ));
+    }
 
     let summaries = service
-        .get_projects_health_summary(&project_ids, start_time, end_time)
+        .get_projects_health_summary(&project_ids, start_time, end_time, query.is_bot)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

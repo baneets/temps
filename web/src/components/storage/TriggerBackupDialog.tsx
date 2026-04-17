@@ -27,21 +27,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { AlertCircle, HardDrive, Loader2 } from 'lucide-react'
+import { AlertCircle, HardDrive, Loader2, Star } from 'lucide-react'
+import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
-import { z } from 'zod'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Link } from 'react-router-dom'
 
-const formSchema = z.object({
-  s3_source_id: z.coerce.number({ required_error: 'Please select an S3 source' }),
-  backup_type: z.string().optional(),
-})
-
-type FormValues = z.infer<typeof formSchema>
+type FormValues = {
+  s3_source_id?: number
+  backup_type?: string
+}
 
 interface TriggerBackupDialogProps {
   open: boolean
@@ -64,11 +61,20 @@ export function TriggerBackupDialog({
   })
 
   const form = useForm<FormValues>({
-    resolver: zodResolver(formSchema),
     defaultValues: {
       backup_type: 'full',
     },
   })
+
+  const defaultSource = s3Sources?.find(
+    (s) => (s as { is_default?: boolean }).is_default === true,
+  )
+
+  useEffect(() => {
+    if (open && defaultSource && form.getValues('s3_source_id') === undefined) {
+      form.setValue('s3_source_id', defaultSource.id)
+    }
+  }, [open, defaultSource, form])
 
   const runBackupMutation = useMutation({
     ...runExternalServiceBackupMutation(),
@@ -86,12 +92,16 @@ export function TriggerBackupDialog({
   })
 
   const onSubmit = (values: FormValues) => {
+    // Backend accepts s3_source_id as Option<i32>; generated client type still requires number.
+    const body = {
+      backup_type: values.backup_type || 'full',
+      ...(values.s3_source_id !== undefined
+        ? { s3_source_id: values.s3_source_id }
+        : {}),
+    } as { s3_source_id: number; backup_type: string }
     runBackupMutation.mutate({
       path: { id: serviceId },
-      body: {
-        s3_source_id: values.s3_source_id,
-        backup_type: values.backup_type || 'full',
-      },
+      body,
     })
   }
 
@@ -153,7 +163,7 @@ export function TriggerBackupDialog({
                   <FormItem>
                     <FormLabel>Storage Destination</FormLabel>
                     <Select
-                      onValueChange={field.onChange}
+                      onValueChange={(v) => field.onChange(Number(v))}
                       value={field.value?.toString()}
                     >
                       <FormControl>
@@ -162,24 +172,42 @@ export function TriggerBackupDialog({
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        {s3Sources?.map((source) => (
-                          <SelectItem
-                            key={source.id}
-                            value={source.id.toString()}
-                          >
-                            <div className="flex flex-col">
-                              <span>{source.name}</span>
-                              <span className="text-xs text-muted-foreground">
-                                {source.bucket_name}
-                                {source.bucket_path && `/${source.bucket_path}`}
-                              </span>
-                            </div>
-                          </SelectItem>
-                        ))}
+                        {s3Sources?.map((source) => {
+                          const isDefault =
+                            (source as { is_default?: boolean }).is_default ===
+                            true
+                          return (
+                            <SelectItem
+                              key={source.id}
+                              value={source.id.toString()}
+                            >
+                              <div className="flex flex-col">
+                                <span className="flex items-center gap-1.5">
+                                  {source.name}
+                                  {isDefault ? (
+                                    <span
+                                      title="Default source"
+                                      className="inline-flex items-center gap-0.5 text-xs text-amber-600 dark:text-amber-400"
+                                    >
+                                      <Star className="h-3 w-3 fill-current" />
+                                      Default
+                                    </span>
+                                  ) : null}
+                                </span>
+                                <span className="text-xs text-muted-foreground">
+                                  {source.bucket_name}
+                                  {source.bucket_path && `/${source.bucket_path}`}
+                                </span>
+                              </div>
+                            </SelectItem>
+                          )
+                        })}
                       </SelectContent>
                     </Select>
                     <FormDescription>
-                      The S3-compatible storage where the backup will be saved
+                      {defaultSource
+                        ? `Defaults to ⭐ ${defaultSource.name}. Pick a different source to override.`
+                        : 'The S3-compatible storage where the backup will be saved.'}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

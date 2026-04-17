@@ -435,6 +435,14 @@ pub struct WorkflowYamlConfig {
     pub deliverable: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// CPU cores allocated to the sandbox (e.g. 1.0, 2.5). `None` falls back
+    /// to the platform default (`AgentSandboxSettings.cpu_limit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<f64>,
+    /// Memory limit in MB. `None` falls back to the platform default
+    /// (`AgentSandboxSettings.memory_limit_mb`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mb: Option<u64>,
 }
 
 /// All possible workflow triggers.

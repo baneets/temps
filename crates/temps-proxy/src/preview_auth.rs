@@ -31,9 +31,16 @@ use temps_database::DbConnection;
 use temps_entities::workspace_sessions;
 use tracing::{debug, warn};
 
-/// Cookie name template — one cookie per session (`temps_preview_<sid>`)
-/// scoped to all ports of that session via the parent preview domain.
+/// Cookie name template for workspace sessions — one cookie per session
+/// (`temps_preview_<sid>`) scoped to all ports via the parent preview domain.
 pub const PREVIEW_COOKIE_PREFIX: &str = "temps_preview_";
+
+/// Cookie name template for standalone sandboxes (`temps_preview_sbx_<hex>`).
+/// Namespaced so a workspace cookie cannot be silently replayed at a sandbox
+/// URL — the cookie subject is also checked against the sandbox public_id,
+/// but keeping cookie names disjoint avoids accidental conflicts in browsers
+/// that scope both workspace and sandbox previews under the same domain.
+pub const PREVIEW_SANDBOX_COOKIE_PREFIX: &str = "temps_preview_sbx_";
 
 /// How long a preview session cookie is valid before the user is asked to
 /// re-enter the password. Rotating the password invalidates cookies
@@ -199,12 +206,30 @@ pub fn encode_preview_cookie(
     password_hash: &str,
     now: SystemTime,
 ) -> Option<String> {
+    encode_preview_cookie_subject(crypto, &session_id.to_string(), password_hash, now)
+}
+
+/// String-subject variant of [`encode_preview_cookie`]. Sandboxes use the
+/// `sbx_<hex>` public_id as the subject; workspaces delegate via the i32
+/// helper above. Subjects must not contain `|` — we control both sides, so
+/// this is enforced by construction (hex suffix or stringified int only).
+pub fn encode_preview_cookie_subject(
+    crypto: &CookieCrypto,
+    subject: &str,
+    password_hash: &str,
+    now: SystemTime,
+) -> Option<String> {
+    if subject.contains('|') {
+        // Defense-in-depth: reject anything that could alias another subject
+        // via `|` injection, even though both current producers can't emit it.
+        return None;
+    }
     let exp = now
         .checked_add(PREVIEW_COOKIE_TTL)?
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_secs();
-    let payload = format!("{}|{}|{}", session_id, hash_fingerprint(password_hash), exp);
+    let payload = format!("{}|{}|{}", subject, hash_fingerprint(password_hash), exp);
     crypto.encrypt(&payload).ok()
 }
 
@@ -218,6 +243,25 @@ pub fn verify_preview_cookie(
     password_hash: &str,
     now: SystemTime,
 ) -> bool {
+    verify_preview_cookie_subject(
+        crypto,
+        cookie_value,
+        &session_id.to_string(),
+        password_hash,
+        now,
+    )
+}
+
+/// String-subject variant of [`verify_preview_cookie`]. The cookie subject
+/// is compared byte-exact, so cross-subject cookies (e.g. a workspace
+/// cookie replayed at a sandbox URL) are always rejected.
+pub fn verify_preview_cookie_subject(
+    crypto: &CookieCrypto,
+    cookie_value: &str,
+    subject: &str,
+    password_hash: &str,
+    now: SystemTime,
+) -> bool {
     let Ok(plain) = crypto.decrypt(cookie_value) else {
         return false;
     };
@@ -225,10 +269,7 @@ pub fn verify_preview_cookie(
     if parts.len() != 3 {
         return false;
     }
-    let Ok(sid) = parts[0].parse::<i32>() else {
-        return false;
-    };
-    if sid != session_id {
+    if parts[0] != subject {
         return false;
     }
     if parts[1] != hash_fingerprint(password_hash) {
@@ -256,11 +297,42 @@ pub fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str>
     None
 }
 
-/// Build the full `Set-Cookie` header value for a preview cookie. Scoped to
-/// the parent preview domain so it covers every `ws-<sid>-<port>.<domain>`
-/// host belonging to the session.
+/// Build the full `Set-Cookie` header value for a workspace preview cookie.
+/// Scoped to the parent preview domain so it covers every
+/// `ws-<sid>-<port>.<domain>` host belonging to the session.
 pub fn build_set_cookie(
     session_id: i32,
+    cookie_value: &str,
+    preview_domain: &str,
+    secure: bool,
+) -> String {
+    build_set_cookie_raw(
+        &format!("{PREVIEW_COOKIE_PREFIX}{session_id}"),
+        cookie_value,
+        preview_domain,
+        secure,
+    )
+}
+
+/// Build the `Set-Cookie` header for a sandbox preview cookie. Uses a
+/// separate cookie-name prefix so sandbox cookies never collide with
+/// workspace cookies under the same preview domain.
+pub fn build_set_cookie_sandbox(
+    public_id_suffix: &str,
+    cookie_value: &str,
+    preview_domain: &str,
+    secure: bool,
+) -> String {
+    build_set_cookie_raw(
+        &format!("{PREVIEW_SANDBOX_COOKIE_PREFIX}{public_id_suffix}"),
+        cookie_value,
+        preview_domain,
+        secure,
+    )
+}
+
+fn build_set_cookie_raw(
+    cookie_name: &str,
     cookie_value: &str,
     preview_domain: &str,
     secure: bool,
@@ -273,7 +345,7 @@ pub fn build_set_cookie(
     let secure_attr = if secure { "; Secure" } else { "" };
     let ttl = PREVIEW_COOKIE_TTL.as_secs();
     format!(
-        "{PREVIEW_COOKIE_PREFIX}{session_id}={cookie_value}; Domain=.{domain}; Path=/; HttpOnly{secure_attr}; SameSite=Lax; Max-Age={ttl}"
+        "{cookie_name}={cookie_value}; Domain=.{domain}; Path=/; HttpOnly{secure_attr}; SameSite=Lax; Max-Age={ttl}"
     )
 }
 
@@ -419,14 +491,32 @@ pub async fn lookup_preview_session(
     }
 }
 
-/// Confirm a sandbox with the given 16-hex public_id suffix exists and is
-/// in a state where preview traffic makes sense (i.e. not destroyed).
+/// Outcome of looking up a sandbox for preview auth. Distinguishes the
+/// three states that drive routing here: doesn't exist, exists with no
+/// password (URL-only), exists with a configured password.
+#[derive(Debug)]
+pub enum PreviewSandboxLookup {
+    /// Sandbox exists and is live, with a password configured. The
+    /// gateway should require a valid cookie or redirect to login.
+    Protected { password_hash: String },
+    /// Sandbox exists and is live but has no password — the unguessable
+    /// hex public_id is the only gate. Forward traffic directly.
+    Open,
+    /// Sandbox does not exist (or is destroyed).
+    NotFound,
+}
+
+/// Load a sandbox's existence and preview password hash. The result drives
+/// three-way routing in `check_preview_auth`: missing → 404, unprotected →
+/// Allow, protected → require cookie/login.
 ///
-/// Returns true iff the sandbox row exists and `status != "destroyed"`. The
-/// check is intentionally liberal — `"stopped"` (paused) sandboxes still
-/// resolve so the gateway can surface a 502 from the dev-server side rather
-/// than a 404 from the auth side, which matches what workspace sessions do.
-pub async fn lookup_sandbox(db: &Arc<DbConnection>, public_id_suffix: &str) -> bool {
+/// `"stopped"` (paused) sandboxes still resolve so the gateway can surface
+/// a 502 from the dev-server side rather than a 404 from the auth side —
+/// same liberality as workspace sessions.
+pub async fn lookup_sandbox(
+    db: &Arc<DbConnection>,
+    public_id_suffix: &str,
+) -> PreviewSandboxLookup {
     use sea_orm::{ColumnTrait, QueryFilter};
     use temps_entities::sandboxes;
 
@@ -437,13 +527,19 @@ pub async fn lookup_sandbox(db: &Arc<DbConnection>, public_id_suffix: &str) -> b
         .one(db.as_ref())
         .await
     {
-        Ok(Some(row)) => row.status != "destroyed",
+        Ok(Some(row)) if row.status == "destroyed" => PreviewSandboxLookup::NotFound,
+        Ok(Some(row)) => match row.preview_password_hash {
+            Some(hash) => PreviewSandboxLookup::Protected {
+                password_hash: hash,
+            },
+            None => PreviewSandboxLookup::Open,
+        },
         Ok(None) => {
             debug!(
                 public_id = %full_public_id,
                 "preview-auth: sandbox not found"
             );
-            false
+            PreviewSandboxLookup::NotFound
         }
         Err(e) => {
             warn!(
@@ -451,7 +547,7 @@ pub async fn lookup_sandbox(db: &Arc<DbConnection>, public_id_suffix: &str) -> b
                 error = %e,
                 "preview-auth: failed to load sandbox"
             );
-            false
+            PreviewSandboxLookup::NotFound
         }
     }
 }
@@ -475,39 +571,54 @@ pub async fn check_preview_auth(
     client_ip: IpAddr,
     cookie_header: Option<&str>,
 ) -> PreviewAuthOutcome {
-    // Standalone sandboxes bypass the password wall — their security model
-    // is the unguessable 16-hex public_id plus the preview-gateway shared
-    // secret. Only check existence so we can return a clean NotFound for
-    // typo'd URLs instead of letting the gateway 502.
-    if let PreviewTarget::Sandbox(hex) = &host.target {
-        if lookup_sandbox(db, hex).await {
-            return PreviewAuthOutcome::Allow { host };
+    // Three-way routing depends on target:
+    //   - Sandbox + no password → Allow (unguessable hex is the only gate)
+    //   - Sandbox + password     → cookie-gate like workspaces
+    //   - Sandbox not found      → NotFound
+    //   - Workspace              → existing session gate below
+    let (subject, stored_hash, cookie_name) = match &host.target {
+        PreviewTarget::Sandbox(hex) => match lookup_sandbox(db, hex).await {
+            PreviewSandboxLookup::NotFound => {
+                return PreviewAuthOutcome::NotFound { host };
+            }
+            PreviewSandboxLookup::Open => {
+                return PreviewAuthOutcome::Allow { host };
+            }
+            PreviewSandboxLookup::Protected { password_hash } => {
+                let rate_key = host.target.rate_limit_key();
+                if limiter.is_blocked(client_ip, rate_key) {
+                    return PreviewAuthOutcome::RateLimited { host };
+                }
+                let cookie_name = format!("{}{}", PREVIEW_SANDBOX_COOKIE_PREFIX, hex);
+                (format!("sbx_{}", hex), password_hash, cookie_name)
+            }
+        },
+        PreviewTarget::WorkspaceSession(id) => {
+            let session_id = *id;
+            if limiter.is_blocked(client_ip, session_id) {
+                return PreviewAuthOutcome::RateLimited { host };
+            }
+            let stored_hash = match lookup_preview_session(db, session_id).await {
+                PreviewSessionLookup::Found { password_hash } => password_hash,
+                PreviewSessionLookup::NotFound => {
+                    return PreviewAuthOutcome::NotFound { host };
+                }
+            };
+            let cookie_name = format!("{}{}", PREVIEW_COOKIE_PREFIX, session_id);
+            (session_id.to_string(), stored_hash, cookie_name)
         }
-        return PreviewAuthOutcome::NotFound { host };
-    }
-
-    let session_id = match host.target {
-        PreviewTarget::WorkspaceSession(id) => id,
-        // Unreachable — the sandbox arm returns above. Keeps the match
-        // exhaustive without adding a catch-all that would drop future
-        // variants silently.
-        PreviewTarget::Sandbox(_) => unreachable!(),
     };
 
-    if limiter.is_blocked(client_ip, session_id) {
-        return PreviewAuthOutcome::RateLimited { host };
-    }
-
-    let stored_hash = match lookup_preview_session(db, session_id).await {
-        PreviewSessionLookup::Found { password_hash } => password_hash,
-        PreviewSessionLookup::NotFound => return PreviewAuthOutcome::NotFound { host },
-    };
-
-    let cookie_name = format!("{}{}", PREVIEW_COOKIE_PREFIX, session_id);
     if let Some(header) = cookie_header {
         if let Some(value) = extract_cookie(header, &cookie_name) {
-            if verify_preview_cookie(crypto, value, session_id, &stored_hash, SystemTime::now()) {
-                limiter.record_success(client_ip, session_id);
+            if verify_preview_cookie_subject(
+                crypto,
+                value,
+                &subject,
+                &stored_hash,
+                SystemTime::now(),
+            ) {
+                limiter.record_success(client_ip, host.target.rate_limit_key());
                 return PreviewAuthOutcome::Allow { host };
             }
         }

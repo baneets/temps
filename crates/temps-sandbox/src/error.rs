@@ -69,6 +69,12 @@ pub enum SandboxError {
     #[error("Sandbox subsystem unavailable: {reason}")]
     Unavailable { reason: String },
 
+    /// Hashing the preview password failed. Argon2 returns errors only for
+    /// catastrophic platform issues (OS RNG failure etc.), so this maps to
+    /// HTTP 500.
+    #[error("Failed to hash preview password for sandbox {sandbox_id}: {reason}")]
+    PasswordHashFailed { sandbox_id: String, reason: String },
+
     #[error("Database error: {0}")]
     Database(#[from] sea_orm::DbErr),
 

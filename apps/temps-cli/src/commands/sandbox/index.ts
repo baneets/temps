@@ -27,6 +27,11 @@ interface SandboxResponse {
   work_dir: string
   created_at: string
   expires_at: string
+  preview_password_hint?: string | null
+}
+
+interface SetPreviewPasswordResponse {
+  preview_password_hint: string
 }
 
 interface ListSandboxesResponse {
@@ -149,6 +154,31 @@ function statusColor(status: string): string {
   return status
 }
 
+/**
+ * Generate a URL-safe preview password on the client. Uses
+ * `crypto.getRandomValues` over a 64-symbol alphabet, so each character
+ * carries 6 bits of entropy — 24 chars gives ~144 bits, comfortably past
+ * brute-force range. Kept in sync with `web/src/components/sandboxes/
+ * SandboxPreviewPasswordCard.tsx` so UI + CLI produce the same shape.
+ *
+ * Clamped to the server's [8, 256] range to surface typos early instead
+ * of as a 400 round-trip.
+ */
+function generatePassword(length = 24): string {
+  if (length < 8 || length > 256) {
+    throw new Error('Password length must be between 8 and 256 characters')
+  }
+  const alphabet =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+  const buf = new Uint8Array(length)
+  crypto.getRandomValues(buf)
+  let out = ''
+  for (let i = 0; i < length; i++) {
+    out += alphabet[buf[i]! % alphabet.length]
+  }
+  return out
+}
+
 function base64Encode(bytes: Uint8Array): string {
   // Bun/Node both support Buffer.
   return Buffer.from(bytes).toString('base64')
@@ -188,6 +218,14 @@ export function registerSandboxCommands(program: Command): void {
     .option('--git-username <user>', 'HTTP Basic username for private repo clone (requires --git-password)')
     .option('--git-password <token>', 'HTTP Basic password/token (paired with --git-username; injected via GIT_ASKPASS)')
     .option('--tarball-url <url>', 'Tarball URL to download and extract')
+    .option(
+      '--preview-password',
+      'Generate a random preview-URL password and print it once on stdout',
+    )
+    .option(
+      '--preview-password-length <n>',
+      'Length of the generated preview password (8..=256, default 24)',
+    )
     .option('--json', 'Output as JSON')
     .action(createAction)
 
@@ -278,6 +316,19 @@ export function registerSandboxCommands(program: Command): void {
     .requiredOption('--port <port>', 'Port inside the sandbox (1..=65535)')
     .action(domainAction)
 
+  sandbox
+    .command('password <id>')
+    .description(
+      'Generate, rotate, or clear the preview-URL password for a sandbox',
+    )
+    .option(
+      '--rotate',
+      'Generate a new random password and set it (default when no flag is given)',
+    )
+    .option('--length <n>', 'Length of the generated password (8..=256, default 24)')
+    .option('--clear', 'Remove the preview password — preview URLs become open again')
+    .action(passwordAction)
+
   // ── Filesystem subgroup ──
   const fs = sandbox.command('fs').description('Filesystem operations inside a sandbox')
 
@@ -323,6 +374,8 @@ interface CreateOptions {
   gitUsername?: string
   gitPassword?: string
   tarballUrl?: string
+  previewPassword?: boolean
+  previewPasswordLength?: string
   json?: boolean
 }
 
@@ -411,6 +464,22 @@ async function createAction(options: CreateOptions): Promise<void> {
   const source = buildSource(options)
   if (source) body.source = source
 
+  // Preview-password generation happens client-side so the plaintext
+  // exists only on this machine: the server stores just an argon2 hash
+  // and the 4-char hint. Printed once below — never retrievable later.
+  let generatedPassword: string | undefined
+  if (options.previewPassword) {
+    const len =
+      options.previewPasswordLength !== undefined
+        ? Number(options.previewPasswordLength)
+        : 24
+    if (!Number.isInteger(len)) {
+      throw new Error('--preview-password-length must be an integer')
+    }
+    generatedPassword = generatePassword(len)
+    body.preview_password = generatedPassword
+  }
+
   const sbx = await withSpinner('Creating sandbox...', () =>
     apiRequest<SandboxResponse>(api, '', {
       method: 'POST',
@@ -419,7 +488,10 @@ async function createAction(options: CreateOptions): Promise<void> {
   )
 
   if (options.json) {
-    json(sbx)
+    // In JSON mode the generated plaintext is part of the payload so
+    // scripts can capture it in one call. Caller is responsible for
+    // handling it safely.
+    json(generatedPassword ? { ...sbx, preview_password: generatedPassword } : sbx)
     return
   }
 
@@ -429,6 +501,82 @@ async function createAction(options: CreateOptions): Promise<void> {
   keyValue('Image', sbx.image ?? '(default)')
   keyValue('Work dir', sbx.work_dir)
   keyValue('Expires', sbx.expires_at)
+  if (generatedPassword) {
+    newline()
+    warning('Preview password (shown once — copy it now):')
+    console.log(`  ${colors.primary(generatedPassword)}`)
+    if (sbx.preview_password_hint) {
+      keyValue('Hint', `ends in …${sbx.preview_password_hint}`)
+    }
+  } else if (sbx.preview_password_hint) {
+    keyValue('Preview password', `ends in …${sbx.preview_password_hint}`)
+  }
+  newline()
+}
+
+interface PasswordOptions {
+  rotate?: boolean
+  length?: string
+  clear?: boolean
+}
+
+/**
+ * Rotate or clear a sandbox's preview-URL password. The CLI generates
+ * the new plaintext locally and sends it to
+ * `PUT /v1/sandbox/{id}/preview-password`; the server only ever sees —
+ * and persists — the argon2 hash plus the 4-char hint.
+ *
+ * The new password is printed exactly once. There is no retrieval path:
+ * rotating again replaces it, and losing it before it's copied means
+ * rotating a second time.
+ */
+async function passwordAction(
+  id: string,
+  options: PasswordOptions,
+): Promise<void> {
+  if (options.clear && (options.rotate || options.length)) {
+    throw new Error('--clear is mutually exclusive with --rotate/--length')
+  }
+
+  const api = await auth()
+
+  if (options.clear) {
+    await withSpinner('Clearing preview password...', () =>
+      apiRequest<void>(
+        api,
+        `/${encodeURIComponent(id)}/preview-password`,
+        { method: 'DELETE' },
+      ),
+    )
+    success(`Preview password cleared for ${colors.primary(id)}`)
+    info('Preview URLs are now open — the sandbox ID is the only gate.')
+    return
+  }
+
+  // Default behavior when no flag is given: rotate. Matches what the
+  // command description says and avoids a silent no-op.
+  const len = options.length !== undefined ? Number(options.length) : 24
+  if (!Number.isInteger(len)) {
+    throw new Error('--length must be an integer')
+  }
+  const password = generatePassword(len)
+
+  const res = await withSpinner('Setting preview password...', () =>
+    apiRequest<SetPreviewPasswordResponse>(
+      api,
+      `/${encodeURIComponent(id)}/preview-password`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ password }),
+      },
+    ),
+  )
+
+  success(`Preview password set for ${colors.primary(id)}`)
+  newline()
+  warning('Preview password (shown once — copy it now):')
+  console.log(`  ${colors.primary(password)}`)
+  keyValue('Hint', `ends in …${res.preview_password_hint}`)
   newline()
 }
 
@@ -499,6 +647,9 @@ async function showAction(id: string, options: { json?: boolean }): Promise<void
   keyValue('Work dir', sbx.work_dir)
   keyValue('Created', sbx.created_at)
   keyValue('Expires', sbx.expires_at)
+  if (sbx.preview_password_hint) {
+    keyValue('Preview password', `ends in …${sbx.preview_password_hint}`)
+  }
   newline()
 }
 

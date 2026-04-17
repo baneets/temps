@@ -13,6 +13,7 @@ pub mod openapi;
 pub mod plugin;
 pub mod problemdetails;
 pub mod retry;
+pub mod tls;
 pub use problemdetails::ProblemDetails;
 mod app_settings;
 mod constants;

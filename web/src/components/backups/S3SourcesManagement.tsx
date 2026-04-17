@@ -27,14 +27,21 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import {
+  setDefaultS3Source,
+  testS3SourceConnection,
+} from '@/lib/s3-sources'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
+  CheckCircle2,
   Database,
   MoreHorizontal,
   Pencil,
+  PlugZap,
   Plus,
   RefreshCw,
+  Star,
   Trash2,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -199,6 +206,9 @@ export function S3SourcesManagement() {
   const [selectedSource, setSelectedSource] = useState<
     (Partial<NewS3Source> & { id?: number }) | null
   >(null)
+  const [pendingDefault, setPendingDefault] = useState<S3SourceResponse | null>(
+    null,
+  )
 
   const {
     data: sources = [],
@@ -210,6 +220,30 @@ export function S3SourcesManagement() {
       const { data } = await listS3Sources()
       return data
     },
+  })
+
+  const setDefaultMutation = useMutation({
+    mutationFn: (id: number) => setDefaultS3Source(id),
+    meta: { errorTitle: 'Failed to set default S3 source' },
+    onSuccess: () => {
+      toast.success('Default S3 source updated')
+      setPendingDefault(null)
+      refetch()
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const testConnectionMutation = useMutation({
+    mutationFn: (id: number) => testS3SourceConnection(id),
+    meta: { errorTitle: 'Failed to test S3 connection' },
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success(result.message || 'Connection successful')
+      } else {
+        toast.error(result.message || 'Connection failed')
+      }
+    },
+    onError: (e: Error) => toast.error(e.message),
   })
 
   const deleteMutation = useMutation({
@@ -323,6 +357,50 @@ export function S3SourcesManagement() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={pendingDefault !== null}
+        onOpenChange={(open) => !open && setPendingDefault(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Make this the default S3 source?</DialogTitle>
+          </DialogHeader>
+          {pendingDefault ? (
+            <div className="space-y-3 text-sm">
+              <p>
+                All future backups and WAL archives for services using the
+                default source will go to{' '}
+                <span className="font-medium">{pendingDefault.name}</span> (
+                <code>{pendingDefault.bucket_name}</code>).
+              </p>
+              <p className="text-muted-foreground">
+                Existing backup schedules keep their explicitly-configured
+                source. External services (like Postgres WAL archiving) that
+                track the default source will begin writing to the new
+                location on their next backup.
+              </p>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setPendingDefault(null)}
+              disabled={setDefaultMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() =>
+                pendingDefault && setDefaultMutation.mutate(pendingDefault.id)
+              }
+              disabled={setDefaultMutation.isPending}
+            >
+              {setDefaultMutation.isPending ? 'Updating...' : 'Set as default'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Card>
         <div className="p-4">
           {isLoading ? (
@@ -354,59 +432,102 @@ export function S3SourcesManagement() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sources.map((source) => (
-                  <TableRow key={source.id}>
-                    <TableCell>
-                      <Link
-                        to={`/settings/backups/s3-sources/${source.id}`}
-                        className="font-medium hover:underline"
-                      >
-                        {source.name}
-                      </Link>
-                    </TableCell>
-                    <TableCell>{source.bucket_name}</TableCell>
-                    <TableCell>{source.region}</TableCell>
-                    <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon">
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={() => handleEditSource(source)}
+                {sources.map((source) => {
+                  const isDefault =
+                    (source as S3SourceResponse & { is_default?: boolean })
+                      .is_default === true
+                  const isTestingThis =
+                    testConnectionMutation.isPending &&
+                    testConnectionMutation.variables === source.id
+                  return (
+                    <TableRow key={source.id}>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <Link
+                            to={`/settings/backups/s3-sources/${source.id}`}
+                            className="font-medium hover:underline"
                           >
-                            <Pencil className="mr-2 h-4 w-4" />
-                            Edit
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            onClick={() => handleRunBackup(source.id)}
-                            disabled={runBackupMutation.isPending}
-                          >
-                            <RefreshCw
-                              className={cn('mr-2 h-4 w-4', {
-                                'animate-spin': runBackupMutation.isPending,
-                              })}
-                            />
-                            {runBackupMutation.isPending
-                              ? 'Starting...'
-                              : 'Run Now'}
-                          </DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            onClick={() => handleDeleteSource(source.id)}
-                            className="text-destructive"
-                            disabled={deleteMutation.isPending}
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                            {source.name}
+                          </Link>
+                          {isDefault ? (
+                            <span
+                              title="Default source — used by backups and external services when no source is specified"
+                              className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200"
+                            >
+                              <Star className="h-3 w-3 fill-current" />
+                              Default
+                            </span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell>{source.bucket_name}</TableCell>
+                      <TableCell>{source.region}</TableCell>
+                      <TableCell>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon">
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={() => handleEditSource(source)}
+                            >
+                              <Pencil className="mr-2 h-4 w-4" />
+                              Edit
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() =>
+                                testConnectionMutation.mutate(source.id)
+                              }
+                              disabled={testConnectionMutation.isPending}
+                            >
+                              {isTestingThis ? (
+                                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                              ) : (
+                                <PlugZap className="mr-2 h-4 w-4" />
+                              )}
+                              {isTestingThis
+                                ? 'Testing...'
+                                : 'Test connection'}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => handleRunBackup(source.id)}
+                              disabled={runBackupMutation.isPending}
+                            >
+                              <RefreshCw
+                                className={cn('mr-2 h-4 w-4', {
+                                  'animate-spin':
+                                    runBackupMutation.isPending,
+                                })}
+                              />
+                              {runBackupMutation.isPending
+                                ? 'Starting...'
+                                : 'Run Now'}
+                            </DropdownMenuItem>
+                            {!isDefault ? (
+                              <DropdownMenuItem
+                                onClick={() => setPendingDefault(source)}
+                              >
+                                <CheckCircle2 className="mr-2 h-4 w-4" />
+                                Set as default
+                              </DropdownMenuItem>
+                            ) : null}
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={() => handleDeleteSource(source.id)}
+                              className="text-destructive"
+                              disabled={deleteMutation.isPending}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
               </TableBody>
             </Table>
           )}

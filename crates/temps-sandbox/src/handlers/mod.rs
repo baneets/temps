@@ -53,6 +53,8 @@ pub struct SandboxAppState {
         sandboxes::stat_path,
         sandboxes::mkdir,
         sandboxes::domain,
+        sandboxes::set_preview_password,
+        sandboxes::clear_preview_password,
     ),
     components(schemas(
         sandboxes::CreateSandboxBody,
@@ -74,6 +76,8 @@ pub struct SandboxAppState {
         sandboxes::MkdirBody,
         sandboxes::StatResponse,
         sandboxes::DomainResponse,
+        sandboxes::SetPreviewPasswordBody,
+        sandboxes::SetPreviewPasswordResponse,
     )),
     tags(
         (name = "Sandboxes", description = "Standalone sandbox API (`/v1/sandbox/*`) for running isolated containers.")
@@ -122,6 +126,7 @@ mod tests {
             "/v1/sandbox/{id}/fs/stat",
             "/v1/sandbox/{id}/fs/mkdir",
             "/v1/sandbox/{id}/domain",
+            "/v1/sandbox/{id}/preview-password",
         ] {
             assert!(
                 paths.contains_key(expected),

@@ -216,6 +216,7 @@ fn sandbox_response_has_sdk_field_names() {
         created_at: "2026-01-01T00:00:00Z".into(),
         expires_at: "2026-01-01T01:00:00Z".into(),
         preview_url_template: String::new(),
+        preview_password_hint: None,
     };
     let v = serde_json::to_value(&r).expect("serializes");
     for field in [

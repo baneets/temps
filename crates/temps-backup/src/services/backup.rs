@@ -5,8 +5,8 @@ use aws_sdk_s3::{Client as S3Client, Config};
 use chrono::{DateTime, Duration, Timelike, Utc};
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde_json::json;
 use serde_yaml;
@@ -30,6 +30,20 @@ use tokio_stream::StreamExt;
 /// embedded single quotes. Safe for use in `sh -c` command strings.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Build a normalized S3 object key from a bucket_path prefix and a relative
+/// suffix. Keys must NEVER start with "/" — S3-compatible providers (MinIO, R2,
+/// Backblaze B2) reject leading-slash keys as `InvalidArgument`. When the
+/// configured `bucket_path` is empty or just "/", the prefix is dropped.
+fn build_s3_key(bucket_path: &str, suffix: &str) -> String {
+    let prefix = bucket_path.trim_matches('/');
+    let suffix = suffix.trim_start_matches('/');
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{}/{}", prefix, suffix)
+    }
 }
 
 #[derive(Error, Debug)]
@@ -267,11 +281,13 @@ impl BackupService {
                         ));
                     }
 
-                    let s3_location = format!(
-                        "{}/backups/{}/{}/backup.sql.gz",
-                        s3_source.bucket_path.trim_matches('/'),
-                        Utc::now().format("%Y/%m/%d"),
-                        backup_id
+                    let s3_location = build_s3_key(
+                        &s3_source.bucket_path,
+                        &format!(
+                            "backups/{}/{}/backup.sql.gz",
+                            Utc::now().format("%Y/%m/%d"),
+                            backup_id
+                        ),
                     );
 
                     self.upload_backup(&s3_client, &s3_source, &temp_file, &s3_location)
@@ -375,11 +391,13 @@ impl BackupService {
 
         // After successful backup upload, create and upload metadata file
         let metadata = self.generate_backup_metadata(&backup, &s3_source, &external_backups);
-        let metadata_key = format!(
-            "{}/backups/{}/{}/metadata.json",
-            s3_source.bucket_path.trim_matches('/'),
-            Utc::now().format("%Y/%m/%d"),
-            backup_id
+        let metadata_key = build_s3_key(
+            &s3_source.bucket_path,
+            &format!(
+                "backups/{}/{}/metadata.json",
+                Utc::now().format("%Y/%m/%d"),
+                backup_id
+            ),
         );
 
         // Upload metadata file
@@ -2979,6 +2997,29 @@ impl BackupService {
                 message: format!("Failed to encrypt secret key: {}", e),
             })?;
 
+        // First source is automatically default; subsequent sources require an explicit
+        // set-default call. An explicit `is_default: true` in the request is honored and
+        // will swap default atomically.
+        let existing_count = temps_entities::s3_sources::Entity::find()
+            .count(self.db.as_ref())
+            .await?;
+        let explicit_default = request.is_default.unwrap_or(false);
+        let should_be_default = existing_count == 0 || explicit_default;
+
+        let txn = self.db.begin().await?;
+
+        if should_be_default && existing_count > 0 {
+            // Clear existing default before inserting new default
+            temps_entities::s3_sources::Entity::update_many()
+                .col_expr(
+                    temps_entities::s3_sources::Column::IsDefault,
+                    sea_orm::sea_query::Expr::value(false),
+                )
+                .filter(temps_entities::s3_sources::Column::IsDefault.eq(true))
+                .exec(&txn)
+                .await?;
+        }
+
         let new_source = temps_entities::s3_sources::ActiveModel {
             id: sea_orm::NotSet,
             name: sea_orm::Set(request.name.clone()),
@@ -2991,11 +3032,143 @@ impl BackupService {
             updated_at: sea_orm::Set(Utc::now()),
             endpoint: sea_orm::Set(request.endpoint),
             force_path_style: sea_orm::Set(request.force_path_style),
+            is_default: sea_orm::Set(should_be_default),
         };
 
-        let source = new_source.insert(self.db.as_ref()).await?;
+        let source = new_source.insert(&txn).await?;
+        txn.commit().await?;
 
-        debug!("Created new S3 source: {}", source.name);
+        debug!(
+            "Created new S3 source: {} (is_default={})",
+            source.name, source.is_default
+        );
+        Ok(source)
+    }
+
+    /// Test an S3 connection using stored (encrypted) credentials for an existing source.
+    /// Returns `Ok(())` on success, or `BackupError::S3` with user-friendly guidance on failure.
+    pub async fn test_s3_source_connection(&self, id: i32) -> Result<(), BackupError> {
+        let source = self.get_s3_source(id).await?;
+        let client = self
+            .create_s3_client(&source)
+            .await
+            .map_err(|e| BackupError::Internal {
+                message: format!("Failed to build S3 client for source {}: {}", id, e),
+            })?;
+
+        match client
+            .list_objects_v2()
+            .bucket(&source.bucket_name)
+            .max_keys(1)
+            .send()
+            .await
+        {
+            Ok(_) => {
+                debug!(
+                    "S3 connection test succeeded for source {} (bucket {})",
+                    id, source.bucket_name
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let error_msg = self.parse_s3_error(&e, &source.bucket_name, "access");
+                Err(BackupError::S3(error_msg))
+            }
+        }
+    }
+
+    /// Test an S3 connection using credentials from a prospective request (before persistence).
+    /// Does NOT create the bucket — only attempts a list to verify access.
+    pub async fn test_s3_connection_from_request(
+        &self,
+        request: &CreateS3SourceRequest,
+    ) -> Result<(), BackupError> {
+        if request.access_key_id.is_empty() || request.secret_key.is_empty() {
+            return Err(BackupError::Validation(
+                "Access key and secret key are required to test connection".into(),
+            ));
+        }
+
+        let client = self.create_s3_client_from_request(request).await?;
+        match client
+            .list_objects_v2()
+            .bucket(&request.bucket_name)
+            .max_keys(1)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let error_code = e
+                    .as_service_error()
+                    .and_then(|se| se.code())
+                    .map(|s| s.to_string());
+
+                // NoSuchBucket is not a hard failure — credentials are valid, bucket is
+                // just missing (would be auto-created on actual source creation).
+                if error_code.as_deref() == Some("NoSuchBucket") {
+                    debug!(
+                        "S3 connection test: credentials valid, bucket '{}' does not yet exist",
+                        request.bucket_name
+                    );
+                    Ok(())
+                } else {
+                    let error_msg = self.parse_s3_error(&e, &request.bucket_name, "access");
+                    Err(BackupError::S3(error_msg))
+                }
+            }
+        }
+    }
+
+    /// Atomically make the given source the default. All other sources will be set to
+    /// is_default=false in the same transaction.
+    pub async fn set_default_s3_source(
+        &self,
+        id: i32,
+    ) -> Result<temps_entities::s3_sources::Model, BackupError> {
+        // Verify target exists
+        self.get_s3_source(id).await?;
+
+        let txn = self.db.begin().await?;
+
+        temps_entities::s3_sources::Entity::update_many()
+            .col_expr(
+                temps_entities::s3_sources::Column::IsDefault,
+                sea_orm::sea_query::Expr::value(false),
+            )
+            .filter(temps_entities::s3_sources::Column::IsDefault.eq(true))
+            .filter(temps_entities::s3_sources::Column::Id.ne(id))
+            .exec(&txn)
+            .await?;
+
+        temps_entities::s3_sources::Entity::update_many()
+            .col_expr(
+                temps_entities::s3_sources::Column::IsDefault,
+                sea_orm::sea_query::Expr::value(true),
+            )
+            .col_expr(
+                temps_entities::s3_sources::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(Utc::now()),
+            )
+            .filter(temps_entities::s3_sources::Column::Id.eq(id))
+            .exec(&txn)
+            .await?;
+
+        txn.commit().await?;
+
+        let updated = self.get_s3_source(id).await?;
+        info!("S3 source {} is now the default", updated.name);
+        Ok(updated)
+    }
+
+    /// Return the currently-default S3 source, if any.
+    pub async fn get_default_s3_source(
+        &self,
+    ) -> Result<Option<temps_entities::s3_sources::Model>, BackupError> {
+        let source = temps_entities::s3_sources::Entity::find()
+            .filter(temps_entities::s3_sources::Column::IsDefault.eq(true))
+            .one(self.db.as_ref())
+            .await?;
         Ok(source)
     }
 
@@ -3019,6 +3192,34 @@ impl BackupService {
     pub async fn delete_s3_source(&self, id: i32) -> Result<bool, BackupError> {
         // First check if source exists and is not in use
         let source = self.get_s3_source(id).await?;
+
+        // Refuse to delete the default source while other sources exist. The caller
+        // should set a different source as default first.
+        if source.is_default {
+            let other_count = temps_entities::s3_sources::Entity::find()
+                .filter(temps_entities::s3_sources::Column::Id.ne(id))
+                .count(self.db.as_ref())
+                .await?;
+            if other_count > 0 {
+                return Err(BackupError::Validation(format!(
+                    "S3 source '{}' is the default. Set a different source as default before deleting.",
+                    source.name
+                )));
+            }
+        }
+
+        // Refuse to delete if any backup schedule still references this source.
+        let schedule_count = temps_entities::backup_schedules::Entity::find()
+            .filter(temps_entities::backup_schedules::Column::S3SourceId.eq(id))
+            .count(self.db.as_ref())
+            .await?;
+        if schedule_count > 0 {
+            return Err(BackupError::Validation(format!(
+                "Cannot delete S3 source '{}': still referenced by {} backup schedule(s)",
+                source.name, schedule_count
+            )));
+        }
+
         let result = temps_entities::s3_sources::Entity::delete_by_id(id)
             .exec(self.db.as_ref())
             .await?;
@@ -3046,13 +3247,16 @@ impl BackupService {
     ) -> Result<BackupSchedule, BackupError> {
         use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 
+        // Resolve S3 source: explicit id OR fall back to the default source.
+        let s3_source_id = self.resolve_s3_source_id(request.s3_source_id).await?;
+
         // Verify S3 source exists
-        temps_entities::s3_sources::Entity::find_by_id(request.s3_source_id)
+        temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
             .one(self.db.as_ref())
             .await?
             .ok_or_else(|| BackupError::NotFound {
                 resource: "S3Source".to_string(),
-                detail: "S3 source not found".to_string(),
+                detail: format!("S3 source {} not found", s3_source_id),
             })?;
 
         // Validate the schedule expression
@@ -3071,7 +3275,7 @@ impl BackupService {
             name: Set(request.name.clone()),
             backup_type: Set(request.backup_type.clone()),
             retention_period: Set(request.retention_period),
-            s3_source_id: Set(request.s3_source_id),
+            s3_source_id: Set(s3_source_id),
             schedule_expression: Set(request.schedule_expression.clone()),
             enabled: Set(request.enabled),
             created_at: Set(now),
@@ -3085,6 +3289,24 @@ impl BackupService {
         let schedule_model = new_schedule.insert(self.db.as_ref()).await?;
         info!("Created new backup schedule: {}", schedule_model.name);
         Ok(schedule_model)
+    }
+
+    /// Resolve an optional `s3_source_id` into a concrete ID. If `Some`, returns it
+    /// as-is (caller still validates existence). If `None`, returns the current default
+    /// source. Returns `Validation` if no default has been configured.
+    pub async fn resolve_s3_source_id(&self, requested: Option<i32>) -> Result<i32, BackupError> {
+        if let Some(id) = requested {
+            return Ok(id);
+        }
+
+        match self.get_default_s3_source().await? {
+            Some(source) => Ok(source.id),
+            None => Err(BackupError::Validation(
+                "No S3 source specified and no default S3 source is configured. \
+                 Create an S3 source or mark one as default first."
+                    .to_string(),
+            )),
+        }
     }
 
     /// Get a backup schedule by ID
@@ -3311,10 +3533,7 @@ impl BackupService {
         s3_source: &temps_entities::s3_sources::Model,
         backup: &Backup,
     ) -> Result<()> {
-        let index_key = format!(
-            "{}/backups/index.json",
-            s3_source.bucket_path.trim_matches('/')
-        );
+        let index_key = build_s3_key(&s3_source.bucket_path, "backups/index.json");
 
         // Try to get existing index
         let mut index = match s3_client
@@ -3386,10 +3605,7 @@ impl BackupService {
         let s3_client = self.create_s3_client(&s3_source).await?;
 
         // Read index.json from the source
-        let key = format!(
-            "{}/backups/index.json",
-            s3_source.bucket_path.trim_matches('/')
-        );
+        let key = build_s3_key(&s3_source.bucket_path, "backups/index.json");
 
         let resp = s3_client
             .get_object()
@@ -3897,6 +4113,46 @@ impl BackupService {
     }
 }
 
+/// Implementation of the pre-upgrade backup provider required by the
+/// postgres major-upgrade orchestrator. Lives here (not in temps-providers)
+/// because temps-backup owns `BackupService` and already depends on
+/// temps-providers — the trait is defined in temps-providers specifically
+/// to keep the dep flow one-way.
+#[async_trait::async_trait]
+impl temps_providers::externalsvc::postgres_upgrade::PreUpgradeBackupProvider for BackupService {
+    async fn default_s3_source_id(&self, _service_id: i32) -> Result<Option<i32>, String> {
+        // Default S3 source is user-scoped (global for now). Look up the
+        // single row flagged is_default=true; return None if none set so
+        // the orchestrator raises NoDefaultS3Source.
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let row = temps_entities::s3_sources::Entity::find()
+            .filter(temps_entities::s3_sources::Column::IsDefault.eq(true))
+            .one(self.db.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|r| r.id))
+    }
+
+    async fn create_pre_upgrade_backup(
+        &self,
+        service_id: i32,
+        s3_source_id: i32,
+        created_by: i32,
+    ) -> Result<i32, String> {
+        let backup = self
+            .create_backup(None, s3_source_id, "full", created_by)
+            .await
+            .map_err(|e| e.to_string())?;
+        // `create_backup` returns a `temps_entities::backups::Model`; the
+        // service-level backup id for external_services is surfaced via
+        // `external_service_backups`. For the upgrade row we record the
+        // `backups.id` itself (migration FK targets `backups(id)`), so we
+        // need the numeric id — which the model exposes directly.
+        let _ = service_id; // reserved for future: scope the search to this service
+        Ok(backup.id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3999,6 +4255,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             force_path_style: Some(true),
+            is_default: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -4127,6 +4384,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             force_path_style: Some(true),
+            is_default: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -4163,6 +4421,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         let result = backup_service.create_s3_source(request).await;
@@ -4198,6 +4457,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         let result = backup_service.create_s3_source(request).await;
@@ -4409,6 +4669,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some(minio_endpoint.clone()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         let s3_source = backup_service
@@ -4421,7 +4682,7 @@ mod tests {
             name: "test-schedule".to_string(),
             backup_type: "full".to_string(),
             retention_period: 7,
-            s3_source_id: s3_source.id,
+            s3_source_id: Some(s3_source.id),
             schedule_expression: "0 0 2 * * *".to_string(), // Daily at 2 AM
             enabled: true,
             description: Some("Test backup schedule".to_string()),
@@ -4718,6 +4979,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some(minio_endpoint.clone()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         let s3_source = source_backup_service
@@ -4784,6 +5046,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some(minio_endpoint.clone()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         let target_s3_source = target_backup_service
@@ -4791,8 +5054,11 @@ mod tests {
             .await
             .expect("Failed to create S3 source in target database");
 
-        // Create a user in the target database to satisfy foreign key constraint
+        // Create a user in the target database to satisfy foreign key constraint.
+        // Use an explicit high ID so the dump's COPY (which uses id=1 for the source's
+        // first user) doesn't collide with this row when restoring into the target.
         let target_user = users::ActiveModel {
+            id: Set(999_999),
             name: Set("Target User".to_string()),
             email: Set("target@example.com".to_string()),
             password_hash: Set(Some("target_hash".to_string())),
@@ -4977,6 +5243,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         let result = backup_service.create_s3_client_from_request(&request).await;
@@ -5013,6 +5280,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             force_path_style: Some(true),
+            is_default: None,
         };
 
         // This test requires a real MinIO instance running
@@ -5059,6 +5327,7 @@ mod tests {
             region: "us-east-1".to_string(),
             endpoint: None,
             force_path_style: None,
+            is_default: None,
         };
 
         let result = backup_service.create_s3_source(invalid_request).await;

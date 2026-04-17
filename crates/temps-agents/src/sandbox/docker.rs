@@ -638,11 +638,24 @@ impl DockerSandboxProvider {
         format!("{}{}", SANDBOX_NAME_PREFIX, run_id)
     }
 
-    /// Shared recovery by absolute container name — looks up the container,
-    /// returns a handle if it's running, cleans up if it exists but is
-    /// stopped. Used by both `recover(run_id)` (numeric naming for agent
-    /// runs / workspace sessions) and `recover_by_name(id)` (public_id
-    /// naming for standalone sandboxes).
+    /// Shared recovery by absolute container name — looks up the container
+    /// and returns a handle for it regardless of whether it's currently
+    /// running or stopped. Only returns `None` when the container has been
+    /// removed at the Docker level.
+    ///
+    /// IMPORTANT: this function must never delete a container. Stopped is a
+    /// legitimate long-lived state for standalone sandboxes — the
+    /// expiration sweeper parks expired sandboxes there, and the user
+    /// resumes them later. An earlier version of this function auto-removed
+    /// stopped containers on the assumption that "stopped" meant "leaked
+    /// leftover"; that destroyed sandbox filesystems + volumes on every
+    /// server restart that happened between stop and resume. Callers who
+    /// genuinely want to destroy must go through the explicit `destroy`
+    /// path, which is the only code that should call `remove_container`.
+    ///
+    /// Used by both `recover(run_id)` (numeric naming for agent runs /
+    /// workspace sessions) and `recover_by_name(id)` (public_id naming for
+    /// standalone sandboxes).
     async fn recover_container(
         &self,
         container_name: &str,
@@ -658,28 +671,12 @@ impl DockerSandboxProvider {
             Ok(info) => {
                 let running = info.state.as_ref().and_then(|s| s.running).unwrap_or(false);
                 let container_id = info.id.unwrap_or_default();
-
-                if running {
-                    tracing::info!("Recovered running sandbox {}", container_name);
-                    Ok(Some(SandboxHandle {
-                        sandbox_id: container_id,
-                        sandbox_name: container_name.to_string(),
-                        work_dir: PathBuf::from(CONTAINER_WORK_DIR),
-                    }))
-                } else {
-                    tracing::info!("Found stopped sandbox {}, removing", container_name);
-                    let _ = self
-                        .docker
-                        .remove_container(
-                            container_name,
-                            Some(bollard::query_parameters::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
-                        )
-                        .await;
-                    Ok(None)
-                }
+                tracing::info!("Recovered sandbox {} (running={})", container_name, running);
+                Ok(Some(SandboxHandle {
+                    sandbox_id: container_id,
+                    sandbox_name: container_name.to_string(),
+                    work_dir: PathBuf::from(CONTAINER_WORK_DIR),
+                }))
             }
             Err(_) => Ok(None),
         }
@@ -2389,6 +2386,140 @@ mod tests {
 
         // Cleanup
         provider.destroy(&handle, true).await.unwrap();
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// Regression test for the "stopped container auto-removed on
+    /// recovery" bug. The earlier `recover_container` force-removed any
+    /// container it found in stopped state, destroying the filesystem +
+    /// volumes of any expired sandbox the user hadn't resumed yet.
+    ///
+    /// Invariant this pins down: after `stop` + `recover_by_name`, the
+    /// container must still exist in Docker, a handle must be returned,
+    /// and a subsequent `start` must succeed. If this test starts failing,
+    /// the sandbox fleet is silently losing user data on every server
+    /// restart that happens between stop and resume — fix the registry
+    /// or provider, not the test.
+    #[tokio::test]
+    async fn recover_by_name_preserves_stopped_containers() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Docker not available, skipping recovery regression test");
+                return;
+            }
+        };
+        let docker = Arc::new(docker);
+        if docker.ping().await.is_err() {
+            println!("Docker not responding, skipping recovery regression test");
+            return;
+        }
+
+        // If `temps serve` is running it will clean up any container whose
+        // run_id isn't in its DB. That would kill this test. Skip to avoid
+        // flakes — same guard the kill_processes test uses.
+        let existing = docker
+            .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+                all: false,
+                filters: Some(HashMap::from([(
+                    "name".to_string(),
+                    vec!["temps-sandbox-".to_string()],
+                )])),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_default();
+        if !existing.is_empty() {
+            println!(
+                "temps serve is managing {} sandbox(es) — skipping recovery regression test",
+                existing.len()
+            );
+            return;
+        }
+
+        let provider = DockerSandboxProvider::new(docker.clone(), DockerSandboxConfig::default());
+        if provider.ensure_image().await.is_err() {
+            println!("Cannot build sandbox image, skipping recovery regression test");
+            return;
+        }
+
+        // Use a label-style name (what standalone sandboxes use) so we
+        // exercise exactly the recover_by_name path, not recover(run_id).
+        let label = "recover-test-abcdef";
+        let run_id = 99994;
+        let work_dir = std::env::temp_dir().join(format!("sandbox-recover-test-{}", run_id));
+        let _ = std::fs::create_dir_all(&work_dir);
+
+        let create_config = SandboxCreateConfig {
+            run_id,
+            container_name_override: Some(label.to_string()),
+            host_work_dir: work_dir.clone(),
+            image: None,
+            cpu_limit: Some(1.0),
+            memory_limit_mb: Some(256),
+            pids_limit: None,
+            network_mode: Some("none".to_string()),
+            env_vars: HashMap::new(),
+            idle_timeout: Duration::from_secs(60),
+        };
+
+        let handle = provider
+            .create(create_config)
+            .await
+            .expect("create sandbox");
+
+        // Stop the container — this is the state the expiration sweeper
+        // leaves a sandbox in when the user doesn't resume before expiry.
+        provider.stop(&handle).await.expect("stop container");
+
+        // Sanity check: docker still knows about the container.
+        let inspect = docker
+            .inspect_container(
+                &handle.sandbox_name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .expect("container still exists after stop");
+        let running = inspect.state.and_then(|s| s.running).unwrap_or(true);
+        assert!(!running, "container should be stopped, not running");
+
+        // NOW the recovery call the bug lived in. Previously this
+        // force-removed the stopped container and returned None. Post-fix
+        // it must return a handle and leave the container alone.
+        let recovered = provider
+            .recover_by_name(label)
+            .await
+            .expect("recover_by_name does not error")
+            .expect(
+                "recover_by_name must return a handle for stopped \
+                 containers — the old behavior silently deleted them, \
+                 losing user data on every server restart between stop \
+                 and resume",
+            );
+        assert_eq!(recovered.sandbox_name, handle.sandbox_name);
+
+        // Container is still there AND still stopped (recovery is read-only).
+        let inspect2 = docker
+            .inspect_container(
+                &handle.sandbox_name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .expect("container still exists after recovery");
+        assert!(
+            !inspect2.state.and_then(|s| s.running).unwrap_or(true),
+            "recovery must not start the container — that's the caller's job"
+        );
+
+        // And it's actually usable: we can start it back up via the
+        // recovered handle, which is exactly what resume_sandbox does.
+        provider
+            .start(&recovered)
+            .await
+            .expect("start using recovered handle");
+
+        // Cleanup (only place that should ever call remove_container).
+        provider.destroy(&recovered, true).await.unwrap();
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 }

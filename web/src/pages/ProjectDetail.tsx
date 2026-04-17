@@ -34,7 +34,6 @@ import { AlertRulesManagement } from '@/components/monitoring/AlertRulesManageme
 import { AlertRuleForm } from '@/pages/AlertRuleForm'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
-import { useAuth } from '@/contexts/AuthContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { DeploymentDetails } from '@/pages/DeploymentDetails'
 import { ErrorEventDetail } from './ErrorEventDetail'
@@ -67,7 +66,6 @@ import { toast } from 'sonner'
 export function ProjectDetail() {
   const { slug } = useParams()
   const { setBreadcrumbs } = useBreadcrumbs()
-  const { isDemoMode } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
 
   // Check for confetti query parameter
@@ -193,11 +191,6 @@ export function ProjectDetail() {
   ])
 
   usePageTitle(project?.slug ? `${project.slug}` : '')
-
-  // In demo mode, redirect to projects list if project not found or error occurs
-  if (isDemoMode && (error || (!isLoading && !project))) {
-    return <Navigate to="/projects" replace />
-  }
 
   if (error?.message?.includes('404') || (!isLoading && !project)) {
     return <NotFound />
@@ -329,9 +322,7 @@ export function ProjectDetail() {
             <Routes>
               <Route
                 index
-                element={
-                  <Navigate to={isDemoMode ? 'analytics' : 'project'} replace />
-                }
+                element={<Navigate to="project" replace />}
               />
               <Route
                 path="project"

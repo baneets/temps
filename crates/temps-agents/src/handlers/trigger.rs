@@ -63,6 +63,10 @@ impl AuditOperation for AgentRunTriggeredAudit {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
+// Note: the ephemeral CLI dry-run endpoint (`/projects/{id}/workflows/dry-run`)
+// lives in `handlers::workflows` — it owns its own routes, request type, and
+// audit struct.
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
@@ -142,6 +146,42 @@ async fn trigger_agent(
                 slug, project_id
             ),
         }));
+    }
+
+    // If the caller is linking the run to an error group, validate it here so
+    // they get a 400 synchronously. The executor also revalidates (and checks
+    // cross-project ownership) in `load_error_context`, but failing early
+    // surfaces the problem immediately in the HTTP response instead of in a
+    // background run that errors out mid-execution.
+    if request.trigger_source_type.as_deref() == Some("error_group") {
+        use sea_orm::EntityTrait;
+        let group_id = request.trigger_source_id.ok_or_else(|| {
+            Problem::from(AgentError::Validation {
+                message: "trigger_source_id is required when trigger_source_type is 'error_group'"
+                    .to_string(),
+            })
+        })?;
+        let group = temps_entities::error_groups::Entity::find_by_id(group_id)
+            .one(app_state.db.as_ref())
+            .await
+            .map_err(AgentError::Database)
+            .map_err(Problem::from)?
+            .ok_or_else(|| {
+                Problem::from(AgentError::Validation {
+                    message: format!(
+                        "Error group {} not found for project {}",
+                        group_id, project_id
+                    ),
+                })
+            })?;
+        if group.project_id != project_id {
+            return Err(Problem::from(AgentError::Validation {
+                message: format!(
+                    "Error group {} does not belong to project {}",
+                    group_id, project_id
+                ),
+            }));
+        }
     }
 
     // Create the run record with "pending" status

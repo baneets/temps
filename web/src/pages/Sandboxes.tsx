@@ -9,7 +9,6 @@ import {
   Box,
   ChevronDown,
   ExternalLink,
-  Loader2,
   Play,
   RefreshCw,
   RotateCw,
@@ -162,21 +161,16 @@ export default function Sandboxes() {
   })
 
   return (
-    <div className="container mx-auto py-6 space-y-5">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold flex items-center gap-2">
-            <Box className="h-7 w-7" />
-            Sandboxes
+    <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8 space-y-6">
+      {/* Page header — canonical pattern from DESIGN.md §4.4 */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Sandboxes</h1>
+          <p className="text-sm text-muted-foreground">
+            Standalone containers for one-off commands, tests, or agent work.
             {total > 0 && (
-              <span className="text-muted-foreground font-normal text-lg">
-                · {total}
-              </span>
+              <span className="ml-1 tabular-nums">· {total}</span>
             )}
-          </h1>
-          <p className="text-muted-foreground mt-2">
-            Standalone sandboxes ({'/v1/sandbox'}). Run isolated containers
-            for one-off commands, tests, or agent work.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -187,31 +181,59 @@ export default function Sandboxes() {
             disabled={isFetching}
           >
             <RefreshCw
-              className={`mr-2 h-4 w-4 ${isFetching ? 'animate-spin' : ''}`}
+              className={`mr-1.5 h-4 w-4 ${isFetching ? 'animate-spin' : ''}`}
             />
-            Refresh
+            <span className="hidden sm:inline">Refresh</span>
           </Button>
         </div>
       </div>
 
       {isLoading ? (
-        <div className="flex items-center justify-center py-16">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <div className="space-y-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardContent className="py-4 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex-1 space-y-2">
+                    <div className="h-5 w-48 rounded bg-muted animate-pulse" />
+                    <div className="h-3 w-32 rounded bg-muted animate-pulse" />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="h-8 w-20 rounded bg-muted animate-pulse" />
+                    <div className="h-8 w-20 rounded bg-muted animate-pulse" />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       ) : isError ? (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-destructive">
-            {(error as Error)?.message ?? 'Failed to load sandboxes'}
+          <CardContent className="py-12 text-center space-y-2">
+            <Box className="mx-auto h-8 w-8 text-destructive" />
+            <p className="text-sm font-medium">Failed to load sandboxes</p>
+            <p className="text-xs text-muted-foreground">
+              {(error as Error)?.message ?? 'Unknown error'}
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              className="mt-2"
+            >
+              <RefreshCw className="mr-1.5 h-4 w-4" />
+              Try again
+            </Button>
           </CardContent>
         </Card>
       ) : items.length === 0 ? (
         <Card>
           <CardContent className="py-16 text-center space-y-2">
             <Box className="mx-auto h-10 w-10 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">No sandboxes yet.</p>
+            <p className="text-sm font-medium">No sandboxes yet</p>
             <p className="text-xs text-muted-foreground">
-              Create one via the{' '}
-              <code className="font-mono">POST /v1/sandbox</code> API or the{' '}
+              Create one via{' '}
+              <code className="font-mono">POST /v1/sandbox</code> or the{' '}
               <code className="font-mono">temps sandbox</code> CLI.
             </p>
           </CardContent>
@@ -230,17 +252,17 @@ export default function Sandboxes() {
       )}
 
       {total > PAGE_SIZE && (
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-muted-foreground">
+        <div className="flex flex-col gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-muted-foreground tabular-nums">
             <span className="hidden sm:inline">
               Showing {(page - 1) * PAGE_SIZE + 1}–
               {Math.min(page * PAGE_SIZE, total)} of {total}
             </span>
             <span className="sm:hidden">
-              {page} / {totalPages}
+              Page {page} / {totalPages}
             </span>
-          </div>
-          <div className="flex gap-2">
+          </p>
+          <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -249,6 +271,9 @@ export default function Sandboxes() {
             >
               Previous
             </Button>
+            <span className="hidden text-xs text-muted-foreground tabular-nums sm:inline">
+              Page {page} / {totalPages}
+            </span>
             <Button
               variant="outline"
               size="sm"
@@ -387,7 +412,7 @@ function SandboxRow({
 
   return (
     <Card
-      className={`cursor-pointer transition-colors hover:border-foreground/20 ${
+      className={`cursor-pointer transition-colors hover:bg-muted/50 ${
         expired ? 'border-destructive/40' : ''
       }`}
       onClick={goToDetail}
@@ -400,7 +425,7 @@ function SandboxRow({
               <Link
                 to={`/sandboxes/${sandbox.id}`}
                 onClick={stop}
-                className="font-medium hover:underline truncate"
+                className="font-semibold leading-none hover:underline truncate"
               >
                 {sandbox.name}
               </Link>
@@ -408,7 +433,7 @@ function SandboxRow({
                 {sandbox.status}
               </Badge>
               {sandbox.image && (
-                <span className="font-mono text-[11px] text-muted-foreground truncate">
+                <span className="font-mono text-xs text-muted-foreground truncate">
                   {sandbox.image}
                 </span>
               )}
@@ -554,20 +579,20 @@ function SandboxRow({
                 />
                 <div className="leading-tight">
                   <div
-                    className={`font-mono text-xs ${
+                    className={`font-mono text-xs tabular-nums ${
                       expired ? 'text-destructive' : ''
                     }`}
                   >
                     {expired ? 'expired' : `${timeLeft} left`}
                   </div>
-                  <div className="text-[10px] text-muted-foreground">
+                  <div className="text-xs text-muted-foreground">
                     created {formatAge(sandbox.created_at, now)}
                   </div>
                 </div>
               </div>
             </div>
             <div className="flex items-center gap-1.5 pt-2 sm:pt-0">
-              <span className="text-[11px] text-muted-foreground mr-1">
+              <span className="text-xs text-muted-foreground mr-1">
                 Extend:
               </span>
               <Button

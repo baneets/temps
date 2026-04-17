@@ -1289,7 +1289,7 @@ mod tests {
         agent_runs::Model {
             id,
             project_id,
-            config_id: 0,
+            config_id: None,
             agent_id: None,
             trigger_type: "autofixer".to_string(),
             trigger_source_id: Some(42),
@@ -1317,6 +1317,10 @@ mod tests {
             completed_at: None,
             created_at: chrono::Utc::now(),
             ai_session_id: None,
+            source: "committed".to_string(),
+            ephemeral_yaml: None,
+
+            prompt_text: None,
         }
     }
 

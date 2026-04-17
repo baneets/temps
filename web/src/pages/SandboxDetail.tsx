@@ -59,6 +59,7 @@ import {
   type ExecResponse,
   type JobSummary,
 } from '@/components/sandboxes/api'
+import { SandboxPreviewPasswordCard } from '@/components/sandboxes/SandboxPreviewPasswordCard'
 
 function statusVariant(
   status: string,
@@ -328,22 +329,47 @@ export default function SandboxDetail() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8 space-y-6">
+        <div className="h-4 w-40 rounded bg-muted animate-pulse" />
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="space-y-2">
+            <div className="h-7 w-64 rounded bg-muted animate-pulse" />
+            <div className="h-3 w-48 rounded bg-muted animate-pulse" />
+          </div>
+          <div className="flex gap-2">
+            <div className="h-9 w-32 rounded bg-muted animate-pulse" />
+            <div className="h-9 w-24 rounded bg-muted animate-pulse" />
+          </div>
+        </div>
+        <Card>
+          <CardContent className="py-4">
+            <div className="h-10 w-full rounded bg-muted animate-pulse" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="py-6 space-y-3">
+            <div className="h-8 w-full rounded bg-muted animate-pulse" />
+            <div className="h-20 w-full rounded bg-muted animate-pulse" />
+          </CardContent>
+        </Card>
       </div>
     )
   }
 
   if (isError || !sandbox) {
     return (
-      <div className="container mx-auto py-6 space-y-4">
+      <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8 space-y-4">
         <Button variant="ghost" size="sm" onClick={() => navigate('/sandboxes')}>
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back
+          <ArrowLeft className="mr-1.5 h-4 w-4" />
+          Back to sandboxes
         </Button>
         <Card>
-          <CardContent className="py-12 text-center text-sm text-destructive">
-            {(error as Error)?.message ?? 'Sandbox not found'}
+          <CardContent className="py-12 text-center space-y-2">
+            <Box className="mx-auto h-8 w-8 text-destructive" />
+            <p className="text-sm font-medium">Sandbox not found</p>
+            <p className="text-xs text-muted-foreground">
+              {(error as Error)?.message ?? 'This sandbox may have been deleted.'}
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -359,29 +385,28 @@ export default function SandboxDetail() {
   const expired = !destroyed && new Date(sandbox.expires_at).getTime() <= now
 
   return (
-    <div className="container mx-auto py-6 space-y-5">
+    <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8 space-y-6">
       {/* Breadcrumb */}
       <div className="flex items-center gap-1 text-sm text-muted-foreground">
         <Link to="/sandboxes" className="hover:text-foreground">
           Sandboxes
         </Link>
         <ChevronRight className="h-4 w-4" />
-        <span className="font-mono text-foreground">{sandbox.id}</span>
+        <span className="font-mono text-foreground truncate">{sandbox.id}</span>
       </div>
 
-      {/* Header: identity + primary actions */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+      {/* Header: identity + primary actions (DESIGN.md §4.4) */}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0 space-y-1">
-          <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2 flex-wrap">
-            <Box className="h-6 w-6 sm:h-7 sm:w-7 shrink-0" />
+          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2 flex-wrap">
             <span className="truncate">{sandbox.name}</span>
             <Badge variant={statusVariant(sandbox.status)}>
               {sandbox.status}
             </Badge>
           </h1>
           <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground">
-            <span>{sandbox.id}</span>
-            <CopyButton value={sandbox.id} minimal className="h-6 w-6" />
+            <span className="truncate">{sandbox.id}</span>
+            <CopyButton value={sandbox.id} minimal className="h-5 w-5 shrink-0" />
           </div>
         </div>
 
@@ -413,7 +438,7 @@ export default function SandboxDetail() {
                 <div className="p-2 space-y-1.5">
                   <Label
                     htmlFor="dd-custom-port"
-                    className="text-[11px] text-muted-foreground"
+                    className="text-xs text-muted-foreground"
                   >
                     Custom port
                   </Label>
@@ -519,27 +544,27 @@ export default function SandboxDetail() {
                   />
                   <div className="leading-tight">
                     <div
-                      className={`font-mono text-sm ${
+                      className={`font-mono text-sm tabular-nums ${
                         expired ? 'text-destructive' : ''
                       }`}
                     >
                       {expired ? 'expired' : `${timeLeft} left`}
                     </div>
-                    <div className="text-[11px] text-muted-foreground">
+                    <div className="text-xs text-muted-foreground">
                       expires {formatDate(sandbox.expires_at)}
                     </div>
                   </div>
                 </div>
                 <div className="h-8 w-px bg-border hidden sm:block" />
                 <div className="leading-tight">
-                  <div className="text-sm">{formatAge(sandbox.created_at, now)}</div>
-                  <div className="text-[11px] text-muted-foreground">
+                  <div className="text-sm tabular-nums">{formatAge(sandbox.created_at, now)}</div>
+                  <div className="text-xs text-muted-foreground">
                     created
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="text-[11px] text-muted-foreground mr-1">
+                <span className="text-xs text-muted-foreground mr-1">
                   Extend:
                 </span>
                 <Button
@@ -581,7 +606,7 @@ export default function SandboxDetail() {
               Command
             </CardTitle>
             {!running && (
-              <Badge variant="warning" className="text-[11px]">
+              <Badge variant="warning">
                 sandbox {sandbox.status}
               </Badge>
             )}
@@ -759,7 +784,7 @@ export default function SandboxDetail() {
               <code className="block font-mono text-xs bg-muted px-2 py-1.5 rounded break-all">
                 {sandbox.preview_url_template}
               </code>
-              <p className="text-[11px] text-muted-foreground mt-2">
+              <p className="text-xs text-muted-foreground mt-2">
                 Substitute <code className="font-mono">{'{port}'}</code> for
                 any port bound inside the sandbox. Use "Open preview" above
                 to launch common dev-server ports directly.
@@ -768,6 +793,17 @@ export default function SandboxDetail() {
           </Card>
         )}
       </div>
+
+      {/* Preview access gate — only meaningful when preview URLs are
+          configured on this install. Destroyed sandboxes freeze the
+          controls since mutating a dead row is never useful. */}
+      {Boolean(sandbox.preview_url_template) && (
+        <SandboxPreviewPasswordCard
+          sandboxId={sandbox.id}
+          hint={sandbox.preview_password_hint}
+          disabled={destroyed}
+        />
+      )}
 
       {/* Delete dialog */}
       <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
@@ -974,7 +1010,7 @@ function JobLogsPanel({
           <CopyButton value={job.id} className="h-6 w-6" />
           {job.status === 'running' && connected && (
             <span className="flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
               live
             </span>
           )}
@@ -993,7 +1029,7 @@ function JobLogsPanel({
       </pre>
       {stderrText.trim().length > 0 && (
         <div className="space-y-1">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             stderr
           </div>
           <pre className="max-h-40 overflow-auto rounded-md border bg-background p-2 font-mono text-xs leading-relaxed text-destructive/90">
@@ -1038,7 +1074,7 @@ function OutputBlock({
   if (text.length === 0) {
     return (
       <div className="space-y-1">
-        <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           {label}
         </div>
         <div className="text-xs text-muted-foreground italic">(empty)</div>
@@ -1047,7 +1083,7 @@ function OutputBlock({
   }
   return (
     <div className="space-y-1">
-      <div className="text-[11px] font-medium text-muted-foreground uppercase tracking-wide">
+      <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
         {label}
       </div>
       <pre

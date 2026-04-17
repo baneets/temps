@@ -300,15 +300,36 @@ jobs:
     name: "Integration Tests (${{ matrix.group }})"
     runs-on: ubuntu-latest
     needs: [build-tests, unit-tests]
+    # 45 min covers the postgres-upgrades group worst-case
+    # (5 tests × ~6 min + pg17/pg18 image pulls on a cold runner).
+    # Other groups finish well under that.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - group: docker-providers
-            # temps-providers with Docker tests enabled
+            # temps-providers with Docker tests enabled.
+            # NOTE: orchestrator_* tests run in a dedicated `postgres-upgrades`
+            # group below (serial, long timeout, real pg17→pg18 containers).
+            # Skip them here so this group stays fast and parallel-safe.
             command: >-
               cargo test --no-fail-fast --lib
               -p temps-providers --features docker-tests
+              --
+              --skip orchestrator_
+          - group: postgres-upgrades
+            # PostgreSQL major-version upgrade orchestrator integration tests.
+            # Each test pulls pg17 + pg18 images and runs a real dump/restore,
+            # so they're 2–6 min apiece and must not contend for Docker.
+            # --test-threads=1 guarantees serial execution.
+            command: >-
+              cargo test --no-fail-fast --lib
+              -p temps-providers --features docker-tests
+              orchestrator_
+              --
+              --nocapture
+              --test-threads=1
           - group: docker-deployments
             # Crates that use TestDatabase and/or Docker
             command: >-

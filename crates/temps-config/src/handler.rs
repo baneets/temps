@@ -71,13 +71,6 @@ pub struct JoinTokenStatusResponse {
     pub has_token: bool,
 }
 
-/// Public settings response containing only non-sensitive feature flags
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct PublicSettingsResponse {
-    /// Whether demo mode is enabled
-    pub demo_enabled: bool,
-}
-
 /// Safe response for application settings that masks sensitive fields
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AppSettingsResponse {
@@ -164,7 +157,6 @@ impl From<AppSettings> for AppSettingsResponse {
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        get_public_settings,
         get_settings,
         update_settings,
         generate_join_token,
@@ -178,7 +170,6 @@ impl From<AppSettings> for AppSettingsResponse {
         ContainerLogSettings,
         DnsProviderSettingsMasked,
         DockerRegistrySettingsMasked,
-        PublicSettingsResponse,
         SettingsUpdateResponse,
         GenerateJoinTokenResponse,
         JoinTokenStatusResponse,
@@ -195,44 +186,12 @@ pub struct SettingsApiDoc;
 
 pub fn configure_routes() -> Router<Arc<SettingsState>> {
     Router::new()
-        .route("/settings/public", get(get_public_settings))
         .route("/settings", get(get_settings))
         .route("/settings", put(update_settings))
         .route("/settings/join-token/generate", post(generate_join_token))
         .route("/settings/join-token", delete(revoke_join_token))
         .route("/settings/join-token/status", get(get_join_token_status))
         .route("/settings/routes/refresh", post(refresh_route_table))
-}
-
-/// Get public settings (no authentication required)
-///
-/// Returns non-sensitive feature flags like demo mode status.
-/// This endpoint is intentionally unauthenticated so the login page can use it.
-#[utoipa::path(
-    tag = "Settings",
-    get,
-    path = "/settings/public",
-    responses(
-        (status = 200, description = "Public settings", body = PublicSettingsResponse),
-        (status = 500, description = "Internal server error")
-    )
-)]
-async fn get_public_settings(
-    State(app_state): State<Arc<SettingsState>>,
-) -> Result<impl IntoResponse, Problem> {
-    match app_state.config_service.get_settings().await {
-        Ok(settings) => Ok(Json(PublicSettingsResponse {
-            demo_enabled: settings.demo_mode.enabled,
-        })),
-        Err(e) => {
-            tracing::error!("Failed to get public settings: {}", e);
-            Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .type_("https://temps.sh/probs/settings-error")
-                .title("Settings Error")
-                .detail("Failed to get public settings".to_string())
-                .build())
-        }
-    }
 }
 
 /// Get application settings

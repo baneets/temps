@@ -11,8 +11,9 @@ import {
 } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { testS3ConnectionPreview } from '@/lib/s3-sources'
 import { useMutation } from '@tanstack/react-query'
-import { ArrowLeft, Plus } from 'lucide-react'
+import { ArrowLeft, PlugZap, Plus, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -43,6 +44,42 @@ export function CreateS3Source() {
       navigate('/settings/backups')
     },
   })
+
+  const testConnectionMutation = useMutation({
+    mutationFn: testS3ConnectionPreview,
+    meta: { errorTitle: 'Failed to test S3 connection' },
+    onSuccess: (result) => {
+      if (result.ok) {
+        toast.success(result.message || 'Connection successful')
+      } else {
+        toast.error(result.message || 'Connection failed')
+      }
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const handleTestConnection = () => {
+    if (
+      !formData.name ||
+      !formData.bucket_name ||
+      !formData.region ||
+      !formData.access_key_id ||
+      !formData.secret_key
+    ) {
+      toast.error('Fill all required fields to test the connection')
+      return
+    }
+    testConnectionMutation.mutate({
+      name: formData.name,
+      bucket_name: formData.bucket_name,
+      bucket_path: '/',
+      region: formData.region,
+      access_key_id: formData.access_key_id,
+      secret_key: formData.secret_key,
+      endpoint: formData.endpoint || undefined,
+      force_path_style: formData.force_path_style ?? undefined,
+    })
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -218,7 +255,7 @@ export function CreateS3Source() {
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-4">
+            <div className="flex flex-col gap-2 pt-4 sm:flex-row sm:items-center sm:justify-between">
               <Button
                 type="button"
                 variant="outline"
@@ -226,12 +263,35 @@ export function CreateS3Source() {
               >
                 Cancel
               </Button>
-              <Button
-                type="submit"
-                disabled={createMutation.isPending || !isFormValid}
-              >
-                {createMutation.isPending ? 'Creating...' : 'Create S3 Source'}
-              </Button>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleTestConnection}
+                  disabled={
+                    !isFormValid ||
+                    testConnectionMutation.isPending ||
+                    createMutation.isPending
+                  }
+                >
+                  {testConnectionMutation.isPending ? (
+                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <PlugZap className="mr-2 h-4 w-4" />
+                  )}
+                  {testConnectionMutation.isPending
+                    ? 'Testing...'
+                    : 'Test connection'}
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={createMutation.isPending || !isFormValid}
+                >
+                  {createMutation.isPending
+                    ? 'Creating...'
+                    : 'Create S3 Source'}
+                </Button>
+              </div>
             </div>
           </form>
         </CardContent>

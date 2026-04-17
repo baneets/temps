@@ -2123,6 +2123,7 @@ mod tests {
             access_key_id: encrypted_access_key,
             secret_key: encrypted_secret_key,
             force_path_style: Some(true),
+            is_default: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

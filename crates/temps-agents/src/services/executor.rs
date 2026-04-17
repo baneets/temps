@@ -16,8 +16,8 @@ use temps_deployments::services::deployment_token_service::{
     CreateDeploymentTokenRequest, DeploymentTokenService,
 };
 use temps_entities::{
-    agent_runs, deployment_containers, deployments, error_events, error_groups, projects, settings,
-    status_checks, status_monitors,
+    agent_runs, deployment_containers, deployments, error_events, error_groups, project_agents,
+    projects, settings, status_checks, status_monitors,
 };
 use temps_git::services::git_provider_manager_trait::GitProviderManagerTrait;
 use temps_notifications::services::NotificationService;
@@ -1072,6 +1072,68 @@ impl AgentExecutor {
             .to_string()
     }
 
+    /// Build an in-memory `project_agents::Model` from a `WorkflowYamlConfig`
+    /// stored on the run row. Used when `agent_runs.source == "cli_ephemeral"`
+    /// — there is no `project_agents` row to load.
+    ///
+    /// `id`, `webhook_id`, etc. are placeholders; ephemeral runs never persist
+    /// or look this synthetic model up by id.
+    fn synthesize_ephemeral_config(
+        &self,
+        project_id: i32,
+        ephemeral_yaml: &str,
+        platform_default_provider: &str,
+    ) -> Result<project_agents::Model, AgentError> {
+        let yaml: temps_core::WorkflowYamlConfig =
+            serde_yaml::from_str(ephemeral_yaml).map_err(|e| AgentError::Validation {
+                message: format!("Invalid ephemeral_yaml: {}", e),
+            })?;
+
+        let now = Utc::now();
+        let provider = yaml
+            .provider
+            .clone()
+            .unwrap_or_else(|| platform_default_provider.to_string());
+
+        Ok(project_agents::Model {
+            // Negative sentinel id makes accidental DB lookups against this
+            // synthetic model fail loudly rather than silently aliasing onto
+            // a real agent.
+            id: -1,
+            project_id,
+            slug: yaml.slug(),
+            name: yaml.name.clone(),
+            description: yaml.description.clone(),
+            source: "cli_ephemeral".to_string(),
+            enabled: yaml.enabled,
+            trigger_config: serde_json::json!({ "manual": true }),
+            prompt: Some(yaml.prompt.clone()),
+            ai_provider: provider,
+            ai_model: yaml.ai_model.clone(),
+            api_key_encrypted: None,
+            ai_provider_key_id: None,
+            max_turns: yaml.max_turns,
+            timeout_seconds: yaml.timeout_seconds,
+            daily_budget_cents: yaml.daily_budget_cents,
+            cooldown_minutes: yaml.cooldown_minutes,
+            branch_prefix: "temps/ephemeral".to_string(),
+            // Force "report" so an ephemeral CLI run never opens a PR or
+            // mutates the repo. The dry-run handler already enforces this on
+            // the way in — we re-pin it here as defense in depth.
+            deliverable: "report".to_string(),
+            sandbox_enabled: Some(true),
+            mcp_servers_config: None,
+            skills_config: None,
+            tools_config: None,
+            config_repo_url: None,
+            config_repo_branch: None,
+            webhook_id: None,
+            webhook_token: None,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
     /// Execute a single autopilot run. Handles the full lifecycle from cloning to PR creation.
     pub async fn execute_run(&self, run_id: i32) {
         tracing::info!("Starting autopilot run {}", run_id);
@@ -1137,22 +1199,54 @@ impl AgentExecutor {
         let run = self.run_service.get_run(run_id).await?;
 
         // Step 2: Load the agent config
-        // Use agent_id from the run record (set when the run was created).
-        // Fall back to config_id for backward compatibility with old runs.
-        let agent_id = run.agent_id.unwrap_or(run.config_id);
-        let mut config = self.config_service.get_agent_by_id(agent_id).await?.ok_or(
-            AgentError::ConfigNotFound {
-                project_id: run.project_id,
-            },
-        )?;
+        //
+        // Two sources:
+        //  1. Persistent (`source = "committed"`): look up by agent_id /
+        //     config_id in `project_agents`. This is the normal path for
+        //     workflows synced from `.temps/workflows/` and dashboard-created
+        //     agents.
+        //  2. Ephemeral (`source = "cli_ephemeral"`): build a synthetic
+        //     `project_agents::Model` from the YAML stored on the run row.
+        //     Nothing was written to `project_agents`, so there is no row to
+        //     look up — the executor synthesizes one in memory so the rest of
+        //     this function (which references ~65 `config.*` fields) doesn't
+        //     need any branching.
+        let mut config = if run.source == "cli_ephemeral" {
+            let yaml = run
+                .ephemeral_yaml
+                .as_deref()
+                .ok_or_else(|| AgentError::Validation {
+                    message: format!(
+                        "Run {} is marked source=cli_ephemeral but ephemeral_yaml is NULL",
+                        run_id
+                    ),
+                })?;
+            let default_provider = self.platform_default_provider().await;
+            self.synthesize_ephemeral_config(run.project_id, yaml, &default_provider)?
+        } else {
+            let agent_id = run
+                .agent_id
+                .or(run.config_id)
+                .ok_or(AgentError::ConfigNotFound {
+                    project_id: run.project_id,
+                })?;
+            let mut cfg = self.config_service.get_agent_by_id(agent_id).await?.ok_or(
+                AgentError::ConfigNotFound {
+                    project_id: run.project_id,
+                },
+            )?;
 
-        // For YAML-sourced workflows that don't declare an explicit provider,
-        // the DB row stores whatever the platform default was at sync time.
-        // Always re-resolve from the current platform default so the admin's
-        // choice takes effect immediately without needing a redeploy.
-        if config.source == "yaml" && config.ai_provider_key_id.is_none() {
-            config.ai_provider = self.platform_default_provider().await;
-        }
+            // For YAML-sourced workflows that don't declare an explicit provider,
+            // the DB row stores whatever the platform default was at sync time.
+            // Always re-resolve from the current platform default so the admin's
+            // choice takes effect immediately without needing a redeploy.
+            if cfg.source == "yaml" && cfg.ai_provider_key_id.is_none() {
+                cfg.ai_provider = self.platform_default_provider().await;
+            }
+            cfg
+        };
+        // Suppress "unused mut" lint when only the persistent branch mutates.
+        let _ = &mut config;
 
         // Step 3: Load the project
         let project = projects::Entity::find_by_id(run.project_id)
@@ -1350,13 +1444,72 @@ impl AgentExecutor {
                 sandbox_env.insert("TEMPS_API_TOKEN".to_string(), token);
             }
 
+            // Fetch the git provider token so `git push` and `gh`/`glab`
+            // can authenticate from inside the sandbox. We deliberately do
+            // NOT expose this as `GITHUB_TOKEN`/`GH_TOKEN` env vars: some
+            // AI CLIs (opencode's `github-copilot` provider, Codex, etc.)
+            // auto-pick those up as *AI chat* credentials and try to call
+            // api.githubcopilot.com with a plain PAT → 400 "Personal Access
+            // Tokens are not supported for this endpoint".
+            //
+            // Instead we install file-based auth after the sandbox boots:
+            //   - `~/.git-credentials` + `credential.helper store` for git
+            //   - `~/.config/gh/hosts.yml` for the `gh` CLI
+            //   - `~/.config/glab-cli/config.yml` for `glab`
+            // (see the `setup_git_credentials`-style exec block below).
+            let mut git_creds: Option<(String, String)> = None;
+            match self
+                .git_provider_manager
+                .get_connection_access_token(connection_id)
+                .await
+            {
+                Ok((token, provider_type)) => match provider_type.as_str() {
+                    "github" | "gitlab" => {
+                        git_creds = Some((token, provider_type));
+                    }
+                    other => {
+                        tracing::debug!(
+                            "Run {}: git provider '{}' has no known credential layout; \
+                             skipping credential injection",
+                            run_id,
+                            other
+                        );
+                    }
+                },
+                Err(e) => {
+                    // "if github is configured" — we silently skip when the
+                    // connection lookup fails. The run still proceeds; the
+                    // host-side PR path stays as the fallback.
+                    tracing::warn!(
+                        "Run {}: failed to fetch git provider token for connection {}: {}. \
+                         Agent will run without push/PR credentials.",
+                        run_id,
+                        connection_id,
+                        e
+                    );
+                }
+            }
+
+            // Per-run overrides from the ephemeral YAML take precedence over
+            // global defaults. Only ephemeral runs carry limits today
+            // (committed workflows read the global `AgentSandboxSettings`);
+            // parse the YAML once here to extract them.
+            let (yaml_cpu, yaml_mem): (Option<f64>, Option<u64>) = run
+                .ephemeral_yaml
+                .as_deref()
+                .and_then(|y| serde_yaml::from_str::<temps_core::WorkflowYamlConfig>(y).ok())
+                .map(|y| (y.cpu_limit, y.memory_limit_mb))
+                .unwrap_or((None, None));
+            let cpu_limit = yaml_cpu.unwrap_or(global_sandbox.cpu_limit);
+            let memory_limit_mb = yaml_mem.unwrap_or(global_sandbox.memory_limit_mb);
+
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 container_name_override: None,
                 host_work_dir: work_dir.clone(),
                 image: resolved_image,
-                cpu_limit: Some(global_sandbox.cpu_limit),
-                memory_limit_mb: Some(global_sandbox.memory_limit_mb),
+                cpu_limit: Some(cpu_limit),
+                memory_limit_mb: Some(memory_limit_mb),
                 pids_limit: None,
                 network_mode: Some(global_sandbox.network_mode.clone()),
                 env_vars: sandbox_env,
@@ -1370,8 +1523,8 @@ impl AgentExecutor {
                         "Creating sandbox: runtime={}, image={}, {} CPU, {}MB RAM, network={}",
                         global_sandbox.runtime,
                         crate::sandbox::docker::image_name_for_runtime(&global_sandbox.runtime),
-                        global_sandbox.cpu_limit,
-                        global_sandbox.memory_limit_mb,
+                        cpu_limit,
+                        memory_limit_mb,
                         global_sandbox.network_mode,
                     ),
                     None,
@@ -1490,6 +1643,108 @@ impl AgentExecutor {
                 );
             } else {
                 tracing::debug!("Installed memory script for run {}", run_id);
+            }
+
+            // Configure git credential storage + URL rewrite so `git push`
+            // from inside the sandbox authenticates against the project's
+            // HTTPS remote without the agent having to re-paste the token.
+            // We also write `gh` / `glab` CLI config files directly instead
+            // of setting env vars — this keeps the token invisible to AI
+            // CLIs that would otherwise mistake it for a chat credential.
+            if let Some((ref token, ref provider)) = git_creds {
+                let host = match provider.as_str() {
+                    "github" => "github.com",
+                    "gitlab" => "gitlab.com",
+                    _ => "github.com",
+                };
+                let shell_quote = |v: &str| v.replace('\'', "'\\''");
+                let mut script = String::from("set -e\n");
+                script.push_str("mkdir -p /home/temps\n");
+                script.push_str("git config --global init.defaultBranch main\n");
+                script.push_str("git config --global pull.rebase false\n");
+                // x-access-token is the conventional username for token auth
+                // on both GitHub and GitLab — the token is the password.
+                script.push_str(&format!(
+                    "umask 077 && printf 'https://x-access-token:%s@%s\\n' '{}' '{}' > /home/temps/.git-credentials\n",
+                    shell_quote(token),
+                    host,
+                ));
+                script.push_str("git config --global credential.helper store\n");
+                // Force HTTPS even if the AI tries to clone via SSH — we
+                // don't ship SSH keys into the sandbox.
+                script.push_str(&format!(
+                    "git config --global url.'https://{host}/'.insteadOf 'git@{host}:'\n",
+                    host = host,
+                ));
+
+                // Seed the `gh` / `glab` CLI config so the agent can run
+                // `gh pr create` without touching env vars. These files
+                // are only read by the respective CLIs, not by AI chat
+                // providers that scan for GITHUB_TOKEN.
+                match provider.as_str() {
+                    "github" => {
+                        script.push_str("mkdir -p /home/temps/.config/gh\n");
+                        script.push_str(&format!(
+                            "umask 077 && cat > /home/temps/.config/gh/hosts.yml <<'EOF'\n\
+                             github.com:\n\
+                             \x20\x20oauth_token: {}\n\
+                             \x20\x20user: x-access-token\n\
+                             \x20\x20git_protocol: https\n\
+                             EOF\n",
+                            shell_quote(token),
+                        ));
+                    }
+                    "gitlab" => {
+                        script.push_str("mkdir -p /home/temps/.config/glab-cli\n");
+                        script.push_str(&format!(
+                            "umask 077 && cat > /home/temps/.config/glab-cli/config.yml <<'EOF'\n\
+                             hosts:\n\
+                             \x20\x20gitlab.com:\n\
+                             \x20\x20\x20\x20token: {}\n\
+                             \x20\x20\x20\x20git_protocol: https\n\
+                             EOF\n",
+                            shell_quote(token),
+                        ));
+                    }
+                    _ => {}
+                }
+
+                script.push_str("chown -R temps:temps /home/temps/.git-credentials /home/temps/.gitconfig /home/temps/.config 2>/dev/null || true\n");
+
+                if let Err(e) = self
+                    .sandbox_registry
+                    .exec(
+                        run_id,
+                        vec!["sh".to_string(), "-c".to_string(), script],
+                        std::collections::HashMap::new(),
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "Run {}: failed to install git credential helper: {}",
+                        run_id,
+                        e
+                    );
+                } else {
+                    tracing::debug!(
+                        "Run {}: installed git credentials for {} provider",
+                        run_id,
+                        provider
+                    );
+                    self.run_service
+                        .append_log(
+                            run_id,
+                            "info",
+                            &format!(
+                                "Injected {} credentials (git push + {} CLI auth, no env vars)",
+                                provider,
+                                if provider == "github" { "gh" } else { "glab" }
+                            ),
+                            None,
+                        )
+                        .await?;
+                }
             }
 
             // Step 6c: Inject config repos and secrets into the sandbox
@@ -1632,6 +1887,46 @@ impl AgentExecutor {
                 format!("{}{}", memory_section, prompt)
             }
         };
+
+        // Step 8b.5: Append deliverable-specific output guidelines so the AI
+        // knows exactly what shape the human-facing artifact should take.
+        let prompt = match config.deliverable.as_str() {
+            "pull_request" => format!(
+                "{prompt}\n\n---\nOUTPUT REQUIREMENTS (deliverable: pull_request)\n\n\
+                 When your code changes are ready, emit the PR title and body in this exact block at the END of your final message, with nothing after it:\n\n\
+                 <pr_title>Concise, imperative PR title (max 72 chars, no newlines, no trailing punctuation)</pr_title>\n\
+                 <pr_body>\n\
+                 ## Summary\n\
+                 - One bullet per meaningful change\n\
+                 - Use real line breaks (never literal \"\\n\"); write Markdown\n\n\
+                 ## Test plan\n\
+                 - [ ] How this was verified\n\
+                 </pr_body>\n\n\
+                 Rules:\n\
+                 - Title: plain text, single line, starts with a conventional-commit type (feat/fix/chore/docs/refactor/test/build/ci/perf/style/revert) followed by \": \". Example: `fix: handle empty response in OrderList`.\n\
+                 - Body: GitHub-flavored Markdown. Never output the two-character sequence \"\\n\" — use actual newlines.\n\
+                 - Do not wrap the block in ``` fences. Do not repeat the title inside the body.\n",
+                prompt = prompt
+            ),
+            _ => prompt,
+        };
+
+        // Step 8c: Persist the final prompt so the dashboard can show exactly
+        // what the AI CLI saw. Best-effort — a failure here shouldn't abort
+        // the run.
+        if let Err(e) = self
+            .run_service
+            .update_status(
+                run_id,
+                UpdateRunFields {
+                    prompt_text: Some(prompt.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!("Run {}: failed to persist prompt_text: {}", run_id, e);
+        }
 
         // Step 9: Resolve API key. Priority:
         // 1. Per-agent encrypted key (config.api_key_encrypted)
@@ -2276,12 +2571,22 @@ impl AgentExecutor {
         );
 
         // Step 18: Push + create PR
-        // Use agent name for the PR title — different agents produce different types of PRs
-        let pr_title = if run.trigger_source_type.as_deref() == Some("error_group") {
+        // Prefer the <pr_title>/<pr_body> block the AI produced per the
+        // deliverable guidelines. Fall back to a deterministic default when
+        // the AI didn't emit one (or emitted something unusable).
+        let extracted = extract_pr_metadata(&ai_result.output);
+
+        let fallback_title = if run.trigger_source_type.as_deref() == Some("error_group") {
             format!("fix: {} — {} (run #{})", error_message, config.name, run_id)
         } else {
             format!("{}: {} (run #{})", config.name, project.name, run_id)
         };
+        let pr_title = extracted
+            .title
+            .as_deref()
+            .map(sanitize_pr_title)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(fallback_title);
 
         let commit_message = if run.trigger_source_type.as_deref() == Some("error_group") {
             format!("fix: {} (run #{})", error_message, run_id)
@@ -2289,14 +2594,18 @@ impl AgentExecutor {
             format!("{} (run #{})", config.name.to_lowercase(), run_id)
         };
 
+        let description = normalize_markdown(config.description.as_deref().unwrap_or(""));
+        let ai_body = extracted
+            .body
+            .as_deref()
+            .map(normalize_markdown)
+            .filter(|b| !b.trim().is_empty());
+        let body_main = ai_body.unwrap_or_else(|| description.clone());
         let pr_body = format!(
-            "## {agent_name}\n\n\
-            This PR was created by the **{agent_name}** agent in [Temps](https://temps.sh) (run #{run_id}).\n\n\
-            {description}\n\n\
-            **Files changed:** {files}",
+            "{body}\n\n---\n<sub>Created by the **{agent_name}** agent in [Temps](https://temps.sh) · run #{run_id} · {files} file(s) changed</sub>",
+            body = body_main.trim_end(),
             agent_name = config.name,
             run_id = run_id,
-            description = config.description.as_deref().unwrap_or(""),
             files = changed_files_owned.len(),
         );
 
@@ -2595,6 +2904,19 @@ impl AgentExecutor {
                 ),
             })?;
 
+        // Cross-project guard: the run's project_id must own this group. Without
+        // this check a caller with ProjectsWrite on project A could pass an
+        // error_group_id belonging to project B and leak its error type,
+        // message, and stack trace into project A's run prompt + logs.
+        if group.project_id != project_id {
+            return Err(AgentError::Validation {
+                message: format!(
+                    "Error group {} does not belong to project {}",
+                    group_id, project_id
+                ),
+            });
+        }
+
         // Load latest error event for the group to extract the stack trace
         let latest_event = error_events::Entity::find()
             .filter(error_events::Column::ErrorGroupId.eq(group_id))
@@ -2653,10 +2975,25 @@ impl AgentExecutor {
             Ok(r) => r,
             Err(_) => return,
         };
-        let agent_id = run.agent_id.unwrap_or(run.config_id);
-        let config = match self.config_service.get_agent_by_id(agent_id).await {
-            Ok(Some(c)) => c,
-            _ => return,
+        // Ephemeral runs don't have a persisted agent row — synthesize a
+        // throwaway config from the run's YAML just for naming the notification.
+        let config = if run.source == "cli_ephemeral" {
+            let Some(yaml) = run.ephemeral_yaml.as_deref() else {
+                return;
+            };
+            let default_provider = self.platform_default_provider().await;
+            match self.synthesize_ephemeral_config(run.project_id, yaml, &default_provider) {
+                Ok(c) => c,
+                Err(_) => return,
+            }
+        } else {
+            let Some(agent_id) = run.agent_id.or(run.config_id) else {
+                return;
+            };
+            match self.config_service.get_agent_by_id(agent_id).await {
+                Ok(Some(c)) => c,
+                _ => return,
+            }
         };
         let project = match projects::Entity::find_by_id(run.project_id)
             .one(self.db.as_ref())
@@ -3021,6 +3358,73 @@ pub fn build_claude_cmd(
             vec![provider_name.to_string(), prompt.to_string()]
         }
     }
+}
+
+/// Metadata the AI emits to describe the pull request it produced.
+#[derive(Debug, Default, Clone)]
+pub struct PrMetadata {
+    pub title: Option<String>,
+    pub body: Option<String>,
+}
+
+/// Extract `<pr_title>…</pr_title>` and `<pr_body>…</pr_body>` blocks from
+/// AI output. The report-text extractor runs first to collapse
+/// stream-json/assistant frames into plain text, so this function works
+/// uniformly across Claude, Codex, and OpenCode output formats.
+pub fn extract_pr_metadata(ai_output: &str) -> PrMetadata {
+    let text = extract_report_text(ai_output);
+    PrMetadata {
+        title: extract_tag(&text, "pr_title"),
+        body: extract_tag(&text, "pr_body"),
+    }
+}
+
+fn extract_tag(haystack: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = haystack.find(&open)? + open.len();
+    let end = haystack[start..].find(&close)? + start;
+    Some(haystack[start..end].trim().to_string())
+}
+
+/// Collapse an AI-generated PR title into a single clean line: unescape
+/// literal `\n`/`\r`/`\t`, strip any actual newlines, trim whitespace and
+/// trailing punctuation, and cap at 72 chars.
+pub fn sanitize_pr_title(raw: &str) -> String {
+    let unescaped = raw
+        .replace("\\r\\n", " ")
+        .replace("\\n", " ")
+        .replace("\\r", " ")
+        .replace("\\t", " ");
+    let flattened: String = unescaped
+        .chars()
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim_end_matches(['.', ',', ';']).trim();
+    if trimmed.chars().count() > 72 {
+        let mut out: String = trimmed.chars().take(71).collect();
+        out.push('…');
+        out
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Unescape literal `\n`/`\r`/`\t` escape sequences that AI models sometimes
+/// emit inside Markdown (especially when they confuse JSON-string and raw-
+/// text contexts). Leaves real newlines untouched.
+pub fn normalize_markdown(raw: &str) -> String {
+    raw.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\r", "\n")
+        .replace("\\t", "    ")
 }
 
 /// Extract human-readable report text from AI output. Supports both Claude
@@ -3388,7 +3792,7 @@ mod tests {
         agent_runs::Model {
             id,
             project_id,
-            config_id: 1,
+            config_id: Some(1),
             agent_id: None,
             trigger_type: "new_issue".into(),
             trigger_source_id: Some(10),
@@ -3416,6 +3820,10 @@ mod tests {
             analysis: None,
             user_context: None,
             ai_session_id: None,
+            source: "committed".into(),
+            ephemeral_yaml: None,
+
+            prompt_text: None,
         }
     }
 

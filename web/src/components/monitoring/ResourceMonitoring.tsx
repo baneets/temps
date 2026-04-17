@@ -22,6 +22,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import { format, subHours } from 'date-fns'
 import { useMemo, useState } from 'react'
+import type { DateRange } from 'react-day-picker'
+import { DateRangePicker } from '@/components/ui/date-range-picker'
 import { Line, LineChart, XAxis, YAxis, CartesianGrid } from 'recharts'
 import { Button } from '@/components/ui/button'
 import {
@@ -65,7 +67,60 @@ const responseTimeChartConfig = {
 
 // ── Types ────────────────────────────────────────────────────────────
 
-type TimeRange = '1h' | '6h' | '24h'
+type TimeRange = '1h' | '6h' | '24h' | 'custom'
+
+interface ResolvedRange {
+  start: Date
+  end: Date
+  /** Short, user-facing label like "last 1h" or "Apr 10–16". */
+  label: string
+  /** TimescaleDB bucket interval matching the window size. */
+  bucketInterval: string
+}
+
+const PRESET_LABEL: Record<Exclude<TimeRange, 'custom'>, string> = {
+  '1h': 'last 1h',
+  '6h': 'last 6h',
+  '24h': 'last 24h',
+}
+
+function pickBucketInterval(hours: number): string {
+  if (hours <= 1) return '5 minutes'
+  if (hours <= 6) return '30 minutes'
+  if (hours <= 48) return '1 hour'
+  if (hours <= 24 * 14) return '6 hours'
+  return '1 day'
+}
+
+function resolveRange(
+  timeRange: TimeRange,
+  custom: DateRange | undefined,
+  now: Date
+): ResolvedRange {
+  if (timeRange === 'custom' && custom?.from && custom?.to) {
+    const hours = (custom.to.getTime() - custom.from.getTime()) / 3_600_000
+    const sameDay =
+      custom.from.toDateString() === custom.to.toDateString()
+    const label = sameDay
+      ? `${format(custom.from, 'MMM d, HH:mm')}–${format(custom.to, 'HH:mm')}`
+      : `${format(custom.from, 'MMM d')}–${format(custom.to, 'MMM d')}`
+    return {
+      start: custom.from,
+      end: custom.to,
+      label,
+      bucketInterval: pickBucketInterval(Math.max(hours, 0.25)),
+    }
+  }
+  const preset: Exclude<TimeRange, 'custom'> =
+    timeRange === 'custom' ? '24h' : timeRange
+  const hours = preset === '1h' ? 1 : preset === '6h' ? 6 : 24
+  return {
+    start: subHours(now, hours),
+    end: now,
+    label: PRESET_LABEL[preset],
+    bucketInterval: pickBucketInterval(hours),
+  }
+}
 
 // ── Health status helpers ────────────────────────────────────────────
 
@@ -234,35 +289,24 @@ function SummaryStatCard({
 
 function TrendCharts({
   projectId,
-  timeRange,
+  range,
+  hideBots,
 }: {
   projectId?: number
-  timeRange: TimeRange
+  range: ResolvedRange
+  hideBots: boolean
 }) {
-  const { startDate, endDate, bucketInterval } = useMemo(() => {
-    const end = new Date()
-    const hours = timeRange === '1h' ? 1 : timeRange === '6h' ? 6 : 24
-    const start = subHours(end, hours)
-    const interval =
-      timeRange === '1h'
-        ? '5 minutes'
-        : timeRange === '6h'
-          ? '30 minutes'
-          : '1 hour'
-    return {
-      startDate: start.toISOString(),
-      endDate: end.toISOString(),
-      bucketInterval: interval,
-    }
-  }, [timeRange])
-
   const { data, isLoading } = useQuery({
     ...getTimeBucketStatsOptions({
       query: {
-        start_time: startDate,
-        end_time: endDate,
-        bucket_interval: bucketInterval,
+        start_time: range.start.toISOString(),
+        end_time: range.end.toISOString(),
+        bucket_interval: range.bucketInterval,
         project_id: projectId,
+        // When no project is selected, match the summary cards which only
+        // aggregate project-routed requests (project_id IS NOT NULL).
+        has_project: projectId === undefined ? true : undefined,
+        is_bot: hideBots ? false : undefined,
       },
     }),
     refetchInterval: 30000,
@@ -468,7 +512,34 @@ function TrendCharts({
 
 export function ResourceMonitoring() {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h')
+  const [customRange, setCustomRange] = useState<DateRange | undefined>(() => {
+    const end = new Date()
+    const start = subHours(end, 24)
+    return { from: start, to: end }
+  })
   const [selectedProjectId, setSelectedProjectId] = useState<string>('all')
+  const [hideBots, setHideBots] = useState<boolean>(true)
+
+  // For preset ranges (1h/6h/24h), "now" should tick forward with the
+  // refetch interval so the window stays live. We snap it to the nearest
+  // 30s so identical ticks produce stable query keys instead of a new
+  // one every render.
+  const now = useMemo(
+    () => {
+      const d = new Date()
+      d.setSeconds(Math.floor(d.getSeconds() / 30) * 30, 0)
+      return d
+    },
+    // Re-evaluate whenever the user switches preset/custom and whenever
+    // react-query refetches (30s interval). A ref to timeRange is enough
+    // — we intentionally do not depend on a ticking clock here.
+    [timeRange]
+  )
+
+  const range = useMemo(
+    () => resolveRange(timeRange, customRange, now),
+    [timeRange, customRange, now]
+  )
 
   const { data: projectsData, isLoading: projectsLoading } = useQuery({
     ...getProjectsOptions({ query: { page: 1, per_page: 100 } }),
@@ -480,15 +551,18 @@ export function ResourceMonitoring() {
     [projects]
   )
 
-  // Fetch health summary for all projects
+  // Fetch health summary for all projects, over the selected window
   const { data: healthData } = useQuery({
     ...getProjectsHealthOptions({
       query: {
         project_ids: projectIds.join(','),
+        start_time: range.start.toISOString(),
+        end_time: range.end.toISOString(),
+        is_bot: hideBots ? false : undefined,
       },
     }),
     enabled: projectIds.length > 0,
-    refetchInterval: 30000,
+    refetchInterval: timeRange === 'custom' ? false : 30000,
   })
 
   const healthMap = healthData?.projects ?? {}
@@ -572,19 +646,44 @@ export function ResourceMonitoring() {
               ))}
             </SelectContent>
           </Select>
+          <Button
+            variant={hideBots ? 'default' : 'outline'}
+            size="sm"
+            className="h-8 px-3 text-xs"
+            onClick={() => setHideBots((v) => !v)}
+            title={hideBots ? 'Bots are hidden' : 'Bots are included'}
+          >
+            {hideBots ? 'Hide bots' : 'Show bots'}
+          </Button>
           <div className="flex items-center gap-1 rounded-md border p-0.5">
-            {(['1h', '6h', '24h'] as const).map((range) => (
+            {(['1h', '6h', '24h'] as const).map((preset) => (
               <Button
-                key={range}
-                variant={timeRange === range ? 'default' : 'ghost'}
+                key={preset}
+                variant={timeRange === preset ? 'default' : 'ghost'}
                 size="sm"
                 className="h-7 px-3 text-xs"
-                onClick={() => setTimeRange(range)}
+                onClick={() => setTimeRange(preset)}
               >
-                {range}
+                {preset}
               </Button>
             ))}
+            <Button
+              variant={timeRange === 'custom' ? 'default' : 'ghost'}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={() => setTimeRange('custom')}
+            >
+              Custom
+            </Button>
           </div>
+          {timeRange === 'custom' && (
+            <DateRangePicker
+              date={customRange}
+              onDateChange={setCustomRange}
+              showTime
+              className="w-[300px]"
+            />
+          )}
         </div>
       </div>
 
@@ -614,7 +713,7 @@ export function ResourceMonitoring() {
             <SummaryStatCard
               label="Total Requests"
               value={summary.totalRequests.toLocaleString()}
-              subValue="last hour"
+              subValue={range.label}
             />
             <SummaryStatCard
               label="Error Rate"
@@ -673,7 +772,8 @@ export function ResourceMonitoring() {
                 ? parseInt(selectedProjectId, 10)
                 : undefined
             }
-            timeRange={timeRange}
+            range={range}
+            hideBots={hideBots}
           />
         </div>
       )}

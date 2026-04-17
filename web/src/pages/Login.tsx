@@ -1,25 +1,13 @@
 import { LoginForm } from '@/components/auth/login-form'
 import { loginMutation } from '@/api/client/@tanstack/react-query.gen'
-import { Button } from '@/components/ui/button'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
-import { Play } from 'lucide-react'
 
 export const Login = () => {
   const [isLoading, setIsLoading] = useState(false)
-  const [isDemoLoading, setIsDemoLoading] = useState(false)
-  const { data: publicSettings } = useQuery({
-    queryKey: ['public-settings'],
-    queryFn: async () => {
-      const res = await fetch('/api/settings/public')
-      if (!res.ok) return { demo_enabled: false }
-      return res.json() as Promise<{ demo_enabled: boolean }>
-    },
-    staleTime: 5 * 60 * 1000,
-  })
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { refetch } = useAuth()
@@ -37,10 +25,8 @@ export const Login = () => {
       }
 
       toast.success('Logged in successfully')
-      // Invalidate and refetch user data
       await queryClient.invalidateQueries({ queryKey: ['getCurrentUser'] })
       await refetch()
-      // Navigate using React Router
       navigate('/dashboard')
     },
   })
@@ -53,34 +39,6 @@ export const Login = () => {
       })
     } finally {
       setIsLoading(false)
-    }
-  }
-
-  const handleDemoLogin = async () => {
-    setIsDemoLoading(true)
-    try {
-      const response = await fetch('/api/auth/demo', {
-        method: 'POST',
-        credentials: 'include',
-      })
-
-      if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.detail || 'Failed to start demo')
-      }
-
-      toast.success('Welcome to the demo!')
-      // Invalidate and refetch user data
-      await queryClient.invalidateQueries({ queryKey: ['getCurrentUser'] })
-      await refetch()
-      // Navigate to dashboard
-      navigate('/dashboard')
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : 'Failed to start demo'
-      )
-    } finally {
-      setIsDemoLoading(false)
     }
   }
 
@@ -110,34 +68,6 @@ export const Login = () => {
           onSubmit={handleSubmit}
           isLoading={isLoading || login.isPending}
         />
-
-        {publicSettings?.demo_enabled && (
-          <>
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-background px-2 text-muted-foreground">
-                  Or continue with
-                </span>
-              </div>
-            </div>
-
-            <Button
-              variant="outline"
-              onClick={handleDemoLogin}
-              disabled={isDemoLoading}
-              className="w-full"
-            >
-              <Play className="mr-2 h-4 w-4" />
-              {isDemoLoading ? 'Starting demo...' : 'Try Demo'}
-            </Button>
-            <p className="text-center text-xs text-muted-foreground">
-              Explore analytics and monitoring with sample data
-            </p>
-          </>
-        )}
       </div>
     </div>
   )

@@ -915,6 +915,7 @@ impl BackupCommand {
             force_path_style: std::env::var("S3_FORCE_PATH_STYLE")
                 .ok()
                 .and_then(|v| v.parse().ok()),
+            is_default: false,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

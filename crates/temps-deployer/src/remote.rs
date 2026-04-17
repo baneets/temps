@@ -38,9 +38,12 @@ pub struct RemoteNodeDeployer {
 
 impl RemoteNodeDeployer {
     pub fn new(agent_url: String, token: String, node_name: String) -> Result<Self, DeployerError> {
+        // Strict TLS by default; operators with self-signed agent certs
+        // on a trusted internal network can opt in via the
+        // `insecure_tls` toggle in the application settings UI.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
-            .danger_accept_invalid_certs(true) // Agent uses self-signed certs on internal network
+            .danger_accept_invalid_certs(temps_core::tls::insecure_tls_enabled())
             .build()
             .map_err(|e| {
                 DeployerError::NetworkError(format!(

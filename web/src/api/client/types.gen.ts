@@ -27619,6 +27619,18 @@ export type GetProjectsHealthData = {
          * Comma-separated list of project IDs
          */
         project_ids: string;
+        /**
+         * Optional start time (ISO 8601). Defaults to end_time - 1h.
+         */
+        start_time?: string;
+        /**
+         * Optional end time (ISO 8601). Defaults to now.
+         */
+        end_time?: string;
+        /**
+         * Filter by bot detection. Pass `false` to exclude bots, `true` for bots only.
+         */
+        is_bot?: boolean | null;
     };
     url: '/proxy-logs/stats/projects-health';
 };
@@ -27707,6 +27719,10 @@ export type GetTimeBucketStatsData = {
          * Filter by device type
          */
         device_type?: string;
+        /**
+         * Filter by whether the request was routed to a project (true = project_id IS NOT NULL)
+         */
+        has_project?: boolean;
     };
     url: '/proxy-logs/stats/time-buckets';
 };

@@ -1,9 +1,8 @@
 import { getUniqueCountsOptions } from '@/api/client/@tanstack/react-query.gen'
 import { ProjectResponse } from '@/api/client/types.gen'
-import { useAuth } from '@/contexts/AuthContext'
 
 import { useQuery } from '@tanstack/react-query'
-import { Users, MousePointer, FileText, DollarSign } from 'lucide-react'
+import { Users, MousePointer, FileText } from 'lucide-react'
 
 interface AnalyticsMetricsProps {
   project: ProjectResponse
@@ -18,7 +17,6 @@ export function AnalyticsMetrics({
   endDate,
   environment,
 }: AnalyticsMetricsProps) {
-  const { isDemoMode } = useAuth()
   // Fetch unique visitors
   const visitorsQuery = useQuery({
     ...getUniqueCountsOptions({
@@ -72,7 +70,7 @@ export function AnalyticsMetrics({
   const hasError =
     visitorsQuery.error || sessionsQuery.error || pathsQuery.error
 
-  const baseMetrics = [
+  const metrics = [
     {
       label: 'Unique Visitors',
       value: visitorsQuery.data?.count ?? 0,
@@ -93,22 +91,8 @@ export function AnalyticsMetrics({
     },
   ]
 
-  // Add Revenue card in demo mode
-  const metrics = isDemoMode
-    ? [
-        ...baseMetrics,
-        {
-          label: 'Revenue',
-          value: 'Coming Soon',
-          icon: DollarSign,
-          description: 'Track revenue from your app',
-          isComingSoon: true,
-        },
-      ]
-    : baseMetrics
-
-  const gridCols = isDemoMode ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'
-  const skeletonCount = isDemoMode ? 4 : 3
+  const gridCols = 'grid-cols-3'
+  const skeletonCount = 3
 
   return (
     <>

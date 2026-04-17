@@ -137,6 +137,7 @@ mod docker_utils {
                 access_key_id: access_key.to_string(),
                 secret_key: secret_key.to_string(),
                 force_path_style: Some(true),
+                is_default: false,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };

@@ -18,11 +18,10 @@ import { ProblemDetails } from './api/client'
 import { client } from './api/client/client.gen'
 import { Header } from './components/dashboard/Header'
 import AppSidebar from './components/dashboard/Sidebar'
-import { DemoLayout } from './components/layout/DemoLayout'
 import { ProtectedLayout } from './components/layout/ProtectedLayout'
 import { SettingsLayout } from './components/settings/SettingsLayout'
 import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
-import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { AuthProvider } from './contexts/AuthContext'
 import { BreadcrumbProvider } from './contexts/BreadcrumbContext'
 import { PlatformAccessProvider } from './contexts/PlatformAccessContext'
 import './globals.css'
@@ -55,6 +54,11 @@ const ServiceDetail = lazy(() =>
 const ServiceDataBrowser = lazy(() =>
   import('./pages/ServiceDataBrowser').then((m) => ({
     default: m.ServiceDataBrowser,
+  }))
+)
+const MajorUpgradeDetail = lazy(() =>
+  import('./pages/MajorUpgradeDetail').then((m) => ({
+    default: m.MajorUpgradeDetail,
   }))
 )
 const Users = lazy(() =>
@@ -217,32 +221,6 @@ const PageLoader = () => (
   </div>
 )
 
-// Demo mode routes - limited to projects only
-const DemoRoutes = () => {
-  return (
-    <BreadcrumbProvider>
-      <DemoLayout>
-        <ErrorBoundary
-          fallback={(error, errorInfo, resetError) => (
-            <ErrorFallback
-              error={error}
-              errorInfo={errorInfo}
-              resetError={resetError}
-            />
-          )}
-        >
-          <Routes>
-            <Route path="/" element={<Navigate to="/projects" replace />} />
-            <Route path="/projects" element={<Projects />} />
-            <Route path="/projects/:slug/*" element={<ProjectDetail />} />
-            <Route path="*" element={<Navigate to="/projects" replace />} />
-          </Routes>
-        </ErrorBoundary>
-      </DemoLayout>
-    </BreadcrumbProvider>
-  )
-}
-
 // Full app routes with sidebar
 const FullAppRoutes = () => {
   return (
@@ -332,6 +310,10 @@ const FullAppRoutes = () => {
                   <Route path="storage/import" element={<ImportService />} />
                   <Route path="storage/:id" element={<ServiceDetail />} />
                   <Route path="storage/:id/browse" element={<ServiceDataBrowser />} />
+                  <Route
+                    path="storage/:id/upgrades/:upgradeId"
+                    element={<MajorUpgradeDetail />}
+                  />
                   <Route path="email" element={<Email />} />
                   <Route path="email/:id" element={<EmailDetail />} />
                   <Route path="ai-gateway" element={<AiGateway />} />
@@ -389,14 +371,7 @@ const FullAppRoutes = () => {
   )
 }
 
-// Component that chooses layout based on demo mode
 const AuthenticatedRoutes = () => {
-  const { isDemoMode } = useAuth()
-
-  if (isDemoMode) {
-    return <DemoRoutes />
-  }
-
   return (
     <PlatformAccessProvider>
       <PluginsProvider>

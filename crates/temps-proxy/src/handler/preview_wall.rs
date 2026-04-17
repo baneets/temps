@@ -31,16 +31,39 @@ pub const PREVIEW_LOGOUT_PATH: &str = "/__temps/preview/logout";
 
 const PREVIEW_FORM_HTML: &str = include_str!("../../preview_wall/preview_form.html");
 
-/// Render the login form. `next` is the path the user will be redirected to
-/// after a successful login — always sanitized by the caller.
+/// Render the workspace login form. Delegates to the generic renderer using
+/// a `session #<id>` label — kept for the existing call sites.
 pub fn generate_preview_form_html(
     session_id: i32,
     port: u16,
     next: &str,
     show_error: bool,
 ) -> String {
-    PREVIEW_FORM_HTML
-        .replace("{{SESSION_ID}}", &session_id.to_string())
+    generate_preview_form_html_labeled(&format!("session #{}", session_id), port, next, show_error)
+}
+
+/// Render the login form with an arbitrary display label (e.g. `session #42`
+/// for workspaces, `sandbox sbx_abc…` for sandboxes). `next` is the path the
+/// user will be redirected to after a successful login — always sanitized by
+/// the caller.
+pub fn generate_preview_form_html_labeled(
+    label: &str,
+    port: u16,
+    next: &str,
+    show_error: bool,
+) -> String {
+    // The template uses `{{SESSION_ID}}` substituted into `session #{{SESSION_ID}}`.
+    // The simplest and safest change that works for both workspaces and
+    // sandboxes is to replace the whole `session #{{SESSION_ID}}` phrase
+    // with the provided label, falling back to numeric substitution for
+    // older templates that don't include the phrase.
+    let escaped_label = html_escape(label);
+    let with_label = PREVIEW_FORM_HTML.replace("session #{{SESSION_ID}}", &escaped_label);
+    with_label
+        // Keep the token replacement for any remaining occurrences so older
+        // template copies still render (substitutes empty string, since we
+        // already swapped the canonical phrase above).
+        .replace("{{SESSION_ID}}", "")
         .replace("{{PORT}}", &port.to_string())
         .replace("{{REDIRECT_PATH}}", &html_escape(next))
         .replace(
@@ -57,11 +80,39 @@ pub fn generate_preview_form_html(
 /// live cookie so the browser actually drops it. `secure` must match the
 /// scheme used when the live cookie was set.
 pub fn build_logout_cookie(session_id: i32, preview_domain: &str, secure: bool) -> String {
+    build_logout_cookie_raw(
+        &format!(
+            "{}{}",
+            crate::preview_auth::PREVIEW_COOKIE_PREFIX,
+            session_id
+        ),
+        preview_domain,
+        secure,
+    )
+}
+
+/// Build an expired Set-Cookie header for a standalone sandbox logout.
+pub fn build_logout_cookie_sandbox(
+    public_id_suffix: &str,
+    preview_domain: &str,
+    secure: bool,
+) -> String {
+    build_logout_cookie_raw(
+        &format!(
+            "{}{}",
+            crate::preview_auth::PREVIEW_SANDBOX_COOKIE_PREFIX,
+            public_id_suffix
+        ),
+        preview_domain,
+        secure,
+    )
+}
+
+fn build_logout_cookie_raw(cookie_name: &str, preview_domain: &str, secure: bool) -> String {
     let domain = preview_domain.trim_start_matches("*.");
     let secure_attr = if secure { "; Secure" } else { "" };
-    let prefix = crate::preview_auth::PREVIEW_COOKIE_PREFIX;
     format!(
-        "{prefix}{session_id}=; Domain=.{domain}; Path=/; HttpOnly{secure_attr}; SameSite=Lax; Max-Age=0"
+        "{cookie_name}=; Domain=.{domain}; Path=/; HttpOnly{secure_attr}; SameSite=Lax; Max-Age=0"
     )
 }
 

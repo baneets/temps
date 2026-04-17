@@ -24,7 +24,6 @@ import {
   MoreHorizontal,
   ScrollText,
   Settings,
-  SquareTerminal,
 } from 'lucide-react'
 
 import { ProjectResponse } from '@/api/client'
@@ -52,8 +51,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu'
 
-// Main navigation items - all items
-const navMainAll = [
+const navMain = [
   {
     title: 'Projects',
     url: '/projects',
@@ -64,26 +62,6 @@ const navMainAll = [
     title: 'Sandboxes',
     url: '/sandboxes',
     icon: Box,
-  },
-  {
-    title: 'Monitoring',
-    url: '/monitoring',
-    icon: Activity,
-  },
-]
-
-// Main navigation items available in demo mode (restricted)
-const navMainDemo = [
-  {
-    title: 'Dashboard',
-    url: '/dashboard',
-    icon: SquareTerminal,
-    isActive: true,
-  },
-  {
-    title: 'Projects',
-    url: '/projects',
-    icon: Folder,
   },
   {
     title: 'Monitoring',
@@ -356,7 +334,6 @@ function NavSettingsLink() {
 export default function AppSidebar() {
   const { projects } = useProjects()
   const { setIsMinimal, isMinimal, isMobile } = useSidebar()
-  const { isDemoMode } = useAuth()
   const { platformNavEntries } = usePluginsContext()
   const location = useLocation()
 
@@ -370,9 +347,6 @@ export default function AppSidebar() {
       })),
     [platformNavEntries]
   )
-
-  // Use restricted navigation in demo mode (accessed via demo.<preview_domain> subdomain)
-  const navMainItems = isDemoMode ? navMainDemo : navMainAll
 
   // Auto-collapse sidebar when on project detail pages
   useEffect(() => {
@@ -421,16 +395,11 @@ export default function AppSidebar() {
           </SidebarMenu>
         </SidebarHeader>
         <SidebarContent>
-          <NavMain items={navMainItems} />
+          <NavMain items={navMain} />
           <NavProjects projects={projects} />
-          {/* Hide observe, plugins, and settings in demo mode */}
-          {!isDemoMode && (
-            <>
-              <NavObserve items={navObserve} />
-              <NavPlugins items={pluginItems} />
-              <NavSettingsLink />
-            </>
-          )}
+          <NavObserve items={navObserve} />
+          <NavPlugins items={pluginItems} />
+          <NavSettingsLink />
           <SidebarGroup />
         </SidebarContent>
         <SidebarFooter>

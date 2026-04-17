@@ -613,6 +613,7 @@ impl ProxyLogService {
         project_ids: &[i32],
         start_time: UtcDateTime,
         end_time: UtcDateTime,
+        is_bot: Option<bool>,
     ) -> Result<Vec<ProjectHealthSummary>, ProxyLogServiceError> {
         if project_ids.is_empty() {
             return Ok(vec![]);
@@ -626,6 +627,14 @@ impl ProxyLogService {
             .collect();
         let placeholders_str = placeholders.join(", ");
 
+        let (bot_clause, bot_value) = match is_bot {
+            Some(flag) => (
+                format!(" AND is_bot = ${}", project_ids.len() + 3),
+                Some(flag),
+            ),
+            None => (String::new(), None),
+        };
+
         let sql = format!(
             r#"
             SELECT
@@ -636,16 +645,19 @@ impl ProxyLogService {
             FROM proxy_logs
             WHERE timestamp >= $1
               AND timestamp < $2
-              AND project_id IN ({})
+              AND project_id IN ({}){}
             GROUP BY project_id
             "#,
-            placeholders_str
+            placeholders_str, bot_clause
         );
 
         let db_backend = sea_orm::DatabaseBackend::Postgres;
         let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
         for &id in project_ids {
             values.push(id.into());
+        }
+        if let Some(flag) = bot_value {
+            values.push(flag.into());
         }
 
         let stmt = sea_orm::Statement::from_sql_and_values(db_backend, &sql, values);
@@ -815,6 +827,14 @@ impl ProxyLogService {
             where_clauses.push(format!("device_type = ${}", param_index));
             *param_index += 1;
         }
+        if let Some(has_project) = filters.has_project {
+            where_clauses.push(if has_project {
+                "project_id IS NOT NULL".to_string()
+            } else {
+                "project_id IS NULL".to_string()
+            });
+            // no parameterized value — the predicate is fully in SQL
+        }
         String::new()
     }
 
@@ -928,6 +948,9 @@ pub struct StatsFilters {
     pub request_source: Option<String>,
     pub is_bot: Option<bool>,
     pub device_type: Option<String>,
+    /// When true, only count requests that matched a project (project_id IS NOT NULL).
+    /// Used by the health dashboard so totals match the per-project cards.
+    pub has_project: Option<bool>,
 }
 
 /// Time bucket statistics response
@@ -1099,6 +1122,7 @@ mod tests {
             request_source: Some("proxy".to_string()),
             is_bot: Some(false),
             device_type: Some("desktop".to_string()),
+            has_project: None,
         };
         let mut where_clauses = Vec::new();
         let mut param_index = 1;
@@ -1165,6 +1189,7 @@ mod tests {
             request_source: Some("proxy".to_string()),
             is_bot: Some(false),
             device_type: Some("desktop".to_string()),
+            has_project: None,
         };
         let mut values: Vec<sea_orm::Value> = vec![];
 

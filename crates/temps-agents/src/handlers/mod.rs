@@ -6,6 +6,7 @@ pub mod preview_gateway;
 pub mod runs;
 pub mod secrets;
 pub mod trigger;
+pub mod workflows;
 
 use axum::Router;
 use std::sync::Arc;
@@ -44,4 +45,5 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .merge(runs::routes())
         .merge(secrets::routes())
         .merge(trigger::routes())
+        .merge(workflows::routes())
 }

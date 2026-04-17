@@ -118,8 +118,11 @@ fn spawn_heartbeat_loop(
     let labels = config.labels.clone();
 
     tokio::spawn(async move {
+        // Strict TLS — the worker→control-plane heartbeat carries the
+        // node's auth token. A MitM with a self-signed cert here would
+        // capture the token and impersonate this worker. There is no
+        // opt-in: `AppSettings.insecure_tls` is server-side only.
         let client = match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(10))
             .build()
         {

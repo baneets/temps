@@ -1174,16 +1174,22 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let external_plugins_service = plugin_manager
         .service_context()
         .get_service::<temps_external_plugins::ExternalPluginsService>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("Console API received shutdown signal, stopping external plugins...");
-            if let Some(service) = external_plugins_service {
-                service.shutdown_all().await;
-                info!("External plugins shut down");
-            }
-        })
-        .await?;
+    // Use into_make_service_with_connect_info so handlers/middleware can read
+    // the immediate peer SocketAddr — required by rate-limiter to decide if
+    // X-Forwarded-For headers should be trusted (only from loopback proxies).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Console API received shutdown signal, stopping external plugins...");
+        if let Some(service) = external_plugins_service {
+            service.shutdown_all().await;
+            info!("External plugins shut down");
+        }
+    })
+    .await?;
     info!("Console API server exited");
     Ok(())
 }

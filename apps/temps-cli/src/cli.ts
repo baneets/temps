@@ -53,6 +53,7 @@ import { registerSkillsCommands } from './commands/skills/index.js'
 import { registerMcpServersCommands } from './commands/mcp-servers/index.js'
 import { registerSecretsCommands } from './commands/secrets/index.js'
 import { registerSandboxCommands } from './commands/sandbox/index.js'
+import { registerWorkflowCommands } from './commands/workflow/index.js'
 
 // Developer workflow commands
 import { registerInitCommand } from './commands/init/index.js'
@@ -151,6 +152,7 @@ export function createProgram(): Command {
   registerMcpServersCommands(program)
   registerSecretsCommands(program)
   registerSandboxCommands(program)
+  registerWorkflowCommands(program)
 
   // Developer workflow commands
   registerInitCommand(program)

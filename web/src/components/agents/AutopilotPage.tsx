@@ -491,7 +491,20 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
                       <AutopilotStatusBadge status={run.status} />
                     </TableCell>
                     <TableCell className="text-sm">
-                      {run.agent_name || (run.trigger_type === 'autofixer' ? 'Autofix' : '-')}
+                      <div className="flex items-center gap-2">
+                        <span>
+                          {run.agent_name ||
+                            (run.trigger_type === 'autofixer' ? 'Autofix' : '-')}
+                        </span>
+                        {run.source === 'cli_ephemeral' && (
+                          <span
+                            className="text-[10px] uppercase tracking-wide bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded font-medium"
+                            title="Triggered from the CLI with --from-file. Not stored in project_agents."
+                          >
+                            Ephemeral
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {run.trigger_type === 'autofixer' ? 'Autofix' : run.trigger_type}

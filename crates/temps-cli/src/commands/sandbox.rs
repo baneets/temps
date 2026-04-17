@@ -197,11 +197,11 @@ fn sandbox_url(base: &str, path: &str) -> String {
 }
 
 fn make_client() -> reqwest::Client {
-    // Mirrors `node.rs`: self-hosted deployments often use self-signed
-    // certs. The trade-off is explicit — the operator is already trusting
-    // the API_URL they typed.
+    // Strict TLS — CLI talks to the control plane over the public
+    // internet. Skipping verification here would let a MitM steal the
+    // user's session token. The server-side opt-in (AppSettings.insecure_tls)
+    // does NOT apply to CLI binaries.
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .build()
         .expect("Failed to build HTTP client")
 }

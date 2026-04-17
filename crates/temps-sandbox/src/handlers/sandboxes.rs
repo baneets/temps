@@ -20,7 +20,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -111,6 +111,11 @@ impl From<SandboxError> for Problem {
                     .with_title("Sandbox Subsystem Unavailable")
                     .with_detail(error.to_string())
             }
+            SandboxError::PasswordHashFailed { .. } => {
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Password Hashing Failed")
+                    .with_detail(error.to_string())
+            }
             SandboxError::Database(_) => problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
                 .with_title("Internal Server Error")
                 .with_detail(error.to_string()),
@@ -177,6 +182,37 @@ fn url_contains_credentials(url: &str) -> bool {
     false
 }
 
+/// Reject URLs that point at private/loopback/metadata IPs or use
+/// non-HTTP schemes. Without this, an authenticated user can drive the
+/// sandbox to fetch from internal Docker network services (control
+/// plane API, neighbor sandboxes, cloud metadata), turning sandbox
+/// seeding into an SSRF primitive.
+fn validate_seed_url(url: &str, kind: &str) -> Result<(), SandboxError> {
+    use temps_core::url_validation::{validate_external_url, UrlValidationError};
+    validate_external_url(url).map_err(|e| {
+        let detail = match e {
+            UrlValidationError::InvalidScheme => "scheme must be http or https".to_string(),
+            UrlValidationError::InvalidFormat(m) => format!("invalid url: {m}"),
+            UrlValidationError::PrivateIp
+            | UrlValidationError::LoopbackIp
+            | UrlValidationError::LinkLocalIp
+            | UrlValidationError::CloudMetadata
+            | UrlValidationError::MulticastIp
+            | UrlValidationError::BroadcastIp
+            | UrlValidationError::DocumentationIp
+            | UrlValidationError::UnspecifiedIp
+            | UrlValidationError::DomainResolvesToBlockedIp => {
+                "host points to a private, loopback, or metadata address".to_string()
+            }
+            UrlValidationError::DnsResolutionFailed(m) => format!("dns: {m}"),
+        };
+        SandboxError::Validation {
+            message: format!("{kind} source: {detail}"),
+        }
+    })?;
+    Ok(())
+}
+
 impl SourceBody {
     /// Validate the body before converting it into the service-layer
     /// `SandboxSource`. Called by handlers that accept a SourceBody.
@@ -199,6 +235,7 @@ impl SourceBody {
                         message: "git source: url must not contain embedded credentials — use username/password or git_connection_id".into(),
                     });
                 }
+                validate_seed_url(url, "git")?;
                 let inline = username.is_some() || password.is_some();
                 if inline && git_connection_id.is_some() {
                     return Err(SandboxError::Validation {
@@ -219,6 +256,7 @@ impl SourceBody {
                         message: "tarball source: url must not be empty".into(),
                     });
                 }
+                validate_seed_url(url, "tarball")?;
                 Ok(())
             }
         }
@@ -272,6 +310,13 @@ pub struct CreateSandboxBody {
     /// repo or extracts a tarball after the sandbox is created.
     #[serde(default)]
     pub source: Option<SourceBody>,
+    /// Optional preview-URL password. When set, every preview URL served
+    /// for this sandbox is gated behind a login form. 8–256 characters.
+    /// Omit to leave preview URLs open (the sandbox ID remains the only
+    /// gate). The plaintext is never returned; only the last-4 hint is
+    /// surfaced in `SandboxResponse.preview_password_hint`.
+    #[serde(default)]
+    pub preview_password: Option<String>,
 }
 
 impl From<CreateSandboxBody> for CreateSandboxRequest {
@@ -285,6 +330,7 @@ impl From<CreateSandboxBody> for CreateSandboxRequest {
             memory_limit_mb: b.memory_limit_mb,
             pids_limit: b.pids_limit,
             source: b.source.map(SandboxSource::from),
+            preview_password: b.preview_password,
         }
     }
 }
@@ -306,6 +352,12 @@ pub struct SandboxResponse {
     /// Empty string when preview URLs aren't configured for this install
     /// (e.g. local dev without a `preview_domain` setting).
     pub preview_url_template: String,
+
+    /// Last 4 chars of the preview password when one is configured.
+    /// Absent means "no password set — preview URL relies on the
+    /// unguessable 16-hex public_id". Never contains the full plaintext.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_password_hint: Option<String>,
 }
 
 impl SandboxResponse {
@@ -323,6 +375,7 @@ impl SandboxResponse {
             created_at: s.created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             expires_at: s.expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             preview_url_template: template,
+            preview_password_hint: s.preview_password_hint,
         }
     }
 }
@@ -1231,6 +1284,74 @@ pub async fn domain(
     Ok(Json(DomainResponse { url }))
 }
 
+// ── Preview password ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetPreviewPasswordBody {
+    /// Plaintext password to protect the sandbox's preview URLs. Hashed
+    /// server-side with argon2id — we never persist or echo this back.
+    /// Must be between 8 and 256 characters.
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SetPreviewPasswordResponse {
+    /// Last 4 chars of the password we just stored. Surface in the UI so
+    /// users can confirm which password is live without re-entering it.
+    pub preview_password_hint: String,
+}
+
+#[utoipa::path(
+    tag = "Sandboxes",
+    put,
+    path = "/v1/sandbox/{id}/preview-password",
+    request_body = SetPreviewPasswordBody,
+    responses(
+        (status = 200, description = "Preview password set or rotated", body = SetPreviewPasswordResponse),
+        (status = 400, description = "Password too short or too long"),
+        (status = 404, description = "Sandbox not found")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn set_preview_password(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<SandboxAppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetPreviewPasswordBody>,
+) -> Result<impl IntoResponse, Problem> {
+    sandbox_permission_guard(&auth, Permission::SandboxesWrite, Permission::ProjectsWrite)?;
+    let hint = state
+        .sandbox_service
+        .set_preview_password(&id, auth.user_id(), &body.password)
+        .await?;
+    Ok(Json(SetPreviewPasswordResponse {
+        preview_password_hint: hint,
+    }))
+}
+
+#[utoipa::path(
+    tag = "Sandboxes",
+    delete,
+    path = "/v1/sandbox/{id}/preview-password",
+    responses(
+        (status = 204, description = "Preview password removed (sandbox is now URL-only protected)"),
+        (status = 404, description = "Sandbox not found")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn clear_preview_password(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<SandboxAppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, Problem> {
+    sandbox_permission_guard(&auth, Permission::SandboxesWrite, Permission::ProjectsWrite)?;
+    state
+        .sandbox_service
+        .clear_preview_password(&id, auth.user_id())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Routing ─────────────────────────────────────────────────────────────────
 
 pub fn routes() -> Router<Arc<SandboxAppState>> {
@@ -1256,6 +1377,10 @@ pub fn routes() -> Router<Arc<SandboxAppState>> {
         .route("/v1/sandbox/{id}/fs/stat", get(stat_path))
         .route("/v1/sandbox/{id}/fs/mkdir", post(mkdir))
         .route("/v1/sandbox/{id}/domain", get(domain))
+        .route(
+            "/v1/sandbox/{id}/preview-password",
+            put(set_preview_password).delete(clear_preview_password),
+        )
 }
 
 #[cfg(test)]
@@ -1310,6 +1435,7 @@ mod tests {
             work_dir: "/workspace".into(),
             created_at: now,
             expires_at: now,
+            preview_password_hint: None,
         };
         let r = SandboxResponse::from(summary);
         assert_eq!(r.id, "sbx_abc");

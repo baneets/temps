@@ -7,6 +7,7 @@ use utoipa::ToSchema;
 pub mod mongodb;
 pub mod postgres;
 pub mod postgres_cluster;
+pub mod postgres_upgrade;
 pub mod redis;
 pub mod rustfs;
 pub mod s3;
@@ -197,6 +198,119 @@ pub struct ServiceConfig {
     pub version: Option<String>,
     pub parameters: serde_json::Value,
 }
+
+/// Capabilities a service exposes for the generic restore framework.
+///
+/// Each engine overrides `ExternalService::restore_capabilities` to declare
+/// what it supports. The handler layer uses this to validate requests and
+/// the UI uses it to conditionally show options (e.g., PITR picker).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RestoreCapabilities {
+    /// Restore a backup onto the same running service (destructive).
+    pub restore_in_place: bool,
+    /// Restore a backup into a freshly provisioned service.
+    pub restore_to_new_service: bool,
+    /// Point-in-time recovery using engine-specific continuous archives
+    /// (WAL for Postgres, AOF for Redis, oplog for MongoDB, object versions for S3).
+    pub pitr: bool,
+    /// Earliest recoverable timestamp, if `pitr` is true. Derived from
+    /// engine-specific archive metadata (e.g., `pg_stat_archiver`).
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub earliest_pitr_time: Option<chrono::DateTime<chrono::Utc>>,
+    /// Latest recoverable timestamp, if `pitr` is true.
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub latest_pitr_time: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Default for RestoreCapabilities {
+    fn default() -> Self {
+        Self {
+            restore_in_place: true,
+            restore_to_new_service: false,
+            pitr: false,
+            earliest_pitr_time: None,
+            latest_pitr_time: None,
+        }
+    }
+}
+
+/// What the caller wants to do with a backup.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum RestoreMode {
+    /// Restore onto the existing service, replacing current data.
+    InPlace,
+    /// Provision a new service and restore the backup into it.
+    NewService {
+        /// Name for the new service.
+        name: String,
+        /// Optional parameter overrides (e.g., different port, volume).
+        /// Parameters not specified are copied from the source service.
+        #[serde(default)]
+        parameter_overrides: serde_json::Value,
+    },
+    /// Point-in-time recovery. Only valid when `RestoreCapabilities::pitr` is true.
+    /// May apply in-place or create a new service depending on `target`.
+    Pitr {
+        /// Whether PITR creates a new service or restores in place.
+        to_new_service: bool,
+        /// Optional new service name (required when `to_new_service` is true).
+        new_service_name: Option<String>,
+        /// The recovery target — engine decides which variant it honors.
+        target: RecoveryTarget,
+    },
+}
+
+/// Engine-specific recovery target for PITR.
+///
+/// Postgres honors all variants; Redis/Mongo/S3 will likely reject non-Time
+/// variants or define their own semantics when they grow PITR support.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecoveryTarget {
+    /// Recover to a specific timestamp.
+    Time {
+        #[schema(value_type = String, format = DateTime)]
+        time: chrono::DateTime<chrono::Utc>,
+    },
+    /// Recover to a specific transaction id (Postgres).
+    Xid { xid: String },
+    /// Recover to a specific log sequence number (Postgres).
+    Lsn { lsn: String },
+    /// Recover to a named restore point created via `pg_create_restore_point` (Postgres).
+    Name { name: String },
+}
+
+/// Context passed to restore methods: database handle, S3 clients, and
+/// supporting services the orchestrator needs.
+///
+/// Kept as a struct (not positional args) because the list will grow as
+/// more engines plug in (e.g., cluster coordinator, volume driver).
+pub struct RestoreContext<'a> {
+    pub s3_client: &'a aws_sdk_s3::Client,
+    pub s3_credentials: &'a S3Credentials,
+    pub s3_source: &'a temps_entities::s3_sources::Model,
+    pub backup: &'a temps_entities::backups::Model,
+    pub backup_location: &'a str,
+    pub source_service: &'a temps_entities::external_services::Model,
+    pub source_config: ServiceConfig,
+    pub pool: &'a temps_database::DbConnection,
+}
+
+/// Outcome of a restore-to-new-service operation.
+///
+/// The orchestrator uses these to create the new `external_services` row
+/// and wire it up to projects/environments as the caller requested.
+#[derive(Debug, Clone)]
+pub struct NewServiceRestoreResult {
+    /// The parameters (docker container id, port, credentials, etc.)
+    /// that the new service ended up with. These get persisted into
+    /// `external_service_params` by the handler.
+    pub parameters: HashMap<String, String>,
+    /// The new service's effective connection string.
+    pub connection_info: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceType {
@@ -480,6 +594,69 @@ pub trait ExternalService: Send + Sync {
         _service_config: ServiceConfig,
     ) -> Result<()> {
         Err(anyhow::anyhow!("Restore not implemented for this service"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Generic restore framework (Phase 1 of restore/PITR project).
+    // Engines override `restore_capabilities` to declare what they support
+    // and implement the matching method(s). Callers MUST consult
+    // `restore_capabilities()` before invoking these methods — the default
+    // impls return "not supported" so unimplemented paths fail fast.
+    // -----------------------------------------------------------------------
+
+    /// Declare what restore modes this service supports.
+    ///
+    /// The default preserves current behavior: in-place restore works for any
+    /// service that implements `restore_from_s3`, and nothing else is claimed.
+    /// Engines that can provision fresh services from a backup should override
+    /// to set `restore_to_new_service = true`. Only Postgres should set
+    /// `pitr = true` initially (after WAL archiving is hardened).
+    async fn restore_capabilities(
+        &self,
+        _service_config: ServiceConfig,
+    ) -> Result<RestoreCapabilities> {
+        Ok(RestoreCapabilities::default())
+    }
+
+    /// Provision a new service and restore the given backup into it.
+    ///
+    /// Implementations should:
+    /// 1. Create a fresh container/bucket/volume sized for the backup.
+    /// 2. Stream or download the backup into the new storage.
+    /// 3. Start the service and verify health.
+    /// 4. Return the parameters the orchestrator should persist.
+    ///
+    /// The new service's `external_services` row is created by the handler
+    /// layer after this returns — implementations should not insert rows.
+    async fn restore_to_new_service(
+        &self,
+        _ctx: RestoreContext<'_>,
+        _new_service_name: String,
+        _parameter_overrides: serde_json::Value,
+    ) -> Result<NewServiceRestoreResult> {
+        Err(anyhow::anyhow!(
+            "restore_to_new_service not supported for service type {}",
+            self.get_type()
+        ))
+    }
+
+    /// Perform a point-in-time recovery.
+    ///
+    /// Only called when `restore_capabilities().pitr == true`. If
+    /// `to_new_service` is true the implementation should behave like
+    /// `restore_to_new_service` but apply the recovery target before
+    /// promoting; otherwise it restores in-place.
+    async fn restore_pitr(
+        &self,
+        _ctx: RestoreContext<'_>,
+        _target: RecoveryTarget,
+        _to_new_service: bool,
+        _new_service_name: Option<String>,
+    ) -> Result<Option<NewServiceRestoreResult>> {
+        Err(anyhow::anyhow!(
+            "restore_pitr not supported for service type {}",
+            self.get_type()
+        ))
     }
 
     /// Upgrade the service to a new version/image with data migration

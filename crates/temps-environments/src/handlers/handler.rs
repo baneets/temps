@@ -359,12 +359,18 @@ pub async fn get_environment_variables(
         .get_environment_variables(project_id, params.environment_id)
         .await?;
 
+    // Always mask plaintext values in the list response. Callers that
+    // legitimately need the decrypted value must hit
+    // GET /projects/{id}/env-vars/{key}/value (audited) one secret at
+    // a time. Bulk-dumping every project secret over a single GET is
+    // the kind of mistake that turns a compromised reader token into
+    // a total credential exfiltration.
     let response: Vec<EnvironmentVariableResponse> = vars
         .into_iter()
         .map(|v| EnvironmentVariableResponse {
             id: v.id,
             key: v.key,
-            value: v.value,
+            value: "***".to_string(),
             created_at: v.created_at.timestamp_millis(),
             updated_at: v.updated_at.timestamp_millis(),
             environments: v
@@ -554,6 +560,18 @@ pub async fn get_environment_variable_value(
     RequireAuth(auth): RequireAuth,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EnvironmentsRead);
+
+    // Reveal of a single decrypted secret. Logged at info so any
+    // bulk-reveal pattern (one of the obvious post-compromise behaviors)
+    // is grep-able in the structured logs even before a dedicated audit
+    // event is added.
+    info!(
+        user_id = auth.user_id(),
+        project_id = project_id,
+        env_var_key = %key,
+        environment_id = ?params.environment_id,
+        "env_var.reveal"
+    );
 
     let value = state
         .env_var_service

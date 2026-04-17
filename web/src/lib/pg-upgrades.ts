@@ -1,0 +1,150 @@
+/**
+ * Hand-written helpers for PostgreSQL major-upgrade endpoints, pending
+ * regeneration of the OpenAPI client. Once `bun run openapi-ts` is re-run
+ * against a server that exposes these endpoints, this file can be deleted
+ * and the generated SDK used directly.
+ */
+
+export interface PgUpgrade {
+  id: number
+  service_id: number
+  from_version: string
+  to_version: string
+  from_image: string
+  to_image: string
+  status: string
+  phase: string
+  log_id: string
+  pre_upgrade_backup_id: number | null
+  rollback_volume_name: string | null
+  error_message: string | null
+  attempt: number
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+}
+
+export interface PgUpgradeLog {
+  log_id: string
+  content: string
+}
+
+export interface StartPgUpgradeBody {
+  from_version: string
+  to_version: string
+  from_image: string
+  to_image: string
+}
+
+async function readJsonOrThrow<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    let detail = response.statusText
+    try {
+      const body = (await response.json()) as { detail?: string; title?: string }
+      detail = body.detail || body.title || detail
+    } catch {
+      // fall through with statusText
+    }
+    throw new Error(detail)
+  }
+  return (await response.json()) as T
+}
+
+export async function listPgUpgrades(serviceId: number): Promise<PgUpgrade[]> {
+  const response = await fetch(`/api/external-services/${serviceId}/upgrades`, {
+    credentials: 'include',
+  })
+  return readJsonOrThrow<PgUpgrade[]>(response)
+}
+
+export async function getPgUpgrade(
+  serviceId: number,
+  upgradeId: number,
+): Promise<PgUpgrade> {
+  const response = await fetch(
+    `/api/external-services/${serviceId}/upgrades/${upgradeId}`,
+    { credentials: 'include' },
+  )
+  return readJsonOrThrow<PgUpgrade>(response)
+}
+
+export async function getPgUpgradeLogs(
+  serviceId: number,
+  upgradeId: number,
+): Promise<PgUpgradeLog> {
+  const response = await fetch(
+    `/api/external-services/${serviceId}/upgrades/${upgradeId}/logs`,
+    { credentials: 'include' },
+  )
+  return readJsonOrThrow<PgUpgradeLog>(response)
+}
+
+export async function startPgUpgrade(
+  serviceId: number,
+  body: StartPgUpgradeBody,
+): Promise<PgUpgrade> {
+  const response = await fetch(`/api/external-services/${serviceId}/upgrades`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return readJsonOrThrow<PgUpgrade>(response)
+}
+
+export async function retryPgUpgrade(
+  serviceId: number,
+  upgradeId: number,
+): Promise<PgUpgrade> {
+  const response = await fetch(
+    `/api/external-services/${serviceId}/upgrades/${upgradeId}/retry`,
+    { method: 'POST', credentials: 'include' },
+  )
+  return readJsonOrThrow<PgUpgrade>(response)
+}
+
+export async function cancelPgUpgrade(
+  serviceId: number,
+  upgradeId: number,
+): Promise<PgUpgrade> {
+  const response = await fetch(
+    `/api/external-services/${serviceId}/upgrades/${upgradeId}/cancel`,
+    { method: 'POST', credentials: 'include' },
+  )
+  return readJsonOrThrow<PgUpgrade>(response)
+}
+
+// ---- Phase timeline helpers -------------------------------------------
+
+export const PG_UPGRADE_PHASES = [
+  'pre_backup',
+  'snapshot',
+  'dump',
+  'new_container',
+  'restore',
+  'swap',
+  'analyze',
+  'completed',
+] as const
+
+export type PgUpgradePhase = (typeof PG_UPGRADE_PHASES)[number]
+
+export const PHASE_LABELS: Record<PgUpgradePhase, string> = {
+  pre_backup: 'Pre-upgrade backup',
+  snapshot: 'Snapshot volume',
+  dump: 'Dump old database',
+  new_container: 'Create new container',
+  restore: 'Restore into new version',
+  swap: 'Swap containers',
+  analyze: 'ANALYZE planner stats',
+  completed: 'Completed',
+}
+
+export function phaseIndex(phase: string): number {
+  const idx = PG_UPGRADE_PHASES.indexOf(phase as PgUpgradePhase)
+  return idx === -1 ? 0 : idx
+}
+
+export function isTerminal(status: string): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}

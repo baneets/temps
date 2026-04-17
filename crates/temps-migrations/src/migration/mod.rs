@@ -83,6 +83,12 @@ mod m20260413_000002_add_ai_model_to_project_agents;
 mod m20260414_000001_create_sandboxes;
 mod m20260415_000001_add_memory_embeddings_and_expiry;
 mod m20260415_000002_add_workspace_session_public_id;
+mod m20260416_000001_add_sandbox_preview_password;
+mod m20260416_000002_add_s3_source_default;
+mod m20260416_000003_create_postgres_major_upgrades;
+mod m20260416_000004_add_ephemeral_fields_to_agent_runs;
+mod m20260417_000001_create_restore_runs;
+mod m20260417_000002_add_prompt_text_to_agent_runs;
 
 pub struct Migrator;
 
@@ -173,6 +179,12 @@ impl MigratorTrait for Migrator {
             Box::new(m20260414_000001_create_sandboxes::Migration),
             Box::new(m20260415_000001_add_memory_embeddings_and_expiry::Migration),
             Box::new(m20260415_000002_add_workspace_session_public_id::Migration),
+            Box::new(m20260416_000001_add_sandbox_preview_password::Migration),
+            Box::new(m20260416_000002_add_s3_source_default::Migration),
+            Box::new(m20260416_000003_create_postgres_major_upgrades::Migration),
+            Box::new(m20260416_000004_add_ephemeral_fields_to_agent_runs::Migration),
+            Box::new(m20260417_000001_create_restore_runs::Migration),
+            Box::new(m20260417_000002_add_prompt_text_to_agent_runs::Migration),
         ]
     }
 }

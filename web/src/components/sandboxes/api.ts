@@ -17,6 +17,12 @@ export interface SandboxResponse {
    * on this install.
    */
   preview_url_template: string
+  /**
+   * Last 4 characters of the active preview password. Present only when
+   * a password has been set — omitted otherwise. The plaintext password
+   * is never returned by the API (the user chooses it).
+   */
+  preview_password_hint?: string
 }
 
 export interface ListSandboxesResponse {
@@ -46,6 +52,14 @@ export interface CreateSandboxBody {
   cpu_limit?: number
   memory_limit_mb?: number
   pids_limit?: number
+  /**
+   * Optional preview-URL password. When set, every preview URL served for
+   * this sandbox is gated behind a login form. 8–256 characters. Omit to
+   * leave preview URLs open (the sandbox ID is then the only gate). The
+   * plaintext is never returned — only the last-4 hint surfaces on the
+   * response as `preview_password_hint`.
+   */
+  preview_password?: string
 }
 
 const BASE = '/api/v1/sandbox'
@@ -206,4 +220,44 @@ export async function getJob(
  */
 export function jobLogsUrl(sandboxId: string, jobId: string): string {
   return `${BASE}/${encodeURIComponent(sandboxId)}/jobs/${encodeURIComponent(jobId)}/logs`
+}
+
+export interface SetPreviewPasswordResponse {
+  preview_password_hint: string
+}
+
+/**
+ * Set or rotate the sandbox's preview-URL password. The user supplies the
+ * plaintext; the server hashes it with argon2 and returns only the last-4
+ * hint so the UI can confirm which password is active. Plaintext is never
+ * persisted and never echoed back.
+ *
+ * Backend validation: 8–256 characters. HTTP 400 on length violations.
+ */
+export async function setSandboxPreviewPassword(
+  id: string,
+  password: string,
+): Promise<SetPreviewPasswordResponse> {
+  const response = await fetch(
+    `${BASE}/${encodeURIComponent(id)}/preview-password`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    },
+  )
+  return handleResponse<SetPreviewPasswordResponse>(response)
+}
+
+/**
+ * Remove the password on the sandbox's preview URLs. After this call the
+ * sandbox's 16-hex public ID is the only gate on preview traffic. 204
+ * No Content on success.
+ */
+export async function clearSandboxPreviewPassword(id: string): Promise<void> {
+  const response = await fetch(
+    `${BASE}/${encodeURIComponent(id)}/preview-password`,
+    { method: 'DELETE' },
+  )
+  return handleEmpty(response, 'clear preview password')
 }

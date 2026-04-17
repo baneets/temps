@@ -53,6 +53,18 @@ pub struct Model {
     pub created_at: DBDateTime,
     pub last_activity_at: DBDateTime,
     pub expires_at: DBDateTime,
+
+    /// Optional argon2 PHC hash of a user-supplied password that protects
+    /// the sandbox's preview URLs. When null, the gateway allows any
+    /// request that can reach the sandbox's unguessable hex hostname.
+    /// When set, Pingora presents a login form and expects a cookie
+    /// minted against this hash.
+    pub preview_password_hash: Option<String>,
+
+    /// Last 4 characters of the plaintext password. Safe to surface in
+    /// the UI so users can tell two passwords apart without storing the
+    /// full plaintext anywhere.
+    pub preview_password_hint: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

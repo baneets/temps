@@ -2,6 +2,8 @@
 
 pub mod externalsvc;
 pub mod parameter_strategies;
+pub mod postgres_lifecycle;
+pub mod postgres_upgrade_service;
 pub mod query_service;
 pub mod remote_service_client;
 pub mod services;

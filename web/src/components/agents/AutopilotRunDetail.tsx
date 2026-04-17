@@ -7,6 +7,14 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
@@ -704,29 +712,34 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
         <div className="flex items-center gap-2">
           {!activeStatuses.has(run.status) && (
             <>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={isRetrying}
-                onClick={async () => {
-                  setIsRetrying(true)
-                  try {
-                    const newRun = await retryRun(project.id, run.id)
-                    navigate(`../agents/${newRun.id}`)
-                  } catch (e) {
-                    console.error('Failed to retry run:', e)
-                  } finally {
-                    setIsRetrying(false)
-                  }
-                }}
-              >
-                {isRetrying ? (
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                ) : (
-                  <RefreshCw className="h-4 w-4 mr-1" />
-                )}
-                Retry
-              </Button>
+              {/* Retry hits the server's `/runs/{id}/retry` endpoint, which
+                  rejects ephemeral runs (their config isn't stored). Hide the
+                  button entirely so the user re-runs from the CLI instead. */}
+              {run.source !== 'cli_ephemeral' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isRetrying}
+                  onClick={async () => {
+                    setIsRetrying(true)
+                    try {
+                      const newRun = await retryRun(project.id, run.id)
+                      navigate(`../agents/${newRun.id}`)
+                    } catch (e) {
+                      console.error('Failed to retry run:', e)
+                    } finally {
+                      setIsRetrying(false)
+                    }
+                  }}
+                >
+                  {isRetrying ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                  )}
+                  Retry
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -775,6 +788,56 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           )}
         </div>
       </div>
+
+      {/* Ephemeral run banner. Only shown for runs uploaded via
+          `temps workflow run --from-file`. Surfaces the YAML so the user can
+          confirm exactly what executed (the server caps limits and forces
+          deliverable=report, so what they uploaded != what ran). */}
+      {run.source === 'cli_ephemeral' && (
+        <Alert>
+          <FileCode className="h-4 w-4" />
+          <AlertTitle className="flex items-center gap-2">
+            Ephemeral CLI run
+            <span className="text-[10px] uppercase tracking-wide bg-blue-500/10 text-blue-400 px-1.5 py-0.5 rounded font-medium">
+              dry-run
+            </span>
+          </AlertTitle>
+          <AlertDescription className="space-y-2">
+            <p>
+              This run was triggered with{' '}
+              <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                temps workflow run --from-file
+              </code>
+              . Its workflow config is not stored in{' '}
+              <code className="text-xs bg-muted px-1 py-0.5 rounded">project_agents</code>
+              {' '}— it lives only on this run row. Retry from the CLI to re-run.
+            </p>
+            {run.ephemeral_yaml && (
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <FileCode className="h-3 w-3 mr-1.5" />
+                    View YAML
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-3xl">
+                  <DialogHeader>
+                    <DialogTitle>Workflow YAML</DialogTitle>
+                    <DialogDescription>
+                      The exact config the executor ran (after server-side
+                      validation and limit capping). May differ from what was
+                      uploaded if any field exceeded the dry-run caps.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <pre className="text-xs bg-muted/40 border border-border rounded p-3 overflow-auto max-h-[60vh] whitespace-pre-wrap break-all">
+                    {run.ephemeral_yaml}
+                  </pre>
+                </DialogContent>
+              </Dialog>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Info cards grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -980,6 +1043,48 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
               </pre>
             </CardContent>
           )}
+        </Card>
+      )}
+
+      {/* Assembled prompt — what the AI CLI actually saw */}
+      {run.prompt_text && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <FileCode className="h-4 w-4 text-muted-foreground" />
+                <CardTitle className="text-sm">Prompt sent to AI</CardTitle>
+              </div>
+              <Dialog>
+                <DialogTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <FileCode className="h-3 w-3 mr-1.5" />
+                    View full prompt
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-3xl">
+                  <DialogHeader>
+                    <DialogTitle>Final assembled prompt</DialogTitle>
+                    <DialogDescription>
+                      The exact text the AI CLI received — trigger context,
+                      error details (if any), YAML prompt, and user context
+                      all merged together.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <pre className="text-xs bg-muted/40 border border-border rounded p-3 overflow-auto max-h-[70vh] whitespace-pre-wrap break-words">
+                    {run.prompt_text}
+                  </pre>
+                </DialogContent>
+              </Dialog>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <pre className="whitespace-pre-wrap text-xs font-mono bg-muted p-3 rounded-md overflow-x-auto max-h-48 overflow-y-auto">
+              {run.prompt_text.length > 1200
+                ? run.prompt_text.slice(0, 1200) + '\n\n… (truncated — click "View full prompt")'
+                : run.prompt_text}
+            </pre>
+          </CardContent>
         </Card>
       )}
 

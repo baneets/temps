@@ -26,11 +26,21 @@ use crate::handlers::AppState;
 pub struct AgentRunResponse {
     pub id: i32,
     pub project_id: i32,
-    pub config_id: i32,
+    /// Optional. NULL for ephemeral CLI runs (`source = "cli_ephemeral"`) and
+    /// historical autofixer runs that pre-date the agent_id column.
+    pub config_id: Option<i32>,
     /// Slug of the agent that created this run, if available.
     pub agent_slug: Option<String>,
     /// Name of the agent that created this run, if available.
     pub agent_name: Option<String>,
+    /// `committed` (the run's config lives in `project_agents`) or
+    /// `cli_ephemeral` (the config was uploaded via the CLI for a one-off
+    /// dry run; see `ephemeral_yaml`).
+    pub source: String,
+    /// Full WorkflowYamlConfig as YAML text. Populated only when
+    /// `source = "cli_ephemeral"`. Used by the web UI to show a "View YAML"
+    /// modal so the user can see exactly what the executor ran.
+    pub ephemeral_yaml: Option<String>,
     pub trigger_type: String,
     pub trigger_source_id: Option<i32>,
     pub trigger_source_type: Option<String>,
@@ -61,6 +71,10 @@ pub struct AgentRunResponse {
     pub user_context: Option<String>,
     /// Claude CLI session UUID for resuming conversations via `--resume`.
     pub ai_session_id: Option<String>,
+    /// Final assembled prompt the AI CLI actually saw (trigger context block +
+    /// YAML prompt, with error-group fields interpolated). Captured once per
+    /// run. `None` for pre-migration rows.
+    pub prompt_text: Option<String>,
 }
 
 impl AgentRunResponse {
@@ -85,6 +99,8 @@ impl AgentRunResponse {
             config_id: model.config_id,
             agent_slug,
             agent_name,
+            source: model.source,
+            ephemeral_yaml: model.ephemeral_yaml,
             trigger_type: model.trigger_type,
             trigger_source_id: model.trigger_source_id,
             trigger_source_type: model.trigger_source_type,
@@ -110,6 +126,7 @@ impl AgentRunResponse {
             sandbox_enabled,
             user_context: model.user_context,
             ai_session_id: model.ai_session_id,
+            prompt_text: model.prompt_text,
         }
     }
 }
@@ -139,7 +156,7 @@ async fn resolve_sandbox_for_run<'a>(
         })
         .unwrap_or(false);
 
-    let agent = agents.iter().find(|a| a.id == run.config_id);
+    let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
     let sandbox = agent
         .and_then(|a| a.sandbox_enabled)
         .unwrap_or(global_sandbox_enabled);
@@ -298,7 +315,7 @@ async fn list_all_runs(
     let items = runs
         .into_iter()
         .map(|run| {
-            let agent = agents.iter().find(|a| a.id == run.config_id);
+            let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
             let sandbox = agent
                 .and_then(|a| a.sandbox_enabled)
                 .unwrap_or(global_sandbox_enabled);
@@ -381,7 +398,7 @@ async fn latest_run_for_source(
             .unwrap_or(false)
     };
 
-    let agent = agents.iter().find(|a| a.id == run.config_id);
+    let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
     let sandbox = agent
         .and_then(|a| a.sandbox_enabled)
         .unwrap_or(global_sandbox_enabled);
@@ -514,12 +531,16 @@ async fn get_run_with_logs(
         .await
         .map_err(Problem::from)?;
 
-    // Enrich with agent slug/name
-    let agent = app_state
-        .config_service
-        .get_agent_by_id(run_with_logs.run.config_id)
-        .await
-        .map_err(Problem::from)?;
+    // Enrich with agent slug/name. Ephemeral runs have no `project_agents`
+    // row, so skip the lookup entirely.
+    let agent = match run_with_logs.run.config_id {
+        Some(id) => app_state
+            .config_service
+            .get_agent_by_id(id)
+            .await
+            .map_err(Problem::from)?,
+        None => None,
+    };
 
     // Resolve sandbox status against global setting (same logic as executor)
     let global_sandbox_enabled = {
@@ -707,17 +728,37 @@ async fn retry_run(
             )));
     }
 
+    // Ephemeral CLI runs can't be retried server-side: the YAML lives only on
+    // the original run row, the user already has it locally, and re-running
+    // it via this endpoint would let anyone with permission to read the run
+    // fork an arbitrary workflow. Tell them to re-trigger from the CLI.
+    if original.source == "cli_ephemeral" {
+        return Err(problemdetails::new(StatusCode::BAD_REQUEST)
+            .with_title("Cannot Retry Ephemeral Run")
+            .with_detail(format!(
+                "Run {} was triggered via `temps workflow run --from-file`. \
+                 Re-run it from your machine instead.",
+                run_id
+            )));
+    }
+
+    let original_config_id = original.config_id.ok_or_else(|| {
+        Problem::from(AgentError::Validation {
+            message: format!("Run {} has no config_id and cannot be retried.", run_id),
+        })
+    })?;
+
     // Verify the agent still exists
     let agent = app_state
         .config_service
-        .get_agent_by_id(original.config_id)
+        .get_agent_by_id(original_config_id)
         .await
         .map_err(Problem::from)?
         .ok_or_else(|| {
             Problem::from(AgentError::Validation {
                 message: format!(
                     "The workflow for run {} no longer exists (config_id={}).",
-                    run_id, original.config_id
+                    run_id, original_config_id
                 ),
             })
         })?;
@@ -727,7 +768,7 @@ async fn retry_run(
         .run_service
         .create_run(
             original.project_id,
-            original.config_id,
+            original_config_id,
             "retry".to_string(),
             original.trigger_source_id,
             original.trigger_source_type,

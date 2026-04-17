@@ -37,6 +37,9 @@ pub struct UpdateRunFields {
     pub user_context: Option<String>,
     /// Claude CLI session UUID for resuming conversations
     pub ai_session_id: Option<String>,
+    /// Final assembled prompt that was sent to the AI CLI (captured once per
+    /// run, just before the CLI invocation). Exposed in the run detail UI.
+    pub prompt_text: Option<String>,
 }
 
 /// A run record together with its logs
@@ -65,13 +68,14 @@ impl AgentRunService {
     ) -> Result<agent_runs::Model, AgentError> {
         let active = agent_runs::ActiveModel {
             project_id: Set(project_id),
-            config_id: Set(agent_id),
+            config_id: Set(Some(agent_id)),
             agent_id: Set(Some(agent_id)),
             trigger_type: Set(trigger_type),
             trigger_source_id: Set(trigger_source_id),
             trigger_source_type: Set(trigger_source_type),
             user_context: Set(user_context),
             status: Set("pending".to_string()),
+            source: Set("committed".to_string()),
             tokens_input: Set(0),
             tokens_output: Set(0),
             estimated_cost_cents: Set(0),
@@ -96,8 +100,7 @@ impl AgentRunService {
     ) -> Result<agent_runs::Model, AgentError> {
         let active = agent_runs::ActiveModel {
             project_id: Set(project_id),
-            // config_id is a non-nullable legacy column; use 0 as sentinel for autofixer runs
-            config_id: Set(0),
+            config_id: Set(None),
             agent_id: Set(None),
             trigger_type: Set("autofixer".to_string()),
             trigger_source_type: Set(Some("error_group".to_string())),
@@ -105,6 +108,53 @@ impl AgentRunService {
             status: Set("pending".to_string()),
             phase: Set(Some("analyzing".to_string())),
             user_context: Set(user_context),
+            source: Set("committed".to_string()),
+            tokens_input: Set(0),
+            tokens_output: Set(0),
+            estimated_cost_cents: Set(0),
+            files_changed: Set(0),
+            ..Default::default()
+        };
+
+        let model = active
+            .insert(self.db.as_ref())
+            .await
+            .map_err(AgentError::Database)?;
+
+        Ok(model)
+    }
+
+    /// Create a run that executes an ephemeral YAML config uploaded by the CLI.
+    /// `config_id` and `agent_id` stay NULL — the executor reads
+    /// `ephemeral_yaml` and builds a synthetic config in memory.
+    ///
+    /// `trigger_source` is optional `(type, id)` for linking this run to an
+    /// external entity (e.g. `("error_group", 5)`). The executor's
+    /// `load_error_context` path keys off these fields to inject the error
+    /// type / message / stack trace into the prompt — identical to the
+    /// committed-workflow path.
+    pub async fn create_ephemeral_run(
+        &self,
+        project_id: i32,
+        ephemeral_yaml: String,
+        user_context: Option<String>,
+        trigger_source: Option<(String, i32)>,
+    ) -> Result<agent_runs::Model, AgentError> {
+        let (trigger_source_type, trigger_source_id) = match trigger_source {
+            Some((t, id)) => (Some(t), Some(id)),
+            None => (None, None),
+        };
+        let active = agent_runs::ActiveModel {
+            project_id: Set(project_id),
+            config_id: Set(None),
+            agent_id: Set(None),
+            trigger_type: Set("cli_ephemeral".to_string()),
+            trigger_source_type: Set(trigger_source_type),
+            trigger_source_id: Set(trigger_source_id),
+            status: Set("pending".to_string()),
+            user_context: Set(user_context),
+            source: Set("cli_ephemeral".to_string()),
+            ephemeral_yaml: Set(Some(ephemeral_yaml)),
             tokens_input: Set(0),
             tokens_output: Set(0),
             estimated_cost_cents: Set(0),
@@ -190,6 +240,9 @@ impl AgentRunService {
         }
         if let Some(ai_session_id) = fields.ai_session_id {
             active.ai_session_id = Set(Some(ai_session_id));
+        }
+        if let Some(prompt_text) = fields.prompt_text {
+            active.prompt_text = Set(Some(prompt_text));
         }
 
         let model = active
@@ -502,7 +555,7 @@ mod tests {
         agent_runs::Model {
             id,
             project_id,
-            config_id: 1,
+            config_id: Some(1),
             agent_id: None,
             trigger_type: "manual".to_string(),
             trigger_source_id: None,
@@ -530,6 +583,10 @@ mod tests {
             analysis: None,
             user_context: None,
             ai_session_id: None,
+            source: "committed".to_string(),
+            ephemeral_yaml: None,
+
+            prompt_text: None,
         }
     }
 

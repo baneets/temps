@@ -1,5 +1,4 @@
 import { ProjectResponse } from '@/api/client'
-import { useAuth } from '@/contexts/AuthContext'
 import { usePluginsContext } from '@/contexts/PluginsContext'
 import { resolvePluginIcon } from '@/lib/pluginIcons'
 import { cn } from '@/lib/utils'
@@ -213,7 +212,6 @@ export function MobileSidebarProvider({
 export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
   const location = useLocation()
   const navigate = useNavigate()
-  const { isDemoMode } = useAuth()
   const { projectNavEntries } = usePluginsContext()
   const [expandedItems, setExpandedItems] = useState<string[]>([
     'Observability',
@@ -233,7 +231,7 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
 
   // Build nav items including environments and plugin entries
   const settingsIndex = baseNavItems.length - 1
-  const allNavItems: NavItem[] = [
+  const navItems: NavItem[] = [
     ...baseNavItems.slice(0, settingsIndex),
     {
       title: 'Environments',
@@ -243,20 +241,6 @@ export function ProjectDetailSidebar({ project }: ProjectDetailSidebarProps) {
     ...pluginProjectItems,
     baseNavItems[settingsIndex],
   ]
-
-  // In demo mode, only show Observability as a flat item
-  const demoNavItems: NavItem[] = [
-    {
-      title: 'Observability',
-      url: 'analytics',
-      icon: Eye,
-      subItems: [
-        { title: 'Analytics', url: 'analytics' },
-        { title: 'Uptime', url: 'monitors' },
-      ],
-    },
-  ]
-  const navItems = isDemoMode ? demoNavItems : allNavItems
 
   // Auto-expand parent items when navigating to their sub-items
   useEffect(() => {

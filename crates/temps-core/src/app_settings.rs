@@ -11,12 +11,6 @@ pub struct AppSettings {
     pub external_url: Option<String>,
     pub preview_domain: String,
 
-    // Access control
-    pub allow_readonly_external_access: bool,
-
-    // Demo mode settings
-    pub demo_mode: DemoModeSettings,
-
     // Screenshot settings
     pub screenshots: ScreenshotSettings,
 
@@ -50,6 +44,14 @@ pub struct AppSettings {
 
     // AI configuration settings (global config repo for skills, MCP servers, etc.)
     pub ai_config: AiConfigSettings,
+
+    /// Skip TLS certificate verification on outbound HTTP clients built by the
+    /// server (deployer, agent, remote service client). Strictly opt-in for
+    /// operators running self-signed control plane / worker certs on a trusted
+    /// internal network. Worker→control-plane traffic that traverses the public
+    /// internet must keep this `false` — otherwise a MitM steals the join token.
+    #[serde(default)]
+    pub insecure_tls: bool,
 }
 
 /// Docker container log rotation settings
@@ -312,19 +314,6 @@ pub struct DiskSpaceAlertSettings {
     pub monitor_path: Option<String>,
 }
 
-/// Demo mode settings for allowing unauthenticated access to demo subdomain
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(default)]
-#[derive(Default)]
-pub struct DemoModeSettings {
-    /// Whether demo mode is enabled (disabled by default for security)
-    pub enabled: bool,
-    /// Optional custom domain for demo mode (defaults to demo.<preview_domain>)
-    /// If set, this overrides the default demo.preview_domain pattern
-    #[schema(example = "demo.example.com")]
-    pub domain: Option<String>,
-}
-
 /// Multi-node cluster settings
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
@@ -390,8 +379,6 @@ impl Default for AppSettings {
         Self {
             external_url: None,
             preview_domain: DEFAULT_LOCAL_DOMAIN.to_string(),
-            allow_readonly_external_access: false,
-            demo_mode: DemoModeSettings::default(),
             screenshots: ScreenshotSettings::default(),
             letsencrypt: LetsEncryptSettings::default(),
             dns_provider: DnsProviderSettings::default(),
@@ -404,6 +391,7 @@ impl Default for AppSettings {
             agent_sandbox: AgentSandboxSettings::default(),
             preview_gateway: PreviewGatewaySettings::default(),
             ai_config: AiConfigSettings::default(),
+            insecure_tls: false,
         }
     }
 }

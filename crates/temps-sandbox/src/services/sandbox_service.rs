@@ -82,6 +82,12 @@ pub struct CreateSandboxRequest {
     pub pids_limit: Option<i64>,
     /// Optional initial content to seed into the work dir.
     pub source: Option<SandboxSource>,
+    /// Optional preview-URL password applied atomically at create. Same
+    /// validation rules as `set_preview_password` (8–256 chars, argon2-
+    /// hashed server-side). `None` leaves preview URLs open (public once
+    /// the sandbox ID is known). The plaintext is never returned — only
+    /// the last-4 hint round-trips in `SandboxSummary`.
+    pub preview_password: Option<String>,
 }
 
 /// Output DTO — what the service returns to handlers and what handlers
@@ -96,6 +102,10 @@ pub struct SandboxSummary {
     pub work_dir: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Present iff a preview password is configured. The hint is the
+    /// last 4 chars of the plaintext — safe to display in the UI so
+    /// users can tell two passwords apart.
+    pub preview_password_hint: Option<String>,
 }
 
 impl From<&sandboxes::Model> for SandboxSummary {
@@ -108,6 +118,7 @@ impl From<&sandboxes::Model> for SandboxSummary {
             work_dir: m.work_dir.clone(),
             created_at: m.created_at,
             expires_at: m.expires_at,
+            preview_password_hint: m.preview_password_hint.clone(),
         }
     }
 }
@@ -243,6 +254,25 @@ impl SandboxService {
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(timeout as i64);
 
+        // Validate + hash the optional preview password *before* any
+        // container/workdir work starts. A caller passing junk should fail
+        // fast with a 400 rather than leaving an orphan container behind.
+        let preview = match req.preview_password.as_deref() {
+            Some(pw) => {
+                crate::services::preview_password::validate(pw)
+                    .map_err(|message| SandboxError::Validation { message })?;
+                let hp =
+                    crate::services::preview_password::hash_password(pw).map_err(|reason| {
+                        SandboxError::PasswordHashFailed {
+                            sandbox_id: public_id_value.clone(),
+                            reason,
+                        }
+                    })?;
+                Some(hp)
+            }
+            None => None,
+        };
+
         let active = sandboxes::ActiveModel {
             public_id: Set(public_id_value.clone()),
             user_id: Set(user_id),
@@ -255,6 +285,8 @@ impl SandboxService {
             created_at: Set(now),
             last_activity_at: Set(now),
             expires_at: Set(expires_at),
+            preview_password_hash: Set(preview.as_ref().map(|p| p.hash.clone())),
+            preview_password_hint: Set(preview.as_ref().map(|p| p.hint.clone())),
             ..Default::default()
         };
         let row = active.insert(self.db.as_ref()).await?;
@@ -314,7 +346,7 @@ impl SandboxService {
                     public_id_value,
                     e
                 );
-                let _ = self.registry.destroy(row.id).await;
+                let _ = self.registry.destroy(row.id, &public_id_value).await;
                 self.mark_destroyed(row.id).await.ok();
                 return Err(e);
             }
@@ -596,7 +628,7 @@ TEMPS_ASKPASS_EOF\n\
     ) -> Result<(), SandboxError> {
         let row = self.find_by_public_id(public_id_value, user_id).await?;
         self.jobs.abort_all(row.id).await;
-        if let Err(e) = self.registry.destroy(row.id).await {
+        if let Err(e) = self.registry.destroy(row.id, public_id_value).await {
             // Even if the container destroy failed, mark the row
             // destroyed — otherwise the user is stuck with a zombie
             // they can't delete. Log the provider error loudly.
@@ -632,7 +664,7 @@ TEMPS_ASKPASS_EOF\n\
         }
         self.jobs.abort_all(row.id).await;
         self.registry
-            .stop(row.id)
+            .stop(row.id, public_id_value)
             .await
             .map_err(|e| from_agent_error(public_id_value, e))?;
         let now = Utc::now();
@@ -663,7 +695,7 @@ TEMPS_ASKPASS_EOF\n\
             });
         }
         self.registry
-            .start(row.id)
+            .start(row.id, public_id_value)
             .await
             .map_err(|e| from_agent_error(public_id_value, e))?;
         let now = Utc::now();
@@ -693,7 +725,7 @@ TEMPS_ASKPASS_EOF\n\
         }
         self.jobs.abort_all(row.id).await;
         self.registry
-            .restart(row.id)
+            .restart(row.id, public_id_value)
             .await
             .map_err(|e| from_agent_error(public_id_value, e))?;
         let now = Utc::now();
@@ -795,6 +827,55 @@ TEMPS_ASKPASS_EOF\n\
         Ok(())
     }
 
+    // ── Preview password ────────────────────────────────────────────────
+
+    /// Set (or rotate) the preview password for a sandbox. The plaintext
+    /// is hashed with argon2id and only the hash + last-4 hint are stored.
+    /// Returns the hint to the caller — the plaintext is never persisted
+    /// or echoed back (the caller already has it).
+    ///
+    /// Rotating an existing password invalidates every live preview cookie
+    /// immediately: the proxy folds a digest of the argon2 hash into the
+    /// cookie payload, so a new hash = a new fingerprint = every existing
+    /// cookie fails verification.
+    pub async fn set_preview_password(
+        &self,
+        public_id_value: &str,
+        user_id: i32,
+        plaintext: &str,
+    ) -> Result<String, SandboxError> {
+        crate::services::preview_password::validate(plaintext)
+            .map_err(|message| SandboxError::Validation { message })?;
+        let row = self.find_by_public_id(public_id_value, user_id).await?;
+        let hp = crate::services::preview_password::hash_password(plaintext).map_err(|reason| {
+            SandboxError::PasswordHashFailed {
+                sandbox_id: public_id_value.to_string(),
+                reason,
+            }
+        })?;
+        let mut active: sandboxes::ActiveModel = row.into();
+        active.preview_password_hash = Set(Some(hp.hash));
+        active.preview_password_hint = Set(Some(hp.hint.clone()));
+        active.update(self.db.as_ref()).await?;
+        Ok(hp.hint)
+    }
+
+    /// Remove the preview password. Subsequent preview requests fall back
+    /// to URL-only protection (the unguessable hex public_id). Idempotent —
+    /// clearing an already-unset password is a no-op, not an error.
+    pub async fn clear_preview_password(
+        &self,
+        public_id_value: &str,
+        user_id: i32,
+    ) -> Result<(), SandboxError> {
+        let row = self.find_by_public_id(public_id_value, user_id).await?;
+        let mut active: sandboxes::ActiveModel = row.into();
+        active.preview_password_hash = Set(None);
+        active.preview_password_hint = Set(None);
+        active.update(self.db.as_ref()).await?;
+        Ok(())
+    }
+
     // ── Helpers shared with the exec/fs modules ──────────────────────────
 
     /// Load + authorize + return the internal ID, or a typed error that
@@ -889,6 +970,18 @@ mod tests {
         assert!(r.image.is_none());
         assert!(r.env.is_empty());
         assert!(r.timeout_secs.is_none());
+        assert!(r.preview_password.is_none());
+    }
+
+    #[test]
+    fn request_carries_preview_password() {
+        // The field is plumbed through the service input DTO so handlers
+        // don't need to reach around the service to wire it in.
+        let r = CreateSandboxRequest {
+            preview_password: Some("hunter2secret".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(r.preview_password.as_deref(), Some("hunter2secret"));
     }
 
     #[test]
@@ -914,6 +1007,8 @@ mod tests {
             created_at: now,
             last_activity_at: now,
             expires_at: now,
+            preview_password_hash: None,
+            preview_password_hint: None,
         };
         let s = SandboxSummary::from(&m);
         assert_eq!(s.public_id, "sbx_abc1234567890def");

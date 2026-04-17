@@ -1,12 +1,13 @@
 use crate::handler::preview_wall::{
-    build_logout_cookie, generate_preview_form_html, sanitize_next, PREVIEW_LOGIN_PATH,
-    PREVIEW_LOGOUT_PATH,
+    build_logout_cookie, build_logout_cookie_sandbox, generate_preview_form_html,
+    generate_preview_form_html_labeled, sanitize_next, PREVIEW_LOGIN_PATH, PREVIEW_LOGOUT_PATH,
 };
 use crate::on_demand::OnDemandManager;
 use crate::preview_auth::{
-    build_set_cookie, check_preview_auth, encode_preview_cookie, lookup_preview_session,
-    parse_preview_host, verify_argon2, PreviewAuthLimiter, PreviewAuthOutcome, PreviewHost,
-    PreviewSessionLookup, PREVIEW_GATEWAY_PEER,
+    build_set_cookie, build_set_cookie_sandbox, check_preview_auth, encode_preview_cookie,
+    encode_preview_cookie_subject, lookup_preview_session, lookup_sandbox, parse_preview_host,
+    verify_argon2, PreviewAuthLimiter, PreviewAuthOutcome, PreviewHost, PreviewSandboxLookup,
+    PreviewSessionLookup, PreviewTarget, PREVIEW_GATEWAY_PEER,
 };
 use crate::service::challenge_service::ChallengeService;
 use crate::service::ip_access_control_service::IpAccessControlService;
@@ -2070,8 +2071,9 @@ impl ProxyHttp for LoadBalancer {
             ctx.ip_address = Some(client_ip.to_string());
         }
 
-        // SECURITY: Strip client-supplied X-Temps-Demo-Mode header to prevent
-        // bypass of authentication. Only the proxy should set this header.
+        // SECURITY: Strip any inbound X-Temps-Demo-Mode header. Demo mode
+        // has been removed; clients sending this header should never have it
+        // honored by downstream auth middleware.
         let _ = session.req_header_mut().remove_header("X-Temps-Demo-Mode");
 
         // Workspace preview gateway: requests to `ws-<sid>-<port>.<preview_domain>`
@@ -2097,13 +2099,17 @@ impl ProxyHttp for LoadBalancer {
                 // be scoped to the preview domain. They must come BEFORE
                 // `check_preview_auth` so unauthenticated GET /login works.
 
-                // Sandbox preview hosts don't have a password wall — the 16-hex
-                // public_id *is* the capability. The login/logout paths below
-                // only apply to workspace sessions, so short-circuit sandboxes
-                // straight to the auth check.
+                // Sandboxes and workspace sessions share the same login/logout
+                // UX. Workspace cookies are keyed on the integer session id;
+                // sandbox cookies are keyed on the `sbx_<hex>` public_id. We
+                // branch by target but keep the surface identical.
                 let workspace_session_id = preview_host.workspace_session_id();
+                let sandbox_hex: Option<String> = match &preview_host.target {
+                    PreviewTarget::Sandbox(hex) => Some(hex.clone()),
+                    PreviewTarget::WorkspaceSession(_) => None,
+                };
 
-                // POST /__temps/preview/login → verify password, mint cookie
+                // POST /__temps/preview/login → verify password, mint cookie (workspace)
                 if let Some(session_id) = workspace_session_id
                     .filter(|_| ctx.path == PREVIEW_LOGIN_PATH && ctx.method == "POST")
                 {
@@ -2300,6 +2306,222 @@ impl ProxyHttp for LoadBalancer {
                     return Ok(true);
                 }
 
+                // ── Sandbox login/logout (mirrors the workspace flow above) ──
+
+                // POST /__temps/preview/login for a sandbox host.
+                if let Some(hex) = sandbox_hex
+                    .clone()
+                    .filter(|_| ctx.path == PREVIEW_LOGIN_PATH && ctx.method == "POST")
+                {
+                    let rate_key = preview_host.rate_limit_key();
+                    if self.preview_auth_limiter.is_blocked(client_ip, rate_key) {
+                        warn!(
+                            sandbox = %hex,
+                            client_ip = %client_ip,
+                            "preview-auth: sandbox login POST rate limited"
+                        );
+                        let mut response =
+                            ResponseHeader::build(StatusCode::TOO_MANY_REQUESTS, None)?;
+                        response.insert_header("Retry-After", "60")?;
+                        response.insert_header("Cache-Control", "no-store")?;
+                        response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        response.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+                        session
+                            .write_response_header(Box::new(response), false)
+                            .await?;
+                        session
+                            .write_response_body(
+                                Some(Bytes::from_static(b"Too many failed attempts\n")),
+                                true,
+                            )
+                            .await?;
+                        ctx.routing_status = "preview_rate_limited".to_string();
+                        return Ok(true);
+                    }
+
+                    let stored_hash = match lookup_sandbox(&self.db, &hex).await {
+                        PreviewSandboxLookup::Protected { password_hash } => password_hash,
+                        PreviewSandboxLookup::Open => {
+                            // No password configured — nothing to verify. Redirect to `/`.
+                            let mut response = ResponseHeader::build(303, None)?;
+                            response.insert_header("Location", "/")?;
+                            response.insert_header("Cache-Control", "no-store")?;
+                            response.insert_header("X-Request-ID", &ctx.request_id)?;
+                            session
+                                .write_response_header(Box::new(response), true)
+                                .await?;
+                            ctx.routing_status = "preview_login_not_required".to_string();
+                            return Ok(true);
+                        }
+                        PreviewSandboxLookup::NotFound => {
+                            let mut response = ResponseHeader::build(StatusCode::NOT_FOUND, None)?;
+                            response.insert_header("Cache-Control", "no-store")?;
+                            response.insert_header("X-Request-ID", &ctx.request_id)?;
+                            response.insert_header("Content-Type", "text/plain; charset=utf-8")?;
+                            session
+                                .write_response_header(Box::new(response), false)
+                                .await?;
+                            session
+                                .write_response_body(
+                                    Some(Bytes::from_static(b"Sandbox preview not found\n")),
+                                    true,
+                                )
+                                .await?;
+                            ctx.routing_status = "preview_not_found".to_string();
+                            return Ok(true);
+                        }
+                    };
+
+                    let body = session.read_request_body().await.map_err(|e| {
+                        error!("preview-auth: failed to read sandbox login body: {}", e);
+                        e
+                    })?;
+                    let body_str = body
+                        .as_ref()
+                        .map(|b| String::from_utf8_lossy(b).to_string())
+                        .unwrap_or_default();
+                    let params: Vec<(String, String)> =
+                        url::form_urlencoded::parse(body_str.as_bytes())
+                            .into_owned()
+                            .collect();
+                    let password = params
+                        .iter()
+                        .find(|(k, _)| k == "password")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("");
+                    let next_raw = params
+                        .iter()
+                        .find(|(k, _)| k == "next")
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("/");
+                    let next = sanitize_next(next_raw);
+
+                    if verify_argon2(password, &stored_hash) {
+                        self.preview_auth_limiter
+                            .record_success(client_ip, rate_key);
+                        let subject = format!("sbx_{}", hex);
+                        let Some(cookie_value) = encode_preview_cookie_subject(
+                            &self.crypto,
+                            &subject,
+                            &stored_hash,
+                            std::time::SystemTime::now(),
+                        ) else {
+                            error!("preview-auth: failed to encode sandbox preview cookie");
+                            let mut response =
+                                ResponseHeader::build(StatusCode::INTERNAL_SERVER_ERROR, None)?;
+                            response.insert_header("Cache-Control", "no-store")?;
+                            response.insert_header("X-Request-ID", &ctx.request_id)?;
+                            session
+                                .write_response_header(Box::new(response), false)
+                                .await?;
+                            session
+                                .write_response_body(
+                                    Some(Bytes::from_static(b"Cookie mint failed\n")),
+                                    true,
+                                )
+                                .await?;
+                            ctx.routing_status = "preview_cookie_error".to_string();
+                            return Ok(true);
+                        };
+                        let set_cookie = build_set_cookie_sandbox(
+                            &hex,
+                            &cookie_value,
+                            &settings.preview_domain,
+                            self.is_tls_connection(session),
+                        );
+
+                        info!(sandbox = %hex, "preview-auth: sandbox login succeeded");
+                        let mut response = ResponseHeader::build(303, None)?;
+                        response.insert_header("Location", &next)?;
+                        response.insert_header("Set-Cookie", &set_cookie)?;
+                        response.insert_header("Cache-Control", "no-store")?;
+                        response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        session
+                            .write_response_header(Box::new(response), true)
+                            .await?;
+                        ctx.routing_status = "preview_login_ok".to_string();
+                        return Ok(true);
+                    } else {
+                        self.preview_auth_limiter
+                            .record_failure(client_ip, rate_key);
+                        debug!(sandbox = %hex, "preview-auth: sandbox login failed (bad password)");
+                        let label = format!("sandbox sbx_{}", hex);
+                        let html = generate_preview_form_html_labeled(
+                            &label,
+                            preview_host.port,
+                            &next,
+                            true,
+                        );
+                        let html_bytes = Bytes::from(html);
+                        let mut response = ResponseHeader::build(StatusCode::UNAUTHORIZED, None)?;
+                        response.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                        response.insert_header("Cache-Control", "no-store")?;
+                        response.insert_header("X-Request-ID", &ctx.request_id)?;
+                        session
+                            .write_response_header(Box::new(response), false)
+                            .await?;
+                        session.write_response_body(Some(html_bytes), true).await?;
+                        ctx.routing_status = "preview_login_failed".to_string();
+                        return Ok(true);
+                    }
+                }
+
+                // GET/HEAD /__temps/preview/login for a sandbox host.
+                if let Some(hex) = sandbox_hex.clone().filter(|_| {
+                    ctx.path == PREVIEW_LOGIN_PATH && (ctx.method == "GET" || ctx.method == "HEAD")
+                }) {
+                    let next_raw = ctx
+                        .query_string
+                        .as_deref()
+                        .and_then(|qs| {
+                            url::form_urlencoded::parse(qs.as_bytes())
+                                .find(|(k, _)| k == "next")
+                                .map(|(_, v)| v.into_owned())
+                        })
+                        .unwrap_or_else(|| "/".to_string());
+                    let next = sanitize_next(&next_raw);
+                    let label = format!("sandbox sbx_{}", hex);
+                    let html =
+                        generate_preview_form_html_labeled(&label, preview_host.port, &next, false);
+                    let html_bytes = Bytes::from(html);
+                    let mut response = ResponseHeader::build(StatusCode::OK, None)?;
+                    response.insert_header("Content-Type", "text/html; charset=utf-8")?;
+                    response.insert_header("Cache-Control", "no-store")?;
+                    response.insert_header("X-Request-ID", &ctx.request_id)?;
+                    session
+                        .write_response_header(Box::new(response), false)
+                        .await?;
+                    if ctx.method == "GET" {
+                        session.write_response_body(Some(html_bytes), true).await?;
+                    } else {
+                        session.write_response_body(None, true).await?;
+                    }
+                    ctx.routing_status = "preview_login_form".to_string();
+                    return Ok(true);
+                }
+
+                // POST /__temps/preview/logout for a sandbox host.
+                if let Some(hex) = sandbox_hex
+                    .clone()
+                    .filter(|_| ctx.path == PREVIEW_LOGOUT_PATH && ctx.method == "POST")
+                {
+                    let set_cookie = build_logout_cookie_sandbox(
+                        &hex,
+                        &settings.preview_domain,
+                        self.is_tls_connection(session),
+                    );
+                    let mut response = ResponseHeader::build(303, None)?;
+                    response.insert_header("Location", "/")?;
+                    response.insert_header("Set-Cookie", &set_cookie)?;
+                    response.insert_header("Cache-Control", "no-store")?;
+                    response.insert_header("X-Request-ID", &ctx.request_id)?;
+                    session
+                        .write_response_header(Box::new(response), true)
+                        .await?;
+                    ctx.routing_status = "preview_logout".to_string();
+                    return Ok(true);
+                }
+
                 // ── Regular preview request: check cookie ─────────────────
                 let cookie_header = session
                     .req_header()
@@ -2422,51 +2644,6 @@ impl ProxyHttp for LoadBalancer {
                         return Ok(true);
                     }
                 }
-            }
-        }
-
-        // Detect demo subdomain and add demo mode header
-        // This allows the auth middleware to auto-authenticate as demo user
-        // Demo mode must be explicitly enabled in settings
-        if ctx.host.starts_with("demo.") {
-            // Get settings to check if demo mode is enabled and verify host
-            if let Ok(settings) = self.config_service.get_settings().await {
-                // Demo mode must be explicitly enabled
-                if settings.demo_mode.enabled {
-                    // Determine expected demo host from custom domain or default pattern
-                    let expected_demo_host =
-                        if let Some(ref custom_domain) = settings.demo_mode.domain {
-                            custom_domain.clone()
-                        } else {
-                            let preview_domain = settings.preview_domain.trim_start_matches("*.");
-                            format!("demo.{}", preview_domain)
-                        };
-
-                    // Strip port from host for comparison (handles both http and https)
-                    let host_without_port = ctx.host.split(':').next().unwrap_or(&ctx.host);
-
-                    debug!(
-                        "Demo check: host={}, host_without_port={}, expected_demo_host={}, demo_mode_enabled={}",
-                        ctx.host, host_without_port, expected_demo_host, settings.demo_mode.enabled
-                    );
-
-                    if host_without_port == expected_demo_host {
-                        info!(
-                            "Demo subdomain detected: {} (matches {}), adding X-Temps-Demo-Mode header",
-                            ctx.host, expected_demo_host
-                        );
-                        session
-                            .req_header_mut()
-                            .insert_header("X-Temps-Demo-Mode", "true")?;
-                    }
-                } else {
-                    debug!(
-                        "Demo mode disabled in settings, not adding demo header for host: {}",
-                        ctx.host
-                    );
-                }
-            } else {
-                warn!("Failed to get settings for demo subdomain check");
             }
         }
 

@@ -166,8 +166,11 @@ fn api_url(base: &str, path: &str) -> String {
 }
 
 fn make_client() -> reqwest::Client {
+    // Strict TLS — CLI talks to the control plane over the public
+    // internet. Skipping verification here would let a MitM steal the
+    // user's session token. The server-side opt-in (AppSettings.insecure_tls)
+    // does NOT apply to CLI binaries.
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .build()
         .expect("Failed to build HTTP client")
 }
