@@ -23,6 +23,7 @@ import { ProjectMonitors } from '@/components/project/ProjectMonitors'
 import { ProjectMonitoring } from '@/components/project/ProjectMonitoring'
 import { MonitorDetail } from '@/components/project/MonitorDetail'
 import { ErrorTracking } from '@/components/projects/ErrorTracking'
+import { ErrorTrackingSetup } from '@/components/project/setup/ErrorTrackingSetup'
 import { EnvironmentsTabsView } from './EnvironmentsTabsView'
 import { Confetti } from '@/components/ui/confetti'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -422,6 +423,10 @@ export function ProjectDetail() {
               <Route
                 path="errors"
                 element={<ErrorTracking project={project} />}
+              />
+              <Route
+                path="errors/setup"
+                element={<ErrorTrackingSetup project={project} />}
               />
               <Route
                 path="errors/alert-rules"

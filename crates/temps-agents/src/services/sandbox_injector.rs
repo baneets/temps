@@ -489,19 +489,19 @@ pub async fn inject(
 
     // ── Phase 3: Skills ─────────────────────────────────────────────
     if has_skills {
-        // Each AI CLI reads skills from a different directory. Writing to
-        // the provider's native location means no AGENTS.md pointer and no
-        // per-skill hacks — the CLI discovers them the same way it would
-        // for a user-installed skill.
+        // Each AI CLI reads skills from a different directory. We always
+        // write under the user's home (/home/temps/...) rather than into
+        // /workspace, because /workspace is bind-mounted from the host repo
+        // and any writes there show up as modified files in the user's git
+        // working tree. Claude Code discovers user-level skills from
+        // ~/.claude/skills the same way it discovers project-level ones.
         //
-        // - claude: `/workspace/.claude/skills/<slug>/SKILL.md` (project-local)
-        // - codex:  `/home/temps/.codex/skills/<slug>/SKILL.md` (user-level; repo root is irrelevant)
-        // - opencode: no native skills system — falls back to claude's dir
-        //   (opencode reads `AGENTS.md` at the repo root, which the project
-        //   itself owns; we don't overwrite it).
+        // - claude:   `/home/temps/.claude/skills/<slug>/SKILL.md`
+        // - codex:    `/home/temps/.codex/skills/<slug>/SKILL.md`
+        // - opencode: no native skills system — falls back to claude's dir.
         let skills_base = match provider {
             "codex_cli" => "/home/temps/.codex/skills",
-            _ => "/workspace/.claude/skills",
+            _ => "/home/temps/.claude/skills",
         };
         let _ = fs
             .exec(vec![

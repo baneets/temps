@@ -192,6 +192,7 @@ impl AutofixerService {
             run_id,
             container_name_override: None,
             host_work_dir: work_dir.clone(),
+            workspace_volume: None,
             image: Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime)),
             cpu_limit: Some(global_sandbox.cpu_limit),
             memory_limit_mb: Some(global_sandbox.memory_limit_mb),
@@ -1321,6 +1322,7 @@ mod tests {
             ephemeral_yaml: None,
 
             prompt_text: None,
+            workspace_volume: None,
         }
     }
 

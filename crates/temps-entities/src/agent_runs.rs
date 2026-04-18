@@ -58,6 +58,14 @@ pub struct Model {
     /// once per run, immediately before the CLI invocation. Nullable because
     /// historical rows never persisted it.
     pub prompt_text: Option<String>,
+    /// Docker volume (e.g. `temps-wfrun-123`) that backs this run's
+    /// `/workspace`. Populated when the run starts. NOT deleted on run
+    /// finish — it's retained so the user can open a follow-up workspace
+    /// sandbox mounting the exact same filesystem (including `.git` and
+    /// any unpushed commits the AI produced). The TTL sweeper is the only
+    /// thing that removes these automatically. Nullable for historical
+    /// rows and for runs that failed before volume creation.
+    pub workspace_volume: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

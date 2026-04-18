@@ -64,7 +64,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { SetupWizardShell, WizardStepId } from '@/components/project/setup/SetupWizardShell'
 import VisitorAnalytics from '@/components/visitors/VisitorAnalytics'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -81,11 +81,14 @@ import {
   type AnalyticsDateFilter,
 } from '@/hooks/useAnalyticsDateRange'
 import {
+  ArrowLeft,
+  ArrowRight,
   Calendar as CalendarIcon,
-  Code2,
+  Check,
   FileCode,
   Globe,
   Info,
+  Loader2,
   RefreshCw,
   RotateCcw,
   Terminal,
@@ -1670,6 +1673,20 @@ export default function App() {
     const fw = selectedFrameworkData
     return `Add Temps analytics to my ${fw.name}${fw.description ? ` (${fw.description})` : ''} application.
 
+## Using an AI coding CLI? Install the Temps skill
+
+Works with Claude Code, OpenCode, Codex, and any other CLI that supports the skills format. The \`add-react-analytics\` skill has the canonical, framework-specific instructions and stays up to date.
+
+\`\`\`bash
+# Install the skill (one-time)
+npx skills add https://github.com/gotempsh/temps --skill add-react-analytics
+
+# Then invoke it in your CLI:
+/add-react-analytics
+\`\`\`
+
+If the skill is already installed, just run \`/add-react-analytics\` and skip the manual steps below.
+
 ## Installation
 
 \`\`\`bash
@@ -1770,354 +1787,308 @@ After implementation:
 3. Confirm Web Vitals are being captured`
   }
 
-  // Group frameworks by category
-  const frameworksByCategory = frameworks.reduce(
-    (acc, framework) => {
-      if (!acc[framework.category]) acc[framework.category] = []
-      acc[framework.category].push(framework)
-      return acc
-    },
-    {} as Record<string, typeof frameworks>
-  )
+  const [wizardStep, setWizardStep] = React.useState<WizardStepId>('framework')
+  const [celebrate, setCelebrate] = React.useState(false)
+  const navigate = useNavigate()
+
+  const { data: hasEventsData } = useQuery({
+    ...hasAnalyticsEventsOptions({ path: { project_id: project.id } }),
+    enabled: !!project.id && wizardStep === 'waiting',
+    refetchInterval: wizardStep === 'waiting' ? 2000 : false,
+    refetchOnWindowFocus: false,
+  })
+
+  React.useEffect(() => {
+    if (wizardStep === 'waiting' && hasEventsData?.has_events && !celebrate) {
+      setCelebrate(true)
+      const timer = setTimeout(() => {
+        navigate(`/projects/${project.slug}/analytics`)
+      }, 1600)
+      return () => clearTimeout(timer)
+    }
+  }, [wizardStep, hasEventsData?.has_events, celebrate, navigate, project.slug])
+
+  const steps = [
+    { id: 'framework' as WizardStepId, label: 'Framework' },
+    { id: 'install' as WizardStepId, label: 'Install' },
+    { id: 'waiting' as WizardStepId, label: 'Verify' },
+  ]
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-3">
-              <div className="rounded-lg bg-primary/10 p-2">
-                <Code2 className="h-5 w-5 text-primary" />
+    <SetupWizardShell
+      title="Install analytics"
+      description="Pick your framework, drop in the provider, and we'll wait for your first event."
+      currentStep={wizardStep}
+      steps={steps}
+      celebrate={celebrate}
+    >
+      {wizardStep === 'framework' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {frameworks.map((framework) => {
+              const FrameworkIcon = framework.icon
+              const isSelected = selectedFramework === framework.id
+              return (
+                <button
+                  key={framework.id}
+                  type="button"
+                  onClick={() => setSelectedFramework(framework.id)}
+                  className={cn(
+                    'flex items-center gap-3 rounded-lg border bg-card p-4 text-left transition-all hover:border-primary/60 hover:bg-accent/40',
+                    isSelected &&
+                      'border-primary bg-primary/5 ring-2 ring-primary/20'
+                  )}
+                  aria-pressed={isSelected}
+                >
+                  <div className="rounded-md bg-muted p-2 text-foreground">
+                    <FrameworkIcon />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium leading-none">{framework.name}</p>
+                    {framework.description && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {framework.description}
+                      </p>
+                    )}
+                  </div>
+                  {isSelected && (
+                    <Check className="size-4 shrink-0 text-primary" />
+                  )}
+                </button>
+              )
+            })}
+          </div>
+          <div className="flex justify-end">
+            <Button onClick={() => setWizardStep('install')}>
+              Continue
+              <ArrowRight className="ml-2 size-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {wizardStep === 'install' && (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between gap-3 rounded-lg border bg-card p-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="rounded-md bg-muted p-2">
+                {(selectedFrameworkData?.icon || ReactIcon)()}
               </div>
-              <div className="space-y-1">
-                <CardTitle>Analytics Setup Instructions</CardTitle>
-                <CardDescription>
-                  Choose your framework and follow the instructions to integrate
-                  analytics
-                </CardDescription>
+              <div className="min-w-0">
+                <p className="font-medium leading-none">
+                  {selectedFrameworkData.name}
+                </p>
+                {selectedFrameworkData.description && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {selectedFrameworkData.description}
+                  </p>
+                )}
               </div>
             </div>
             <CopyButton
               value={getAnalyticsAiPrompt()}
               className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs font-medium"
             >
-              Copy AI Prompt
+              Copy AI prompt
             </CopyButton>
           </div>
-        </CardHeader>
-      </Card>
 
-      {/* Framework Selection Tabs */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Select Your Framework</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Tabs value={selectedFramework} onValueChange={setSelectedFramework}>
-            <div className="w-full overflow-x-auto">
-              <TabsList className="w-full justify-start h-auto p-1 flex-wrap">
-                {Object.entries(frameworksByCategory).map(
-                  ([category, categoryFrameworks]) => (
-                    <div
-                      key={category}
-                      className="flex items-center gap-1 mr-4 last:mr-0"
-                    >
-                      <span className="text-xs text-muted-foreground px-2">
-                        {category}:
-                      </span>
-                      {categoryFrameworks.map((framework) => {
-                        const FrameworkIcon = framework.icon
-                        return (
-                          <TabsTrigger
-                            key={framework.id}
-                            value={framework.id}
-                            className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
-                          >
-                            <div className="flex items-center gap-2">
-                              <FrameworkIcon />
-                              <span className="hidden sm:inline">
-                                {framework.name}
-                              </span>
-                              {framework.description && (
-                                <span className="hidden lg:inline text-xs opacity-70">
-                                  ({framework.description})
-                                </span>
-                              )}
-                            </div>
-                          </TabsTrigger>
-                        )
-                      })}
-                    </div>
-                  )
-                )}
-              </TabsList>
-            </div>
-          </Tabs>
-        </CardContent>
-      </Card>
-
-      {/* Selected Framework Instructions */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-muted p-2">
-              {(selectedFrameworkData?.icon || ReactIcon)()}
-            </div>
-            <div>
-              <CardTitle className="text-lg">
-                {selectedFrameworkData.name}
-                {selectedFrameworkData.description && (
-                  <span className="ml-2 text-sm font-normal text-muted-foreground">
-                    {selectedFrameworkData.description}
-                  </span>
-                )}
-              </CardTitle>
-              <CardDescription>
-                Follow these steps to add analytics to your{' '}
-                {selectedFrameworkData.name} application
-              </CardDescription>
+          <div className="rounded-lg border border-primary/30 bg-primary/5 p-4">
+            <div className="flex items-start gap-3">
+              <Terminal className="mt-0.5 size-4 shrink-0 text-primary" />
+              <div className="min-w-0 space-y-2">
+                <div>
+                  <p className="text-sm font-medium">
+                    Using an AI coding CLI? Run the Temps skill.
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Works with Claude Code, OpenCode, Codex, and any CLI that
+                    supports skills. The{' '}
+                    <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+                      add-react-analytics
+                    </code>{' '}
+                    skill auto-detects your framework and wires the provider,
+                    env vars, and proxy route for you.
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    1. Install the skill (one-time)
+                  </p>
+                  <CodeBlock
+                    language="bash"
+                    code={`npx skills add https://github.com/gotempsh/temps --skill add-react-analytics`}
+                    showCopy
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    2. Invoke it in your CLI
+                  </p>
+                  <CodeBlock
+                    language="bash"
+                    code={`/add-react-analytics`}
+                    showCopy
+                  />
+                </div>
+              </div>
             </div>
           </div>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {/* Step 1: Install */}
+
           {selectedFrameworkData.packageName && (
             <div className="space-y-3">
               <div className="flex items-center gap-2">
-                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground">
-                  1
-                </span>
-                <h4 className="font-medium">Install the SDK</h4>
+                <Terminal className="size-4 text-muted-foreground" />
+                <h3 className="text-sm font-medium">1. Install the SDK</h3>
               </div>
-              <div className="relative ml-8 space-y-3">
-                <div className="flex items-center gap-2">
-                  <Terminal className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-sm text-muted-foreground">
-                    Choose your package manager:
-                  </span>
-                </div>
-
-                {/* Package Manager Tabs */}
-                <div className="flex gap-1 p-1 bg-muted rounded-lg w-fit border border-border">
-                  {['npm', 'yarn', 'pnpm', 'bun'].map((pm) => {
-                    const isSelected = selectedPackageManager === pm
-                    return (
-                      <Button
-                        key={pm}
-                        variant="ghost"
-                        size="sm"
-                        className={cn(
-                          'px-3 py-1 h-7 text-xs transition-colors font-normal shadow-none',
-                          isSelected
-                            ? 'bg-foreground text-background border border-border shadow-md font-medium'
-                            : 'hover:bg-accent hover:text-accent-foreground'
-                        )}
-                        style={
-                          isSelected
-                            ? {
-                                boxShadow: '0 2px 8px 0 rgba(0,0,0,0.10)',
-                                backgroundColor: 'var(--foreground)',
-                                color: 'var(--background)',
-                              }
-                            : undefined
-                        }
-                        onClick={() => setSelectedPackageManager(pm)}
-                        aria-pressed={isSelected}
-                      >
-                        {pm}
-                      </Button>
-                    )
-                  })}
-                </div>
-
-                <CodeBlock
-                  language="bash"
-                  code={getInstallCommand(selectedFrameworkData.packageName!)}
-                  showCopy
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Step 2: Add Provider */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs text-primary-foreground">
-                {selectedFrameworkData.packageName ? '2' : '1'}
-              </span>
-              <h4 className="font-medium">Add the Analytics Provider</h4>
-            </div>
-            <div className="relative ml-8">
-              <div className="flex items-center gap-2 mb-2">
-                <FileCode className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm text-muted-foreground">
-                  Wrap your app with the provider:
-                </span>
+              <div className="flex gap-1 rounded-lg border border-border bg-muted p-1 w-fit">
+                {['npm', 'yarn', 'pnpm', 'bun'].map((pm) => {
+                  const isSelected = selectedPackageManager === pm
+                  return (
+                    <button
+                      key={pm}
+                      type="button"
+                      onClick={() => setSelectedPackageManager(pm)}
+                      className={cn(
+                        'rounded-md px-3 py-1 text-xs font-medium transition-colors',
+                        isSelected
+                          ? 'bg-background text-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground'
+                      )}
+                      aria-pressed={isSelected}
+                    >
+                      {pm}
+                    </button>
+                  )
+                })}
               </div>
               <CodeBlock
-                language={
-                  selectedFrameworkData.id.includes('next')
-                    ? 'typescript'
-                    : 'javascript'
-                }
-                code={selectedFrameworkData.setupCode}
+                language="bash"
+                code={getInstallCommand(selectedFrameworkData.packageName)}
                 showCopy
               />
             </div>
+          )}
+
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <FileCode className="size-4 text-muted-foreground" />
+              <h3 className="text-sm font-medium">
+                {selectedFrameworkData.packageName ? '2' : '1'}. Wrap your app
+                with the provider
+              </h3>
+            </div>
+            <CodeBlock
+              language={
+                selectedFrameworkData.id.includes('next')
+                  ? 'typescript'
+                  : 'javascript'
+              }
+              code={selectedFrameworkData.setupCode}
+              showCopy
+            />
           </div>
-        </CardContent>
-      </Card>
 
-      {/* Additional Configuration */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Usage Examples</CardTitle>
-          <CardDescription>
-            Learn how to use the analytics SDK in your application
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-6">
-            {/* Custom Events Example */}
+          {selectedFrameworkData.envExample && (
             <div className="space-y-3">
-              <h4 className="font-medium">Track Custom Events</h4>
-              <p className="text-sm text-muted-foreground">
-                Use the useAnalytics hook to track custom events with metadata:
-              </p>
+              <div className="flex items-center gap-2">
+                <FileCode className="size-4 text-muted-foreground" />
+                <h3 className="text-sm font-medium">3. Environment variables</h3>
+              </div>
               <CodeBlock
-                language="javascript"
-                code={`import { useAnalytics } from '@temps-sdk/react-analytics';
-
-function MyComponent() {
-  const { track } = useAnalytics();
-
-  const handleClick = () => {
-    // Track a custom event with properties
-    track('button_click', {
-      button_id: 'subscribe',
-      page: '/pricing',
-      plan: 'premium'
-    });
-  };
-
-  return (
-    <button onClick={handleClick}>
-      Subscribe Now
-    </button>
-  );
-}`}
+                language="bash"
+                code={selectedFrameworkData.envExample}
+                showCopy
               />
             </div>
+          )}
 
-            {/* Identify Users Example */}
-            <div className="space-y-3">
-              <h4 className="font-medium">Identify Users</h4>
-              <p className="text-sm text-muted-foreground">
-                Associate analytics with specific users:
-              </p>
-              <CodeBlock
-                language="javascript"
-                code={`import { useAnalytics } from '@temps-sdk/react-analytics';
-import { useEffect } from 'react';
-
-function UserProfile({ user }) {
-  const { identify } = useAnalytics();
-
-  useEffect(() => {
-    if (user) {
-      // Identify the user with their details
-      identify(user.id, {
-        email: user.email,
-        name: user.name,
-        plan: user.subscription.plan
-      });
-    }
-  }, [user]);
-
-  return <div>Profile content</div>;
-}`}
-              />
-            </div>
+          <div className="flex items-center justify-between gap-3 pt-2">
+            <Button
+              variant="ghost"
+              onClick={() => setWizardStep('framework')}
+            >
+              <ArrowLeft className="mr-2 size-4" />
+              Back
+            </Button>
+            <Button onClick={() => setWizardStep('waiting')}>
+              I've installed it — start listening
+              <ArrowRight className="ml-2 size-4" />
+            </Button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      )}
 
-      {/* Verification Steps */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Verify Your Installation</CardTitle>
-          <CardDescription>
-            Follow these steps to ensure analytics is working correctly
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ol className="space-y-4">
-            <li className="flex gap-3">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-primary text-xs font-medium">
-                1
-              </span>
-              <div className="space-y-1">
-                <p className="font-medium">Deploy your changes</p>
-                <p className="text-sm text-muted-foreground">
-                  Push your code to staging or production environment
-                </p>
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-primary text-xs font-medium">
-                2
-              </span>
-              <div className="space-y-1">
-                <p className="font-medium">Visit your application</p>
-                <p className="text-sm text-muted-foreground">
-                  Navigate through a few pages to generate some traffic
-                </p>
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-primary text-xs font-medium">
-                3
-              </span>
-              <div className="space-y-1">
-                <p className="font-medium">Check the Analytics Dashboard</p>
-                <p className="text-sm text-muted-foreground">
-                  Return to the Overview tab to see your data in real-time
-                </p>
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-primary text-xs font-medium">
-                4
-              </span>
-              <div className="space-y-1">
-                <p className="font-medium">Debug if needed</p>
-                <p className="text-sm text-muted-foreground">
-                  Open browser console and look for any analytics errors
-                </p>
-              </div>
-            </li>
-          </ol>
-        </CardContent>
-        <CardFooter className="flex gap-2">
-          <Button
-            variant="outline"
-            onClick={() =>
-              window.open('https://docs.temps.sh/analytics', '_blank')
-            }
-          >
-            View Documentation
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() =>
-              window.open('https://github.com/gotempsh/temps/issues', '_blank')
-            }
-          >
-            Report an Issue
-          </Button>
-        </CardFooter>
-      </Card>
-    </div>
+      {wizardStep === 'waiting' && (
+        <div className="space-y-6">
+          <div className="flex flex-col items-center justify-center gap-4 rounded-xl border bg-card px-6 py-12 text-center">
+            {hasEventsData?.has_events ? (
+              <>
+                <div className="flex size-14 items-center justify-center rounded-full bg-emerald-500/10">
+                  <Check
+                    className="size-7 text-emerald-500"
+                    strokeWidth={3}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-lg font-semibold">First event received</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Taking you to your analytics dashboard…
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="relative flex size-14 items-center justify-center">
+                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/20" />
+                  <span className="absolute inline-flex size-10 animate-ping rounded-full bg-primary/30 [animation-delay:200ms]" />
+                  <span className="relative inline-flex size-4 rounded-full bg-primary" />
+                </div>
+                <div className="space-y-1">
+                  <h3 className="text-lg font-semibold">
+                    Waiting for your first event…
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    Deploy your app or run it locally. We'll auto-redirect as
+                    soon as an event arrives.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="size-3 animate-spin" />
+                  Polling every 2s
+                </div>
+              </>
+            )}
+          </div>
+
+          {!hasEventsData?.has_events && (
+            <details className="rounded-lg border bg-card p-4 text-sm">
+              <summary className="cursor-pointer font-medium">
+                Not seeing anything? Double-check the setup.
+              </summary>
+              <ol className="mt-3 space-y-2 text-muted-foreground">
+                <li>1. Confirm the provider wraps your app's root.</li>
+                <li>
+                  2. Check DevTools → Network for <code>/api/_temps</code>{' '}
+                  requests.
+                </li>
+                <li>3. Reload a page to trigger a pageview.</li>
+              </ol>
+            </details>
+          )}
+
+          <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              onClick={() => setWizardStep('install')}
+              disabled={celebrate}
+            >
+              <ArrowLeft className="mr-2 size-4" />
+              Back to instructions
+            </Button>
+          </div>
+        </div>
+      )}
+    </SetupWizardShell>
   )
 }

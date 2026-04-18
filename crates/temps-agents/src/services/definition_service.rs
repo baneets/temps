@@ -11,7 +11,7 @@ use temps_entities::{project_mcp_definitions, project_skill_definitions};
 use crate::error::AgentError;
 
 /// Validate a slug used as a URL segment AND as a filesystem path component
-/// (skills are extracted to `/workspace/.claude/skills/<slug>/`, MCP archives
+/// (skills are extracted to `/home/temps/.claude/skills/<slug>/`, MCP archives
 /// will land in `/home/temps/.mcp/<slug>/`). Must reject `..`, `/`, and
 /// other characters that could escape the intended directory.
 fn validate_slug(slug: &str, kind: &str) -> Result<(), AgentError> {

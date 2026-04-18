@@ -315,6 +315,7 @@ impl SandboxService {
             run_id: row.id,
             container_name_override: Some(container_label.clone()),
             host_work_dir,
+            workspace_volume: None,
             image: req.image,
             cpu_limit: req.cpu_limit,
             memory_limit_mb: req.memory_limit_mb,

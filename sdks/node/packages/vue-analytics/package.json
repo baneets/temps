@@ -1,0 +1,40 @@
+{
+	"name": "@temps-sdk/vue-analytics",
+	"version": "0.0.1",
+	"description": "Temps analytics for Vue 3 — plugin + composables for events, Web Vitals, engagement, and session replay.",
+	"private": false,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"build:js": "tsc -p tsconfig.json",
+		"build:types": "tsc -p tsconfig.types.json",
+		"build": "bun run build:js && bun run build:types",
+		"clean": "rm -rf dist",
+		"prepublishOnly": "bun run clean && bun run build"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"peerDependencies": {
+		"vue": "^3.3.0"
+	},
+	"dependencies": {
+		"@temps-sdk/analytics-core": "workspace:*"
+	},
+	"devDependencies": {
+		"typescript": "^5.5.4",
+		"vue": "^3.4.0"
+	},
+	"sideEffects": false
+}

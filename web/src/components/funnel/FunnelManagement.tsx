@@ -9,6 +9,16 @@ import {
 } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import {
   listFunnelsOptions,
   deleteFunnelMutation,
 } from '@/api/client/@tanstack/react-query.gen'
@@ -33,6 +43,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
     from: subDays(new Date(), 30),
     to: new Date(),
   })
+  const [deletingId, setDeletingId] = React.useState<number | null>(null)
 
   const dateRangeQuery = React.useMemo(() => {
     if (!dateRange?.from || !dateRange?.to) return null
@@ -65,15 +76,19 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
     },
   })
 
-  const handleDelete = async (funnelId: number) => {
-    if (confirm('Are you sure you want to delete this funnel?')) {
-      deleteFunnel.mutate({
-        path: {
-          project_id: project.id,
-          funnel_id: funnelId,
-        },
-      })
-    }
+  const handleDelete = (funnelId: number) => {
+    setDeletingId(funnelId)
+  }
+
+  const confirmDelete = () => {
+    if (deletingId === null) return
+    deleteFunnel.mutate({
+      path: {
+        project_id: project.id,
+        funnel_id: deletingId,
+      },
+    })
+    setDeletingId(null)
   }
 
   return (
@@ -216,6 +231,29 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
           ))}
         </div>
       )}
+
+      <AlertDialog
+        open={deletingId !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeletingId(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete funnel?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This action cannot be undone. The funnel and its configuration
+              will be permanently removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

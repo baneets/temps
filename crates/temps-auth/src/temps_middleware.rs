@@ -183,7 +183,7 @@ impl AuthMiddleware {
             crate::middleware::extract_session_id_cookie(&req, &self.cookie_crypto);
 
         // Create base URL from request headers
-        let host = req
+        let raw_host = req
             .headers()
             .get("host")
             .and_then(|h| h.to_str().ok())
@@ -202,7 +202,11 @@ impl AuthMiddleware {
             "http"
         };
         let is_secure = scheme == "https";
-        let base_url = format!("{}://{}", scheme, host);
+        // `base_url` keeps the port so generated links point back at the same
+        // listener the client reached us on. `host` is port-stripped so it can
+        // be used as a route-table key (the proxy normalizes identically).
+        let base_url = format!("{}://{}", scheme, raw_host);
+        let host = temps_core::host_without_port(&raw_host).to_string();
 
         // Create RequestMetadata
         let metadata = temps_core::RequestMetadata {

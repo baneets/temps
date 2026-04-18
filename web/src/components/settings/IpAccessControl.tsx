@@ -14,6 +14,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -67,6 +77,7 @@ export function IpAccessControl() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [editingRule, setEditingRule] =
     useState<IpAccessControlResponse | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
 
   const {
     data: rules = [],
@@ -171,11 +182,13 @@ export function IpAccessControl() {
   }
 
   const handleDelete = (id: number) => {
-    if (
-      confirm('Are you sure you want to delete this IP access control rule?')
-    ) {
-      deleteMutation.mutate({ path: { id } })
-    }
+    setDeletingId(id)
+  }
+
+  const confirmDelete = () => {
+    if (deletingId === null) return
+    deleteMutation.mutate({ path: { id: deletingId } })
+    setDeletingId(null)
   }
 
   const handleCreateDialogOpen = (open: boolean) => {
@@ -541,6 +554,29 @@ export function IpAccessControl() {
             </form>
           </DialogContent>
         </Dialog>
+
+        <AlertDialog
+          open={deletingId !== null}
+          onOpenChange={(open) => {
+            if (!open) setDeletingId(null)
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete IP access control rule?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This action cannot be undone. The rule will no longer be
+                enforced at the proxy.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={confirmDelete}>
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </CardContent>
     </Card>
   )

@@ -24,8 +24,10 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   CheckCircle2,
   Loader2,
+  Play,
   Save,
   Sparkles,
+  XCircle,
 } from 'lucide-react'
 
 // ── Types mirroring the Rust catalog DTO ─────────────────────────────────────
@@ -174,6 +176,19 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
   const [saving, setSaving] = useState(false)
   const [activating, setActivating] = useState(false)
 
+  // Smoke test state. The backend now accepts an explicit provider_id query
+  // param so we can verify *any* saved credential, not just whichever one
+  // happens to be active. The Test button is still hidden when no credential
+  // has been saved yet — there's nothing meaningful to check in that case.
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{
+    passed: boolean
+    environment: string
+    cli_version: string | null
+    auth_info: string | null
+    setup_hint: string | null
+  } | null>(null)
+
   // Per-provider model state. Server is the source of truth — `serverModel`
   // is what we last successfully PATCHead (or what the catalog reported on
   // load). `modelDraft` is the local input being edited. We auto-save on
@@ -298,6 +313,47 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
     }
   }
 
+  const handleTest = async () => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      // project_id=0 is a sentinel — the endpoint doesn't use it. The
+      // provider_id query param selects which CLI to probe, so Test buttons
+      // on inactive cards still verify the right credential instead of
+      // silently testing the active one.
+      const res = await fetch(
+        `/api/projects/0/agents/smoke-test?provider_id=${encodeURIComponent(provider.id)}`,
+        { method: 'POST' }
+      )
+      if (!res.ok) {
+        const detail = await res.text()
+        toast.error(`Smoke test failed`, { description: detail.slice(0, 200) })
+        return
+      }
+      const data = await res.json()
+      setTestResult({
+        passed: data.passed,
+        environment: data.environment,
+        cli_version: data.cli_version,
+        auth_info: data.auth_info,
+        setup_hint: data.setup_hint,
+      })
+      if (data.passed) {
+        toast.success(`${provider.name} is ready`)
+      } else {
+        toast.error(`${provider.name} test failed`, {
+          description: data.setup_hint ?? 'See card for details',
+        })
+      }
+    } catch (e) {
+      toast.error('Smoke test failed', {
+        description: e instanceof Error ? e.message : 'Network error',
+      })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   const handleSave = async () => {
     if (!credential.trim()) return
     setSaving(true)
@@ -366,18 +422,34 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
             </span>
           )}
           {provider.credential_saved ? (
-            <Button
-              type="button"
-              variant={isActive ? 'default' : 'outline'}
-              size="sm"
-              onClick={handleActivate}
-              disabled={isActive || activating}
-            >
-              {activating ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
-              ) : null}
-              {isActive ? 'Active' : 'Use this'}
-            </Button>
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleTest}
+                disabled={testing}
+              >
+                {testing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                ) : (
+                  <Play className="h-3.5 w-3.5 mr-1.5" />
+                )}
+                Test
+              </Button>
+              <Button
+                type="button"
+                variant={isActive ? 'default' : 'outline'}
+                size="sm"
+                onClick={handleActivate}
+                disabled={isActive || activating}
+              >
+                {activating ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+                ) : null}
+                {isActive ? 'Active' : 'Use this'}
+              </Button>
+            </>
           ) : (
             <span className="text-xs text-muted-foreground">
               Save a credential to enable
@@ -464,6 +536,43 @@ function ProviderCard({ provider, isActive, onSetActive }: ProviderCardProps) {
           </Button>
         </div>
       </div>
+
+      {/* Test result — shown after clicking Test. The smoke-test endpoint runs
+          a provider-scoped auth check (claude auth status / codex --version /
+          opencode --version) on the host or inside a sandbox depending on
+          whether sandbox mode is enabled globally. */}
+      {testResult && (
+        <div
+          className={`rounded-md border p-3 text-xs space-y-1 ${
+            testResult.passed
+              ? 'border-green-500/30 bg-green-500/5'
+              : 'border-red-500/30 bg-red-500/5'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 font-medium">
+            {testResult.passed ? (
+              <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+            ) : (
+              <XCircle className="h-3.5 w-3.5 text-red-500" />
+            )}
+            {testResult.passed ? 'Connected' : 'Test failed'}
+            <span className="text-muted-foreground font-normal">
+              ({testResult.environment})
+            </span>
+          </div>
+          {testResult.cli_version && (
+            <p className="text-muted-foreground">
+              Version: <code className="bg-muted px-1 rounded">{testResult.cli_version}</code>
+            </p>
+          )}
+          {testResult.auth_info && (
+            <p className="text-muted-foreground">Auth: {testResult.auth_info}</p>
+          )}
+          {testResult.setup_hint && (
+            <p className="text-muted-foreground">{testResult.setup_hint}</p>
+          )}
+        </div>
+      )}
 
       {/* Model — auto-saves to /settings/ai-providers/{id} so changing the
           model never requires re-pasting the credential. OpenCode catalogues

@@ -758,8 +758,8 @@ mod tests {
             ai_session_id: None,
             source: "committed".to_string(),
             ephemeral_yaml: None,
-
             prompt_text: None,
+            workspace_volume: None,
         }
     }
 

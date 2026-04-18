@@ -76,8 +76,22 @@ pub struct SandboxCreateConfig {
     /// (`ws-<id>-<port>.<domain>`) is unguessable. `None` preserves the
     /// historical numeric naming for agent runs and workspace sessions.
     pub container_name_override: Option<String>,
-    /// Path to the cloned repository on the host (for bind mount / upload)
+    /// Path to the cloned repository on the host (for bind mount / upload).
+    /// When `workspace_volume` is also set, this directory is used to seed
+    /// the volume on first use (only if the volume is empty) and is then
+    /// ignored — the volume is the source of truth.
     pub host_work_dir: PathBuf,
+    /// When `Some`, mount this Docker named volume at `/workspace` instead
+    /// of bind-mounting `host_work_dir`. The volume is seeded from
+    /// `host_work_dir` on first use (detected by checking if it's empty)
+    /// and retained on sandbox destroy so a follow-up workspace can mount
+    /// the exact same filesystem. This is how "Open in workspace" picks
+    /// up where a failed workflow run left off — including `.git` and any
+    /// unpushed commits the AI produced.
+    ///
+    /// Only honored by the Docker provider; `LocalSandboxProvider` ignores
+    /// it and falls back to `host_work_dir`.
+    pub workspace_volume: Option<String>,
     /// Custom Docker image override (empty = use provider default)
     pub image: Option<String>,
     /// CPU limit in cores (e.g. 2.0)

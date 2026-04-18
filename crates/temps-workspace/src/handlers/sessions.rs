@@ -175,7 +175,7 @@ pub struct StartSessionRequest {
     pub agent_run_id: Option<i32>,
     /// Slugs of skill definitions to inject into the sandbox. Resolved from
     /// `project_skill_definitions` (falls back to global). Written to
-    /// `/workspace/.claude/skills/<slug>/` at session start.
+    /// `/home/temps/.claude/skills/<slug>/` at session start.
     pub skills: Option<Vec<String>>,
     /// Slugs of MCP server definitions to inject into the sandbox. Deep-merged
     /// into `/workspace/.claude/settings.json` and `/home/temps/.claude.json`

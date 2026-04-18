@@ -38,6 +38,7 @@
 	},
 	"dependencies": {
 		"@rrweb/packer": "^2.0.0-alpha.17",
+		"@temps-sdk/analytics-core": "workspace:*",
 		"rrweb": "^2.0.0-alpha.17",
 		"web-vitals": "^4.2.4"
 	},

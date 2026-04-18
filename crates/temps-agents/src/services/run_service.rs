@@ -40,6 +40,11 @@ pub struct UpdateRunFields {
     /// Final assembled prompt that was sent to the AI CLI (captured once per
     /// run, just before the CLI invocation). Exposed in the run detail UI.
     pub prompt_text: Option<String>,
+    /// Docker volume name backing `/workspace` for this run (e.g.
+    /// `temps-wfrun-42`). Set once when the sandbox is created. Retained
+    /// after the run finishes so "Open in workspace" can re-mount the
+    /// same filesystem.
+    pub workspace_volume: Option<String>,
 }
 
 /// A run record together with its logs
@@ -243,6 +248,9 @@ impl AgentRunService {
         }
         if let Some(prompt_text) = fields.prompt_text {
             active.prompt_text = Set(Some(prompt_text));
+        }
+        if let Some(workspace_volume) = fields.workspace_volume {
+            active.workspace_volume = Set(Some(workspace_volume));
         }
 
         let model = active
@@ -587,6 +595,7 @@ mod tests {
             ephemeral_yaml: None,
 
             prompt_text: None,
+            workspace_volume: None,
         }
     }
 

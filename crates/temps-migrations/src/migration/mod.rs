@@ -89,6 +89,7 @@ mod m20260416_000003_create_postgres_major_upgrades;
 mod m20260416_000004_add_ephemeral_fields_to_agent_runs;
 mod m20260417_000001_create_restore_runs;
 mod m20260417_000002_add_prompt_text_to_agent_runs;
+mod m20260417_000003_add_workspace_volume_to_agent_runs;
 
 pub struct Migrator;
 
@@ -185,6 +186,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260416_000004_add_ephemeral_fields_to_agent_runs::Migration),
             Box::new(m20260417_000001_create_restore_runs::Migration),
             Box::new(m20260417_000002_add_prompt_text_to_agent_runs::Migration),
+            Box::new(m20260417_000003_add_workspace_volume_to_agent_runs::Migration),
         ]
     }
 }

@@ -56,7 +56,7 @@ pub use chrono;
 pub use cookie_crypto::{CookieCrypto, CryptoError};
 pub use encryption::EncryptionService;
 pub use repo_config::*;
-pub use request_metadata::RequestMetadata;
+pub use request_metadata::{host_without_port, RequestMetadata};
 pub use serde;
 pub use serde_json;
 pub use stages::*;

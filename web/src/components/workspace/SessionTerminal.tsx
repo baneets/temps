@@ -26,6 +26,7 @@ import {
 /** Live connection state for the status indicator. */
 export type TerminalStatus = 'connecting' | 'open' | 'closed' | 'error'
 import { FitAddon, Ghostty, Terminal } from 'ghostty-web'
+import { toast } from 'sonner'
 
 import { pasteTerminalImage, sessionTerminalUrl } from './api'
 
@@ -538,7 +539,7 @@ export const SessionTerminal = forwardRef<
           }
         } catch (err) {
           console.error('[temps] image paste failed', err)
-          window.alert(
+          toast.error(
             `Image paste failed: ${
               err instanceof Error ? err.message : String(err)
             }`

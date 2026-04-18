@@ -16,7 +16,6 @@ import {
   GitBranch,
   Key,
   Loader2,
-  Play,
   Rocket,
   Sparkles,
   Terminal,
@@ -29,17 +28,6 @@ interface SandboxStatus {
   image_ready: boolean
   image_name: string
   error: string | null
-}
-
-interface SmokeTestResult {
-  passed: boolean
-  environment: string
-  cli_installed: boolean
-  cli_authenticated: boolean
-  cli_version?: string
-  auth_info?: string
-  setup_hint?: string
-  detail?: string
 }
 
 interface QuickstartStep {
@@ -66,59 +54,14 @@ interface CatalogResponse {
   providers: CatalogEntry[]
 }
 
-// localStorage cache for the last successful smoke-test result. Keyed by
-// provider so switching providers doesn't surface a stale green checkmark
-// for a different CLI. The test endpoint itself is fast but runs a real
-// container — we cache so a reload doesn't reset the "Ready" state for
-// users who already verified setup.
-const SMOKE_CACHE_PREFIX = 'temps.quickstart.smoke.'
-const smokeCacheKey = (provider: string) => `${SMOKE_CACHE_PREFIX}${provider}`
-
-function loadCachedSmoke(provider: string): SmokeTestResult | null {
-  try {
-    const raw = localStorage.getItem(smokeCacheKey(provider))
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as SmokeTestResult
-    // Defensive: the shape might evolve. Require `passed` to be a boolean
-    // before trusting the cache, otherwise drop it so a stale entry from
-    // an older build can't poison the UI.
-    if (typeof parsed?.passed !== 'boolean') return null
-    return parsed
-  } catch {
-    return null
-  }
-}
-
-function saveCachedSmoke(provider: string, result: SmokeTestResult) {
-  try {
-    localStorage.setItem(smokeCacheKey(provider), JSON.stringify(result))
-  } catch {
-    // Quota/private-mode — losing the cache is acceptable.
-  }
-}
-
 export function AiQuickstart({
   provider,
   sandboxEnabled,
 }: AiQuickstartProps) {
   const [collapsed, setCollapsed] = useState(false)
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
-  // Seed from localStorage so a reload after a successful test keeps the
-  // step green without re-running the test. `useState(fn)` runs the init
-  // exactly once; provider-change rehydration is handled by the effect below.
-  const [smokeResult, setSmokeResult] = useState<SmokeTestResult | null>(() =>
-    loadCachedSmoke(provider),
-  )
-  const [testing, setTesting] = useState(false)
   const [statusChecked, setStatusChecked] = useState(false)
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null)
-
-  // Re-hydrate when the user switches providers — each provider has its
-  // own cache entry, and a stale Claude result must not linger when the
-  // card re-renders under Codex.
-  useEffect(() => {
-    setSmokeResult(loadCachedSmoke(provider))
-  }, [provider])
 
   // The credentials step needs to know whether *this* provider has a saved
   // credential — pulled from the same catalog endpoint the AiProvidersCard
@@ -156,30 +99,8 @@ export function AiQuickstart({
       .catch(() => {})
   }, [fetchSandboxStatus])
 
-  const handleTest = async () => {
-    setTesting(true)
-    setSmokeResult(null)
-    try {
-      const response = await fetch('/api/projects/0/agents/smoke-test', {
-        method: 'POST',
-      })
-      if (response.ok) {
-        const result = (await response.json()) as SmokeTestResult
-        setSmokeResult(result)
-        // Cache every result — including failures — so the UI reflects
-        // the last known state on reload instead of snapping back to
-        // "pending" and asking the user to re-run the test.
-        saveCachedSmoke(provider, result)
-      }
-    } catch {
-      // Failed
-    } finally {
-      setTesting(false)
-    }
-  }
-
   // ── Steps aligned with Managed Agents pattern ──
-  // Agent → Environment → Credentials → Test
+  // Agent → Environment → Credentials (Test lives in AiProvidersCard per-provider)
   const steps: QuickstartStep[] = [
     {
       id: 'agent',
@@ -214,28 +135,9 @@ export function AiQuickstart({
       title: 'Save credentials',
       icon: <Key className="h-4 w-4" />,
       description: tokenSaved
-        ? `${authType === 'subscription' ? 'OAuth token' : 'API key'} encrypted and saved. Credentials are injected into the environment at session start.`
+        ? `${authType === 'subscription' ? 'OAuth token' : 'API key'} encrypted and saved. Use the Test button next to ${providerName} below to verify the setup end-to-end.`
         : `Save your ${authType === 'subscription' ? 'OAuth token' : 'API key'} in the AI Provider section below. Credentials are encrypted at rest and injected into each session.`,
       status: tokenSaved ? 'complete' : 'pending',
-    },
-    {
-      id: 'test',
-      title: 'Test connection',
-      icon: <Play className="h-4 w-4" />,
-      description: testing
-        ? `Creating a test session to verify ${providerName} is installed and authenticated...`
-        : smokeResult
-          ? smokeResult.passed
-            ? `${providerName}${smokeResult.cli_version ? ` v${smokeResult.cli_version}` : ''} is ready${smokeResult.auth_info ? ` (${smokeResult.auth_info})` : ''}. Sessions will start successfully.`
-            : smokeResult.setup_hint || 'Test session failed — check credentials and environment configuration.'
-          : `Run a test session to verify ${providerName} is installed and authenticated in the environment.`,
-      status: testing
-        ? 'loading'
-        : smokeResult
-          ? smokeResult.passed
-            ? 'complete'
-            : 'error'
-          : 'pending',
     },
   ]
 
@@ -315,22 +217,6 @@ export function AiQuickstart({
                 </p>
               </div>
 
-              {step.id === 'test' && step.status !== 'complete' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleTest}
-                  disabled={testing || !tokenSaved}
-                  className="shrink-0 h-7 text-xs"
-                >
-                  {testing ? (
-                    <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                  ) : (
-                    <Play className="h-3 w-3 mr-1" />
-                  )}
-                  Test
-                </Button>
-              )}
             </div>
           ))}
 

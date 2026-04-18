@@ -33,6 +33,16 @@ import {
   listTerminalTabs,
   type TerminalTab as TerminalTabRecord,
 } from './api'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 
 interface TerminalTabsProps {
   projectId: number
@@ -134,6 +144,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   ])
   const [activeKey, setActiveKey] = useState<string>('claude-main')
   activeKeyRef.current = activeKey
+
+  // Restart-AI confirmation. Tracks which tab is pending restart so the
+  // AlertDialog (rendered once at the root) knows what to kill on confirm.
+  const [restartTarget, setRestartTarget] = useState<LocalTab | null>(null)
 
   // Per-tab websocket status + reconnect counter. Bumping the reconnect
   // counter for a tab key forces the underlying SessionTerminal to drop
@@ -307,23 +321,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
               {t.kind === 'claude' && t.id === 'main' && (
                 <button
                   type="button"
-                  onClick={async (e) => {
+                  onClick={(e) => {
                     e.stopPropagation()
-                    const ok = window.confirm(
-                      `Restart ${t.label}? The current session will be killed and a fresh one will start.`
-                    )
-                    if (!ok) return
-                    try {
-                      await deleteTerminalTab(
-                        projectId,
-                        sessionId,
-                        t.kind,
-                        t.id
-                      )
-                    } catch {
-                      // Best-effort — reconnect still produces a fresh session.
-                    }
-                    reconnect(key)
+                    setRestartTarget(t)
                   }}
                   className="ml-0.5 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:bg-white/10 hover:text-zinc-300 group-hover:opacity-100"
                   aria-label={`Restart ${t.label}`}
@@ -391,6 +391,47 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
           )
         })}
       </div>
+
+      <AlertDialog
+        open={restartTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRestartTarget(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Restart {restartTarget?.label ?? ''}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The current session will be killed and a fresh one will start.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={async () => {
+                const target = restartTarget
+                if (!target) return
+                setRestartTarget(null)
+                try {
+                  await deleteTerminalTab(
+                    projectId,
+                    sessionId,
+                    target.kind,
+                    target.id
+                  )
+                } catch {
+                  // Best-effort — reconnect still produces a fresh session.
+                }
+                reconnect(tabKey(target))
+              }}
+            >
+              Restart
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 })

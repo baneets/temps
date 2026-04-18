@@ -1,0 +1,44 @@
+{
+	"name": "@temps-sdk/analytics-core",
+	"version": "0.0.1",
+	"description": "Framework-agnostic core for Temps analytics, engagement, Web Vitals, and session replay.",
+	"private": false,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"build:js": "tsc -p tsconfig.json",
+		"build:types": "tsc -p tsconfig.types.json",
+		"build": "bun run build:js && bun run build:types",
+		"clean": "rm -rf dist",
+		"prepublishOnly": "bun run clean && bun run build",
+		"test": "vitest",
+		"test:run": "vitest run",
+		"test:coverage": "vitest run --coverage"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"dependencies": {
+		"@rrweb/packer": "^2.0.0-alpha.17",
+		"rrweb": "^2.0.0-alpha.17",
+		"web-vitals": "^4.2.4"
+	},
+	"devDependencies": {
+		"@vitest/coverage-v8": "^1.3.1",
+		"jsdom": "^24.0.0",
+		"typescript": "^5.5.4",
+		"vitest": "^1.3.1"
+	},
+	"sideEffects": false
+}

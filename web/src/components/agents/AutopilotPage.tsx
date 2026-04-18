@@ -21,12 +21,14 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, Box, Loader2, Pencil, Play, Plus, Sparkles } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Box, Loader2, Pencil, Play, Sparkles, Terminal } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { AgentSettingsDialog } from './AgentSettingsDialog'
+import { CodeBlock } from '@/components/ui/code-block'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { cn } from '@/lib/utils'
 import {
   listAgents,
   listAllRuns,
@@ -349,27 +351,119 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
 
   if (!agents || agents.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <Sparkles className="h-12 w-12 text-muted-foreground mb-4" />
-        <h2 className="text-lg font-semibold mb-2">No workflows configured</h2>
-        <p className="text-muted-foreground text-sm mb-4 text-center max-w-md">
-          Create workflows via the dashboard or add <code className="text-xs bg-muted px-1 py-0.5 rounded">.temps/workflows/*.yaml</code> files to your repository.
-        </p>
-        <Button
-          onClick={() => {
-            setEditingAgent(null)
-            setDialogOpen(true)
-          }}
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Create Workflow
-        </Button>
-        <AgentSettingsDialog
-          open={dialogOpen}
-          onOpenChange={setDialogOpen}
-          projectId={project.id}
-          agent={editingAgent}
-        />
+      <div className="mx-auto max-w-2xl py-12">
+        <div className="flex flex-col items-center text-center mb-8">
+          <Sparkles className="h-12 w-12 text-muted-foreground mb-4" />
+          <h2 className="text-lg font-semibold mb-2">No workflows configured</h2>
+          <p className="text-muted-foreground text-sm max-w-md">
+            Workflows are defined in your repository or run ephemerally from the CLI.
+          </p>
+        </div>
+
+        <div className="space-y-6">
+          {/* Step 1: AI provider */}
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="flex items-start gap-3">
+              <div
+                className={cn(
+                  'flex size-8 shrink-0 items-center justify-center rounded-md text-sm font-medium',
+                  hasCredential
+                    ? 'bg-emerald-500/10 text-emerald-500'
+                    : 'bg-amber-500/10 text-amber-500',
+                )}
+              >
+                {hasCredential ? <CheckCircle2 className="size-4" /> : '1'}
+              </div>
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <h3 className="text-sm font-semibold">Configure an AI provider</h3>
+                  {hasCredential ? (
+                    <span className="text-xs text-emerald-500 font-medium">
+                      {defaultProviderName} configured
+                    </span>
+                  ) : (
+                    <span className="text-xs text-amber-500 font-medium">
+                      Not configured
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Workflows need an AI CLI (Claude Code, Codex, or OpenCode) to run.
+                  Add credentials once in{' '}
+                  <Link to="/settings/agent-sandbox" className="underline font-medium">
+                    Settings &gt; AI Workflows
+                  </Link>
+                  .
+                </p>
+                {!hasCredential && (
+                  <Button size="sm" variant="outline" asChild>
+                    <Link to="/settings/agent-sandbox">Configure AI provider</Link>
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Step 2: Commit a workflow */}
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="flex items-start gap-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary text-sm font-medium">
+                2
+              </div>
+              <div className="min-w-0 flex-1 space-y-2">
+                <h3 className="text-sm font-semibold">Commit a workflow to your repo</h3>
+                <p className="text-xs text-muted-foreground">
+                  Add a YAML file to{' '}
+                  <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
+                    .temps/workflows/
+                  </code>{' '}
+                  in your repository. Temps picks it up on the next deploy and wires
+                  up the triggers automatically.
+                </p>
+                <CodeBlock
+                  language="yaml"
+                  title=".temps/workflows/error-fixer.yaml"
+                  code={`name: error-fixer
+description: Automatically fixes production errors
+enabled: true
+deliverable: pull_request
+provider: claude_cli
+on:
+  error:
+    new_issue: true
+    regression: true
+prompt: |
+  Investigate and fix the reported production error.`}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Step 3: Ephemeral CLI run */}
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="flex items-start gap-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary text-sm font-medium">
+                3
+              </div>
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="flex items-center gap-2">
+                  <Terminal className="size-3.5 text-muted-foreground" />
+                  <h3 className="text-sm font-semibold">
+                    Or run ephemerally from the CLI
+                  </h3>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Trigger a one-off run from a local YAML file — nothing is stored
+                  in the project config. Great for experimenting before committing.
+                </p>
+                <CodeBlock
+                  language="bash"
+                  code={`bunx @temps-sdk/cli wf run --project ${project.slug} --from-file ./my-workflow.yaml`}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     )
   }
@@ -378,16 +472,6 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-xl font-semibold">Workflows</h1>
-        <Button
-          size="sm"
-          onClick={() => {
-            setEditingAgent(null)
-            setDialogOpen(true)
-          }}
-        >
-          <Plus className="h-3 w-3 mr-1" />
-          New Workflow
-        </Button>
       </div>
 
       <AgentSettingsDialog

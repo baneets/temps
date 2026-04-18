@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/collapsible'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
+import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
@@ -287,10 +288,16 @@ function ServiceCard({
 
 export function ProjectStorage({ project }: { project: ProjectResponse }) {
   const { setBreadcrumbs } = useBreadcrumbs()
+  const [isCreateDropdownOpen, setIsCreateDropdownOpen] = useState(false)
 
   useEffect(() => {
-    setBreadcrumbs([{ label: 'Storage', href: '/settings/storage' }])
+    setBreadcrumbs([{ label: 'Databases' }])
   }, [setBreadcrumbs])
+
+  useKeyboardShortcut({
+    key: 'n',
+    callback: () => setIsCreateDropdownOpen(true),
+  })
 
   const {
     data: services,
@@ -392,8 +399,15 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
       <div className="flex-1 overflow-auto">
         <div className="sm:p-4 space-y-6 md:p-6">
           <div className="flex items-center justify-between mb-6">
-            <h1 className="text-xl font-semibold sm:text-2xl">Storage</h1>
+            <div>
+              <h1 className="text-xl font-semibold sm:text-2xl">Databases</h1>
+              <p className="text-muted-foreground text-sm mt-1">
+                Link Postgres, MongoDB, Redis, or S3-compatible services to this project
+              </p>
+            </div>
             <CreateServiceButton
+              open={isCreateDropdownOpen}
+              onOpenChange={setIsCreateDropdownOpen}
               onSuccess={() => {
                 refetchServices()
                 refetchServicesLinked()
@@ -410,8 +424,15 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
     <div className="flex-1 overflow-auto">
       <div className="sm:p-4 space-y-6 md:p-6">
         <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold sm:text-2xl">Storage</h1>
+          <div>
+            <h1 className="text-xl font-semibold sm:text-2xl">Databases</h1>
+            <p className="text-muted-foreground text-sm mt-1">
+              Link Postgres, MongoDB, Redis, or S3-compatible services to this project
+            </p>
+          </div>
           <CreateServiceButton
+            open={isCreateDropdownOpen}
+            onOpenChange={setIsCreateDropdownOpen}
             onSuccess={() => {
               refetchServices()
               refetchServicesLinked()

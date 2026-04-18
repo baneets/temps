@@ -586,7 +586,11 @@ impl AgentExecutor {
                 .await?;
         }
 
-        // ── Skills: resolve slugs from project definitions, write as .claude/skills/{slug}.md ──
+        // ── Skills: resolve slugs from project definitions, write as
+        //    /home/temps/.claude/skills/{slug}/SKILL.md ──
+        // We write to the user's home instead of /workspace/.claude so the
+        // files don't appear as modifications in the repo bind mount.
+        // Claude Code discovers user-level skills under ~/.claude/skills.
         if has_skills {
             let _ = self
                 .sandbox_registry
@@ -595,7 +599,7 @@ impl AgentExecutor {
                     vec![
                         "mkdir".to_string(),
                         "-p".to_string(),
-                        "/workspace/.claude/skills".to_string(),
+                        "/home/temps/.claude/skills".to_string(),
                     ],
                     std::collections::HashMap::new(),
                     None,
@@ -611,7 +615,7 @@ impl AgentExecutor {
             for def in &skill_defs {
                 if let Some(archive_data) = &def.archive {
                     // Directory skill: extract tar.gz into a temp dir, then upload
-                    // the whole directory to .claude/skills/{slug}/
+                    // the whole directory to /home/temps/.claude/skills/{slug}/
                     let tmp_dir = tempfile::tempdir().map_err(|e| {
                         crate::error::AgentError::SandboxExecFailed {
                             run_id,
@@ -696,13 +700,14 @@ impl AgentExecutor {
                             });
                         }
                     }
-                    let target_path = format!("/workspace/.claude/skills/{}", def.slug);
+                    let target_path = format!("/home/temps/.claude/skills/{}", def.slug);
                     self.sandbox_registry
                         .write_directory(run_id, tmp_dir.path(), &target_path)
                         .await?;
                 } else {
-                    // Simple single-file skill: write as .claude/skills/{slug}/SKILL.md
-                    let dir_path = format!("/workspace/.claude/skills/{}", def.slug);
+                    // Simple single-file skill: write as
+                    // /home/temps/.claude/skills/{slug}/SKILL.md
+                    let dir_path = format!("/home/temps/.claude/skills/{}", def.slug);
                     let _ = self
                         .sandbox_registry
                         .exec(
@@ -741,7 +746,10 @@ impl AgentExecutor {
                     .append_log(
                         run_id,
                         "info",
-                        &format!("Injected {} skill file(s) into .claude/skills/", count),
+                        &format!(
+                            "Injected {} skill file(s) into /home/temps/.claude/skills/",
+                            count
+                        ),
                         None,
                     )
                     .await?;
@@ -1503,10 +1511,30 @@ impl AgentExecutor {
             let cpu_limit = yaml_cpu.unwrap_or(global_sandbox.cpu_limit);
             let memory_limit_mb = yaml_mem.unwrap_or(global_sandbox.memory_limit_mb);
 
+            // Per-run named volume for `/workspace`. Retained after the run
+            // finishes so a follow-up workspace sandbox can mount the exact
+            // same filesystem (including `.git` and any commits the AI
+            // made). Cleanup belongs to the TTL sweeper, not this path.
+            let workspace_volume = format!("temps-wfrun-{}", run_id);
+            if let Err(e) = self
+                .run_service
+                .update_status(
+                    run_id,
+                    UpdateRunFields {
+                        workspace_volume: Some(workspace_volume.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!("Run {}: failed to persist workspace_volume: {}", run_id, e);
+            }
+
             let sandbox_config = SandboxCreateConfig {
                 run_id,
                 container_name_override: None,
                 host_work_dir: work_dir.clone(),
+                workspace_volume: Some(workspace_volume),
                 image: resolved_image,
                 cpu_limit: Some(cpu_limit),
                 memory_limit_mb: Some(memory_limit_mb),
@@ -3824,6 +3852,7 @@ mod tests {
             ephemeral_yaml: None,
 
             prompt_text: None,
+            workspace_volume: None,
         }
     }
 

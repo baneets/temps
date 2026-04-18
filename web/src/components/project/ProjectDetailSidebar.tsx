@@ -121,7 +121,7 @@ const baseNavItems: NavItem[] = [
 
   // Error Tracking
   {
-    title: 'Issues',
+    title: 'Error Tracking',
     url: 'errors',
     icon: ShieldAlert,
     kbd: 'E',
@@ -156,15 +156,14 @@ const baseNavItems: NavItem[] = [
     icon: Bot,
   },
 
-  // Services (merged: Storage + Services + KV + Blob)
+  // Databases (linked external services) + platform services (KV / Blob)
   {
-    title: 'Services',
-    url: 'services',
+    title: 'Databases',
+    url: 'storage',
     icon: Boxes,
     kbd: 'S',
     subItems: [
-      { title: 'Overview', url: 'services' },
-      { title: 'Databases', url: 'storage' },
+      { title: 'Linked Services', url: 'storage' },
       { title: 'KV Store', url: 'services/kv' },
       { title: 'Blob Storage', url: 'services/blob' },
     ],

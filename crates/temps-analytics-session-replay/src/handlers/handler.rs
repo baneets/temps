@@ -679,7 +679,16 @@ pub async fn init_session_replay(
     let (project_id, environment_id, deployment_id) =
         match state.route_table.get_route(&metadata.host) {
             Some(route_info) => {
-                let project_id = route_info.project.as_ref().map(|p| p.id).unwrap_or(1);
+                let Some(project) = route_info.project.as_ref() else {
+                    return Err(ErrorBuilder::new(StatusCode::NOT_FOUND)
+                        .title("No project associated with host")
+                        .detail(format!(
+                            "Host {} resolved but has no project (sandbox/orphan route)",
+                            metadata.host
+                        ))
+                        .build());
+                };
+                let project_id = project.id;
                 let environment_id = route_info.environment.as_ref().map(|e| e.id);
                 let deployment_id = route_info.deployment.as_ref().map(|d| d.id);
 

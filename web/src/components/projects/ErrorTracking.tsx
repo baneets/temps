@@ -56,7 +56,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { TimeAgo } from '../utils/TimeAgo'
@@ -188,6 +188,20 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
       path: { project_id: project.id },
     }),
   })
+
+  // When the project has never received any errors, route to the onboarding
+  // wizard (mirrors analytics empty-state behavior).
+  useEffect(() => {
+    if (isCheckingErrors) return
+    if (!hasErrorGroupsData?.has_error_groups) {
+      navigate(`/projects/${project.slug}/errors/setup`, { replace: true })
+    }
+  }, [
+    isCheckingErrors,
+    hasErrorGroupsData?.has_error_groups,
+    navigate,
+    project.slug,
+  ])
 
   // Create DSN mutation
   const createDsnMutation = useMutation({

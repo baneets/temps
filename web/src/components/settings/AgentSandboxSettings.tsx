@@ -24,10 +24,8 @@ import {
   Cpu,
   Globe,
   Loader2,
-  Play,
   RefreshCw,
   Save,
-  Sparkles,
   XCircle,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
@@ -127,18 +125,6 @@ export function AgentSandboxSettings() {
   const [statusLoading, setStatusLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [buildLog, setBuildLog] = useState<string[]>([])
-  const [smokeTestLoading, setSmokeTestLoading] = useState(false)
-  const [smokeTestResult, setSmokeTestResult] = useState<{
-    passed: boolean
-    environment: string
-    cli_installed: boolean
-    cli_authenticated: boolean
-    cli_version?: string
-    auth_info?: string
-    setup_hint?: string
-    detail?: string
-  } | null>(null)
-
   const fetchSandboxStatus = useCallback(async () => {
     setStatusLoading(true)
     try {
@@ -229,29 +215,6 @@ export function AgentSandboxSettings() {
     }
   }
 
-  const handleSmokeTest = async () => {
-    setSmokeTestLoading(true)
-    setSmokeTestResult(null)
-    try {
-      // Use project_id=0 as a global test — the endpoint doesn't actually use it
-      const response = await fetch('/api/projects/0/agents/smoke-test', {
-        method: 'POST',
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setSmokeTestResult(data)
-        if (data.passed) {
-          toast.success('AI provider is configured correctly')
-        }
-      } else {
-        toast.error('Smoke test failed')
-      }
-    } catch {
-      toast.error('Failed to run smoke test')
-    } finally {
-      setSmokeTestLoading(false)
-    }
-  }
 
   const handleResourcePresetChange = (preset: string) => {
     setResourcePreset(preset)
@@ -315,88 +278,6 @@ export function AgentSandboxSettings() {
           setIsDirty(true)
         }}
       />
-
-      {/* Smoke test for the platform's active provider — verifies the
-          chosen CLI is installed and authenticated in the environment
-          workflows will actually run in (sandbox vs host). */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5" />
-            Connection Test
-          </CardTitle>
-          <CardDescription>
-            Runs a quick check against the active provider in the
-            environment workflows execute in.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">
-              Testing <span className="font-medium">{defaultProvider}</span> in{' '}
-              {enabled ? 'sandbox container' : 'host environment'}.
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleSmokeTest}
-              disabled={smokeTestLoading}
-            >
-              {smokeTestLoading ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" />
-              ) : (
-                <Play className="h-3.5 w-3.5 mr-2" />
-              )}
-              {smokeTestLoading ? 'Testing...' : 'Test Connection'}
-            </Button>
-          </div>
-
-          {smokeTestResult && (
-            <div className="space-y-2 rounded-lg border p-4">
-              <div className="flex items-center gap-2 text-sm">
-                {smokeTestResult.cli_installed ? (
-                  <CheckCircle2 className="h-4 w-4 text-green-500" />
-                ) : (
-                  <XCircle className="h-4 w-4 text-red-500" />
-                )}
-                <span>
-                  CLI:{' '}
-                  {smokeTestResult.cli_installed
-                    ? `installed${smokeTestResult.cli_version ? ` (${smokeTestResult.cli_version})` : ''}`
-                    : 'not found'}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 text-sm">
-                {smokeTestResult.cli_authenticated ? (
-                  <CheckCircle2 className="h-4 w-4 text-green-500" />
-                ) : (
-                  <XCircle className="h-4 w-4 text-red-500" />
-                )}
-                <span>
-                  Auth:{' '}
-                  {smokeTestResult.cli_authenticated
-                    ? smokeTestResult.auth_info || 'authenticated'
-                    : 'not authenticated'}
-                </span>
-              </div>
-              <div className="text-xs text-muted-foreground">
-                Environment:{' '}
-                {smokeTestResult.environment === 'sandbox'
-                  ? 'sandbox container'
-                  : 'host'}
-              </div>
-              {smokeTestResult.setup_hint && (
-                <Alert variant="destructive" className="mt-2">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription className="text-sm">
-                    {smokeTestResult.setup_hint}
-                  </AlertDescription>
-                </Alert>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
 
       {/* Sandbox */}
       <Card>

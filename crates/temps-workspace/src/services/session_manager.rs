@@ -15,18 +15,68 @@ use temps_core::EncryptionService;
 
 use crate::error::WorkspaceError;
 
-/// Temps platform skill file content.
-/// Auto-injected into workspace sandboxes to teach the AI how to use the Temps CLI.
 /// Canonical Temps CLI skill, embedded at compile time from
-/// `temps/skills/temps-cli/SKILL.md`. This is the same skill markdown the
-/// rest of the platform ships, so workspace sessions, autofixer runs, and
-/// human users all see one consistent CLI reference.
+/// `temps/skills/temps-cli/SKILL.md`. Kept as a standalone constant (in
+/// addition to its entry in [`BUNDLED_SKILLS`]) so the existing content
+/// assertions and external callers that specifically want the CLI reference
+/// don't have to go through a lookup.
+pub const TEMPS_PLATFORM_SKILL: &str = include_str!("../../../../skills/temps-cli/SKILL.md");
+
+/// All skills shipped under `temps/skills/` that we auto-inject into workspace
+/// sandboxes. The directory name is the skill's frontmatter `name:` field —
+/// Claude Code's skill discovery requires the containing directory to match
+/// that name exactly, so the tuple key is reused as the on-disk directory.
+///
+/// Auto-injected into workspace sandboxes so every session sees the same
+/// skill library the rest of the platform ships (CLI reference, deploy
+/// recipes, SDK integration guides, plugin authoring, etc.).
 ///
 /// We deliberately do NOT pre-install `@temps-sdk/cli` in the sandbox image —
-/// the skill instructs Claude to call it via `bunx @temps-sdk/cli@latest`
+/// the CLI skill instructs Claude to call it via `bunx @temps-sdk/cli@latest`
 /// (or `npx @temps-sdk/cli@latest`), so each session always picks up the
 /// latest published version without rebuilding container images.
-pub const TEMPS_PLATFORM_SKILL: &str = include_str!("../../../../skills/temps-cli/SKILL.md");
+pub const BUNDLED_SKILLS: &[(&str, &str)] = &[
+    (
+        "temps-cli",
+        include_str!("../../../../skills/temps-cli/SKILL.md"),
+    ),
+    (
+        "temps-platform-setup",
+        include_str!("../../../../skills/temps-platform-setup/SKILL.md"),
+    ),
+    (
+        "temps-mcp-setup",
+        include_str!("../../../../skills/temps-mcp-setup/SKILL.md"),
+    ),
+    (
+        "temps-plugin",
+        include_str!("../../../../skills/temps-plugin/SKILL.md"),
+    ),
+    (
+        "deploy-to-temps",
+        include_str!("../../../../skills/deploy-to-temps/SKILL.md"),
+    ),
+    (
+        "add-custom-domain",
+        include_str!("../../../../skills/add-custom-domain/SKILL.md"),
+    ),
+    (
+        "add-node-sdk",
+        include_str!("../../../../skills/add-node-sdk/SKILL.md"),
+    ),
+    (
+        "add-react-analytics",
+        include_str!("../../../../skills/add-react-analytics/SKILL.md"),
+    ),
+    (
+        "add-session-recording",
+        include_str!("../../../../skills/add-session-recording/SKILL.md"),
+    ),
+    (
+        "add-error-tracking",
+        include_str!("../../../../skills/add-error-tracking/SKILL.md"),
+    ),
+];
 
 /// Lightweight project descriptor used when injecting the global CLAUDE.md
 /// so the agent knows exactly which Temps project the sandbox belongs to.
@@ -169,6 +219,7 @@ impl WorkspaceSessionManager {
             run_id: session_id, // Reuse run_id field for session_id
             container_name_override: Some(container_label),
             host_work_dir,
+            workspace_volume: None,
             image: None,
             cpu_limit: cpu_limit.map(|v| v as f64),
             memory_limit_mb: memory_limit_mb.map(|v| v as u64),
@@ -769,36 +820,39 @@ impl WorkspaceSessionManager {
         env
     }
 
-    /// Write the Temps platform skill file into the sandbox's workspace.
-    /// This teaches the AI how to use the Temps CLI.
+    /// Write every bundled Temps skill into the sandbox's workspace. This
+    /// teaches the AI how to use the Temps CLI, deploy apps, wire up SDKs,
+    /// author plugins, etc.
     ///
     /// Each CLI reads skills from a different directory, so we route the
-    /// skill to whichever provider is active for this session:
-    /// - claude/opencode: `/workspace/.claude/skills/temps-cli/SKILL.md`
-    /// - codex: `/home/temps/.codex/skills/temps-cli/SKILL.md`
+    /// skills to whichever provider is active for this session:
+    /// - claude/opencode: `/home/temps/.claude/skills/<name>/SKILL.md`
+    /// - codex: `/home/temps/.codex/skills/<name>/SKILL.md`
+    ///
+    /// We deliberately use the user's home for claude rather than the
+    /// `/workspace/.claude` project-local path, because `/workspace` is a
+    /// bind mount from the host repo and writes there would show up as
+    /// modified files in the user's git working tree.
+    ///
+    /// Claude's skill discovery requires the directory (or filename) to match
+    /// the frontmatter `name:` field, so the directory name comes straight
+    /// from [`BUNDLED_SKILLS`] rather than being derived from disk paths.
     pub async fn inject_skill_file(
         &self,
         session_id: i32,
         ai_provider: &str,
     ) -> Result<(), WorkspaceError> {
-        // Codex has its own user-level skills directory. Everything else
-        // (claude_cli, opencode, and any unknown provider) goes to claude's
-        // project-local path.
+        // All providers now use a user-level path to avoid polluting the
+        // /workspace bind mount with Temps-injected skill files.
         let skills_base = match ai_provider {
             "codex_cli" => "/home/temps/.codex/skills",
-            _ => "/workspace/.claude/skills",
+            _ => "/home/temps/.claude/skills",
         };
-        let skill_dir = format!("{}/temps-cli", skills_base);
-        let skill_path = format!("{}/SKILL.md", skill_dir);
 
-        // Claude's skill discovery requires the directory (or filename) to match
-        // the frontmatter `name:` field. The canonical skill declares
-        // `name: temps-cli`.
-        let mkdir_cmd = vec!["mkdir".to_string(), "-p".to_string(), skill_dir.clone()];
-        self.exec(session_id, mkdir_cmd, HashMap::new(), None)
-            .await?;
-
-        // Remove any stale flat-file version from older sandbox builds.
+        // Remove the stale flat-file version from older sandbox builds.
+        // We deliberately do NOT touch the `/workspace/.claude/skills`
+        // directory beyond this: `/workspace` is the user's repo and any
+        // skills they keep there belong to them.
         let cleanup_cmd = vec![
             "rm".to_string(),
             "-f".to_string(),
@@ -808,21 +862,27 @@ impl WorkspaceSessionManager {
             .exec(session_id, cleanup_cmd, HashMap::new(), None)
             .await;
 
-        // Write the skill file content via native tar upload (avoids the
-        // bollard exec phantom-stream hang on silent heredoc writes).
-        self.write_file(
-            session_id,
-            &skill_path,
-            TEMPS_PLATFORM_SKILL.as_bytes(),
-            0o644,
-        )
-        .await?;
+        for (name, body) in BUNDLED_SKILLS {
+            let skill_dir = format!("{}/{}", skills_base, name);
+            let skill_path = format!("{}/SKILL.md", skill_dir);
 
-        tracing::debug!(
-            "Injected Temps platform skill into session {} at {}",
-            session_id,
-            skill_path
-        );
+            let mkdir_cmd = vec!["mkdir".to_string(), "-p".to_string(), skill_dir.clone()];
+            self.exec(session_id, mkdir_cmd, HashMap::new(), None)
+                .await?;
+
+            // Write via native tar upload (avoids the bollard exec
+            // phantom-stream hang on silent heredoc writes).
+            self.write_file(session_id, &skill_path, body.as_bytes(), 0o644)
+                .await?;
+
+            tracing::debug!(
+                "Injected Temps skill '{}' into session {} at {}",
+                name,
+                session_id,
+                skill_path
+            );
+        }
+
         Ok(())
     }
 
@@ -1935,6 +1995,43 @@ mod tests {
         assert!(TEMPS_PLATFORM_SKILL.contains("memory list"));
         assert!(TEMPS_PLATFORM_SKILL.contains("memory supersede"));
         assert!(TEMPS_PLATFORM_SKILL.contains("Tags matter"));
+    }
+
+    #[test]
+    fn test_bundled_skills_complete_and_named_correctly() {
+        // Every skill shipped under temps/skills/ should be in the bundle.
+        // Names must match the directory and the frontmatter `name:` field —
+        // Claude's skill discovery breaks if they diverge.
+        let expected = [
+            "temps-cli",
+            "temps-platform-setup",
+            "temps-mcp-setup",
+            "temps-plugin",
+            "deploy-to-temps",
+            "add-custom-domain",
+            "add-node-sdk",
+            "add-react-analytics",
+            "add-session-recording",
+            "add-error-tracking",
+        ];
+        for name in expected {
+            let entry = BUNDLED_SKILLS.iter().find(|(n, _)| *n == name);
+            assert!(entry.is_some(), "missing bundled skill: {}", name);
+            let (_, body) = entry.unwrap();
+            assert!(!body.is_empty(), "skill {} is empty", name);
+            // Frontmatter name must match the directory key.
+            let frontmatter_line = format!("name: {}", name);
+            assert!(
+                body.contains(&frontmatter_line),
+                "skill {} frontmatter name doesn't match bundle key",
+                name
+            );
+        }
+        assert_eq!(
+            BUNDLED_SKILLS.len(),
+            expected.len(),
+            "unexpected extra skill"
+        );
     }
 
     #[test]

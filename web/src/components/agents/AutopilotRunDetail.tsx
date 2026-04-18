@@ -16,6 +16,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -23,20 +24,14 @@ import remarkGfm from 'remark-gfm'
 import {
   AlertTriangle,
   ArrowLeft,
-  Bot,
-  Box,
-  Clock,
-  Cpu,
   ExternalLink,
   FileCode,
-  GitBranch,
   Hash,
   Loader2,
   RefreshCw,
   SquareTerminal,
   Terminal,
   Webhook,
-  Zap,
 } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { getAgentRun, retryRun } from './api'
@@ -439,157 +434,401 @@ function parseStreamOutput(output: string): ConversationEvent[] {
   return parseClaudeOutput(output)
 }
 
-/** Render the full AI conversation */
-function AiOutputCard({ output, live }: { output: string; live?: boolean }) {
-  const events = parseStreamOutput(output)
-  const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to bottom when live and new events arrive
+/** Claude-managed-agent style viewer: Transcript + Debug with inspector pane. */
+function ConversationViewer({
+  output,
+  systemPrompt,
+  live,
+}: {
+  output: string
+  systemPrompt?: string | null
+  live?: boolean
+}) {
+  const events = parseStreamOutput(output)
+  const [mode, setMode] = useState<'transcript' | 'debug'>('transcript')
+  const [filter, setFilter] = useState<'all' | 'user' | 'assistant' | 'tool' | 'system'>(
+    'all',
+  )
+  const [selectedIdx, setSelectedIdx] = useState<number | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
-    if (live && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    if (live && listRef.current) {
+      listRef.current.scrollTop = listRef.current.scrollHeight
     }
   }, [events.length, live])
 
-  // If no events parsed, show raw output
-  if (events.length === 0) {
+  // Build a unified event list with a synthetic "system" entry for the prompt.
+  type ViewEvent = {
+    kind: 'system' | 'user' | 'assistant' | 'tool' | 'result'
+    label: string
+    summary: string
+    raw: unknown
+    tool?: string
+    status?: string
+  }
+  const viewEvents: ViewEvent[] = []
+  if (systemPrompt) {
+    viewEvents.push({
+      kind: 'system',
+      label: 'System prompt',
+      summary: systemPrompt.slice(0, 160),
+      raw: systemPrompt,
+    })
+  }
+  for (const e of events) {
+    if (e.type === 'assistant_text' && e.content) {
+      viewEvents.push({
+        kind: 'assistant',
+        label: 'Assistant',
+        summary: e.content.slice(0, 200),
+        raw: e,
+      })
+    } else if (e.type === 'tool_call') {
+      const input = e.toolInput || {}
+      const preview =
+        (input.file_path as string) ||
+        (input.command as string) ||
+        (input.pattern as string) ||
+        JSON.stringify(input).slice(0, 160)
+      viewEvents.push({
+        kind: 'tool',
+        label: e.tool || 'Tool',
+        summary: preview,
+        tool: e.tool,
+        status: e.toolStatus,
+        raw: e,
+      })
+    } else if (e.type === 'tool_result' && e.toolResult) {
+      viewEvents.push({
+        kind: 'tool',
+        label: 'Tool result',
+        summary: e.toolResult.slice(0, 200),
+        raw: e,
+      })
+    } else if (e.type === 'result') {
+      viewEvents.push({
+        kind: 'result',
+        label: 'Result',
+        summary: [
+          e.numTurns != null ? `${e.numTurns} turns` : null,
+          e.costUsd != null ? `$${e.costUsd.toFixed(4)}` : null,
+          e.tokensInput != null ? `${e.tokensInput.toLocaleString()} in` : null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        raw: e,
+      })
+    }
+  }
+
+  const filtered = viewEvents.filter((v) => {
+    if (filter === 'all') return true
+    if (filter === 'user') return v.kind === 'user'
+    if (filter === 'assistant') return v.kind === 'assistant'
+    if (filter === 'tool') return v.kind === 'tool'
+    if (filter === 'system') return v.kind === 'system' || v.kind === 'result'
+    return true
+  })
+
+  const selected =
+    selectedIdx != null && filtered[selectedIdx] ? filtered[selectedIdx] : null
+
+  const kindStyle = (kind: ViewEvent['kind']): string => {
+    switch (kind) {
+      case 'system':
+        return 'bg-muted text-muted-foreground border-border'
+      case 'user':
+        return 'bg-pink-500/10 text-pink-600 dark:text-pink-300 border-pink-500/20'
+      case 'assistant':
+        return 'bg-purple-500/10 text-purple-600 dark:text-purple-300 border-purple-500/20'
+      case 'tool':
+        return 'bg-blue-500/10 text-blue-600 dark:text-blue-300 border-blue-500/20'
+      case 'result':
+        return 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border-emerald-500/20'
+    }
+  }
+
+  if (events.length === 0 && !systemPrompt) {
     return (
       <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">AI Output</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <pre className="whitespace-pre-wrap text-xs font-mono bg-muted p-4 rounded-md overflow-x-auto max-h-96 overflow-y-auto">
-            {output}
-          </pre>
+        <CardContent className="p-6 text-center text-sm text-muted-foreground">
+          {live ? 'Waiting for events…' : 'No conversation data.'}
         </CardContent>
       </Card>
     )
   }
 
-  const resultEvent = events.find((e) => e.type === 'result')
-
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-sm">AI Conversation</CardTitle>
-          {resultEvent && (
-            <div className="flex gap-3 text-xs text-muted-foreground">
-              {resultEvent.numTurns != null && (
-                <span>{resultEvent.numTurns} turns</span>
+    <div className="flex flex-col -mx-1">
+      {/* Compact toolbar — no card, tight spacing */}
+      <div className="flex items-center gap-2 flex-wrap px-1 py-1.5 text-xs">
+        <button
+          onClick={() => setMode('transcript')}
+          className={cn(
+            'px-2 py-0.5 rounded transition',
+            mode === 'transcript'
+              ? 'bg-foreground/10 text-foreground font-medium'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          Transcript
+        </button>
+        <button
+          onClick={() => setMode('debug')}
+          className={cn(
+            'px-2 py-0.5 rounded transition',
+            mode === 'debug'
+              ? 'bg-foreground/10 text-foreground font-medium'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          Debug
+        </button>
+        <span className="text-border">·</span>
+        <select
+          value={filter}
+          onChange={(e) => setFilter(e.target.value as typeof filter)}
+          className="bg-transparent text-muted-foreground hover:text-foreground cursor-pointer px-1 py-0.5"
+        >
+          <option value="all">All ({viewEvents.length})</option>
+          <option value="assistant">
+            Assistant ({viewEvents.filter((v) => v.kind === 'assistant').length})
+          </option>
+          <option value="tool">
+            Tool ({viewEvents.filter((v) => v.kind === 'tool').length})
+          </option>
+          <option value="system">
+            System ({viewEvents.filter((v) => v.kind === 'system' || v.kind === 'result').length})
+          </option>
+        </select>
+        <div className="flex-1" />
+        {live && (
+          <span className="text-[10px] font-medium text-emerald-500 animate-pulse tracking-wide">
+            ● LIVE
+          </span>
+        )}
+      </div>
+
+      {/* Main — two pane on desktop, single column on mobile */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] border-t border-border">
+        {/* Event list */}
+        <div
+          ref={listRef}
+          className="overflow-y-auto border-b lg:border-b-0 lg:border-r border-border max-h-[calc(100vh-16rem)]"
+        >
+          {mode === 'transcript' ? (
+            <div className="p-4 space-y-4">
+              {filtered.map((v, i) => {
+                if (v.kind === 'system') {
+                  return (
+                    <details key={i} className="rounded-md border border-border bg-muted/20">
+                      <summary className="px-3 py-2 text-xs font-medium text-muted-foreground cursor-pointer select-none">
+                        System prompt
+                      </summary>
+                      <div className="px-3 py-2 text-sm text-muted-foreground">
+                        <Markdown>{systemPrompt || ''}</Markdown>
+                      </div>
+                    </details>
+                  )
+                }
+                if (v.kind === 'assistant') {
+                  return (
+                    <div key={i} className="flex gap-3">
+                      <span
+                        className={cn(
+                          'shrink-0 h-6 px-2 text-[10px] font-medium rounded border uppercase tracking-wide flex items-center',
+                          kindStyle('assistant'),
+                        )}
+                      >
+                        Assistant
+                      </span>
+                      <div className="text-sm min-w-0 flex-1">
+                        <Markdown>
+                          {(v.raw as ConversationEvent).content || ''}
+                        </Markdown>
+                      </div>
+                    </div>
+                  )
+                }
+                if (v.kind === 'tool') {
+                  const e = v.raw as ConversationEvent
+                  const resultText = e.toolResult || ''
+                  const isFailed = e.toolStatus === 'failed'
+                  return (
+                    <div
+                      key={i}
+                      className={cn(
+                        'rounded-md border',
+                        isFailed
+                          ? 'border-red-500/20 bg-red-500/5'
+                          : 'border-blue-500/15 bg-blue-500/5',
+                      )}
+                    >
+                      <div className="flex items-center gap-2 px-3 py-2">
+                        <span
+                          className={cn(
+                            'text-xs font-mono font-medium',
+                            isFailed ? 'text-red-500' : 'text-blue-500',
+                          )}
+                        >
+                          {e.tool}
+                        </span>
+                        <span className="text-xs font-mono text-muted-foreground truncate flex-1">
+                          {v.summary}
+                        </span>
+                        {e.toolStatus === 'in_progress' && (
+                          <Loader2 className="h-3 w-3 animate-spin text-blue-500" />
+                        )}
+                        {isFailed && (
+                          <span className="text-[10px] font-medium text-red-500">FAILED</span>
+                        )}
+                      </div>
+                      {resultText.length > 2 && (
+                        <details className="border-t border-border/40">
+                          <summary className="px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer select-none hover:bg-muted/40">
+                            Output ({resultText.length > 1000 ? `${Math.round(resultText.length / 1000)}k` : resultText.length} chars)
+                          </summary>
+                          <pre className="text-xs font-mono bg-muted/30 px-3 py-2 max-h-48 overflow-auto whitespace-pre-wrap break-words text-muted-foreground">
+                            {resultText.slice(0, 2000)}
+                            {resultText.length > 2000 ? '\n…' : ''}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  )
+                }
+                if (v.kind === 'result') {
+                  return (
+                    <div
+                      key={i}
+                      className={cn(
+                        'rounded-md border px-3 py-2 text-xs',
+                        kindStyle('result'),
+                      )}
+                    >
+                      <span className="font-medium mr-2">Result</span>
+                      <span className="tabular-nums">{v.summary}</span>
+                    </div>
+                  )
+                }
+                return null
+              })}
+              {filtered.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-8">
+                  No events match the filter.
+                </p>
               )}
-              {resultEvent.durationMs != null && (
-                <span>{Math.round(resultEvent.durationMs / 1000)}s</span>
+            </div>
+          ) : (
+            /* Debug list — compact row per event, click to inspect */
+            <ul className="divide-y divide-border">
+              {filtered.map((v, i) => {
+                const isSelected = selectedIdx === i
+                return (
+                  <li key={i}>
+                    <button
+                      onClick={() => setSelectedIdx(isSelected ? null : i)}
+                      className={cn(
+                        'w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-muted/40 transition',
+                        isSelected && 'bg-muted/60',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'shrink-0 h-5 px-1.5 text-[10px] font-medium rounded border uppercase tracking-wide flex items-center',
+                          kindStyle(v.kind),
+                        )}
+                      >
+                        {v.kind}
+                      </span>
+                      <span className="text-sm font-medium shrink-0">
+                        {v.label}
+                      </span>
+                      <span className="text-xs text-muted-foreground truncate flex-1 font-mono">
+                        {v.summary}
+                      </span>
+                    </button>
+                  </li>
+                )
+              })}
+              {filtered.length === 0 && (
+                <li className="px-3 py-8 text-xs text-muted-foreground text-center">
+                  No events match the filter.
+                </li>
               )}
-              {resultEvent.costUsd != null && (
-                <span>${resultEvent.costUsd.toFixed(2)}</span>
-              )}
-              {resultEvent.tokensInput != null && (
-                <span>{resultEvent.tokensInput.toLocaleString()} in</span>
-              )}
-              {resultEvent.tokensOutput != null && (
-                <span>{resultEvent.tokensOutput.toLocaleString()} out</span>
+            </ul>
+          )}
+        </div>
+
+        {/* Inspector pane — only shown in debug mode and when something is selected */}
+        <aside
+          className={cn(
+            'bg-muted/10',
+            mode !== 'debug' || !selected ? 'hidden' : 'block',
+          )}
+        >
+          {selected && (
+            <div className="p-4 space-y-3 max-h-[600px] overflow-y-auto">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'shrink-0 h-5 px-1.5 text-[10px] font-medium rounded border uppercase tracking-wide flex items-center',
+                      kindStyle(selected.kind),
+                    )}
+                  >
+                    {selected.kind}
+                  </span>
+                  <span className="text-sm font-semibold">{selected.label}</span>
+                </div>
+                <button
+                  onClick={() => setSelectedIdx(null)}
+                  className="text-muted-foreground hover:text-foreground text-xs"
+                  aria-label="Close inspector"
+                >
+                  ✕
+                </button>
+              </div>
+              {selected.kind === 'system' && typeof selected.raw === 'string' ? (
+                <>
+                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide">
+                    prompt
+                  </p>
+                  <div className="text-sm text-muted-foreground bg-background border border-border rounded p-3 max-h-96 overflow-auto">
+                    <Markdown>{selected.raw}</Markdown>
+                  </div>
+                </>
+              ) : selected.kind === 'assistant' &&
+                (selected.raw as ConversationEvent).content ? (
+                <>
+                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide">
+                    message
+                  </p>
+                  <div className="text-sm text-muted-foreground bg-background border border-border rounded p-3 max-h-96 overflow-auto">
+                    <Markdown>
+                      {(selected.raw as ConversationEvent).content || ''}
+                    </Markdown>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wide">
+                    raw
+                  </p>
+                  <pre className="text-[11px] font-mono bg-background border border-border rounded p-3 overflow-auto whitespace-pre-wrap break-words text-muted-foreground">
+                    {typeof selected.raw === 'string'
+                      ? selected.raw
+                      : JSON.stringify(selected.raw, null, 2)}
+                  </pre>
+                </>
               )}
             </div>
           )}
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div ref={scrollRef} className="space-y-3 max-h-[600px] overflow-y-auto">
-          {events.map((event, i) => {
-            if (event.type === 'assistant_text') {
-              return (
-                <div key={i} className="text-sm">
-                  <Markdown>{event.content || ''}</Markdown>
-                </div>
-              )
-            }
-            if (event.type === 'tool_call') {
-              const input = event.toolInput || {}
-              const preview =
-                event.tool === 'Read'
-                  ? (input.file_path as string) || ''
-                  : event.tool === 'Edit'
-                    ? (input.file_path as string) || ''
-                    : event.tool === 'Write'
-                      ? (input.file_path as string) || ''
-                      : event.tool === 'Bash'
-                        ? (input.command as string) || ''
-                        : event.tool === 'Grep'
-                          ? (input.pattern as string) || ''
-                          : JSON.stringify(input).slice(0, 120)
-              const resultText = event.toolResult || ''
-              const hasResult = resultText.length > 2
-              const isFailed = event.toolStatus === 'failed'
-              const borderColor = isFailed ? 'border-red-500/20' : 'border-blue-500/10'
-              const bgColor = isFailed ? 'bg-red-500/5' : 'bg-blue-500/5'
-              const labelColor = isFailed ? 'text-red-400' : 'text-blue-400'
-              return (
-                <div key={i} className={`rounded-md ${bgColor} border ${borderColor}`}>
-                  <div className="flex items-start gap-2 px-3 py-2">
-                    <span className={`text-xs font-mono font-medium ${labelColor} whitespace-nowrap`}>
-                      {event.tool}
-                    </span>
-                    <span className="text-xs font-mono text-muted-foreground truncate flex-1">
-                      {preview}
-                    </span>
-                    {isFailed && (
-                      <span className="text-[10px] font-medium text-red-400 shrink-0">FAILED</span>
-                    )}
-                    {event.toolStatus === 'in_progress' && (
-                      <Loader2 className="h-3 w-3 text-blue-400 animate-spin shrink-0" />
-                    )}
-                  </div>
-                  {hasResult && (
-                    <details className={`border-t ${borderColor}`}>
-                      <summary className={`px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer hover:${bgColor} select-none`}>
-                        Output ({resultText.length > 1000 ? `${Math.round(resultText.length / 1000)}k chars` : `${resultText.length} chars`})
-                      </summary>
-                      <pre className="text-xs font-mono bg-muted/30 px-3 py-2 overflow-x-auto max-h-48 overflow-y-auto text-muted-foreground whitespace-pre-wrap break-words">
-                        {resultText.length > 2000 ? resultText.slice(0, 2000) + '\n...' : resultText}
-                      </pre>
-                    </details>
-                  )}
-                </div>
-              )
-            }
-            if (event.type === 'tool_result') {
-              // Only render standalone results that weren't merged into a tool_call
-              const text = event.toolResult || ''
-              if (!text || text.length < 3) return null
-              return (
-                <details
-                  key={i}
-                  className="rounded-md bg-muted/30 border border-border"
-                >
-                  <summary className="px-3 py-1.5 text-[11px] text-muted-foreground cursor-pointer hover:bg-muted/50 select-none">
-                    Tool output ({text.length > 1000 ? `${Math.round(text.length / 1000)}k chars` : `${text.length} chars`})
-                  </summary>
-                  <pre className="text-xs font-mono px-3 py-2 overflow-x-auto max-h-48 overflow-y-auto text-muted-foreground whitespace-pre-wrap break-words">
-                    {text.length > 2000 ? text.slice(0, 2000) + '\n...' : text}
-                  </pre>
-                </details>
-              )
-            }
-            if (event.type === 'result' && event.result) {
-              return (
-                <div
-                  key={i}
-                  className="rounded-md bg-green-500/5 border border-green-500/10 p-3"
-                >
-                  <p className="text-xs font-medium text-green-400 mb-1">
-                    Result
-                  </p>
-                  <div className="text-sm"><Markdown>{event.result}</Markdown></div>
-                </div>
-              )
-            }
-            return null
-          })}
-        </div>
-      </CardContent>
-    </Card>
+        </aside>
+      </div>
+    </div>
   )
 }
 
@@ -693,106 +932,207 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
 
   const logs = allLogs
 
-  return (
-    <div className="space-y-6">
-      {/* Back link + header */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" asChild>
-            <Link to="../agents">
-              <ArrowLeft className="h-4 w-4" />
-            </Link>
-          </Button>
-          <h1 className="text-xl font-semibold">Run #{run.id}</h1>
-          <AutopilotStatusBadge status={run.status} />
-          {isStreaming && (
-            <span className="text-xs text-green-400 animate-pulse">LIVE</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {!activeStatuses.has(run.status) && (
-            <>
-              {/* Retry hits the server's `/runs/{id}/retry` endpoint, which
-                  rejects ephemeral runs (their config isn't stored). Hide the
-                  button entirely so the user re-runs from the CLI instead. */}
-              {run.source !== 'cli_ephemeral' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={isRetrying}
-                  onClick={async () => {
-                    setIsRetrying(true)
-                    try {
-                      const newRun = await retryRun(project.id, run.id)
-                      navigate(`../agents/${newRun.id}`)
-                    } catch (e) {
-                      console.error('Failed to retry run:', e)
-                    } finally {
-                      setIsRetrying(false)
-                    }
-                  }}
-                >
-                  {isRetrying ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4 mr-1" />
-                  )}
-                  Retry
-                </Button>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={isOpeningWorkspace}
-                onClick={async () => {
-                  setIsOpeningWorkspace(true)
-                  try {
-                    const session = await startSession(project.id, {
-                      branch_name: run.branch_name || undefined,
-                      agent_run_id: run.id,
-                    })
-                    navigate(`../workspace?session=${session.id}`)
-                  } catch (e) {
-                    console.error('Failed to open workspace:', e)
-                  } finally {
-                    setIsOpeningWorkspace(false)
-                  }
-                }}
-              >
-                {isOpeningWorkspace ? (
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                ) : (
-                  <SquareTerminal className="h-4 w-4 mr-1" />
-                )}
-                Open in Workspace
-              </Button>
-            </>
-          )}
-          {activeStatuses.has(run.status) && (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={async () => {
-                try {
-                  await fetch(`/api/projects/${project.id}/agents/runs/${run.id}/cancel`, {
-                    method: 'POST',
-                  })
-                  window.location.reload()
-                } catch {
-                  // ignore
-                }
-              }}
-            >
-              Cancel
-            </Button>
-          )}
-        </div>
-      </div>
+  const isActive = activeStatuses.has(run.status)
+  const canRetry = !isActive && run.source !== 'cli_ephemeral'
 
-      {/* Ephemeral run banner. Only shown for runs uploaded via
-          `temps workflow run --from-file`. Surfaces the YAML so the user can
-          confirm exactly what executed (the server caps limits and forces
-          deliverable=report, so what they uploaded != what ran). */}
+  const onRetry = async () => {
+    setIsRetrying(true)
+    try {
+      const newRun = await retryRun(project.id, run.id)
+      navigate(`../agents/${newRun.id}`)
+    } catch (e) {
+      console.error('Failed to retry run:', e)
+    } finally {
+      setIsRetrying(false)
+    }
+  }
+
+  const onOpenWorkspace = async () => {
+    setIsOpeningWorkspace(true)
+    try {
+      const session = await startSession(project.id, {
+        branch_name: run.branch_name || undefined,
+        agent_run_id: run.id,
+      })
+      navigate(`../workspace?session=${session.id}`)
+    } catch (e) {
+      console.error('Failed to open workspace:', e)
+    } finally {
+      setIsOpeningWorkspace(false)
+    }
+  }
+
+  const onCancel = async () => {
+    try {
+      await fetch(`/api/projects/${project.id}/agents/runs/${run.id}/cancel`, {
+        method: 'POST',
+      })
+      window.location.reload()
+    } catch {
+      // ignore
+    }
+  }
+
+  const durationText = formatDuration(run.started_at, run.completed_at)
+  const costText =
+    run.estimated_cost_cents != null
+      ? `$${(run.estimated_cost_cents / 100).toFixed(2)}`
+      : null
+  const providerLabel =
+    run.ai_provider === 'claude_cli'
+      ? 'Claude Code'
+      : run.ai_provider === 'codex_cli'
+        ? 'Codex'
+        : run.ai_provider === 'opencode'
+          ? 'OpenCode'
+          : run.ai_provider
+
+  // Split logs into AI conversation events and system logs for tab views.
+  const aiEvents = logs.filter((l: AgentRunLog) => l.level === 'ai_event')
+  const systemLogs = logs.filter((l: AgentRunLog) => l.level !== 'ai_event')
+  const combinedAiOutput = run.ai_output
+    ? run.ai_output
+    : aiEvents.length > 0
+      ? aiEvents.map((l: AgentRunLog) => l.message).join('\n')
+      : ''
+  const showLiveAi = !run.ai_output && aiEvents.length > 0
+
+  const PrimaryActions = (
+    <>
+      {run.preview_url && (
+        <Button size="sm" asChild>
+          <a href={run.preview_url} target="_blank" rel="noopener noreferrer">
+            <ExternalLink className="h-3.5 w-3.5 mr-1.5" />
+            Preview
+          </a>
+        </Button>
+      )}
+      {run.pr_url && (
+        <Button size="sm" variant="outline" asChild>
+          <a href={run.pr_url} target="_blank" rel="noopener noreferrer">
+            <Hash className="h-3.5 w-3.5 mr-1.5" />
+            PR #{run.pr_number}
+          </a>
+        </Button>
+      )}
+      {!isActive && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={isOpeningWorkspace}
+          onClick={onOpenWorkspace}
+        >
+          {isOpeningWorkspace ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+          ) : (
+            <SquareTerminal className="h-3.5 w-3.5 mr-1.5" />
+          )}
+          Workspace
+        </Button>
+      )}
+      {canRetry && (
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={isRetrying}
+          onClick={onRetry}
+        >
+          {isRetrying ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+          )}
+          Retry
+        </Button>
+      )}
+      {isActive && (
+        <Button size="sm" variant="destructive" onClick={onCancel}>
+          Cancel
+        </Button>
+      )}
+    </>
+  )
+
+
+
+  // ── Tab contents ──────────────────────────────────────────────────────
+  const ConversationTab = combinedAiOutput || run.prompt_text ? (
+    <ConversationViewer
+      output={combinedAiOutput}
+      systemPrompt={run.prompt_text}
+      live={showLiveAi && isStreaming}
+    />
+  ) : (
+    <Card>
+      <CardContent className="p-6 text-center text-sm text-muted-foreground">
+        {isActive
+          ? 'Waiting for the agent to start the conversation…'
+          : 'No conversation recorded for this run.'}
+      </CardContent>
+    </Card>
+  )
+
+  const ReportTab = run.analysis ? (
+    <Card>
+      <CardContent className="p-5 text-sm">
+        <Markdown>{run.analysis}</Markdown>
+      </CardContent>
+    </Card>
+  ) : (
+    <Card>
+      <CardContent className="p-6 text-center text-sm text-muted-foreground">
+        No report produced for this run.
+      </CardContent>
+    </Card>
+  )
+
+  const LogsTab = systemLogs.length > 0 ? (
+    <Card>
+      <CardContent className="p-4 space-y-2">
+        {systemLogs.map((log: AgentRunLog) => (
+          <div key={log.id} className="flex items-start gap-3">
+            <div className="flex flex-col items-center pt-1.5">
+              <div
+                className={cn(
+                  'h-2 w-2 rounded-full flex-shrink-0',
+                  logLevelColor(log.level),
+                )}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground whitespace-nowrap">
+                  {formatTimestamp(log.created_at)}
+                </span>
+                <span className="text-xs font-medium uppercase text-muted-foreground">
+                  {log.level}
+                </span>
+              </div>
+              <p className="text-sm break-words">{log.message}</p>
+            </div>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  ) : (
+    <Card>
+      <CardContent className="p-6 text-center text-sm text-muted-foreground">
+        No system logs recorded.
+      </CardContent>
+    </Card>
+  )
+
+  const DetailsTab = (
+    <div className="space-y-4">
+      {run.error_message && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription className="whitespace-pre-wrap font-mono text-xs">
+            {run.error_message}
+          </AlertDescription>
+        </Alert>
+      )}
       {run.source === 'cli_ephemeral' && (
         <Alert>
           <FileCode className="h-4 w-4" />
@@ -804,13 +1144,11 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           </AlertTitle>
           <AlertDescription className="space-y-2">
             <p>
-              This run was triggered with{' '}
+              Triggered with{' '}
               <code className="text-xs bg-muted px-1 py-0.5 rounded">
                 temps workflow run --from-file
               </code>
-              . Its workflow config is not stored in{' '}
-              <code className="text-xs bg-muted px-1 py-0.5 rounded">project_agents</code>
-              {' '}— it lives only on this run row. Retry from the CLI to re-run.
+              . Workflow config lives only on this run.
             </p>
             {run.ephemeral_yaml && (
               <Dialog>
@@ -824,9 +1162,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
                   <DialogHeader>
                     <DialogTitle>Workflow YAML</DialogTitle>
                     <DialogDescription>
-                      The exact config the executor ran (after server-side
-                      validation and limit capping). May differ from what was
-                      uploaded if any field exceeded the dry-run caps.
+                      The exact config the executor ran.
                     </DialogDescription>
                   </DialogHeader>
                   <pre className="text-xs bg-muted/40 border border-border rounded p-3 overflow-auto max-h-[60vh] whitespace-pre-wrap break-all">
@@ -838,179 +1174,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           </AlertDescription>
         </Alert>
       )}
-
-      {/* Info cards grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {run.pr_url && (
-          <Card>
-            <CardContent className="p-4 flex items-center gap-2">
-              <Hash className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">Pull Request</p>
-                <a
-                  href={run.pr_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm font-medium text-primary hover:underline flex items-center gap-1"
-                >
-                  #{run.pr_number}
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {run.preview_url && (
-          <Card>
-            <CardContent className="p-4 flex items-center gap-2">
-              <ExternalLink className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">Preview</p>
-                <a
-                  href={run.preview_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm font-medium text-primary hover:underline truncate block"
-                >
-                  Open preview
-                </a>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {run.branch_name && (
-          <Card>
-            <CardContent className="p-4 flex items-center gap-2">
-              <GitBranch className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">Branch</p>
-                <p className="text-sm font-medium truncate">
-                  {run.branch_name}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        <Card>
-          <CardContent className="p-4 flex items-center gap-2">
-            <FileCode className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <div className="min-w-0">
-              <p className="text-xs text-muted-foreground">Files Changed</p>
-              <p className="text-sm font-medium">
-                {run.files_changed ?? '-'}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-4 flex items-center gap-2">
-            <Zap className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <div className="min-w-0">
-              <p className="text-xs text-muted-foreground">Tokens</p>
-              <p className="text-sm font-medium">
-                {run.tokens_input != null
-                  ? `${run.tokens_input.toLocaleString()} / ${(run.tokens_output ?? 0).toLocaleString()}`
-                  : '-'}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-4 flex items-center gap-2">
-            <Zap className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <div className="min-w-0">
-              <p className="text-xs text-muted-foreground">Cost</p>
-              <p className="text-sm font-medium">
-                {run.estimated_cost_cents != null
-                  ? `$${(run.estimated_cost_cents / 100).toFixed(2)}`
-                  : '-'}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardContent className="p-4 flex items-center gap-2">
-            <Clock className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <div className="min-w-0">
-              <p className="text-xs text-muted-foreground">Duration</p>
-              <p className="text-sm font-medium">
-                {formatDuration(run.started_at, run.completed_at)}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        {run.ai_provider && (
-          <Card>
-            <CardContent className="p-4 flex items-center gap-2">
-              <Bot className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0">
-                <p className="text-xs text-muted-foreground">AI Provider</p>
-                <p className="text-sm font-medium">
-                  {run.ai_provider === 'claude_cli'
-                    ? 'Claude Code'
-                    : run.ai_provider === 'codex_cli'
-                      ? 'Codex'
-                      : run.ai_provider === 'opencode'
-                        ? 'OpenCode'
-                        : run.ai_provider}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {run.ai_model && (
-          <Card>
-            <CardContent className="p-4 flex items-center gap-2">
-              <Cpu className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="text-xs text-muted-foreground">AI Model</p>
-                <p className="text-sm font-medium truncate" title={run.ai_model}>
-                  {run.ai_model}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        <Card>
-          <CardContent className="p-4 flex items-center gap-2">
-            <Box className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-            <div className="min-w-0">
-              <p className="text-xs text-muted-foreground">Sandbox</p>
-              <p className="text-sm font-medium">
-                {run.sandbox_enabled ? (
-                  <span className="text-orange-400">Docker</span>
-                ) : (
-                  'Host'
-                )}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-        {run.ai_session_id && (
-          <Card>
-            <CardContent className="p-4 flex items-center gap-2">
-              <SquareTerminal className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="text-xs text-muted-foreground">Session ID</p>
-                <p className="text-sm font-mono truncate" title={run.ai_session_id}>
-                  {run.ai_session_id.slice(0, 8)}…
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-      </div>
-
-      {/* Trigger & Arguments */}
       {(run.trigger_type || run.user_context) && (
         <Card>
           <CardHeader className="pb-3">
@@ -1022,11 +1185,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
               )}
               <CardTitle className="text-sm">
                 Trigger: <span className="capitalize">{run.trigger_type}</span>
-                {run.agent_name && (
-                  <span className="text-muted-foreground font-normal">
-                    {' '}— {run.agent_name}
-                  </span>
-                )}
               </CardTitle>
             </div>
           </CardHeader>
@@ -1045,8 +1203,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           )}
         </Card>
       )}
-
-      {/* Assembled prompt — what the AI CLI actually saw */}
       {run.prompt_text && (
         <Card>
           <CardHeader className="pb-3">
@@ -1059,16 +1215,15 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
                 <DialogTrigger asChild>
                   <Button variant="outline" size="sm">
                     <FileCode className="h-3 w-3 mr-1.5" />
-                    View full prompt
+                    View full
                   </Button>
                 </DialogTrigger>
                 <DialogContent className="max-w-3xl">
                   <DialogHeader>
                     <DialogTitle>Final assembled prompt</DialogTitle>
                     <DialogDescription>
-                      The exact text the AI CLI received — trigger context,
-                      error details (if any), YAML prompt, and user context
-                      all merged together.
+                      Trigger context, error details, YAML prompt, and user
+                      context merged.
                     </DialogDescription>
                   </DialogHeader>
                   <pre className="text-xs bg-muted/40 border border-border rounded p-3 overflow-auto max-h-[70vh] whitespace-pre-wrap break-words">
@@ -1081,91 +1236,141 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           <CardContent className="pt-0">
             <pre className="whitespace-pre-wrap text-xs font-mono bg-muted p-3 rounded-md overflow-x-auto max-h-48 overflow-y-auto">
               {run.prompt_text.length > 1200
-                ? run.prompt_text.slice(0, 1200) + '\n\n… (truncated — click "View full prompt")'
+                ? run.prompt_text.slice(0, 1200) + '\n\n… (truncated)'
                 : run.prompt_text}
             </pre>
           </CardContent>
         </Card>
       )}
+      <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 text-xs px-1">
+        {run.branch_name && (
+          <div className="space-y-0.5">
+            <dt className="text-muted-foreground">Branch</dt>
+            <dd className="font-mono truncate" title={run.branch_name}>
+              {run.branch_name}
+            </dd>
+          </div>
+        )}
+        {providerLabel && (
+          <div className="space-y-0.5">
+            <dt className="text-muted-foreground">Provider</dt>
+            <dd>{providerLabel}</dd>
+          </div>
+        )}
+        {run.ai_model && (
+          <div className="space-y-0.5">
+            <dt className="text-muted-foreground">Model</dt>
+            <dd className="font-mono truncate" title={run.ai_model}>
+              {run.ai_model}
+            </dd>
+          </div>
+        )}
+        {run.tokens_input != null && (
+          <div className="space-y-0.5">
+            <dt className="text-muted-foreground">Tokens</dt>
+            <dd className="tabular-nums">
+              {run.tokens_input.toLocaleString()} /{' '}
+              {(run.tokens_output ?? 0).toLocaleString()}
+            </dd>
+          </div>
+        )}
+        <div className="space-y-0.5">
+          <dt className="text-muted-foreground">Sandbox</dt>
+          <dd>
+            {run.sandbox_enabled ? (
+              <span className="text-orange-500">Docker</span>
+            ) : (
+              'Host'
+            )}
+          </dd>
+        </div>
+        {run.ai_session_id && (
+          <div className="space-y-0.5">
+            <dt className="text-muted-foreground">Session</dt>
+            <dd className="font-mono truncate" title={run.ai_session_id}>
+              {run.ai_session_id.slice(0, 8)}…
+            </dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  )
 
-      {/* Error message */}
-      {run.error_message && (
-        <Alert variant="destructive">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription className="whitespace-pre-wrap font-mono text-xs">
-            {run.error_message}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* Report / Analysis */}
-      {run.analysis && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Report</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm">
-              <Markdown>{run.analysis}</Markdown>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* AI Result */}
-      {run.ai_output && <AiOutputCard output={run.ai_output} />}
-
-      {/* AI Conversation from streamed events */}
-      {(() => {
-        const aiEvents = logs.filter((l: AgentRunLog) => l.level === 'ai_event')
-        if (aiEvents.length > 0 && !run.ai_output) {
-          // Show real-time conversation from streamed logs (while running or if ai_output not saved)
-          const combinedOutput = aiEvents.map((l: AgentRunLog) => l.message).join('\n')
-          return <AiOutputCard output={combinedOutput} live={isStreaming} />
-        }
-        return null
-      })()}
-
-      {/* System logs (non-AI events) */}
-      {(() => {
-        const systemLogs = logs.filter((l: AgentRunLog) => l.level !== 'ai_event')
-        if (systemLogs.length === 0) return null
-        return (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">Logs</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                {systemLogs.map((log: AgentRunLog) => (
-                  <div key={log.id} className="flex items-start gap-3">
-                    <div className="flex flex-col items-center pt-1.5">
-                      <div
-                        className={cn(
-                          'h-2 w-2 rounded-full flex-shrink-0',
-                          logLevelColor(log.level)
-                        )}
-                      />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">
-                          {formatTimestamp(log.created_at)}
-                        </span>
-                        <span className="text-xs font-medium uppercase text-muted-foreground">
-                          {log.level}
-                        </span>
-                      </div>
-                      <p className="text-sm break-words">{log.message}</p>
-                    </div>
-                  </div>
-                ))}
+  return (
+    <div className="space-y-6 pb-24 lg:pb-6">
+          <div className="space-y-2">
+            {/* Single compact row: back · run id · status · agent name · inline metrics · actions */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button variant="ghost" size="icon" asChild className="shrink-0 -ml-2 h-7 w-7">
+                <Link to="../agents">
+                  <ArrowLeft className="h-4 w-4" />
+                </Link>
+              </Button>
+              <span className="text-xs text-muted-foreground font-mono shrink-0">
+                #{run.id}
+              </span>
+              <AutopilotStatusBadge status={run.status} />
+              {run.agent_name && (
+                <h1 className="text-sm font-semibold truncate min-w-0">
+                  {run.agent_name}
+                </h1>
+              )}
+              {isStreaming && (
+                <span className="text-[10px] font-medium text-emerald-500 animate-pulse tracking-wide">
+                  ● LIVE
+                </span>
+              )}
+              <span className="hidden sm:inline text-xs text-muted-foreground tabular-nums ml-auto">
+                {run.files_changed ?? 0} files · {durationText}
+                {costText ? ` · ${costText}` : ''}
+              </span>
+              <div className="flex items-center gap-1 shrink-0 ml-auto sm:ml-2">
+                {PrimaryActions}
               </div>
-            </CardContent>
-          </Card>
-        )
-      })()}
+            </div>
+
+            {/* Tabs as plain text links, no pill, no card */}
+            <Tabs defaultValue="conversation" className="w-full">
+              <TabsList className="h-auto bg-transparent p-0 gap-4 justify-start border-b border-border w-full rounded-none">
+                <TabsTrigger
+                  value="conversation"
+                  className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-foreground rounded-none px-0 pb-2 text-sm font-medium text-muted-foreground data-[state=active]:text-foreground"
+                >
+                  Conversation
+                </TabsTrigger>
+                <TabsTrigger
+                  value="report"
+                  className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-foreground rounded-none px-0 pb-2 text-sm font-medium text-muted-foreground data-[state=active]:text-foreground"
+                >
+                  Report
+                </TabsTrigger>
+                <TabsTrigger
+                  value="details"
+                  className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-foreground rounded-none px-0 pb-2 text-sm font-medium text-muted-foreground data-[state=active]:text-foreground"
+                >
+                  Details
+                </TabsTrigger>
+                <TabsTrigger
+                  value="logs"
+                  className="data-[state=active]:bg-transparent data-[state=active]:shadow-none data-[state=active]:border-b-2 data-[state=active]:border-foreground rounded-none px-0 pb-2 text-sm font-medium text-muted-foreground data-[state=active]:text-foreground"
+                >
+                  Logs
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="conversation" className="mt-2">
+                {ConversationTab}
+              </TabsContent>
+              <TabsContent value="report" className="mt-4">
+                {ReportTab}
+              </TabsContent>
+              <TabsContent value="details" className="mt-4">
+                {DetailsTab}
+              </TabsContent>
+              <TabsContent value="logs" className="mt-4">
+                {LogsTab}
+              </TabsContent>
+            </Tabs>
+          </div>
     </div>
   )
 }

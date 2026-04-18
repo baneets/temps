@@ -23,6 +23,10 @@ import {
   BookOpen,
   Settings2,
   ExternalLink,
+  Upload,
+  Search,
+  Layers,
+  Copy,
 } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { CopyButton } from '@/components/ui/copy-button'
@@ -35,22 +39,20 @@ interface BlobServiceProps {
 export function BlobService({ project: _project }: BlobServiceProps) {
   const { setBreadcrumbs } = useBreadcrumbs()
 
-  // Fetch Blob status
   const { data: status, isLoading } = useQuery({
     ...blobStatusOptions(),
-    refetchInterval: 10000, // Refetch every 10 seconds
+    refetchInterval: 10000,
   })
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Services', href: `../services` },
+      { label: 'Databases', href: `../storage` },
       { label: 'Blob Storage' },
     ])
   }, [setBreadcrumbs])
 
   const isEnabled = status?.enabled ?? false
 
-  // Show loading skeleton while fetching status
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -62,7 +64,7 @@ export function BlobService({ project: _project }: BlobServiceProps) {
             <div>
               <h1 className="text-xl font-semibold sm:text-2xl">Blob Storage</h1>
               <p className="text-muted-foreground text-sm">
-                S3-compatible object storage
+                S3-compatible file storage
               </p>
             </div>
           </div>
@@ -92,7 +94,7 @@ export function BlobService({ project: _project }: BlobServiceProps) {
           <div>
             <h1 className="text-xl font-semibold sm:text-2xl">Blob Storage</h1>
             <p className="text-muted-foreground text-sm">
-              S3-compatible object storage
+              Upload, list, and serve files with a simple S3-backed API
             </p>
           </div>
         </div>
@@ -135,7 +137,7 @@ export function BlobService({ project: _project }: BlobServiceProps) {
             <CardHeader>
               <CardTitle>Service Status</CardTitle>
               <CardDescription>
-                View your Blob Storage service status
+                Cluster-wide status of Blob Storage. Once enabled, every project on this instance can store files through the SDK below.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -144,18 +146,22 @@ export function BlobService({ project: _project }: BlobServiceProps) {
                   <div className="grid gap-4 sm:grid-cols-3">
                     <div className="p-4 rounded-lg border bg-muted/30">
                       <p className="text-sm text-muted-foreground">Status</p>
-                      <p className="font-medium text-green-600 flex items-center gap-1.5 mt-1">
-                        <CheckCircle2 className="h-4 w-4" />
+                      <p className={`font-medium flex items-center gap-1.5 mt-1 ${status?.healthy ? 'text-green-600' : 'text-red-600'}`}>
+                        {status?.healthy ? (
+                          <CheckCircle2 className="h-4 w-4" />
+                        ) : (
+                          <XCircle className="h-4 w-4" />
+                        )}
                         {status?.healthy ? 'Healthy' : 'Unhealthy'}
                       </p>
                     </div>
                     <div className="p-4 rounded-lg border bg-muted/30">
-                      <p className="text-sm text-muted-foreground">Version</p>
-                      <p className="font-medium mt-1">{status?.version || 'Unknown'}</p>
+                      <p className="text-sm text-muted-foreground">Engine</p>
+                      <p className="font-medium mt-1">{status?.version || 'S3-compatible'}</p>
                     </div>
                     <div className="p-4 rounded-lg border bg-muted/30">
                       <p className="text-sm text-muted-foreground">Docker Image</p>
-                      <p className="font-medium mt-1 font-mono text-sm">
+                      <p className="font-medium mt-1 font-mono text-xs break-all">
                         {status?.docker_image || 'Unknown'}
                       </p>
                     </div>
@@ -173,8 +179,7 @@ export function BlobService({ project: _project }: BlobServiceProps) {
                     <Info className="h-4 w-4" />
                     <AlertTitle>Blob Storage is not enabled</AlertTitle>
                     <AlertDescription>
-                      The Blob Storage service needs to be enabled by a system administrator.
-                      Once enabled, you can use the SDK below to interact with it.
+                      An administrator must enable the Blob service from <strong>Storage Settings → Platform Services</strong>. Once enabled, the SDK on the Documentation tab works out of the box — no further per-project setup needed.
                     </AlertDescription>
                   </Alert>
                   <Button asChild>
@@ -187,6 +192,29 @@ export function BlobService({ project: _project }: BlobServiceProps) {
               )}
             </CardContent>
           </Card>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <FeatureCard
+              icon={Upload}
+              title="Streaming uploads"
+              description="Accept any body type — strings, Buffers, Uint8Arrays, Blobs, or ReadableStreams — without buffering large files into memory."
+            />
+            <FeatureCard
+              icon={Search}
+              title="Prefix listing"
+              description="List files under a path prefix with cursor-based pagination. Build folder-style browsing on top of a flat namespace."
+            />
+            <FeatureCard
+              icon={Layers}
+              title="Auto MIME detection"
+              description="Content type is inferred from the file extension. Override it explicitly when serving compressed or non-standard formats."
+            />
+            <FeatureCard
+              icon={Copy}
+              title="Server-side copy"
+              description="Duplicate a blob to a new path without re-uploading the bytes. Ideal for backups, snapshots, and asset versioning."
+            />
+          </div>
         </TabsContent>
 
         <TabsContent value="docs" className="space-y-6">
@@ -194,185 +222,229 @@ export function BlobService({ project: _project }: BlobServiceProps) {
             <CardHeader>
               <CardTitle>TypeScript SDK</CardTitle>
               <CardDescription>
-                Install and use the Temps Blob package in your TypeScript/JavaScript application
+                The <code className="bg-muted px-1.5 py-0.5 rounded text-xs">@temps-sdk/blob</code>{' '}
+                package provides a typed client for upload, download, list, copy, and delete from any
+                Node.js or Bun runtime.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* Installation */}
               <div className="space-y-3">
                 <h3 className="font-medium">Installation</h3>
-                <div className="relative">
-                  <pre className="bg-muted rounded-lg p-4 text-sm font-mono overflow-x-auto">
-                    <code>npm install @temps-sdk/blob</code>
-                  </pre>
-                  <CopyButton
-                    value="npm install @temps-sdk/blob"
-                    className="absolute top-2 right-2 h-8 w-8 p-0 hover:bg-accent hover:text-accent-foreground rounded-md"
-                  />
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Or using other package managers:
-                </p>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <CodeBlock code="yarn add @temps-sdk/blob" />
-                  <CodeBlock code="pnpm add @temps-sdk/blob" />
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <CodeBlock code="npm install @temps-sdk/blob" />
                   <CodeBlock code="bun add @temps-sdk/blob" />
+                  <CodeBlock code="pnpm add @temps-sdk/blob" />
+                  <CodeBlock code="yarn add @temps-sdk/blob" />
                 </div>
               </div>
 
-              {/* Configuration */}
+              <div className="space-y-3">
+                <h3 className="font-medium">Quick start</h3>
+                <p className="text-sm text-muted-foreground">
+                  The default <code className="bg-muted px-1.5 py-0.5 rounded text-xs">blob</code>{' '}
+                  singleton reads its config from environment variables — no extra wiring required
+                  when running on Temps.
+                </p>
+                <CodeBlock
+                  code={`import { blob } from '@temps-sdk/blob'
+
+// Upload
+const { url } = await blob.put('avatars/user-123.png', fileBuffer)
+
+// Download
+const response = await blob.download(url)
+const data = await response.arrayBuffer()
+
+// List
+const { blobs } = await blob.list({ prefix: 'avatars/' })
+
+// Delete
+await blob.del(url)`}
+                  language="typescript"
+                />
+              </div>
+
               <div className="space-y-3">
                 <h3 className="font-medium">Configuration</h3>
                 <p className="text-sm text-muted-foreground">
-                  The Blob client automatically reads the <code className="bg-muted px-1.5 py-0.5 rounded text-xs">TEMPS_BLOB_URL</code> environment
-                  variable which is injected into your project's runtime.
+                  These environment variables are injected automatically into deployments running on
+                  this instance. Set them yourself only when running locally or outside of Temps.
                 </p>
                 <CodeBlock
-                  code={`import { createBlobClient } from '@temps-sdk/blob'
+                  code={`# Required
+TEMPS_API_URL=https://your-instance.temps.dev   # API endpoint
+TEMPS_TOKEN=your-token                          # API key or deployment token
 
-// Automatically uses TEMPS_BLOB_URL from environment
-const blob = createBlobClient()
+# Required for API keys (deployment tokens embed the project ID)
+TEMPS_PROJECT_ID=42`}
+                  language="bash"
+                />
+                <p className="text-sm text-muted-foreground">
+                  Need an isolated client (multiple projects, custom timeouts, testing)? Use{' '}
+                  <code className="bg-muted px-1.5 py-0.5 rounded text-xs">createClient</code>:
+                </p>
+                <CodeBlock
+                  code={`import { createClient } from '@temps-sdk/blob'
 
-// Or configure manually
-const blob = createBlobClient({
-  url: process.env.TEMPS_BLOB_URL,
-  token: process.env.TEMPS_PROJECT_TOKEN,
+const storage = createClient({
+  apiUrl: 'https://your-instance.temps.dev',
+  token: process.env.TEMPS_TOKEN,
+  projectId: 42, // optional with deployment tokens
 })`}
                   language="typescript"
                 />
               </div>
 
-              {/* API Reference */}
               <div className="space-y-4">
                 <h3 className="font-medium">API Reference</h3>
 
                 <ApiMethod
                   name="put"
-                  description="Upload a blob to storage"
-                  signature={`blob.put(pathname: string, body: Blob | Buffer | string, options?: PutOptions): Promise<BlobInfo>`}
+                  description="Upload a file. Content type is auto-detected from the extension; override explicitly when needed. Accepts string | ArrayBuffer | Uint8Array | Blob | ReadableStream<Uint8Array> | Buffer."
+                  signature={`put(
+  pathname: string,
+  body: BlobBody,
+  options?: {
+    contentType?: string         // override auto-detection
+    addRandomSuffix?: boolean    // default: true — prevents collisions
+    cacheControl?: string        // Cache-Control header
+    contentEncoding?: string     // e.g., 'gzip'
+    contentDisposition?: string  // e.g., 'attachment; filename="x.txt"'
+  },
+): Promise<BlobInfo>`}
                   example={`const result = await blob.put('images/avatar.png', imageBuffer, {
   contentType: 'image/png',
-  addRandomSuffix: true, // Prevents collisions
+  cacheControl: 'public, max-age=31536000, immutable',
 })
 
-console.log(result.url) // /api/blob/123/images/avatar-abc123.png
-console.log(result.pathname) // images/avatar-abc123.png
+console.log(result.url)         // https://your-instance.temps.dev/api/blob/...
+console.log(result.pathname)    // images/avatar-abc123.png
 console.log(result.contentType) // image/png
-console.log(result.size) // 12345`}
+console.log(result.size)        // 12345
+console.log(result.uploadedAt)  // 2026-01-15T10:30:00.000Z`}
                 />
 
                 <ApiMethod
                   name="del"
-                  description="Delete one or more blobs"
-                  signature="blob.del(...pathnames: string[]): Promise<number>"
-                  example={`// Delete single blob
-await blob.del('images/avatar.png')
+                  description="Delete one or more files by URL or pathname. Accepts a single value or an array."
+                  signature="del(urls: string | string[]): Promise<void>"
+                  example={`// Delete one
+await blob.del(fileUrl)
 
-// Delete multiple blobs
-const deleted = await blob.del(
-  'images/old1.png',
-  'images/old2.png',
-  'documents/draft.pdf'
-)
-console.log(\`Deleted \${deleted} blobs\`)`}
+// Delete many
+await blob.del([urlA, urlB, urlC])`}
                 />
 
                 <ApiMethod
                   name="head"
-                  description="Get blob metadata without downloading content"
-                  signature="blob.head(pathname: string): Promise<BlobInfo>"
-                  example={`const info = await blob.head('documents/report.pdf')
+                  description="Get metadata for a file without downloading its contents."
+                  signature="head(url: string): Promise<BlobInfo>"
+                  example={`const info = await blob.head(fileUrl)
 
-console.log(info.contentType) // application/pdf
-console.log(info.size) // 1234567
-console.log(info.uploadedAt) // 2025-01-03T12:00:00Z`}
+console.log(info.contentType) // 'application/pdf'
+console.log(info.size)        // 1234567
+console.log(info.uploadedAt)  // ISO 8601 timestamp`}
                 />
 
                 <ApiMethod
                   name="list"
-                  description="List blobs with optional filtering and pagination"
-                  signature={`blob.list(options?: ListOptions): Promise<ListResult>`}
-                  example={`// List all blobs
+                  description="List files with optional prefix filtering and cursor-based pagination."
+                  signature={`list(options?: {
+  limit?: number    // default: 1000
+  prefix?: string   // filter by path prefix
+  cursor?: string   // pagination cursor from previous response
+}): Promise<{
+  blobs: BlobInfo[]
+  hasMore: boolean
+  cursor?: string
+}>`}
+                  example={`// All files
 const { blobs, hasMore, cursor } = await blob.list()
 
-// List with prefix filter
-const images = await blob.list({
-  prefix: 'images/',
-  limit: 100,
-})
+// Under a prefix
+const images = await blob.list({ prefix: 'images/', limit: 50 })
 
-// Paginate through results
-let cursor: string | undefined
-do {
-  const result = await blob.list({ cursor, limit: 50 })
-  for (const item of result.blobs) {
-    console.log(item.pathname, item.size)
+// Paginate fully
+let page = await blob.list({ limit: 100 })
+while (page.hasMore) {
+  for (const file of page.blobs) {
+    console.log(file.pathname, file.size)
   }
-  cursor = result.cursor
-} while (cursor)`}
+  page = await blob.list({ limit: 100, cursor: page.cursor })
+}`}
                 />
 
                 <ApiMethod
                   name="download"
-                  description="Download blob content as a readable stream"
-                  signature="blob.download(pathname: string): Promise<ReadableStream>"
-                  example={`// Download as stream
-const stream = await blob.download('documents/report.pdf')
+                  description="Download a file. Returns a standard Web Response — read it as text, arrayBuffer, or stream it directly."
+                  signature="download(url: string): Promise<Response>"
+                  example={`const response = await blob.download(fileUrl)
 
-// In Node.js, pipe to file
-import { createWriteStream } from 'fs'
-import { Readable } from 'stream'
+// As text
+const text = await response.text()
 
-const nodeStream = Readable.fromWeb(stream)
-nodeStream.pipe(createWriteStream('./report.pdf'))
+// As binary
+const buffer = await response.arrayBuffer()
 
-// Or collect as buffer
-const chunks: Uint8Array[] = []
-for await (const chunk of stream) {
-  chunks.push(chunk)
-}
-const buffer = Buffer.concat(chunks)`}
+// Stream to disk in Node.js
+import { writeFile } from 'node:fs/promises'
+await writeFile('./downloaded.png', Buffer.from(await response.arrayBuffer()))`}
                 />
 
                 <ApiMethod
-                  name="getUrl"
-                  description="Get a public URL for a blob"
-                  signature="blob.getUrl(pathname: string): string"
-                  example={`const imageUrl = blob.getUrl('images/avatar.png')
-// Returns: /api/blob/123/images/avatar.png
-
-// Use in HTML
-<img src={imageUrl} alt="Avatar" />`}
+                  name="copy"
+                  description="Duplicate a blob to a new pathname server-side — no re-upload, no client bandwidth."
+                  signature="copy(fromUrl: string, toPathname: string): Promise<BlobInfo>"
+                  example={`const snapshot = await blob.copy(
+  liveAssetUrl,
+  \`backups/\${new Date().toISOString()}/asset.png\`,
+)
+console.log(snapshot.url)`}
                 />
               </div>
 
-              {/* Types */}
               <div className="space-y-3">
                 <h3 className="font-medium">Types</h3>
                 <CodeBlock
                   code={`interface BlobInfo {
-  url: string          // Full URL to access the blob
-  pathname: string     // Path within project storage
-  contentType: string  // MIME type (e.g., 'image/png')
-  size: number         // Size in bytes
-  uploadedAt: string   // ISO 8601 timestamp
+  url: string         // Full URL to access the blob
+  pathname: string    // Path within project storage
+  contentType: string // MIME type (e.g., 'image/png')
+  size: number        // Size in bytes
+  uploadedAt: string  // ISO 8601 timestamp
 }
 
-interface PutOptions {
-  contentType?: string     // Override auto-detected content type
-  addRandomSuffix?: boolean // Add random suffix to prevent collisions
-}
+type BlobBody =
+  | string
+  | ArrayBuffer
+  | Uint8Array
+  | Blob
+  | ReadableStream<Uint8Array>
+  | Buffer`}
+                  language="typescript"
+                />
+              </div>
 
-interface ListOptions {
-  limit?: number     // Max items to return (default: 100)
-  prefix?: string    // Filter by path prefix
-  cursor?: string    // Pagination cursor
-}
+              <div className="space-y-3">
+                <h3 className="font-medium">Error handling</h3>
+                <p className="text-sm text-muted-foreground">
+                  Every error thrown by the SDK is an instance of{' '}
+                  <code className="bg-muted px-1.5 py-0.5 rounded text-xs">BlobError</code> with
+                  structured fields.
+                </p>
+                <CodeBlock
+                  code={`import { blob, BlobError } from '@temps-sdk/blob'
 
-interface ListResult {
-  blobs: BlobInfo[]       // List of blobs
-  cursor?: string         // Cursor for next page
-  hasMore: boolean        // Whether more results exist
+try {
+  await blob.head('nonexistent.txt')
+} catch (error) {
+  if (error instanceof BlobError) {
+    console.error(error.message) // 'Blob not found: nonexistent.txt'
+    console.error(error.code)    // 'NOT_FOUND' | 'MISSING_CONFIG' | 'NETWORK_ERROR' | 'INVALID_INPUT'
+    console.error(error.status)  // HTTP status (when applicable)
+    console.error(error.title)   // RFC 7807 problem title
+    console.error(error.detail)  // RFC 7807 problem detail
+  }
 }`}
                   language="typescript"
                 />
@@ -384,221 +456,135 @@ interface ListResult {
         <TabsContent value="examples" className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>Usage Examples</CardTitle>
+              <CardTitle>Usage Patterns</CardTitle>
               <CardDescription>
-                Common patterns and use cases for Blob Storage
+                Battle-tested recipes for common file storage workflows.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <ExampleSection
-                title="File Upload API Route"
-                description="Handle file uploads in Next.js or similar frameworks"
-                code={`import { createBlobClient } from '@temps-sdk/blob'
-import { NextRequest, NextResponse } from 'next/server'
+                title="Avatar upload (Next.js Route Handler)"
+                description="Accept a multipart upload, validate type, then store with long-lived caching."
+                code={`import { blob } from '@temps-sdk/blob'
 
-const blob = createBlobClient()
-
-export async function POST(request: NextRequest) {
-  const formData = await request.formData()
-  const file = formData.get('file') as File
+export async function POST(request: Request) {
+  const form = await request.formData()
+  const file = form.get('avatar') as File
 
   if (!file) {
-    return NextResponse.json(
-      { error: 'No file provided' },
-      { status: 400 }
-    )
+    return Response.json({ error: 'No file provided' }, { status: 400 })
   }
 
-  // Validate file type
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/webp']
-  if (!allowedTypes.includes(file.type)) {
-    return NextResponse.json(
-      { error: 'Invalid file type' },
-      { status: 400 }
-    )
+  const allowed = ['image/jpeg', 'image/png', 'image/webp']
+  if (!allowed.includes(file.type)) {
+    return Response.json({ error: 'Invalid file type' }, { status: 400 })
   }
 
-  // Upload to blob storage
-  const buffer = Buffer.from(await file.arrayBuffer())
-  const result = await blob.put(
-    \`uploads/\${file.name}\`,
-    buffer,
+  const { url } = await blob.put(
+    \`avatars/\${userId}/\${file.name}\`,
+    await file.arrayBuffer(),
     {
       contentType: file.type,
-      addRandomSuffix: true,
-    }
+      addRandomSuffix: false,
+      cacheControl: 'public, max-age=31536000, immutable',
+    },
   )
 
-  return NextResponse.json({
-    url: result.url,
-    pathname: result.pathname,
-    size: result.size,
-  })
+  return Response.json({ url })
 }`}
               />
 
               <ExampleSection
-                title="Image Optimization Pipeline"
-                description="Process and store optimized images"
-                code={`import { createBlobClient } from '@temps-sdk/blob'
-import sharp from 'sharp'
+                title="Backup and restore"
+                description="Snapshot JSON state on a schedule, list recent backups, and restore the latest."
+                code={`import { blob } from '@temps-sdk/blob'
 
-const blob = createBlobClient()
+// Snapshot
+const data = JSON.stringify(await db.export())
+await blob.put(
+  \`backups/\${new Date().toISOString()}.json\`,
+  data,
+  { contentType: 'application/json' },
+)
 
-interface ImageVariant {
-  width: number
-  height: number
-  suffix: string
-}
+// List the 10 most recent
+const { blobs } = await blob.list({ prefix: 'backups/', limit: 10 })
 
-const variants: ImageVariant[] = [
-  { width: 1920, height: 1080, suffix: 'large' },
-  { width: 800, height: 600, suffix: 'medium' },
-  { width: 400, height: 300, suffix: 'small' },
-  { width: 150, height: 150, suffix: 'thumb' },
-]
+// Restore the most recent
+const latest = blobs[blobs.length - 1]
+const response = await blob.download(latest.url)
+const backup = await response.json()`}
+              />
 
-async function processImage(
-  originalBuffer: Buffer,
-  filename: string
-): Promise<Record<string, string>> {
-  const results: Record<string, string> = {}
-  const baseName = filename.replace(/\\.[^.]+$/, '')
+              <ExampleSection
+                title="Content-addressed asset pipeline"
+                description="Hash the file contents to derive an immutable URL — ideal for static asset deploys with infinite caching."
+                code={`import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { blob } from '@temps-sdk/blob'
 
-  // Store original
-  const original = await blob.put(
-    \`images/\${filename}\`,
-    originalBuffer,
-    { addRandomSuffix: true }
+async function uploadAsset(filePath: string) {
+  const content = readFileSync(filePath)
+  const hash = createHash('md5').update(content).digest('hex').slice(0, 8)
+  const ext = filePath.split('.').pop()
+
+  const { url } = await blob.put(\`assets/\${hash}.\${ext}\`, content, {
+    addRandomSuffix: false,
+    cacheControl: 'public, max-age=31536000, immutable',
+  })
+
+  return url
+}`}
+              />
+
+              <ExampleSection
+                title="Cleanup stale uploads"
+                description="Sweep a prefix on a schedule and delete files older than a cutoff."
+                code={`import { blob } from '@temps-sdk/blob'
+
+async function cleanupOlderThan(prefix: string, maxAgeMs: number) {
+  const { blobs } = await blob.list({ prefix })
+  const cutoff = Date.now() - maxAgeMs
+
+  const stale = blobs.filter(
+    (b) => new Date(b.uploadedAt).getTime() < cutoff,
   )
-  results.original = original.url
 
-  // Generate variants
-  for (const variant of variants) {
-    const resized = await sharp(originalBuffer)
-      .resize(variant.width, variant.height, { fit: 'cover' })
-      .webp({ quality: 80 })
-      .toBuffer()
-
-    const result = await blob.put(
-      \`images/\${baseName}-\${variant.suffix}.webp\`,
-      resized,
-      { contentType: 'image/webp' }
-    )
-    results[variant.suffix] = result.url
+  if (stale.length > 0) {
+    await blob.del(stale.map((b) => b.url))
+    console.log(\`Deleted \${stale.length} stale files\`)
   }
+}
 
-  return results
-}`}
+// Drop temp uploads older than a week
+await cleanupOlderThan('temp/', 7 * 24 * 60 * 60 * 1000)`}
               />
 
               <ExampleSection
-                title="Document Management"
-                description="Organize and manage user documents"
-                code={`import { createBlobClient } from '@temps-sdk/blob'
-
-const blob = createBlobClient()
-
-// Upload document with metadata in path
-async function uploadDocument(
-  userId: string,
-  category: string,
-  file: File
-): Promise<string> {
-  const date = new Date().toISOString().split('T')[0]
-  const pathname = \`users/\${userId}/\${category}/\${date}/\${file.name}\`
-
-  const buffer = Buffer.from(await file.arrayBuffer())
-  const result = await blob.put(pathname, buffer, {
-    contentType: file.type,
-    addRandomSuffix: true,
-  })
-
-  return result.url
-}
-
-// List user's documents
-async function listUserDocuments(
-  userId: string,
-  category?: string
-): Promise<BlobInfo[]> {
-  const prefix = category
-    ? \`users/\${userId}/\${category}/\`
-    : \`users/\${userId}/\`
-
-  const allBlobs: BlobInfo[] = []
-  let cursor: string | undefined
-
-  do {
-    const result = await blob.list({ prefix, cursor, limit: 100 })
-    allBlobs.push(...result.blobs)
-    cursor = result.cursor
-  } while (cursor)
-
-  return allBlobs
-}
-
-// Delete all documents for a user
-async function deleteUserDocuments(userId: string): Promise<number> {
-  const documents = await listUserDocuments(userId)
-  if (documents.length === 0) return 0
-
-  return blob.del(...documents.map(d => d.pathname))
-}`}
-              />
-
-              <ExampleSection
-                title="Streaming Large Files"
-                description="Handle large file downloads efficiently with streaming"
-                code={`import { createBlobClient } from '@temps-sdk/blob'
-import { NextRequest, NextResponse } from 'next/server'
-
-const blob = createBlobClient()
+                title="Streaming download with caching headers"
+                description="Proxy blob downloads through a Route Handler so you can attach Cache-Control or Content-Disposition headers."
+                code={`import { blob } from '@temps-sdk/blob'
 
 export async function GET(
-  request: NextRequest,
-  { params }: { params: { pathname: string } }
+  _request: Request,
+  { params }: { params: { url: string } },
 ) {
-  const pathname = params.pathname
-
   try {
-    // Get metadata first
-    const info = await blob.head(pathname)
+    const url = decodeURIComponent(params.url)
+    const info = await blob.head(url)
+    const response = await blob.download(url)
 
-    // Stream the file content
-    const stream = await blob.download(pathname)
-
-    return new NextResponse(stream, {
+    return new Response(response.body, {
       headers: {
         'Content-Type': info.contentType,
         'Content-Length': info.size.toString(),
-        'Content-Disposition': \`attachment; filename="\${pathname.split('/').pop()}"\`,
+        'Content-Disposition': \`attachment; filename="\${info.pathname.split('/').pop()}"\`,
         'Cache-Control': 'public, max-age=31536000, immutable',
       },
     })
-  } catch (error) {
-    return NextResponse.json(
-      { error: 'File not found' },
-      { status: 404 }
-    )
+  } catch {
+    return Response.json({ error: 'File not found' }, { status: 404 })
   }
-}
-
-// Progress tracking for uploads
-async function uploadWithProgress(
-  pathname: string,
-  file: File,
-  onProgress: (percent: number) => void
-): Promise<BlobInfo> {
-  // For large files, you might want to use multipart upload
-  // This is a simplified example
-  const buffer = Buffer.from(await file.arrayBuffer())
-  onProgress(50) // Simulated progress
-
-  const result = await blob.put(pathname, buffer)
-  onProgress(100)
-
-  return result
 }`}
               />
             </CardContent>
@@ -606,6 +592,32 @@ async function uploadWithProgress(
         </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+function FeatureCard({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: typeof Upload
+  title: string
+  description: string
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 rounded-md bg-primary/10">
+            <Icon className="h-4 w-4 text-primary" />
+          </div>
+          <CardTitle className="text-base">{title}</CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -638,7 +650,9 @@ function ApiMethod({
     <div className="border rounded-lg p-4 space-y-3">
       <div>
         <h4 className="font-medium font-mono text-primary">{name}</h4>
-        <p className="text-sm text-muted-foreground">{description}</p>
+        <p className="text-sm text-muted-foreground whitespace-pre-line mt-1">
+          {description}
+        </p>
       </div>
       <div>
         <p className="text-xs text-muted-foreground mb-1">Signature</p>
