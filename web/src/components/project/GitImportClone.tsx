@@ -25,7 +25,7 @@ import { RepositoryList } from '@/components/repositories/RepositoryList'
 import { TemplateList, TemplateConfigurator } from '@/components/templates'
 import { ManualProjectConfigurator } from '@/components/project/ManualProjectConfigurator'
 import type { RepositoryResponse, TemplateResponse } from '@/api/client/types.gen'
-import { GitBranch, ChevronLeft, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container, FolderGit2 } from 'lucide-react'
+import { GitBranch, ChevronLeft, ChevronRight, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container, FolderGit2, ArrowRight } from 'lucide-react'
 import Github from '@/icons/Github'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
@@ -411,108 +411,273 @@ export function GitImportClone({
 
   // Source selection step
   if (!selectedSource) {
+    const sources: Array<{
+      key: ProjectSource
+      icon: typeof FolderGit2
+      title: string
+      tagline: string
+      detail: string
+    }> = [
+      {
+        key: 'browse',
+        icon: FolderGit2,
+        title: 'Import Repository',
+        tagline: 'Browse your private and public repos',
+        detail:
+          'Select a repository from your connected Git accounts. Auto-detects framework, build settings, and sets up webhooks for automatic deploys on push.',
+      },
+      {
+        key: 'templates',
+        icon: LayoutTemplate,
+        title: 'Template',
+        tagline: 'Start from a pre-configured starter kit',
+        detail:
+          'Pick from curated templates like Next.js, SaaS starters, and documentation sites. Includes build settings, environment variables, and recommended services.',
+      },
+      {
+        key: 'git-url',
+        icon: LinkIcon,
+        title: 'Git URL',
+        tagline: 'Clone from a public repository URL',
+        detail:
+          'Paste a public GitHub or GitLab URL to import any open-source repository. No account connection required — great for trying out open-source projects.',
+      },
+      {
+        key: 'manual',
+        icon: Container,
+        title: 'Manual Deploy',
+        tagline: 'No Git repository needed',
+        detail:
+          'Deploy a pre-built Docker image from any registry (DockerHub, GHCR, etc.) or upload a static files bundle. Ideal for CI/CD pipelines or pre-built artifacts.',
+      },
+    ]
+
     return (
-      <Card className="flex-1">
-        <CardHeader className="flex items-center gap-2 pb-3">
-          <GitBranch className="h-5 w-5 text-foreground" />
-          <CardTitle className="text-xl font-bold">
-            Create New Project
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground mb-6">
-            Choose how you want to set up your project
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <button
-              onClick={() => setSelectedSource('browse')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <FolderGit2 className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Import Repository</p>
-                  <p className="text-xs text-muted-foreground">Browse your private and public repos</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Select a repository from your connected Git accounts. Auto-detects framework, build settings, and sets up webhooks for automatic deploys on push.
+      <div data-uidotsh-pick="New project layout" className="contents">
+        {/* ── Option 1 — Cards 2×2 (current) ──────────────────────── */}
+        <div data-uidotsh-option="Cards 2×2 (current)" className="contents">
+          <Card className="flex-1">
+            <CardHeader className="flex items-center gap-2 pb-3">
+              <GitBranch className="h-5 w-5 text-foreground" />
+              <CardTitle className="text-xl font-bold">Create New Project</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground mb-6">
+                Choose how you want to set up your project
               </p>
-              {connections && connections.connections.length > 0 && (
-                <div className="flex items-center gap-2 pl-[52px] flex-wrap">
-                  {connections.connections.map((conn) => (
-                    <div key={conn.id} className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1">
-                      <Github className="h-3 w-3" />
-                      <span>{conn.account_name}</span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {sources.map((s) => {
+                  const Icon = s.icon
+                  return (
+                    <button
+                      key={s.key}
+                      onClick={() => setSelectedSource(s.key)}
+                      className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
+                          <Icon className="h-5 w-5 text-primary" />
+                        </div>
+                        <div>
+                          <p className="font-semibold">{s.title}</p>
+                          <p className="text-xs text-muted-foreground">{s.tagline}</p>
+                        </div>
+                      </div>
+                      <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
+                        {s.detail}
+                      </p>
+                      {s.key === 'browse' && connections && connections.connections.length > 0 && (
+                        <div className="flex items-center gap-2 pl-[52px] flex-wrap">
+                          {connections.connections.map((conn) => (
+                            <div
+                              key={conn.id}
+                              className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
+                            >
+                              <Github className="h-3 w-3" />
+                              <span>{conn.account_name}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {s.key === 'browse' && (!connections || connections.connections.length === 0) && (
+                        <p className="text-xs text-amber-500 pl-[52px]">
+                          No Git connections yet — you can add one after selecting this option.
+                        </p>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* ── Option 2 — Bento (hero + 3 tiles) ───────────────────── */}
+        <div data-uidotsh-option="Bento (hero + 3 tiles)" className="contents" hidden>
+          <div className="flex-1 space-y-6">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">Create a new project</h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Pick the source you want to deploy from.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              {/* Primary: Import Repository spans 2 columns on desktop */}
+              <button
+                onClick={() => setSelectedSource('browse')}
+                className="group relative md:col-span-2 flex flex-col justify-between gap-6 rounded-xl border bg-card p-6 text-left transition-all hover:border-primary/50 hover:shadow-sm"
+              >
+                <div className="flex items-start gap-4">
+                  <div className="rounded-lg bg-primary/10 p-3 group-hover:bg-primary/20 transition-colors">
+                    <FolderGit2 className="h-6 w-6 text-primary" />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-lg font-semibold">Import Repository</h2>
+                      <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
+                        Recommended
+                      </Badge>
                     </div>
-                  ))}
+                    <p className="text-sm text-muted-foreground leading-relaxed max-w-md">
+                      Connect a GitHub or GitLab account, pick a repo, and we'll auto-detect the
+                      framework, set up webhooks, and deploy on every push.
+                    </p>
+                  </div>
                 </div>
-              )}
-              {(!connections || connections.connections.length === 0) && (
-                <p className="text-xs text-amber-500 pl-[52px]">
-                  No Git connections yet — you can add one after selecting this option.
-                </p>
-              )}
-            </button>
+                {connections && connections.connections.length > 0 ? (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {connections.connections.map((conn) => (
+                      <div
+                        key={conn.id}
+                        className="flex items-center gap-1.5 text-xs bg-muted rounded-full px-2.5 py-1"
+                      >
+                        <Github className="h-3 w-3" />
+                        <span className="font-medium">{conn.account_name}</span>
+                      </div>
+                    ))}
+                    <span className="text-xs text-muted-foreground">connected</span>
+                  </div>
+                ) : (
+                  <span className="text-xs text-amber-500">
+                    No Git connections yet — you'll connect one in the next step.
+                  </span>
+                )}
+                <ArrowRight className="absolute right-6 top-6 h-4 w-4 text-muted-foreground/40 transition-all group-hover:text-foreground group-hover:translate-x-0.5" />
+              </button>
 
-            <button
-              onClick={() => setSelectedSource('templates')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <LayoutTemplate className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Template</p>
-                  <p className="text-xs text-muted-foreground">Start from a pre-configured starter kit</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Pick from curated templates like Next.js, SaaS starters, and documentation sites. Includes build settings, environment variables, and recommended services.
-              </p>
-            </button>
-
-            <button
-              onClick={() => setSelectedSource('git-url')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <LinkIcon className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Git URL</p>
-                  <p className="text-xs text-muted-foreground">Clone from a public repository URL</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Paste a public GitHub or GitLab URL to import any open-source repository. No account connection required — great for trying out open-source projects.
-              </p>
-            </button>
-
-            <button
-              onClick={() => setSelectedSource('manual')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <Container className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Manual Deploy</p>
-                  <p className="text-xs text-muted-foreground">No Git repository needed</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Deploy a pre-built Docker image from any registry (DockerHub, GHCR, etc.) or upload a static files bundle. Ideal for CI/CD pipelines or pre-built artifacts.
-              </p>
-            </button>
+              {/* Three small tiles */}
+              {sources
+                .filter((s) => s.key !== 'browse')
+                .map((s) => {
+                  const Icon = s.icon
+                  return (
+                    <button
+                      key={s.key}
+                      onClick={() => setSelectedSource(s.key)}
+                      className="group relative flex flex-col gap-3 rounded-xl border bg-card p-5 text-left transition-all hover:border-primary/50 hover:shadow-sm"
+                    >
+                      <div className="rounded-lg bg-primary/10 p-2.5 w-fit group-hover:bg-primary/20 transition-colors">
+                        <Icon className="h-5 w-5 text-primary" />
+                      </div>
+                      <div className="space-y-0.5">
+                        <p className="font-semibold">{s.title}</p>
+                        <p className="text-xs text-muted-foreground">{s.tagline}</p>
+                      </div>
+                      <ArrowRight className="absolute right-4 top-4 h-4 w-4 text-muted-foreground/40 transition-all group-hover:text-foreground group-hover:translate-x-0.5" />
+                    </button>
+                  )
+                })}
+            </div>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+
+        {/* ── Option 3 — Sidebar tabs + live form ─────────────────── */}
+        <div data-uidotsh-option="Sidebar tabs + live form" className="contents" hidden>
+          <div className="flex-1 space-y-5">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">Create a new project</h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Pick a source on the left to get started.
+              </p>
+            </div>
+            <div className="flex flex-col gap-6 lg:flex-row">
+              <nav className="lg:w-64 shrink-0 space-y-1" role="list">
+                {sources.map((s) => {
+                  const Icon = s.icon
+                  return (
+                    <button
+                      key={s.key}
+                      onClick={() => setSelectedSource(s.key)}
+                      className="w-full group flex items-start gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-muted"
+                    >
+                      <Icon className="h-4 w-4 mt-0.5 text-muted-foreground group-hover:text-foreground shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-sm font-medium truncate">{s.title}</p>
+                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 group-hover:text-muted-foreground shrink-0" />
+                        </div>
+                        <p className="text-xs text-muted-foreground line-clamp-1">{s.tagline}</p>
+                      </div>
+                    </button>
+                  )
+                })}
+              </nav>
+              <div className="min-w-0 flex-1 rounded-lg border border-dashed border-border bg-muted/20 p-10 text-center">
+                <GitBranch className="h-10 w-10 text-muted-foreground/40 mx-auto" />
+                <p className="mt-4 text-sm text-muted-foreground">
+                  Pick a source on the left to continue
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Option 4 — Compact list rows ────────────────────────── */}
+        <div data-uidotsh-option="Compact list rows" className="contents" hidden>
+          <div className="flex-1 space-y-5">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">Create a new project</h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Pick how you want to deploy.
+              </p>
+            </div>
+            <div className="rounded-lg border border-border/60 divide-y divide-border/60 bg-card overflow-hidden">
+              {sources.map((s) => {
+                const Icon = s.icon
+                return (
+                  <button
+                    key={s.key}
+                    onClick={() => setSelectedSource(s.key)}
+                    className="group w-full flex items-center gap-4 px-5 py-4 text-left transition-colors hover:bg-muted/50"
+                  >
+                    <div className="rounded-md bg-muted p-2.5 shrink-0 group-hover:bg-primary/15 transition-colors">
+                      <Icon className="h-5 w-5 text-foreground group-hover:text-primary transition-colors" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium text-sm">{s.title}</p>
+                      <p className="text-xs text-muted-foreground line-clamp-1">{s.detail}</p>
+                    </div>
+                    {s.key === 'browse' && connections && connections.connections.length > 0 && (
+                      <div className="hidden md:flex items-center gap-2 shrink-0">
+                        {connections.connections.slice(0, 2).map((conn) => (
+                          <div
+                            key={conn.id}
+                            className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
+                          >
+                            <Github className="h-3 w-3" />
+                            <span>{conn.account_name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-foreground group-hover:translate-x-0.5 transition-all shrink-0" />
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
     )
   }
 

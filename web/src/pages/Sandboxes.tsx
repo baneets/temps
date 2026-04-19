@@ -50,6 +50,7 @@ import {
   stopSandbox,
   type SandboxResponse,
 } from '@/components/sandboxes/api'
+import { CreateSandboxDocs } from '@/components/sandboxes/CreateSandboxDocs'
 
 function statusVariant(
   status: string,
@@ -227,19 +228,16 @@ export default function Sandboxes() {
           </CardContent>
         </Card>
       ) : items.length === 0 ? (
-        <Card>
-          <CardContent className="py-16 text-center space-y-2">
-            <Box className="mx-auto h-10 w-10 text-muted-foreground" />
-            <p className="text-sm font-medium">No sandboxes yet</p>
-            <p className="text-xs text-muted-foreground">
-              Create one via{' '}
-              <code className="font-mono">POST /v1/sandbox</code> or the{' '}
-              <code className="font-mono">temps sandbox</code> CLI.
-            </p>
-          </CardContent>
-        </Card>
+        // Empty state — there's no "Create Sandbox" button in the UI yet, so
+        // surface the three real ways to create one (CLI / REST / SDK) right
+        // here instead of making the user hunt for docs.
+        <CreateSandboxDocs variant="full" />
       ) : (
         <div className="space-y-3">
+          {/* Collapsible docs banner. Creation still only happens from outside
+              the UI, so keep the instructions one click away even when the
+              user already has sandboxes. */}
+          <CreateSandboxDocs variant="compact" />
           {items.map((sbx) => (
             <SandboxRow
               key={sbx.id}

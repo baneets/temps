@@ -84,8 +84,6 @@ const CATEGORY_META: Record<
   {
     label: string
     hint: string
-    // Tailwind classes for the section accent (header underline + card ring on
-    // hover). Keeps the palette consistent and avoids string-concat in JSX.
     accent: string
     badgeClass: string
   }
@@ -93,26 +91,26 @@ const CATEGORY_META: Record<
   fullstack: {
     label: 'Full-stack frameworks',
     hint: 'One SDK captures both browser and server errors from the same app',
-    accent: 'border-l-purple-500',
-    badgeClass: 'bg-purple-500/10 text-purple-600 dark:text-purple-400',
+    accent: 'border-l-foreground',
+    badgeClass: 'bg-muted text-muted-foreground',
   },
   frontend: {
     label: 'Frontend',
     hint: 'Runs in the browser — captures client-side JS errors, replay, and perf',
-    accent: 'border-l-blue-500',
-    badgeClass: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
+    accent: 'border-l-border',
+    badgeClass: 'bg-muted text-muted-foreground',
   },
   backend: {
     label: 'Backend',
     hint: 'Runs on the server — captures API, worker, and cron exceptions',
-    accent: 'border-l-emerald-500',
-    badgeClass: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+    accent: 'border-l-border',
+    badgeClass: 'bg-muted text-muted-foreground',
   },
   mobile: {
     label: 'Mobile',
     hint: 'iOS, Android, and cross-platform native apps',
-    accent: 'border-l-orange-500',
-    badgeClass: 'bg-orange-500/10 text-orange-600 dark:text-orange-400',
+    accent: 'border-l-border',
+    badgeClass: 'bg-muted text-muted-foreground',
   },
 }
 

@@ -13,6 +13,13 @@ export default defineConfig({
   html: {
     title: 'Temps',
     favicon: './src/favicon.png',
+    tags: [
+      {
+        tag: 'script',
+        attrs: { src: 'https://ui.sh/ui-picker.js' },
+        append: true,
+      },
+    ],
   },
   server: {
     proxy: {

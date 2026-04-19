@@ -6,41 +6,56 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
   useSidebar,
 } from '@/components/ui/sidebar'
 import {
   Activity,
+  ArrowLeft,
   BadgeCheck,
+  Bell,
+  Bot,
   Box,
+  Boxes,
   ChevronsUpDown,
+  Cloud,
+  Database,
+  DatabaseBackup,
   Folder,
+  GitBranch,
+  Globe,
+  HardDrive,
+  Home,
+  Key,
+  Layers,
   LogOut,
-  MoreHorizontal,
+  Mail,
+  Monitor,
+  Network,
+  Puzzle,
+  Search,
   ScrollText,
+  Server,
   Settings,
+  Settings2,
+  Shield,
+  ShieldAlert,
+  Sparkles,
+  Users,
+  Wand2,
 } from 'lucide-react'
 
-import { ProjectResponse } from '@/api/client'
+import { getProjectBySlugOptions } from '@/api/client/@tanstack/react-query.gen'
 import { useAuth } from '@/contexts/AuthContext'
 import { usePluginsContext } from '@/contexts/PluginsContext'
-import { useProjects } from '@/contexts/ProjectsContext'
 import { resolvePluginIcon } from '@/lib/pluginIcons'
 import { cn } from '@/lib/utils'
-import { ChevronRight, type LucideIcon } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { ChevronRight, Eye, type LucideIcon } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '../ui/collapsible'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,206 +66,100 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu'
 
-const navMain = [
+// Daily-use root: short, scannable list. Dense areas (AI, Source) drill
+// down into sub-views per the §6.12 sidebar standard.
+interface PlatformNavItem {
+  title: string
+  url: string
+  icon: LucideIcon
+  subItems?: { title: string; url: string; icon: LucideIcon }[]
+}
+
+const navWorkflow: PlatformNavItem[] = [
+  { title: 'Projects', url: '/projects', icon: Folder },
+  { title: 'Sandboxes', url: '/sandboxes', icon: Box },
+  { title: 'Domains', url: '/domains', icon: Globe },
   {
-    title: 'Projects',
-    url: '/projects',
-    icon: Folder,
-    isActive: true,
+    title: 'Storage',
+    url: '/storage',
+    icon: Database,
+    subItems: [
+      { title: 'Linked Services', url: '/storage', icon: Database },
+      { title: 'Backups', url: '/backups', icon: DatabaseBackup },
+    ],
+  },
+  { title: 'Email', url: '/email', icon: Mail },
+  {
+    title: 'AI',
+    url: '/ai-gateway',
+    icon: Sparkles,
+    subItems: [
+      { title: 'AI Gateway', url: '/ai-gateway', icon: Sparkles },
+      { title: 'AI Workflows', url: '/agent-sandbox', icon: Bot },
+      { title: 'Skills', url: '/skills', icon: Wand2 },
+      { title: 'MCP Servers', url: '/mcp-servers', icon: Server },
+    ],
   },
   {
-    title: 'Sandboxes',
-    url: '/sandboxes',
-    icon: Box,
-  },
-  {
-    title: 'Monitoring',
-    url: '/monitoring',
-    icon: Activity,
+    title: 'Source',
+    url: '/git-providers',
+    icon: GitBranch,
+    subItems: [
+      { title: 'Git Providers', url: '/git-providers', icon: GitBranch },
+      { title: 'DNS Providers', url: '/dns-providers', icon: Cloud },
+    ],
   },
 ]
 
-const navObserve = [
-  {
-    title: 'Proxy Logs',
-    url: '/proxy-logs',
-    icon: Activity,
-  },
-  {
-    title: 'Audit Logs',
-    url: '/audit-logs',
-    icon: ScrollText,
-  },
+// Observability section
+const navObservability = [
+  { title: 'Monitoring', url: '/monitoring', icon: Activity },
+  { title: 'Proxy Logs', url: '/proxy-logs', icon: Activity },
+  { title: 'Audit Logs', url: '/audit-logs', icon: ScrollText },
 ]
 
-function NavProjects({ projects }: { projects: ProjectResponse[] }) {
-  const { isMinimal, isMobile } = useSidebar()
-
-  return (
-    <SidebarGroup
-      className={
-        isMinimal && !isMobile ? '' : 'group-data-[collapsible=icon]:hidden'
-      }
-    >
-      <SidebarGroupLabel className={isMinimal && !isMobile ? 'hidden' : ''}>
-        Projects
-      </SidebarGroupLabel>
-      <SidebarMenu>
-        {projects.map((item) => (
-          <SidebarMenuItem key={item.id}>
-            <SidebarMenuButton
-              asChild
-              tooltip={isMinimal && !isMobile ? item.name : undefined}
-              className={cn(
-                'justify-center',
-                (!isMinimal || isMobile) && 'justify-start'
-              )}
-            >
-              <Link to={`/projects/${item.slug}`}>
-                <Avatar className="size-6">
-                  <AvatarImage src={`/api/projects/${item.id}/favicon`} />
-                  <AvatarFallback>{item.name.charAt(0)}</AvatarFallback>
-                </Avatar>
-                {(!isMinimal || isMobile) && <span>{item.name}</span>}
-              </Link>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        ))}
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            asChild
-            tooltip={isMinimal && !isMobile ? 'More Projects' : undefined}
-            className={cn(
-              'justify-center',
-              (!isMinimal || isMobile) && 'justify-start'
-            )}
-          >
-            <Link to="/projects">
-              <MoreHorizontal />
-              {(!isMinimal || isMobile) && <span>More</span>}
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
-    </SidebarGroup>
-  )
-}
-
-function NavMain({
-  items,
-}: {
-  items: {
-    title: string
-    url: string
-    icon: LucideIcon
-    isActive?: boolean
-    items?: { title: string; url: string }[]
-  }[]
-}) {
-  const location = useLocation()
-  const { isMinimal, isMobile } = useSidebar()
-
-  return (
-    <SidebarGroup>
-      <SidebarGroupLabel className={isMinimal && !isMobile ? 'hidden' : ''}>
-        Platform
-      </SidebarGroupLabel>
-      <SidebarMenu>
-        {items.map((item) => {
-          const isActive = location.pathname.startsWith(item.url)
-          return (
-            <Collapsible key={item.title} asChild defaultOpen={item.isActive}>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  asChild
-                  tooltip={isMinimal && !isMobile ? item.title : undefined}
-                  className={cn(
-                    'justify-center',
-                    (!isMinimal || isMobile) && 'justify-start',
-                    isActive &&
-                      'bg-sidebar-accent text-sidebar-accent-foreground'
-                  )}
-                >
-                  <Link to={item.url}>
-                    <item.icon />
-                    {(!isMinimal || isMobile) && <span>{item.title}</span>}
-                  </Link>
-                </SidebarMenuButton>
-                {(!isMinimal || isMobile) && item.items?.length ? (
-                  <>
-                    <CollapsibleTrigger asChild>
-                      <SidebarMenuAction className="data-[state=open]:rotate-90">
-                        <ChevronRight />
-                        <span className="sr-only">Toggle</span>
-                      </SidebarMenuAction>
-                    </CollapsibleTrigger>
-                    <CollapsibleContent>
-                      <SidebarMenuSub>
-                        {item.items?.map((subItem) => (
-                          <SidebarMenuSubItem key={subItem.title}>
-                            <SidebarMenuSubButton asChild>
-                              <Link to={subItem.url}>
-                                <span>{subItem.title}</span>
-                              </Link>
-                            </SidebarMenuSubButton>
-                          </SidebarMenuSubItem>
-                        ))}
-                      </SidebarMenuSub>
-                    </CollapsibleContent>
-                  </>
-                ) : null}
-              </SidebarMenuItem>
-            </Collapsible>
-          )
-        })}
-      </SidebarMenu>
-    </SidebarGroup>
-  )
-}
-
-function NavObserve({
-  items,
-}: {
+// Full grouped settings tree — mirrors SettingsLayout
+interface SettingsGroupDef {
+  label: string
   items: { title: string; url: string; icon: LucideIcon }[]
-}) {
-  const location = useLocation()
-  const { isMinimal, isMobile } = useSidebar()
-
-  return (
-    <SidebarGroup
-      className={
-        isMinimal && !isMobile ? '' : 'group-data-[collapsible=icon]:hidden'
-      }
-    >
-      <SidebarGroupLabel className={isMinimal && !isMobile ? 'hidden' : ''}>
-        Observe
-      </SidebarGroupLabel>
-      <SidebarMenu>
-        {items.map((item) => {
-          const isActive = location.pathname.startsWith(item.url)
-          return (
-            <SidebarMenuItem key={item.title}>
-              <SidebarMenuButton
-                asChild
-                tooltip={isMinimal && !isMobile ? item.title : undefined}
-                className={cn(
-                  'justify-center',
-                  (!isMinimal || isMobile) && 'justify-start',
-                  isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
-                )}
-              >
-                <Link to={item.url}>
-                  <item.icon />
-                  {(!isMinimal || isMobile) && <span>{item.title}</span>}
-                </Link>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          )
-        })}
-      </SidebarMenu>
-    </SidebarGroup>
-  )
 }
+// Settings drill-down only contains items NOT already surfaced in the
+// main app sidebar (Platform / Storage / AI / Source sections in
+// `navWorkflow`). Anything reachable from the root sidebar is omitted
+// here to avoid duplicate entry points.
+const settingsGroups: SettingsGroupDef[] = [
+  {
+    label: 'General',
+    items: [
+      { title: 'Platform', url: '/settings', icon: Settings2 },
+      { title: 'Notifications', url: '/settings/notifications', icon: Bell },
+    ],
+  },
+  {
+    label: 'Access',
+    items: [
+      { title: 'Users', url: '/settings/users', icon: Users },
+      { title: 'API Keys', url: '/settings/keys', icon: Key },
+    ],
+  },
+  {
+    label: 'Infrastructure',
+    items: [
+      { title: 'Load Balancer', url: '/settings/load-balancer', icon: Server },
+      { title: 'Docker Registry', url: '/settings/docker-registry', icon: Boxes },
+      { title: 'Worker Nodes', url: '/settings/nodes', icon: Network },
+      { title: 'Plugins', url: '/settings/plugins', icon: Puzzle },
+    ],
+  },
+  {
+    label: 'Security',
+    items: [
+      { title: 'Security Headers', url: '/settings/security', icon: Shield },
+      { title: 'Rate Limiting', url: '/settings/rate-limiting', icon: Monitor },
+      { title: 'Disk Monitoring', url: '/settings/disk-monitoring', icon: HardDrive },
+    ],
+  },
+]
 
 function NavPlugins({
   items,
@@ -298,42 +207,53 @@ function NavPlugins({
   )
 }
 
-function NavSettingsLink() {
-  const location = useLocation()
+// Command palette trigger pinned at the top of the sidebar.
+// Styled like Vercel's sidebar Find input: bordered, full-width, with a
+// keyboard-hint badge on the right.
+function NavCommandTrigger() {
   const { isMinimal, isMobile } = useSidebar()
-  const isActive = location.pathname.startsWith('/settings')
-
+  const compact = isMinimal && !isMobile
+  const triggerCommand = () => {
+    document.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'k', metaKey: true })
+    )
+  }
+  if (compact) {
+    return (
+      <SidebarGroup className="pb-0">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip="Find (⌘K)"
+              onClick={triggerCommand}
+              className="justify-center text-muted-foreground hover:text-foreground"
+            >
+              <Search />
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
+    )
+  }
   return (
-    <SidebarGroup
-      className={
-        isMinimal && !isMobile ? '' : 'group-data-[collapsible=icon]:hidden'
-      }
-    >
-      <SidebarMenu>
-        <SidebarMenuItem>
-          <SidebarMenuButton
-            asChild
-            tooltip={isMinimal && !isMobile ? 'Settings' : undefined}
-            className={cn(
-              'justify-center',
-              (!isMinimal || isMobile) && 'justify-start',
-              isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
-            )}
-          >
-            <Link to="/settings">
-              <Settings />
-              {(!isMinimal || isMobile) && <span>Settings</span>}
-            </Link>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-      </SidebarMenu>
+    <SidebarGroup className="pb-0">
+      <button
+        type="button"
+        onClick={triggerCommand}
+        className="flex h-8 w-full items-center gap-2 rounded-md border border-sidebar-border bg-transparent px-2 text-sm text-muted-foreground transition-colors hover:border-sidebar-border/80 hover:bg-sidebar-accent/40 hover:text-foreground"
+      >
+        <Search className="size-4 shrink-0" />
+        <span className="flex-1 text-left">Find…</span>
+        <kbd className="rounded border border-sidebar-border bg-sidebar/60 px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
+          ⌘K
+        </kbd>
+      </button>
     </SidebarGroup>
   )
 }
 
 export default function AppSidebar() {
-  const { projects } = useProjects()
-  const { setIsMinimal, isMinimal, isMobile } = useSidebar()
+  const { isMinimal, isMobile } = useSidebar()
   const { platformNavEntries } = usePluginsContext()
   const location = useLocation()
 
@@ -348,65 +268,133 @@ export default function AppSidebar() {
     [platformNavEntries]
   )
 
-  // Auto-collapse sidebar when on project detail pages
-  useEffect(() => {
-    const isProjectDetailPage = location.pathname.match(
-      /^\/projects\/[^/]+\/(project|deployments|analytics|storage|runtime|settings|speed|errors|logs|webhooks|monitors|monitoring|traces|ai-gateway|services|environments|security)/
-    )
+  // Route-driven sidebar swap.
+  //   /settings/*       → settings nav (back → default)
+  //   /projects/:slug/* → project nav  (back → default)
+  //   anything else     → default workspace nav
+  // /projects (the list) and /projects/new keep the default nav.
+  const settingsMode = location.pathname.startsWith('/settings')
+  const projectMatch = location.pathname.match(
+    /^\/projects\/([^/]+)(?:\/.*)?$/
+  )
+  const projectSlug =
+    projectMatch && !['new', 'import-wizard', 'import'].includes(projectMatch[1])
+      ? projectMatch[1]
+      : null
 
-    if (isProjectDetailPage && !isMobile) {
-      setIsMinimal(true)
-    }
-  }, [location.pathname, isMobile, setIsMinimal])
+  // Override: user pressed Back from a route-driven swap; show DefaultNav
+  // even though we're still on /settings or /projects/:slug. Cleared on
+  // any pathname change (so re-clicking Settings or any sub-link
+  // re-triggers the swap).
+  const [forceDefault, setForceDefault] = useState(false)
+  useEffect(() => {
+    setForceDefault(false)
+  }, [location.pathname])
+
+  const compact = isMinimal && !isMobile
+
+  const showDefault = forceDefault || (!settingsMode && !projectSlug)
 
   return (
-    <>
-      <Sidebar>
-        <SidebarHeader>
-          <SidebarMenu>
-            <SidebarMenuItem>
+    <Sidebar>
+      <SidebarHeader>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <div
+              className={cn(
+                'flex items-center gap-2',
+                compact && 'justify-center'
+              )}
+            >
               <div
                 className={cn(
-                  'flex items-center gap-2',
-                  isMinimal && !isMobile && 'justify-center'
+                  'flex aspect-square size-8 items-center justify-center rounded-lg',
+                  compact && 'w-6 h-6'
                 )}
               >
-                <div
-                  className={cn(
-                    'flex aspect-square size-8 items-center justify-center rounded-lg',
-                    isMinimal && !isMobile && 'w-6 h-6' // Make logo slightly smaller in minimal mode
-                  )}
-                >
-                  <img src="/svg/temps-icon.svg" alt="logo" className="size-full" />
-                </div>
-                {(!isMinimal || isMobile) && (
-                  <div
-                    className={cn(
-                      'grid flex-1 text-left text-sm leading-tight',
-                      isMinimal && isMobile && 'text-xs'
-                    )}
-                  >
-                    <span className="truncate font-semibold">Temps</span>
-                    <span className="truncate text-xs">{import.meta.env.TEMPS_VERSION}</span>
-                  </div>
-                )}
+                <img
+                  src="/svg/temps-icon.svg"
+                  alt="logo"
+                  className="size-full"
+                />
               </div>
+              {!compact && (
+                <div className="grid flex-1 text-left text-sm leading-tight">
+                  <span className="truncate font-semibold">Temps</span>
+                  <span className="truncate text-xs">
+                    {import.meta.env.TEMPS_VERSION}
+                  </span>
+                </div>
+              )}
+            </div>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarHeader>
+      <SidebarContent>
+        {showDefault ? (
+          <DefaultNav pluginItems={pluginItems} />
+        ) : settingsMode ? (
+          <SettingsNav onBack={() => setForceDefault(true)} />
+        ) : projectSlug ? (
+          <ProjectNav
+            slug={projectSlug}
+            onBack={() => setForceDefault(true)}
+          />
+        ) : null}
+      </SidebarContent>
+      <SidebarFooter>
+        <NavUser />
+      </SidebarFooter>
+    </Sidebar>
+  )
+}
+
+/**
+ * Reusable labeled nav section used by variants 2-4.
+ * Mirrors NavObserve styling so it inherits hover/active states.
+ */
+function NavSection({
+  label,
+  items,
+}: {
+  label: string
+  items: { title: string; url: string; icon: LucideIcon }[]
+}) {
+  const location = useLocation()
+  const { isMinimal, isMobile } = useSidebar()
+  const compact = isMinimal && !isMobile
+  return (
+    <SidebarGroup
+      className={
+        compact ? '' : 'group-data-[collapsible=icon]:hidden'
+      }
+    >
+      <SidebarGroupLabel className={compact ? 'hidden' : ''}>
+        {label}
+      </SidebarGroupLabel>
+      <SidebarMenu>
+        {items.map((item) => {
+          const isActive = location.pathname.startsWith(item.url)
+          return (
+            <SidebarMenuItem key={item.title}>
+              <SidebarMenuButton
+                asChild
+                tooltip={compact ? item.title : undefined}
+                className={cn(
+                  compact ? 'justify-center' : 'justify-start',
+                  isActive && 'bg-sidebar-accent text-sidebar-accent-foreground'
+                )}
+              >
+                <Link to={item.url}>
+                  <item.icon />
+                  {!compact && <span>{item.title}</span>}
+                </Link>
+              </SidebarMenuButton>
             </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarHeader>
-        <SidebarContent>
-          <NavMain items={navMain} />
-          <NavProjects projects={projects} />
-          <NavObserve items={navObserve} />
-          <NavPlugins items={pluginItems} />
-          <NavSettingsLink />
-          <SidebarGroup />
-        </SidebarContent>
-        <SidebarFooter>
-          <NavUser />
-        </SidebarFooter>
-      </Sidebar>
-    </>
+          )
+        })}
+      </SidebarMenu>
+    </SidebarGroup>
   )
 }
 
@@ -493,5 +481,315 @@ function NavUser() {
         </DropdownMenu>
       </SidebarMenuItem>
     </SidebarMenu>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Default workspace nav (root /, /sandboxes, /monitoring, plugins, …).
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface NavProps {
+  pluginItems: { title: string; url: string; icon: LucideIcon }[]
+}
+
+function DefaultNav({ pluginItems }: NavProps) {
+  const { isMinimal, isMobile } = useSidebar()
+  const compact = isMinimal && !isMobile
+
+  // Split flat items from grouped items. Items with subItems render as
+  // their own labeled sub-section (parent title becomes the group
+  // label, children become flat links). Items without subItems stay in
+  // the main "Platform" group at the top.
+  const flatItems = navWorkflow.filter((it) => !it.subItems?.length)
+  const grouped = navWorkflow.filter((it) => it.subItems?.length)
+
+  return (
+    <>
+      <NavCommandTrigger />
+      <NavSection label="Platform" items={flatItems} />
+      {grouped.map((group) => (
+        <NavSection
+          key={group.title}
+          label={group.title}
+          items={group.subItems!}
+        />
+      ))}
+      <NavSection label="Observe" items={navObservability} />
+      <NavPlugins items={pluginItems} />
+      <SidebarGroup className="mt-auto">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              asChild
+              tooltip={compact ? 'Settings' : undefined}
+              className={compact ? 'justify-center' : 'justify-start'}
+            >
+              <Link to="/settings">
+                <Settings />
+                {!compact && <span>Settings</span>}
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
+    </>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings nav — replaces the whole sidebar when on /settings/*.
+// Back button returns to root.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SettingsNav({ onBack }: { onBack: () => void }) {
+  return (
+    <>
+      <NavCommandTrigger />
+      <SwapHeader title="Settings" onBack={onBack} />
+      {settingsGroups.map((group) => (
+        <NavSection key={group.label} label={group.label} items={group.items} />
+      ))}
+    </>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Project nav — replaces the whole sidebar when on /projects/:slug/*.
+// Reuses the existing ProjectDetailSidebar nav model.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface ProjectNavItem {
+  title: string
+  url: string
+  icon: LucideIcon
+  subItems?: { title: string; url: string }[]
+}
+
+const projectBaseNav: ProjectNavItem[] = [
+  { title: 'Overview', url: 'project', icon: Home },
+  { title: 'Deployments', url: 'deployments', icon: GitBranch },
+  {
+    title: 'Observability',
+    url: 'analytics',
+    icon: Eye,
+    subItems: [
+      { title: 'Analytics', url: 'analytics' },
+      { title: 'Visitors', url: 'analytics/visitors' },
+      { title: 'Pages', url: 'analytics/pages' },
+      { title: 'Funnels', url: 'analytics/funnels' },
+      { title: 'Session Replays', url: 'analytics/replays' },
+      { title: 'Uptime', url: 'monitors' },
+      { title: 'Metrics', url: 'monitoring' },
+      { title: 'Request Logs', url: 'request-logs' },
+      { title: 'Traces', url: 'traces' },
+      { title: 'Speed', url: 'speed' },
+    ],
+  },
+  { title: 'Error Tracking', url: 'errors', icon: ShieldAlert },
+  { title: 'Logs', url: 'runtime', icon: ScrollText },
+  { title: 'AI Gateway', url: 'ai-gateway', icon: Bot },
+  { title: 'Workspace', url: 'workspace', icon: Sparkles },
+  { title: 'Workflows', url: 'agents', icon: Bot },
+  {
+    title: 'Databases',
+    url: 'storage',
+    icon: Boxes,
+    subItems: [
+      { title: 'Linked Services', url: 'storage' },
+      { title: 'KV Store', url: 'services/kv' },
+      { title: 'Blob Storage', url: 'services/blob' },
+    ],
+  },
+  { title: 'Environments', url: 'environments', icon: Layers },
+  {
+    title: 'Settings',
+    url: 'settings',
+    icon: Settings,
+    subItems: [
+      { title: 'General', url: 'settings/general' },
+      { title: 'Domains', url: 'settings/domains' },
+      { title: 'Env Variables', url: 'settings/environment-variables' },
+      { title: 'Git', url: 'settings/git' },
+      { title: 'Security', url: 'settings/security' },
+      { title: 'Cron Jobs', url: 'settings/cron-jobs' },
+      { title: 'Webhooks', url: 'settings/webhooks' },
+      { title: 'Skills', url: 'settings/skills' },
+      { title: 'MCP Servers', url: 'settings/mcp-servers' },
+      { title: 'Alert Rules', url: 'errors/alert-rules' },
+    ],
+  },
+]
+
+function ProjectNav({
+  slug,
+  onBack,
+}: {
+  slug: string
+  onBack: () => void
+}) {
+  const { data: project } = useQuery({
+    ...getProjectBySlugOptions({ path: { slug } }),
+  })
+  const { projectNavEntries } = usePluginsContext()
+  const location = useLocation()
+  const items = useMemo<ProjectNavItem[]>(() => {
+    const settingsIdx = projectBaseNav.length - 1
+    const pluginItems: ProjectNavItem[] = projectNavEntries.map((e) => ({
+      title: e.label,
+      url: e.path,
+      icon: resolvePluginIcon(e.icon),
+    }))
+    return [
+      ...projectBaseNav.slice(0, settingsIdx),
+      ...pluginItems,
+      projectBaseNav[settingsIdx],
+    ]
+  }, [projectNavEntries])
+
+  const activeRoute = useMemo(() => {
+    if (!project) return ''
+    const parts = location.pathname.split('/')
+    const slugIdx = parts.indexOf(project.slug)
+    if (slugIdx === -1) return ''
+    return parts.slice(slugIdx + 1).join('/')
+  }, [location.pathname, project])
+
+  // Drill-down state: null = root project nav; string = title of the
+  // parent whose sub-items are showing. Initialised lazily from the
+  // current route so a deep link lands inside the right sub-view, but
+  // we never re-derive afterwards — Back must always return to root,
+  // even though the URL is still a sub-route.
+  const [drilledTo, setDrilledTo] = useState<string | null>(() => {
+    if (!activeRoute) return null
+    const parent = projectBaseNav.find((it) =>
+      it.subItems?.some((s) => s.url === activeRoute)
+    )
+    return parent?.title ?? null
+  })
+
+  if (!project) {
+    return (
+      <>
+        <NavCommandTrigger />
+        <SwapHeader title="Loading…" onBack={onBack} />
+      </>
+    )
+  }
+
+  const isActive = (url: string) => {
+    if (url === 'project') return activeRoute === '' || activeRoute === 'project'
+    if (url === 'environments') return activeRoute.startsWith('environments')
+    return activeRoute === url
+  }
+  const isParentActive = (item: ProjectNavItem) =>
+    !!item.subItems?.some((s) => isActive(s.url))
+
+  // Drill-down sub-view: show only the children of `drilledTo`.
+  if (drilledTo) {
+    const parent = items.find((it) => it.title === drilledTo)
+    if (parent?.subItems?.length) {
+      return (
+        <>
+          <NavCommandTrigger />
+          <SwapHeader title={parent.title} onBack={() => setDrilledTo(null)} />
+          <SidebarGroup className="pt-0">
+            <SidebarMenu>
+              {parent.subItems.map((sub) => {
+                const active = isActive(sub.url)
+                return (
+                  <SidebarMenuItem key={sub.url}>
+                    <SidebarMenuButton
+                      asChild
+                      className={cn(
+                        'justify-start',
+                        active &&
+                          'bg-sidebar-accent text-sidebar-accent-foreground'
+                      )}
+                    >
+                      <Link to={`/projects/${project.slug}/${sub.url}`}>
+                        <span>{sub.title}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                )
+              })}
+            </SidebarMenu>
+          </SidebarGroup>
+        </>
+      )
+    }
+  }
+
+  return (
+    <>
+      <NavCommandTrigger />
+      <SwapHeader title={project.name} onBack={onBack} />
+      <SidebarGroup className="pt-0">
+        <SidebarMenu>
+          {items.map((item) => {
+            const active = isActive(item.url) || isParentActive(item)
+            const hasSub = !!item.subItems?.length
+            return (
+              <SidebarMenuItem key={item.title}>
+                {hasSub ? (
+                  <SidebarMenuButton
+                    onClick={() => setDrilledTo(item.title)}
+                    className={cn(
+                      'justify-start',
+                      active &&
+                        'bg-sidebar-accent text-sidebar-accent-foreground'
+                    )}
+                  >
+                    <item.icon />
+                    <span className="flex-1 text-left">{item.title}</span>
+                    <ChevronRight className="size-4 text-muted-foreground" />
+                  </SidebarMenuButton>
+                ) : (
+                  <SidebarMenuButton
+                    asChild
+                    className={cn(
+                      'justify-start',
+                      active &&
+                        'bg-sidebar-accent text-sidebar-accent-foreground'
+                    )}
+                  >
+                    <Link to={`/projects/${project.slug}/${item.url}`}>
+                      <item.icon />
+                      <span>{item.title}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                )}
+              </SidebarMenuItem>
+            )
+          })}
+        </SidebarMenu>
+      </SidebarGroup>
+    </>
+  )
+}
+
+// Shared back-arrow header used by Settings, Project, and drill-down
+// sub-views. `onBack` is a state callback — it never navigates.
+function SwapHeader({
+  title,
+  onBack,
+}: {
+  title: string
+  onBack: () => void
+}) {
+  const { isMinimal, isMobile } = useSidebar()
+  const compact = isMinimal && !isMobile
+  if (compact) return null
+  return (
+    <SidebarGroup className="pb-0">
+      <button
+        type="button"
+        onClick={onBack}
+        className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+      >
+        <ArrowLeft className="size-4" />
+        <span className="truncate font-medium text-foreground">{title}</span>
+      </button>
+    </SidebarGroup>
   )
 }

@@ -8,10 +8,7 @@ import {
 import NotFound from '@/components/global/NotFound'
 import { ProjectAnalytics } from '@/components/project/ProjectAnalytics'
 import { ProjectDeployments } from '@/components/project/ProjectDeployments'
-import {
-  ProjectDetailSidebar,
-  MobileSidebarProvider,
-} from '@/components/project/ProjectDetailSidebar'
+import { MobileSidebarProvider } from '@/components/project/ProjectDetailSidebar'
 import { ProjectDetailHeader } from '@/components/project/ProjectDetailHeader'
 import { ProjectOverview } from '@/components/project/ProjectOverview'
 import { ProjectRuntime } from '@/components/project/ProjectRuntime'
@@ -285,7 +282,6 @@ export function ProjectDetail() {
     <MobileSidebarProvider>
       <div className="flex h-full w-full overflow-hidden">
         <Confetti active={showConfetti} duration={4000} particleCount={100} />
-        <ProjectDetailSidebar project={project} />
         <div className="flex flex-1 flex-col overflow-hidden">
           <ProjectDetailHeader
             project={project}

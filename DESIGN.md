@@ -296,6 +296,29 @@ Never ship a blank region.
 ### 6.11 Copy-to-clipboard
 Always use `<CopyButton>`. Never wire `navigator.clipboard` by hand.
 
+### 6.12 Sidebar navigation
+
+The sidebar is a single column with one active context at a time. Two
+patterns only:
+
+- **Flat list.** Top-level items navigate directly. Use this for the
+  workspace root, settings root, and project root.
+- **Drill-down sub-view.** When a parent has its own dense sub-tree
+  (more than ~3 children, or the children form a coherent surface),
+  clicking the parent **replaces the entire sidebar** with the
+  sub-view: a back arrow + section title at the top, then the
+  sub-items as a flat list. Back returns to the previous view without
+  changing the page route.
+
+**Do not** expand sub-items inline with a chevron / accordion. Inline
+accordions create double-scroll, hide context from the rest of the
+nav, and don't scale past a couple of items. If a section has enough
+functionality to need grouping, it has enough to deserve its own
+sub-view.
+
+The route-driven swap between workspace, settings, and project nav in
+`Sidebar.tsx` is the canonical example.
+
 ---
 
 ## 7. Iconography
@@ -384,6 +407,7 @@ Always use `<CopyButton>`. Never wire `navigator.clipboard` by hand.
 | Dropdown when fewer than 5 options                    | Segmented control / radio cards               |
 | Cards inside cards                                    | Flatten or use a section heading              |
 | Custom shadows or radii                               | §5 tokens                                     |
+| Collapsible / accordion sidebar items                 | Drill-down sub-view (§6.12)                   |
 
 ---
 

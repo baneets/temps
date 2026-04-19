@@ -15,6 +15,7 @@ import {
   CommandSeparator,
 } from '@/components/ui/command'
 import { usePluginsContext } from '@/contexts/PluginsContext'
+import { useFrecency } from '@/hooks/useFrecency'
 import { resolvePluginIcon } from '@/lib/pluginIcons'
 import { useQuery } from '@tanstack/react-query'
 import Fuse from 'fuse.js'
@@ -53,7 +54,7 @@ import {
   Workflow,
   type LucideIcon,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 
 interface NavigationItem {
@@ -587,10 +588,17 @@ export function CommandPalette() {
     return () => document.removeEventListener('keydown', down)
   }, [])
 
+  const { record, blend, recent } = useFrecency()
+
   const runCommand = (command: () => void) => {
     setOpen(false)
     setSearch('')
     command()
+  }
+
+  const runWithFrecency = (key: string, command: () => void) => {
+    record(key)
+    runCommand(command)
   }
 
   // Build plugin navigation items for the command palette
@@ -728,12 +736,12 @@ export function CommandPalette() {
     // Search navigation items
     const navResults = navFuse.search(search)
     const groupedNavResults = {
-      navigation: [] as NavigationItem[],
-      settings: [] as NavigationItem[],
-      observe: [] as NavigationItem[],
-      account: [] as NavigationItem[],
-      plugins: [] as NavigationItem[],
-      projectNav: [] as NavigationItem[],
+      navigation: [] as Array<{ item: NavigationItem; score: number }>,
+      settings: [] as Array<{ item: NavigationItem; score: number }>,
+      observe: [] as Array<{ item: NavigationItem; score: number }>,
+      account: [] as Array<{ item: NavigationItem; score: number }>,
+      plugins: [] as Array<{ item: NavigationItem; score: number }>,
+      projectNav: [] as Array<{ item: NavigationItem; score: number }>,
     }
 
     navResults.forEach((result) => {
@@ -744,29 +752,57 @@ export function CommandPalette() {
         icon: item.icon,
         keywords: item.keywords,
       }
+      // Fuse score: 0 = perfect match, 1 = no match. Invert to relevance.
+      const relevance = 1 - (result.score ?? 0)
+      const ranked = { item: baseItem, score: blend(item.url, relevance) }
 
       if (item.category === 'Navigation') {
-        groupedNavResults.navigation.push(baseItem)
+        groupedNavResults.navigation.push(ranked)
       } else if (item.category === 'Settings') {
-        groupedNavResults.settings.push(baseItem)
+        groupedNavResults.settings.push(ranked)
       } else if (item.category === 'Observe') {
-        groupedNavResults.observe.push(baseItem)
+        groupedNavResults.observe.push(ranked)
       } else if (item.category === 'Account') {
-        groupedNavResults.account.push(baseItem)
+        groupedNavResults.account.push(ranked)
       } else if (item.category === 'Plugins') {
-        groupedNavResults.plugins.push(baseItem)
+        groupedNavResults.plugins.push(ranked)
       } else if (item.category === 'Project') {
-        groupedNavResults.projectNav.push(baseItem)
+        groupedNavResults.projectNav.push(ranked)
       }
     })
 
-    // Search projects
-    const projectResults = projectsFuse.search(search)
-    const filteredProjects = projectResults.map((result) => result.item)
+    const sortByScore = (
+      list: Array<{ item: NavigationItem; score: number }>
+    ): NavigationItem[] =>
+      list.sort((a, b) => b.score - a.score).map((entry) => entry.item)
 
-    // Search skills & mcp servers
-    const filteredSkills = skillsFuse.search(search).map((r) => r.item)
-    const filteredMcp = mcpFuse.search(search).map((r) => r.item)
+    // Search projects, blended with frecency
+    const projectResults = projectsFuse.search(search)
+    const filteredProjects = projectResults
+      .map((result) => ({
+        item: result.item,
+        score: blend(`project:${result.item.id}`, 1 - (result.score ?? 0)),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.item)
+
+    // Search skills & mcp servers, blended with frecency
+    const filteredSkills = skillsFuse
+      .search(search)
+      .map((r) => ({
+        item: r.item,
+        score: blend(`skill:${r.item.slug}`, 1 - (r.score ?? 0)),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.item)
+    const filteredMcp = mcpFuse
+      .search(search)
+      .map((r) => ({
+        item: r.item,
+        score: blend(`mcp:${r.item.slug}`, 1 - (r.score ?? 0)),
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((entry) => entry.item)
 
     // Search actions (simple fuzzy match for now)
     const actions: string[] = []
@@ -777,12 +813,12 @@ export function CommandPalette() {
     }
 
     return {
-      navigation: groupedNavResults.navigation,
-      settings: groupedNavResults.settings,
-      observe: groupedNavResults.observe,
-      account: groupedNavResults.account,
-      plugins: groupedNavResults.plugins,
-      projectNav: groupedNavResults.projectNav,
+      navigation: sortByScore(groupedNavResults.navigation),
+      settings: sortByScore(groupedNavResults.settings),
+      observe: sortByScore(groupedNavResults.observe),
+      account: sortByScore(groupedNavResults.account),
+      plugins: sortByScore(groupedNavResults.plugins),
+      projectNav: sortByScore(groupedNavResults.projectNav),
       projects: filteredProjects,
       skills: filteredSkills,
       mcpServers: filteredMcp,
@@ -801,18 +837,149 @@ export function CommandPalette() {
     projectPluginNavItems,
     currentProjectSlug,
     currentProject,
+    blend,
+  ])
+
+  // Resolve recent frecency keys into renderable items (icon + title + run).
+  interface RecentEntry {
+    key: string
+    title: string
+    subtitle?: string
+    icon: ReactNode
+    run: () => void
+  }
+  const recentItems = useMemo<RecentEntry[]>(() => {
+    if (search) return []
+    const allNavItems: NavigationItem[] = [
+      ...mainNavItems,
+      ...settingsNavItems,
+      ...observeNavItems,
+      ...accountNavItems,
+      ...pluginNavItems,
+    ]
+    const projectNavigation =
+      currentProjectSlug && currentProject
+        ? [...projectNavItems, ...projectPluginNavItems].map((item) => ({
+            ...item,
+            url: `/projects/${currentProjectSlug}/${item.url}`,
+          }))
+        : []
+    const navByUrl = new Map<string, NavigationItem>()
+    for (const nav of [...allNavItems, ...projectNavigation]) {
+      navByUrl.set(nav.url, nav)
+    }
+    const projectsById = new Map(projects.map((p) => [String(p.id), p]))
+    const skillsBySlug = new Map(globalSkills.map((s) => [s.slug, s]))
+    const mcpBySlug = new Map(globalMcpServers.map((m) => [m.slug, m]))
+
+    const out: RecentEntry[] = []
+    for (const key of recent(7)) {
+      if (key.startsWith('project:')) {
+        const project = projectsById.get(key.slice('project:'.length))
+        if (!project) continue
+        out.push({
+          key,
+          title: project.slug,
+          icon: (
+            <Avatar className="size-5">
+              <AvatarImage src={`/api/projects/${project.id}/favicon`} />
+              <AvatarFallback>{project.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+          ),
+          run: () => navigate(`/projects/${project.slug}`),
+        })
+      } else if (key.startsWith('skill:')) {
+        const skill = skillsBySlug.get(key.slice('skill:'.length))
+        if (!skill) continue
+        out.push({
+          key,
+          title: skill.name,
+          subtitle: skill.slug,
+          icon: <Wand2 className="h-4 w-4" />,
+          run: () => navigate(`/settings/skills/${skill.slug}`),
+        })
+      } else if (key.startsWith('mcp:')) {
+        const mcp = mcpBySlug.get(key.slice('mcp:'.length))
+        if (!mcp) continue
+        out.push({
+          key,
+          title: mcp.name,
+          subtitle: mcp.slug,
+          icon: <Server className="h-4 w-4" />,
+          run: () => navigate(`/settings/mcp-servers/${mcp.slug}`),
+        })
+      } else if (key === 'action:toggle-theme') {
+        out.push({
+          key,
+          title: 'Toggle Theme',
+          icon: <Settings className="h-4 w-4" />,
+          run: () => document.body.classList.toggle('dark'),
+        })
+      } else {
+        // Treat as nav URL
+        const nav = navByUrl.get(key)
+        if (!nav) continue
+        const Icon = nav.icon
+        out.push({
+          key,
+          title: nav.title,
+          icon: <Icon className="h-4 w-4" />,
+          run: () => navigate(nav.url),
+        })
+      }
+    }
+    return out
+  }, [
+    search,
+    recent,
+    pluginNavItems,
+    projectPluginNavItems,
+    currentProjectSlug,
+    currentProject,
+    projects,
+    globalSkills,
+    globalMcpServers,
+    navigate,
   ])
 
   return (
-    <CommandDialog open={open} onOpenChange={setOpen}>
+    <CommandDialog
+      open={open}
+      onOpenChange={setOpen}
+      contentClassName="sm:max-w-2xl"
+    >
       <Command className="rounded-lg border shadow-md" loop>
         <CommandInput
           placeholder="Type a command or search..."
           value={search}
           onValueChange={setSearch}
         />
-        <CommandList>
+        <CommandList className="max-h-[60vh]">
           <CommandEmpty>No results found.</CommandEmpty>
+
+          {/* Recent (frecency-ranked, only when input is empty) */}
+          {!search && recentItems.length > 0 && (
+            <>
+              <CommandGroup heading="Recent">
+                {recentItems.map((entry) => (
+                  <CommandItem
+                    key={`recent-${entry.key}`}
+                    onSelect={() => runWithFrecency(entry.key, entry.run)}
+                    className="flex items-center gap-2"
+                  >
+                    {entry.icon}
+                    <span className="truncate">{entry.title}</span>
+                    {entry.subtitle && (
+                      <span className="text-xs text-muted-foreground font-mono truncate">
+                        {entry.subtitle}
+                      </span>
+                    )}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+              <CommandSeparator />
+            </>
+          )}
 
           {/* Project Navigation (shown first when on a project page) */}
           {searchResults.projectNav.length > 0 && currentProject && (
@@ -821,7 +988,9 @@ export function CommandPalette() {
                 {searchResults.projectNav.map((item) => (
                   <CommandItem
                     key={item.url}
-                    onSelect={() => runCommand(() => navigate(item.url))}
+                    onSelect={() =>
+                      runWithFrecency(item.url, () => navigate(item.url))
+                    }
                     className="flex items-center gap-2"
                   >
                     <item.icon className="h-4 w-4" />
@@ -840,7 +1009,9 @@ export function CommandPalette() {
                 {searchResults.navigation.map((item) => (
                   <CommandItem
                     key={item.url}
-                    onSelect={() => runCommand(() => navigate(item.url))}
+                    onSelect={() =>
+                      runWithFrecency(item.url, () => navigate(item.url))
+                    }
                     className="flex items-center gap-2"
                   >
                     <item.icon className="h-4 w-4" />
@@ -859,7 +1030,9 @@ export function CommandPalette() {
                 {searchResults.settings.map((item) => (
                   <CommandItem
                     key={item.url}
-                    onSelect={() => runCommand(() => navigate(item.url))}
+                    onSelect={() =>
+                      runWithFrecency(item.url, () => navigate(item.url))
+                    }
                     className="flex items-center gap-2"
                   >
                     <item.icon className="h-4 w-4" />
@@ -878,7 +1051,9 @@ export function CommandPalette() {
                 {searchResults.observe.map((item) => (
                   <CommandItem
                     key={item.url}
-                    onSelect={() => runCommand(() => navigate(item.url))}
+                    onSelect={() =>
+                      runWithFrecency(item.url, () => navigate(item.url))
+                    }
                     className="flex items-center gap-2"
                   >
                     <item.icon className="h-4 w-4" />
@@ -897,7 +1072,9 @@ export function CommandPalette() {
                 {searchResults.plugins.map((item) => (
                   <CommandItem
                     key={item.url}
-                    onSelect={() => runCommand(() => navigate(item.url))}
+                    onSelect={() =>
+                      runWithFrecency(item.url, () => navigate(item.url))
+                    }
                     className="flex items-center gap-2"
                   >
                     <item.icon className="h-4 w-4" />
@@ -916,7 +1093,9 @@ export function CommandPalette() {
                 {searchResults.account.map((item) => (
                   <CommandItem
                     key={item.url}
-                    onSelect={() => runCommand(() => navigate(item.url))}
+                    onSelect={() =>
+                      runWithFrecency(item.url, () => navigate(item.url))
+                    }
                     className="flex items-center gap-2"
                   >
                     <item.icon className="h-4 w-4" />
@@ -936,7 +1115,7 @@ export function CommandPalette() {
                   <CommandItem
                     key={`skill-${skill.id}`}
                     onSelect={() =>
-                      runCommand(() =>
+                      runWithFrecency(`skill:${skill.slug}`, () =>
                         navigate(`/settings/skills/${skill.slug}`)
                       )
                     }
@@ -962,7 +1141,7 @@ export function CommandPalette() {
                   <CommandItem
                     key={`mcp-${mcp.id}`}
                     onSelect={() =>
-                      runCommand(() =>
+                      runWithFrecency(`mcp:${mcp.slug}`, () =>
                         navigate(`/settings/mcp-servers/${mcp.slug}`)
                       )
                     }
@@ -988,7 +1167,9 @@ export function CommandPalette() {
                   <CommandItem
                     key={project.id}
                     onSelect={() =>
-                      runCommand(() => navigate(`/projects/${project.slug}`))
+                      runWithFrecency(`project:${project.id}`, () =>
+                        navigate(`/projects/${project.slug}`)
+                      )
                     }
                     className="flex items-center gap-2"
                   >
@@ -1011,7 +1192,9 @@ export function CommandPalette() {
             <CommandGroup heading="Actions">
               <CommandItem
                 onSelect={() =>
-                  runCommand(() => document.body.classList.toggle('dark'))
+                  runWithFrecency('action:toggle-theme', () =>
+                    document.body.classList.toggle('dark')
+                  )
                 }
               >
                 <span>Toggle Theme</span>

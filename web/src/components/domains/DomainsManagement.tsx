@@ -383,6 +383,8 @@ export function DomainsManagement({
               />
             )
           ) : (
+            <div data-uidotsh-pick="Domains layout" className="contents">
+              <div data-uidotsh-option="Card grid (current)" className="contents" hidden>
             <div className="grid gap-4">
               {domains.map((domain) => (
                 <div
@@ -622,6 +624,42 @@ export function DomainsManagement({
                 </div>
               ))}
             </div>
+              </div>
+
+              <div data-uidotsh-option="Data table" className="contents">
+                <DomainsTableVariant
+                  domains={domains}
+                  onOpen={(id) => navigate(`/settings/domains/${id}`)}
+                  onRenew={handleRenewDomain}
+                  onDelete={setDomainToDelete}
+                  canManageCertificates={canManageCertificates}
+                />
+              </div>
+
+              <div data-uidotsh-option="Tile grid" className="contents" hidden>
+                <DomainsTileGridVariant
+                  domains={domains}
+                  onOpen={(id) => navigate(`/settings/domains/${id}`)}
+                  onRenew={handleRenewDomain}
+                  onDelete={setDomainToDelete}
+                  canManageCertificates={canManageCertificates}
+                />
+              </div>
+
+              <div
+                data-uidotsh-option="Status-grouped"
+                className="contents"
+                hidden
+              >
+                <DomainsGroupedVariant
+                  domains={domains}
+                  onOpen={(id) => navigate(`/settings/domains/${id}`)}
+                  onRenew={handleRenewDomain}
+                  onDelete={setDomainToDelete}
+                  canManageCertificates={canManageCertificates}
+                />
+              </div>
+            </div>
           )}
 
           {/* Pagination */}
@@ -675,6 +713,324 @@ export function DomainsManagement({
           )}
         </div>
       </Card>
+    </div>
+  )
+}
+
+// ── Shared variant helpers ──
+
+interface DomainsVariantProps {
+  domains: DomainResponse[]
+  onOpen: (id: number) => void
+  onRenew: (domain: string) => void
+  onDelete: (domain: DomainResponse) => void
+  canManageCertificates: boolean
+}
+
+function DomainStatusBadge({ status }: { status: string }) {
+  const variant: 'default' | 'secondary' | 'destructive' | 'warning' =
+    status === 'active'
+      ? 'default'
+      : status === 'failed'
+        ? 'destructive'
+        : status === 'pending_dns'
+          ? 'warning'
+          : 'secondary'
+  return <Badge variant={variant}>{status.replace('_', ' ')}</Badge>
+}
+
+function DomainRowActions({
+  domain,
+  onOpen,
+  onRenew,
+  onDelete,
+  canManageCertificates,
+}: {
+  domain: DomainResponse
+  onOpen: (id: number) => void
+  onRenew: (domain: string) => void
+  onDelete: (domain: DomainResponse) => void
+  canManageCertificates: boolean
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
+        <Button variant="ghost" size="icon" className="h-8 w-8">
+          <MoreHorizontal className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+        <DropdownMenuItem onClick={() => onOpen(domain.id)}>
+          <Globe className="mr-2 h-4 w-4" />
+          View details
+        </DropdownMenuItem>
+        {domain.status === 'active' && canManageCertificates && (
+          <DropdownMenuItem onClick={() => onRenew(domain.domain)}>
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Renew certificate
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem
+          className="text-destructive"
+          onClick={() => onDelete(domain)}
+        >
+          <Trash2 className="mr-2 h-4 w-4" />
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+// ── Variant: Data table ──
+
+function DomainsTableVariant({
+  domains,
+  onOpen,
+  onRenew,
+  onDelete,
+  canManageCertificates,
+}: DomainsVariantProps) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="border-b bg-muted/50">
+          <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+            <th className="px-4 py-3 font-medium">Domain</th>
+            <th className="px-4 py-3 font-medium">Status</th>
+            <th className="hidden px-4 py-3 font-medium md:table-cell">Type</th>
+            <th className="hidden px-4 py-3 font-medium md:table-cell">
+              Renewed
+            </th>
+            <th className="hidden px-4 py-3 font-medium lg:table-cell">
+              Expires
+            </th>
+            <th className="px-4 py-3" />
+          </tr>
+        </thead>
+        <tbody className="divide-y">
+          {domains.map((domain) => (
+            <tr
+              key={domain.id}
+              onClick={() => onOpen(domain.id)}
+              className="cursor-pointer transition-colors hover:bg-muted/40"
+            >
+              <td className="px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <Globe className="size-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate font-medium">{domain.domain}</span>
+                </div>
+              </td>
+              <td className="px-4 py-3">
+                <DomainStatusBadge status={domain.status} />
+              </td>
+              <td className="hidden px-4 py-3 md:table-cell">
+                {domain.is_wildcard ? (
+                  <Badge variant="outline">Wildcard</Badge>
+                ) : (
+                  <span className="text-xs text-muted-foreground">Apex</span>
+                )}
+              </td>
+              <td className="hidden px-4 py-3 text-xs text-muted-foreground md:table-cell">
+                {domain.last_renewed
+                  ? formatUTCDate(domain.last_renewed)
+                  : '—'}
+              </td>
+              <td className="hidden px-4 py-3 text-xs text-muted-foreground lg:table-cell">
+                {domain.expiration_time ? (
+                  <span
+                    className={
+                      isExpiringSoon(domain.expiration_time)
+                        ? 'text-warning-foreground'
+                        : ''
+                    }
+                  >
+                    {formatUTCDate(domain.expiration_time)}
+                  </span>
+                ) : (
+                  '—'
+                )}
+              </td>
+              <td className="px-4 py-3 text-right">
+                <DomainRowActions
+                  domain={domain}
+                  onOpen={onOpen}
+                  onRenew={onRenew}
+                  onDelete={onDelete}
+                  canManageCertificates={canManageCertificates}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ── Variant: Tile grid ──
+
+function DomainsTileGridVariant({
+  domains,
+  onOpen,
+  onRenew,
+  onDelete,
+  canManageCertificates,
+}: DomainsVariantProps) {
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {domains.map((domain) => {
+        const expiringSoon =
+          domain.status === 'active' &&
+          isExpiringSoon(domain.expiration_time || 0)
+        return (
+          <div
+            key={domain.id}
+            onClick={() => onOpen(domain.id)}
+            className="group cursor-pointer rounded-lg border p-4 transition-colors hover:bg-muted/40"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex size-9 items-center justify-center rounded-md bg-muted">
+                <Globe className="size-4 text-muted-foreground" />
+              </div>
+              <DomainRowActions
+                domain={domain}
+                onOpen={onOpen}
+                onRenew={onRenew}
+                onDelete={onDelete}
+                canManageCertificates={canManageCertificates}
+              />
+            </div>
+            <p className="mt-3 truncate text-sm font-medium">{domain.domain}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <DomainStatusBadge status={domain.status} />
+              {domain.is_wildcard && (
+                <Badge variant="outline" className="text-xs">
+                  Wildcard
+                </Badge>
+              )}
+              {expiringSoon && (
+                <Badge variant="warning" className="text-xs">
+                  Expires soon
+                </Badge>
+              )}
+            </div>
+            {domain.status === 'active' && (
+              <dl className="mt-4 grid grid-cols-2 gap-2 border-t pt-3 text-xs text-muted-foreground tabular-nums">
+                <div>
+                  <dt className="text-[10px] uppercase tracking-wide">
+                    Renewed
+                  </dt>
+                  <dd className="mt-0.5 truncate text-foreground">
+                    {domain.last_renewed
+                      ? formatUTCDate(domain.last_renewed)
+                      : '—'}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-[10px] uppercase tracking-wide">
+                    Expires
+                  </dt>
+                  <dd className="mt-0.5 truncate text-foreground">
+                    {domain.expiration_time
+                      ? formatUTCDate(domain.expiration_time)
+                      : '—'}
+                  </dd>
+                </div>
+              </dl>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// ── Variant: Status grouped ──
+
+function DomainsGroupedVariant({
+  domains,
+  onOpen,
+  onRenew,
+  onDelete,
+  canManageCertificates,
+}: DomainsVariantProps) {
+  const groups = [
+    {
+      key: 'active',
+      label: 'Active',
+      match: (d: DomainResponse) => d.status === 'active',
+    },
+    {
+      key: 'pending',
+      label: 'Pending verification',
+      match: (d: DomainResponse) =>
+        d.status === 'pending_dns' || d.status === 'pending',
+    },
+    {
+      key: 'failed',
+      label: 'Needs attention',
+      match: (d: DomainResponse) => d.status === 'failed',
+    },
+  ]
+    .map((g) => ({ ...g, items: domains.filter(g.match) }))
+    .filter((g) => g.items.length > 0)
+
+  return (
+    <div className="space-y-6">
+      {groups.map((group) => (
+        <section key={group.key}>
+          <div className="mb-2 flex items-baseline gap-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {group.label}
+            </h3>
+            <span className="text-xs tabular-nums text-muted-foreground/70">
+              {group.items.length}
+            </span>
+          </div>
+          <div className="overflow-hidden rounded-lg border">
+            <ul role="list" className="divide-y">
+              {group.items.map((domain) => (
+                <li
+                  key={domain.id}
+                  onClick={() => onOpen(domain.id)}
+                  className="flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/40"
+                >
+                  <Globe className="size-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium">
+                        {domain.domain}
+                      </span>
+                      {domain.is_wildcard && (
+                        <Badge variant="outline" className="text-xs">
+                          Wildcard
+                        </Badge>
+                      )}
+                    </div>
+                    {domain.status === 'active' && domain.expiration_time ? (
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
+                        Expires {formatUTCDate(domain.expiration_time)}
+                      </p>
+                    ) : domain.last_error ? (
+                      <p className="mt-0.5 truncate text-xs text-destructive">
+                        {domain.last_error}
+                      </p>
+                    ) : null}
+                  </div>
+                  <DomainRowActions
+                    domain={domain}
+                    onOpen={onOpen}
+                    onRenew={onRenew}
+                    onDelete={onDelete}
+                    canManageCertificates={canManageCertificates}
+                  />
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      ))}
     </div>
   )
 }

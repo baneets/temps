@@ -1,0 +1,348 @@
+import { SandboxError } from './errors.js';
+import { request, resolveConfig, type ResolvedConfig } from './http.js';
+import type {
+  CreateSandboxOptions,
+  ExecOptions,
+  ExecResult,
+  JobHandle,
+  JobState,
+  ListSandboxesOptions,
+  ListSandboxesPage,
+  SandboxConfig,
+  SandboxSource,
+  SandboxSummary,
+  StatInfo,
+  WriteFileOptions,
+} from './types.js';
+
+// Wire shapes. Separate from the public `types.ts` so the SDK can adopt
+// idiomatic camelCase at the boundary without the generated types
+// leaking snake_case into user code.
+
+interface WireSandbox {
+  id: string;
+  name: string;
+  status: string;
+  image: string | null;
+  work_dir: string;
+  created_at: string;
+  expires_at: string;
+  preview_url_template: string;
+  preview_password_hint?: string;
+}
+
+interface WireListSandboxes {
+  items: WireSandbox[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+interface WireExecResult {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+}
+
+interface WireJobStatus {
+  status: 'running' | 'exited' | 'failed';
+  exit_code: number | null;
+  reason: string | null;
+  stdout: string;
+  stderr: string;
+}
+
+interface WireStat {
+  path: string;
+  exists: boolean;
+  is_dir: boolean;
+  is_file: boolean;
+  size: number;
+}
+
+function toSummary(w: WireSandbox): SandboxSummary {
+  return {
+    id: w.id,
+    name: w.name,
+    status: w.status,
+    image: w.image,
+    workDir: w.work_dir,
+    createdAt: w.created_at,
+    expiresAt: w.expires_at,
+    previewUrlTemplate: w.preview_url_template,
+    previewPasswordHint: w.preview_password_hint,
+  };
+}
+
+function toCreateBody(opts: CreateSandboxOptions): Record<string, unknown> {
+  return {
+    name: opts.name,
+    image: opts.image,
+    timeout_secs: opts.timeoutSecs,
+    env: opts.env,
+    cpu_limit: opts.cpuLimit,
+    memory_limit_mb: opts.memoryLimitMb,
+    pids_limit: opts.pidsLimit,
+    source: opts.source ? toSourceBody(opts.source) : undefined,
+    preview_password: opts.previewPassword,
+  };
+}
+
+function toSourceBody(src: SandboxSource): Record<string, unknown> {
+  if (src.type === 'git') {
+    return {
+      type: 'git',
+      url: src.url,
+      revision: src.revision,
+      depth: src.depth,
+      username: src.username,
+      password: src.password,
+      git_connection_id: src.gitConnectionId,
+    };
+  }
+  return { type: 'tarball', url: src.url };
+}
+
+function toBase64(contents: string | Uint8Array): string {
+  const bytes =
+    typeof contents === 'string'
+      ? new TextEncoder().encode(contents)
+      : contents;
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+  // Browser fallback
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
+function fromBase64(b64: string): Uint8Array {
+  if (typeof Buffer !== 'undefined')
+    return new Uint8Array(Buffer.from(b64, 'base64'));
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/**
+ * A live sandbox. Instances are returned by {@link Sandbox.create} and
+ * {@link Sandbox.get}; they hold both the server-assigned ID and the
+ * client config needed to make follow-up calls.
+ *
+ * The shape intentionally mirrors `@vercel/sandbox` — switching providers
+ * should require only swapping the import and base URL.
+ */
+export class Sandbox {
+  readonly id: string;
+  private summary: SandboxSummary;
+  private readonly cfg: ResolvedConfig;
+
+  private constructor(summary: SandboxSummary, cfg: ResolvedConfig) {
+    this.id = summary.id;
+    this.summary = summary;
+    this.cfg = cfg;
+  }
+
+  /** Current metadata snapshot. Call {@link refresh} to reload from the server. */
+  get info(): SandboxSummary {
+    return this.summary;
+  }
+
+  /** Provision a new sandbox. */
+  static async create(
+    config: SandboxConfig & CreateSandboxOptions = {}
+  ): Promise<Sandbox> {
+    const { apiUrl, apiToken, fetch, ...opts } = config;
+    const cfg = resolveConfig({ apiUrl, apiToken, fetch });
+    const wire = await request<WireSandbox>(
+      cfg,
+      'POST',
+      '/v1/sandbox',
+      toCreateBody(opts)
+    );
+    return new Sandbox(toSummary(wire), cfg);
+  }
+
+  /** Fetch an existing sandbox by ID. */
+  static async get(id: string, config: SandboxConfig = {}): Promise<Sandbox> {
+    const cfg = resolveConfig(config);
+    const wire = await request<WireSandbox>(cfg, 'GET', `/v1/sandbox/${id}`);
+    return new Sandbox(toSummary(wire), cfg);
+  }
+
+  /** Page through the caller's sandboxes. */
+  static async list(
+    config: SandboxConfig & ListSandboxesOptions = {}
+  ): Promise<ListSandboxesPage> {
+    const { apiUrl, apiToken, fetch, page, pageSize } = config;
+    const cfg = resolveConfig({ apiUrl, apiToken, fetch });
+    const wire = await request<WireListSandboxes>(
+      cfg,
+      'GET',
+      '/v1/sandbox',
+      undefined,
+      { page, page_size: pageSize }
+    );
+    return {
+      items: wire.items.map(toSummary),
+      total: wire.total,
+      page: wire.page,
+      pageSize: wire.page_size,
+    };
+  }
+
+  // ── Instance methods ──
+
+  async refresh(): Promise<SandboxSummary> {
+    const wire = await request<WireSandbox>(
+      this.cfg,
+      'GET',
+      `/v1/sandbox/${this.id}`
+    );
+    this.summary = toSummary(wire);
+    return this.summary;
+  }
+
+  /**
+   * Run a command synchronously. Blocks until the process exits; stdout
+   * and stderr are buffered and returned together. For long-running
+   * processes use {@link execDetached} and stream the job instead.
+   */
+  async exec(cmd: string[], options: Omit<ExecOptions, 'cmd'> = {}): Promise<ExecResult> {
+    const wire = await request<WireExecResult>(
+      this.cfg,
+      'POST',
+      `/v1/sandbox/${this.id}/exec`,
+      { cmd, env: options.env, cwd: options.cwd }
+    );
+    return {
+      exitCode: wire.exit_code,
+      stdout: wire.stdout,
+      stderr: wire.stderr,
+    };
+  }
+
+  /** Start a background job. Returns a handle — poll with {@link jobStatus}. */
+  async execDetached(
+    cmd: string[],
+    options: Omit<ExecOptions, 'cmd'> = {}
+  ): Promise<JobHandle> {
+    const wire = await request<{ job_id: string }>(
+      this.cfg,
+      'POST',
+      `/v1/sandbox/${this.id}/exec-detached`,
+      { cmd, env: options.env, cwd: options.cwd }
+    );
+    return { jobId: wire.job_id };
+  }
+
+  async jobStatus(jobId: string): Promise<JobState> {
+    const wire = await request<WireJobStatus>(
+      this.cfg,
+      'GET',
+      `/v1/sandbox/${this.id}/jobs/${jobId}`
+    );
+    return {
+      status: wire.status,
+      exitCode: wire.exit_code,
+      reason: wire.reason,
+      stdout: wire.stdout,
+      stderr: wire.stderr,
+    };
+  }
+
+  async killJob(jobId: string, signal?: string): Promise<void> {
+    await request<void>(
+      this.cfg,
+      'POST',
+      `/v1/sandbox/${this.id}/jobs/${jobId}/kill`,
+      signal ? { signal } : undefined
+    );
+  }
+
+  async writeFile(opts: WriteFileOptions): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/fs/write`, {
+      path: opts.path,
+      contents_b64: toBase64(opts.contents),
+      mode: opts.mode,
+    });
+  }
+
+  async readFile(path: string): Promise<Uint8Array> {
+    const wire = await request<{ path: string; contents_b64: string; size: number }>(
+      this.cfg,
+      'GET',
+      `/v1/sandbox/${this.id}/fs/read`,
+      undefined,
+      { path }
+    );
+    return fromBase64(wire.contents_b64);
+  }
+
+  async mkdir(path: string): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/fs/mkdir`, {
+      path,
+    });
+  }
+
+  async stat(path: string): Promise<StatInfo> {
+    const wire = await request<WireStat>(
+      this.cfg,
+      'GET',
+      `/v1/sandbox/${this.id}/fs/stat`,
+      undefined,
+      { path }
+    );
+    return {
+      path: wire.path,
+      exists: wire.exists,
+      isDir: wire.is_dir,
+      isFile: wire.is_file,
+      size: wire.size,
+    };
+  }
+
+  /**
+   * Build a public preview URL for a port exposed inside the sandbox.
+   * Returns `null` if this install doesn't have preview URLs configured
+   * (the template is empty). Matches `@vercel/sandbox`'s `domain(port)`.
+   */
+  domain(port: number): string | null {
+    const tpl = this.summary.previewUrlTemplate;
+    if (!tpl) return null;
+    return tpl.replace('{port}', String(port));
+  }
+
+  async extendTimeout(extraSecs: number): Promise<void> {
+    await request<void>(
+      this.cfg,
+      'POST',
+      `/v1/sandbox/${this.id}/extend-timeout`,
+      { extra_secs: extraSecs }
+    );
+  }
+
+  async pause(): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/pause`);
+  }
+
+  async resume(): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/resume`);
+  }
+
+  async restart(): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/restart`);
+  }
+
+  /** Stop the container but keep the row (can `resume` later). */
+  async stop(): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/stop`);
+  }
+
+  /** Stop **and** delete the sandbox. Irreversible. */
+  async destroy(): Promise<void> {
+    await request<void>(this.cfg, 'POST', `/v1/sandbox/${this.id}/destroy`);
+  }
+}
+
+export { SandboxError };

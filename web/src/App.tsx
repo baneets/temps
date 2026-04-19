@@ -188,9 +188,39 @@ const AiGateway = lazy(() =>
     default: m.AiGatewayPage,
   }))
 )
-const AgentSandboxSettingsPage = lazy(() =>
-  import('./components/settings/AgentSandboxSettings').then((m) => ({
-    default: m.AgentSandboxSettings,
+const AgentSandboxLayout = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxLayout').then((m) => ({
+    default: m.AgentSandboxLayout,
+  }))
+)
+const AgentSandboxDashboard = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxDashboard').then((m) => ({
+    default: m.AgentSandboxDashboard,
+  }))
+)
+const AgentSandboxProvidersList = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxProvidersList').then((m) => ({
+    default: m.AgentSandboxProvidersList,
+  }))
+)
+const AgentSandboxProviderDetail = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxProviderDetail').then((m) => ({
+    default: m.AgentSandboxProviderDetail,
+  }))
+)
+const AgentSandboxSandboxPage = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxSandboxPage').then((m) => ({
+    default: m.AgentSandboxSandboxPage,
+  }))
+)
+const AgentSandboxPreviewPage = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxPreviewPage').then((m) => ({
+    default: m.AgentSandboxPreviewPage,
+  }))
+)
+const AgentSandboxSecretsPage = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxSecretsPage').then((m) => ({
+    default: m.AgentSandboxSecretsPage,
   }))
 )
 const GlobalSkillsSettingsPage = lazy(() =>
@@ -292,7 +322,11 @@ const FullAppRoutes = () => {
                 <Route path="/proxy-logs" element={<ProxyLogs />} />
                 <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />
                 <Route path="/audit-logs" element={<AuditLogs />} />
-                {/* Settings with inner sidebar layout */}
+                {/* Settings drill-down: only items NOT surfaced at the
+                    main sidebar root live here. Top-level resources
+                    (domains, storage, email, AI, source providers,
+                    backups) moved out so they don't trigger the
+                    settings sidebar swap. */}
                 <Route path="/settings" element={<SettingsLayout />}>
                   <Route index element={<Settings />} />
                   <Route path="notifications" element={<Notifications />} />
@@ -301,40 +335,9 @@ const FullAppRoutes = () => {
                   <Route path="keys/new" element={<ApiKeyCreate />} />
                   <Route path="keys/:id" element={<ApiKeyDetail />} />
                   <Route path="keys/:id/edit" element={<ApiKeyEdit />} />
-                  {/* Infrastructure */}
-                  <Route path="domains" element={<Domains />} />
-                  <Route path="domains/add" element={<AddDomain />} />
-                  <Route path="domains/:id" element={<DomainDetail />} />
-                  <Route path="storage" element={<Storage />} />
-                  <Route path="storage/create" element={<CreateService />} />
-                  <Route path="storage/import" element={<ImportService />} />
-                  <Route path="storage/:id" element={<ServiceDetail />} />
-                  <Route path="storage/:id/browse" element={<ServiceDataBrowser />} />
-                  <Route
-                    path="storage/:id/upgrades/:upgradeId"
-                    element={<MajorUpgradeDetail />}
-                  />
-                  <Route path="email" element={<Email />} />
-                  <Route path="email/:id" element={<EmailDetail />} />
-                  <Route path="ai-gateway" element={<AiGateway />} />
-                  <Route path="agent-sandbox" element={<AgentSandboxSettingsPage />} />
-                  <Route path="skills" element={<GlobalSkillsSettingsPage />} />
-                  <Route path="skills/:slug" element={<GlobalSkillDetailPage />} />
-                  <Route path="mcp-servers" element={<GlobalMcpServersSettingsPage />} />
-                  <Route path="mcp-servers/:slug" element={<GlobalMcpServerDetailPage />} />
-                  <Route path="git-providers" element={<GitSources />} />
-                  <Route path="git-providers/add" element={<AddGitProvider />} />
-                  <Route path="git-providers/:id" element={<GitProviderDetail />} />
-                  <Route path="dns-providers" element={<DnsProviders />} />
-                  <Route path="dns-providers/add" element={<AddDnsProvider />} />
-                  <Route path="dns-providers/:id" element={<DnsProviderDetail />} />
                   <Route path="load-balancer" element={<CustomRoutes />} />
                   <Route path="load-balancer/add" element={<AddRoute />} />
                   <Route path="docker-registry" element={<DockerRegistryPage />} />
-                  <Route path="backups" element={<Backups />} />
-                  <Route path="backups/s3-sources/new" element={<CreateS3Source />} />
-                  <Route path="backups/s3-sources/:id" element={<S3SourceDetail />} />
-                  <Route path="backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
                   {/* Security */}
                   <Route path="security" element={<SecurityPage />} />
                   <Route path="rate-limiting" element={<RateLimitingPage />} />
@@ -343,13 +346,52 @@ const FullAppRoutes = () => {
                   <Route path="nodes/:nodeId" element={<NodeDetailPage />} />
                   <Route path="plugins" element={<PluginsPage />} />
                 </Route>
-                {/* Redirects from old top-level routes to settings */}
-                <Route path="/domains" element={<Navigate to="/settings/domains" replace />} />
-                <Route path="/storage" element={<Navigate to="/settings/storage" replace />} />
-                <Route path="/email" element={<Navigate to="/settings/email" replace />} />
-                <Route path="/ai-gateway" element={<Navigate to="/settings/ai-gateway" replace />} />
-                <Route path="/git-providers" element={<Navigate to="/settings/git-providers" replace />} />
-                <Route path="/dns-providers" element={<Navigate to="/settings/dns-providers" replace />} />
+                {/* Top-level resources surfaced in the main sidebar */}
+                <Route path="/domains" element={<Domains />} />
+                <Route path="/domains/add" element={<AddDomain />} />
+                <Route path="/domains/:id" element={<DomainDetail />} />
+                <Route path="/storage" element={<Storage />} />
+                <Route path="/storage/create" element={<CreateService />} />
+                <Route path="/storage/import" element={<ImportService />} />
+                <Route path="/storage/:id" element={<ServiceDetail />} />
+                <Route path="/storage/:id/browse" element={<ServiceDataBrowser />} />
+                <Route path="/storage/:id/upgrades/:upgradeId" element={<MajorUpgradeDetail />} />
+                <Route path="/email" element={<Email />} />
+                <Route path="/email/:id" element={<EmailDetail />} />
+                <Route path="/ai-gateway" element={<AiGateway />} />
+                <Route path="/agent-sandbox" element={<AgentSandboxLayout />}>
+                  <Route index element={<AgentSandboxDashboard />} />
+                  <Route path="providers" element={<AgentSandboxProvidersList />} />
+                  <Route path="providers/:id" element={<AgentSandboxProviderDetail />} />
+                  <Route path="sandbox" element={<AgentSandboxSandboxPage />} />
+                  <Route path="preview" element={<AgentSandboxPreviewPage />} />
+                  <Route path="secrets" element={<AgentSandboxSecretsPage />} />
+                </Route>
+                <Route path="/skills" element={<GlobalSkillsSettingsPage />} />
+                <Route path="/skills/:slug" element={<GlobalSkillDetailPage />} />
+                <Route path="/mcp-servers" element={<GlobalMcpServersSettingsPage />} />
+                <Route path="/mcp-servers/:slug" element={<GlobalMcpServerDetailPage />} />
+                <Route path="/git-providers" element={<GitSources />} />
+                <Route path="/git-providers/add" element={<AddGitProvider />} />
+                <Route path="/git-providers/:id" element={<GitProviderDetail />} />
+                <Route path="/dns-providers" element={<DnsProviders />} />
+                <Route path="/dns-providers/add" element={<AddDnsProvider />} />
+                <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
+                <Route path="/backups" element={<Backups />} />
+                <Route path="/backups/s3-sources/new" element={<CreateS3Source />} />
+                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
+                <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                {/* Backward-compat: old /settings/<resource> links → new top-level */}
+                <Route path="/settings/domains/*" element={<Navigate to="/domains" replace />} />
+                <Route path="/settings/storage/*" element={<Navigate to="/storage" replace />} />
+                <Route path="/settings/email/*" element={<Navigate to="/email" replace />} />
+                <Route path="/settings/ai-gateway/*" element={<Navigate to="/ai-gateway" replace />} />
+                <Route path="/settings/agent-sandbox/*" element={<Navigate to="/agent-sandbox" replace />} />
+                <Route path="/settings/skills/*" element={<Navigate to="/skills" replace />} />
+                <Route path="/settings/mcp-servers/*" element={<Navigate to="/mcp-servers" replace />} />
+                <Route path="/settings/git-providers/*" element={<Navigate to="/git-providers" replace />} />
+                <Route path="/settings/dns-providers/*" element={<Navigate to="/dns-providers" replace />} />
+                <Route path="/settings/backups/*" element={<Navigate to="/backups" replace />} />
                 {/* Projects */}
                 <Route path="/projects/new" element={<NewProject />} />
                 <Route path="/projects/import-wizard" element={<Import />} />
