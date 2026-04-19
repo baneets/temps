@@ -8,43 +8,50 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0 0 0);
-  --card: oklch(0.9846 0.0017 247.8389);
-  --card-foreground: oklch(0 0 0);
+  /* Vercel-inspired light palette (Geist design system) */
+  /* Main background is pure white, cards sit on subtle gray-50 */
+  --background: oklch(1 0 0); /* #ffffff — geist background */
+  --foreground: oklch(0.145 0 0); /* #0a0a0a — geist foreground */
+  /* Cards pure white, borders provide separation */
+  --card: oklch(1 0 0); /* #ffffff */
+  --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0 0 0);
-  --primary: oklch(0 0 0);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.967 0.0029 264.5419);
-  --secondary-foreground: oklch(0 0 0);
-  --muted: oklch(0.9846 0.0017 247.8389);
-  --muted-foreground: oklch(0.551 0.0234 264.3637);
-  --accent: oklch(0.9276 0.0058 264.5313);
-  --accent-foreground: oklch(0 0 0);
-  --destructive: oklch(0.6368 0.2078 25.3313);
-  --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0.9276 0.0058 264.5313);
-  --input: oklch(0.9276 0.0058 264.5313);
-  --ring: oklch(0 0 0);
-  /* --chart-1: oklch(0.3729 0.0306 259.7328);
-	--chart-2: oklch(0.5510 0.0234 264.3637);
-	--chart-3: oklch(0.7137 0.0192 261.3246);
-	--chart-4: oklch(0.8717 0.0093 258.3382);
-	--chart-5: oklch(0.9276 0.0058 264.5313); */
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.9846 0.0017 247.8389);
-  --sidebar-foreground: oklch(0 0 0);
-  --sidebar-primary: oklch(0 0 0);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: oklch(0.9276 0.0058 264.5313);
-  --sidebar-accent-foreground: oklch(0 0 0);
-  --sidebar-border: oklch(0.9276 0.0058 264.5313);
-  --sidebar-ring: oklch(0 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  /* Primary: near-black CTAs like Vercel's "Add New…" button */
+  --primary: oklch(0.145 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  /* gray-50 (#fafafa) — subtle secondary surface */
+  --secondary: oklch(0.985 0 0);
+  --secondary-foreground: oklch(0.145 0 0);
+  /* gray-100 (#f5f5f5) — muted surface for sidebar and inset areas */
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0); /* #8f8f8f — geist gray-700 */
+  /* gray-100 (#f2f2f2) — accent hover */
+  --accent: oklch(0.955 0 0);
+  --accent-foreground: oklch(0.145 0 0);
+  /* Vercel red (#e5484d) */
+  --destructive: oklch(0.627 0.2193 23.03);
+  --destructive-foreground: oklch(0.985 0 0);
+  /* gray-200 borders (#eaeaea) — Vercel's signature subtle border */
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  /* Vercel blue ring (#0070f3) for focus */
+  --ring: oklch(0.59 0.2032 256.82);
+  /* Vercel signature accent colors for charts */
+  --chart-1: oklch(0.59 0.2032 256.82); /* blue #0070f3 */
+  --chart-2: oklch(0.723 0.1844 150.31); /* green */
+  --chart-3: oklch(0.773 0.1776 69.61); /* amber */
+  --chart-4: oklch(0.627 0.2193 23.03); /* red */
+  --chart-5: oklch(0.645 0.2253 296.37); /* purple */
+  /* Sidebar uses gray-50 — slightly darker than main canvas like Vercel nav rail */
+  --sidebar: oklch(0.985 0 0); /* #fafafa */
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.145 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.955 0 0); /* #f2f2f2 — hovered nav items */
+  --sidebar-accent-foreground: oklch(0.145 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.59 0.2032 256.82);
   --font-sans:
     'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
     Ubuntu, Cantarell, sans-serif;
@@ -78,38 +85,50 @@
 }
 
 .dark {
-  --background: oklch(0 0 0);
-  --foreground: oklch(1 0 0);
-  --card: oklch(0.1776 0 0);
-  --card-foreground: oklch(1 0 0);
-  --popover: oklch(0 0 0);
-  --popover-foreground: oklch(1 0 0);
-  --primary: oklch(1 0 0);
-  --primary-foreground: oklch(0 0 0);
-  --secondary: oklch(0.252 0 0);
-  --secondary-foreground: oklch(1 0 0);
-  --muted: oklch(0.1776 0 0);
-  --muted-foreground: oklch(0.7118 0.0129 286.0665);
-  --accent: oklch(0.3211 0 0);
-  --accent-foreground: oklch(1 0 0);
-  --destructive: oklch(0.6368 0.2078 25.3313);
-  --destructive-foreground: oklch(1 0 0);
-  --border: oklch(0.3211 0 0);
-  --input: oklch(0.3211 0 0);
-  --ring: oklch(1 0 0);
-  --chart-1: oklch(0.9276 0.0058 264.5313);
-  --chart-2: oklch(0.8717 0.0093 258.3382);
-  --chart-3: oklch(0.7137 0.0192 261.3246);
-  --chart-4: oklch(0.551 0.0234 264.3637);
-  --chart-5: oklch(0.3729 0.0306 259.7328);
-  --sidebar: oklch(0.1776 0 0);
-  --sidebar-foreground: oklch(1 0 0);
-  --sidebar-primary: oklch(1 0 0);
-  --sidebar-primary-foreground: oklch(0 0 0);
-  --sidebar-accent: oklch(0.3211 0 0);
-  --sidebar-accent-foreground: oklch(1 0 0);
-  --sidebar-border: oklch(0.3211 0 0);
-  --sidebar-ring: oklch(1 0 0);
+  /* Vercel-inspired dark palette (Geist design system) */
+  /* background-0 (#0a0a0a), background-100 (#0a0a0a), background-200 (#000) */
+  --background: oklch(0.145 0 0); /* #0a0a0a — geist background */
+  --foreground: oklch(0.985 0 0); /* #ededed — geist foreground */
+  /* gray-100 (#1a1a1a) for cards and surfaces */
+  --card: oklch(0.205 0 0); /* #1a1a1a */
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0); /* #1a1a1a */
+  --popover-foreground: oklch(0.985 0 0);
+  /* Primary is near-white, used for CTAs like Vercel */
+  --primary: oklch(0.985 0 0);
+  --primary-foreground: oklch(0.145 0 0);
+  /* gray-200 (#2b2b2b) — subtle hover/secondary */
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  /* gray-50 (#111) — muted surface */
+  --muted: oklch(0.178 0 0);
+  --muted-foreground: oklch(0.708 0 0); /* #a1a1a1 — geist gray-700 */
+  /* gray-300 (#3a3a3a) — accent hover */
+  --accent: oklch(0.322 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  /* Vercel red (#e5484d / error) */
+  --destructive: oklch(0.627 0.2193 23.03);
+  --destructive-foreground: oklch(0.985 0 0);
+  /* gray-200 borders (#2e2e2e) */
+  --border: oklch(0.269 0 0);
+  --input: oklch(0.269 0 0);
+  /* Vercel blue ring (#0070f3) */
+  --ring: oklch(0.59 0.2032 256.82);
+  /* Vercel signature accent colors for charts */
+  --chart-1: oklch(0.59 0.2032 256.82); /* blue #0070f3 */
+  --chart-2: oklch(0.723 0.1844 150.31); /* green #50e3c2 */
+  --chart-3: oklch(0.773 0.1776 69.61); /* amber #f5a623 */
+  --chart-4: oklch(0.627 0.2193 23.03); /* red #e5484d */
+  --chart-5: oklch(0.645 0.2253 296.37); /* purple #8a63d2 */
+  /* Sidebar uses pure black like Vercel's nav rail */
+  --sidebar: oklch(0.145 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.985 0 0);
+  --sidebar-primary-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.205 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(0.269 0 0);
+  --sidebar-ring: oklch(0.59 0.2032 256.82);
   --font-sans:
     'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
     Ubuntu, Cantarell, sans-serif;
