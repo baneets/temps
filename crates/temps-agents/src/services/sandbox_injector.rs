@@ -16,6 +16,41 @@ use crate::error::AgentError;
 use crate::services::definition_service::DefinitionService;
 use crate::services::secret_service::{ResolvedSecret, SecretService, SecretType};
 
+/// Coerce a user-configured file-secret `mount_path` into a path that is
+/// guaranteed NOT to live inside `/workspace/`.
+///
+/// `/workspace` is bind-mounted from the cloned repo, so writing secret
+/// material there leaks it into the PR branch (we saw `.mcp/gsc-creds.json`
+/// show up in a real PR). Any attempt to mount under `/workspace/...` is
+/// rewritten to `/home/temps/.temps/secrets/<...>` preserving the relative
+/// subpath; absolute paths outside `/workspace` are kept as-is so admins
+/// can still target `/run/secrets/...` tmpfs mounts explicitly.
+pub(crate) fn sanitize_secret_mount_path(requested: &str, secret_name: &str) -> String {
+    const SAFE_ROOT: &str = "/home/temps/.temps/secrets";
+    let trimmed = requested.trim();
+
+    if trimmed.is_empty() {
+        return format!("{}/{}", SAFE_ROOT, secret_name);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/workspace/") {
+        return format!("{}/{}", SAFE_ROOT, rest);
+    }
+    if trimmed == "/workspace" {
+        return SAFE_ROOT.to_string();
+    }
+
+    if trimmed.contains("..") {
+        return format!("{}/{}", SAFE_ROOT, secret_name);
+    }
+
+    if trimmed.starts_with('/') {
+        return trimmed.to_string();
+    }
+
+    format!("{}/{}", SAFE_ROOT, trimmed)
+}
+
 /// Convert a merged `mcpServers` map (Claude Code JSON format) into Codex CLI
 /// TOML (`~/.codex/config.toml`) format.
 ///
@@ -167,43 +202,19 @@ pub async fn write_mcp_configs(
     Ok(())
 }
 
-/// Write MCP config in Claude Code format (.claude/settings.json + ~/.claude.json)
+/// Write MCP config in Claude Code format.
+///
+/// Writes ONLY to `/home/temps/.claude.json` (the CLI's user-level config).
+/// We deliberately do NOT write a project-level `.claude/settings.json`
+/// anymore: `/workspace/.claude/settings.json` lives inside the bind-mounted
+/// repo and would leak resolved secrets (MCP env blocks) into PR diffs.
+/// The user-level config is equivalent for MCP discovery in Claude Code.
 async fn write_claude_mcp(
     fs: &dyn SandboxFs,
     merged: &serde_json::Map<String, serde_json::Value>,
     secret_map: &HashMap<String, String>,
 ) -> Result<(), AgentError> {
-    // Project-level settings.json
-    let existing = fs
-        .read_file("/workspace/.claude/settings.json")
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let mut settings = existing;
-    let mut project_mcp = settings
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default();
-    for (k, v) in merged {
-        project_mcp.insert(k.clone(), v.clone());
-    }
-    settings["mcpServers"] = serde_json::Value::Object(project_mcp);
-
-    let mut settings_str = serde_json::to_string_pretty(&settings).unwrap_or_default();
-    if !secret_map.is_empty() && settings_str.contains("${TEMPS_SECRET:") {
-        settings_str = SecretService::resolve_placeholders(&settings_str, secret_map);
-    }
-    fs.write_file(
-        "/workspace/.claude/settings.json",
-        settings_str.as_bytes(),
-        0o644,
-    )
-    .await?;
-
-    // Home-level ~/.claude.json
+    // Home-level ~/.claude.json (sandbox private volume, NOT the bind-mounted repo)
     let home_existing = fs
         .read_file("/home/temps/.claude.json")
         .await
@@ -226,7 +237,7 @@ async fn write_claude_mcp(
     if !secret_map.is_empty() && home_str.contains("${TEMPS_SECRET:") {
         home_str = SecretService::resolve_placeholders(&home_str, secret_map);
     }
-    fs.write_file("/home/temps/.claude.json", home_str.as_bytes(), 0o644)
+    fs.write_file("/home/temps/.claude.json", home_str.as_bytes(), 0o600)
         .await?;
 
     Ok(())
@@ -388,9 +399,11 @@ pub struct InjectSummary {
 /// - `project_id`: used to resolve project-scoped skill/MCP definitions; global definitions are always included.
 /// - `mcp_slugs` / `skill_slugs`: slug arrays to resolve and inject. Empty = skip that section.
 /// - `secrets`: already-resolved secrets (e.g. from `SecretService::resolve_secrets()`).
-///   Env-type secrets are written to `/workspace/.temps/secrets.env`; file-type secrets
-///   are written to their `mount_path`. `${TEMPS_SECRET:<name>}` placeholders in the
-///   generated `.claude` JSONs are resolved inline.
+///   Env-type secrets are written to `/home/temps/.temps/secrets.env`; file-type
+///   secrets are written to `sanitize_secret_mount_path(mount_path)` (any
+///   `/workspace/...` target is rewritten to `/home/temps/.temps/secrets/...`).
+///   `${TEMPS_SECRET:<name>}` placeholders in the generated `.claude` JSONs are
+///   resolved inline.
 /// - `provider`: AI provider id (`"claude_cli"`, `"codex_cli"`, `"opencode"`). MCP configs
 ///   are written in the format the active provider expects (in addition to Claude Code format).
 pub async fn inject(
@@ -413,12 +426,18 @@ pub async fn inject(
     }
 
     // ── Phase 1: secrets ────────────────────────────────────────────
+    //
+    // Nothing written here is allowed under `/workspace/`. That directory is
+    // bind-mounted from the cloned repo, so any file written there lands in
+    // the PR branch and leaks secret material. All secret files stay under
+    // `/home/temps/` (the private named volume).
     if has_secrets {
         for s in secrets {
             match s.secret_type {
                 SecretType::File => {
                     if let Some(mount_path) = &s.mount_path {
-                        fs.write_file(mount_path, s.value.as_bytes(), 0o600).await?;
+                        let safe_path = sanitize_secret_mount_path(mount_path, &s.name);
+                        fs.write_file(&safe_path, s.value.as_bytes(), 0o600).await?;
                         summary.file_secret_count += 1;
                     }
                 }
@@ -439,7 +458,7 @@ pub async fn inject(
                 env_content.push_str(&format!("export {}='{}'\n", s.name, escaped));
             }
             fs.write_file(
-                "/workspace/.temps/secrets.env",
+                "/home/temps/.temps/secrets.env",
                 env_content.as_bytes(),
                 0o600,
             )
@@ -460,7 +479,7 @@ pub async fn inject(
         .exec(vec![
             "mkdir".to_string(),
             "-p".to_string(),
-            "/workspace/.claude".to_string(),
+            "/home/temps/.claude".to_string(),
         ])
         .await;
 

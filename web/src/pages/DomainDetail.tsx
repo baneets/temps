@@ -6,7 +6,7 @@ import {
   getDomainOrderOptions,
   getHttpChallengeDebugOptions,
   getPublicIpOptions,
-  listProvidersOptions,
+  listDnsProvidersOptions as listProvidersOptions,
   renewDomainMutation,
   setupDnsChallengeMutation,
 } from '@/api/client/@tanstack/react-query.gen'
@@ -15,79 +15,90 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import { CopyButton } from '@/components/ui/copy-button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { usePlatformCapabilities } from '@/hooks/usePlatformCapabilities'
 import { formatUTCDate } from '@/lib/date'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsFetching, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { formatDistanceToNowStrict } from 'date-fns'
 import {
   AlertTriangle,
   ArrowLeft,
   Calendar,
+  Check,
   CheckCircle,
+  ChevronDown,
+  Circle,
   Clock,
-  Copy,
-  CopyCheck,
   ExternalLink,
   Globe,
   Info,
   Loader2,
+  MoreHorizontal,
   RefreshCw,
   Shield,
   Wand2,
   XCircle,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
+
+type ChallengeData = {
+  challenge_type: 'dns-01' | 'http-01'
+  dns_txt_records: { name: string; value: string }[]
+  key_authorization: string
+  token: string
+  validation_url: string
+}
 
 export function DomainDetail() {
   const { id } = useParams<{ id: string }>()
   const { setBreadcrumbs } = useBreadcrumbs()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [copiedField, setCopiedField] = useState<string | null>(null)
   const [selectedDnsProvider, setSelectedDnsProvider] = useState<string>('')
 
-  const {
-    data: domain,
-    isLoading: isDomainLoading,
-    refetch: refetchDomain,
-  } = useQuery({
-    ...getDomainByIdOptions({
-      path: {
-        domain: Number(id),
-      },
-    }),
+  const domainQueryKey = getDomainByIdOptions({
+    path: { domain: Number(id) },
+  }).queryKey
+  const orderQueryKey = getDomainOrderOptions({
+    path: { domain_id: Number(id) },
+  }).queryKey
+
+  const { data: domain, isLoading: isDomainLoading } = useQuery({
+    ...getDomainByIdOptions({ path: { domain: Number(id) } }),
     enabled: !!id,
   })
 
-  const {
-    data: order,
-    isLoading: isOrderLoading,
-    refetch: refetchOrder,
-  } = useQuery({
-    ...getDomainOrderOptions({
-      path: {
-        domain_id: Number(id),
-      },
-    }),
+  const { data: order, isLoading: isOrderLoading } = useQuery({
+    ...getDomainOrderOptions({ path: { domain_id: Number(id) } }),
     enabled: !!id && domain?.status !== 'active',
     retry: false,
   })
 
   const { data: httpDebugInfo } = useQuery({
     ...getHttpChallengeDebugOptions({
-      path: {
-        domain: domain?.domain || '',
-      },
+      path: { domain: domain?.domain || '' },
     }),
     enabled:
       !!domain?.domain &&
@@ -108,7 +119,6 @@ export function DomainDetail() {
         domain?.status === 'pending_http'),
   })
 
-  // Fetch DNS providers for auto-provisioning when DNS-01 challenge is available
   const { data: dnsProviders } = useQuery({
     ...listProvidersOptions(),
     enabled:
@@ -120,6 +130,45 @@ export function DomainDetail() {
   })
 
   const { canManageCertificates, isUsingCloudflare } = usePlatformCapabilities()
+
+  const fetchingCount = useIsFetching({
+    predicate: (q) => {
+      const k = q.queryKey?.[0]
+      if (typeof k !== 'string') return false
+      return (
+        k.includes('getDomainById') ||
+        k.includes('getDomainOrder') ||
+        k.includes('getHttpChallengeDebug') ||
+        k.includes('getPublicIp') ||
+        k.includes('listProviders')
+      )
+    },
+  })
+  const isRefreshing = fetchingCount > 0
+
+  const refreshAll = useCallback(
+    async (opts?: { clearOrder?: boolean }) => {
+      if (opts?.clearOrder) {
+        queryClient.removeQueries({ queryKey: orderQueryKey })
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: domainQueryKey }),
+        queryClient.invalidateQueries({ queryKey: orderQueryKey }),
+        queryClient.invalidateQueries({
+          predicate: (q) => {
+            const k = q.queryKey?.[0]
+            return (
+              typeof k === 'string' &&
+              (k.includes('getHttpChallengeDebug') ||
+                k.includes('getPublicIp') ||
+                k.includes('listProviders'))
+            )
+          },
+        }),
+      ])
+    },
+    [queryClient, domainQueryKey, orderQueryKey]
+  )
 
   useEffect(() => {
     if (domain) {
@@ -134,161 +183,107 @@ export function DomainDetail() {
 
   const createOrder = useMutation({
     ...createOrRecreateOrderMutation(),
-    meta: {
-      errorTitle: 'Failed to create ACME order',
-    },
-    onSuccess: () => {
+    meta: { errorTitle: 'Failed to create ACME order' },
+    onSuccess: async () => {
       toast.success('ACME order created successfully')
-      refetchDomain()
-      refetchOrder()
+      await refreshAll()
     },
   })
 
   const finalizeOrder = useMutation({
     ...finalizeOrderMutation(),
-    meta: {
-      errorTitle: 'Failed to verify DNS challenge',
-    },
+    meta: { errorTitle: 'Failed to verify DNS challenge' },
     onSuccess: async () => {
       toast.success(
-        'DNS challenge verified! SSL certificate provisioning in progress.'
+        'DNS challenge verified! TLS certificate provisioning in progress.'
       )
+      await refreshAll()
 
-      // Initial refetch
-      await refetchDomain()
-      await refetchOrder()
-
-      // Poll for status updates until domain becomes active
       const pollInterval = setInterval(async () => {
-        const result = await refetchDomain()
-        if (result.data?.status === 'active') {
+        await refreshAll()
+        const latest = queryClient.getQueryData(domainQueryKey) as
+          | { status?: string }
+          | undefined
+        if (latest?.status === 'active') {
           clearInterval(pollInterval)
-          toast.success('SSL certificate is now active!')
-          await refetchDomain()
-          await refetchOrder()
+          toast.success('TLS certificate is now active!')
+          await refreshAll()
         }
-      }, 3000) // Check every 3 seconds
+      }, 3000)
 
-      // Stop polling after 2 minutes
       setTimeout(() => clearInterval(pollInterval), 120000)
     },
   })
 
   const cancelOrder = useMutation({
     ...cancelDomainOrderMutation(),
-    meta: {
-      errorTitle: 'Failed to cancel ACME order',
-    },
+    meta: { errorTitle: 'Failed to cancel ACME order' },
     onSuccess: async () => {
       toast.success('ACME order cancelled. You can now start over.')
-
-      // Invalidate and clear the order query
-      queryClient.setQueryData(
-        getDomainOrderOptions({
-          path: { domain_id: Number(id) },
-        }).queryKey,
-        undefined
-      )
-
-      await refetchDomain()
-      await refetchOrder()
+      await refreshAll({ clearOrder: true })
     },
   })
 
   const renewDomain = useMutation({
     ...renewDomainMutation(),
-    meta: {
-      errorTitle: 'Failed to renew certificate',
-    },
-    onSuccess: (data) => {
-      // Check if the response is a challenge (DNS-01 renewal)
-      // The API returns 202 with challenge data for DNS-01 domains
+    meta: { errorTitle: 'Failed to renew certificate' },
+    onSuccess: async (data) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = data as any
       if (response?.txt_records && response.txt_records.length > 0) {
-        // DNS-01 challenge was created - user needs to update DNS and finalize
         toast.success(
           'Renewal order created. Update DNS TXT records and click "Verify & Complete" to finalize.',
           { duration: 6000 }
         )
       } else if (response?.Complete) {
-        // HTTP-01 certificate was renewed successfully
         toast.success('Certificate renewed successfully')
       } else {
-        // Generic success
         toast.success('Certificate renewal initiated')
       }
-      refetchDomain()
-      refetchOrder()
+      await refreshAll()
     },
   })
 
   const setupDns = useMutation({
     ...setupDnsChallengeMutation(),
-    meta: {
-      errorTitle: 'Failed to setup DNS records',
-    },
-    onSuccess: (data) => {
+    meta: { errorTitle: 'Failed to setup DNS records' },
+    onSuccess: async (data) => {
       if (data.success) {
         toast.success(data.message)
       } else {
         toast.warning(data.message)
       }
-      // Show individual record results
       data.results.forEach((result) => {
         if (!result.success) {
           toast.error(`${result.name}: ${result.message}`)
         }
       })
+      await refreshAll()
     },
   })
 
-  const handleCopy = (text: string, field: string) => {
-    navigator.clipboard.writeText(text)
-    setCopiedField(field)
-    toast.success('Copied to clipboard')
-    setTimeout(() => setCopiedField(null), 2000)
-  }
-
   const handleCreateOrder = () => {
     if (!domain) return
-    createOrder.mutate({
-      path: {
-        domain_id: domain.id,
-      },
-    })
+    createOrder.mutate({ path: { domain_id: domain.id } })
   }
 
   const handleCompleteDns = () => {
     if (!domain) return
-    // Finalize the order after DNS challenge verification
-    finalizeOrder.mutate({
-      path: {
-        domain_id: domain.id,
-      },
-    })
+    finalizeOrder.mutate({ path: { domain_id: domain.id } })
   }
 
   const handleSetupDnsRecords = async () => {
     if (!domain || !selectedDnsProvider) return
     await setupDns.mutateAsync({
-      path: {
-        domain_id: domain.id,
-      },
-      body: {
-        dns_provider_id: parseInt(selectedDnsProvider, 10),
-      },
+      path: { domain_id: domain.id },
+      body: { dns_provider_id: parseInt(selectedDnsProvider, 10) },
     })
   }
 
   const handleCancelOrder = () => {
     if (!domain) return
     toast.promise(
-      cancelOrder.mutateAsync({
-        path: {
-          domain_id: domain.id,
-        },
-      }),
+      cancelOrder.mutateAsync({ path: { domain_id: domain.id } }),
       {
         loading: 'Cancelling ACME order...',
         success: 'ACME order cancelled successfully',
@@ -305,13 +300,9 @@ export function DomainDetail() {
         : 'Renewing certificate...'
     )
     try {
-      await renewDomain.mutateAsync({
-        path: {
-          domain: domain.domain,
-        },
-      })
+      await renewDomain.mutateAsync({ path: { domain: domain.domain } })
     } catch {
-      // Error is handled by the mutation's meta.errorTitle
+      // handled by meta.errorTitle
     } finally {
       toast.dismiss(loadingToast)
     }
@@ -331,15 +322,15 @@ export function DomainDetail() {
     switch (status) {
       case 'active':
       case 'valid':
-        return 'default'
+        return 'default' as const
       case 'pending':
       case 'processing':
-        return 'secondary'
+        return 'secondary' as const
       case 'failed':
       case 'invalid':
-        return 'destructive'
+        return 'destructive' as const
       default:
-        return 'outline'
+        return 'outline' as const
     }
   }
 
@@ -349,7 +340,7 @@ export function DomainDetail() {
     return (
       <div className="flex-1 overflow-auto">
         <div className="flex items-center justify-center min-h-[400px]">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          <Loader2 className="size-8 animate-spin text-muted-foreground" />
         </div>
       </div>
     )
@@ -360,14 +351,14 @@ export function DomainDetail() {
       <div className="flex-1 overflow-auto">
         <div className="max-w-5xl mx-auto p-6">
           <Alert variant="warning">
-            <AlertTriangle className="h-4 w-4" />
+            <AlertTriangle className="size-4" />
             <AlertTitle>Domain not found</AlertTitle>
             <AlertDescription>
               The requested domain could not be found.
             </AlertDescription>
           </Alert>
           <Button className="mt-4" onClick={() => navigate('/settings/domains')}>
-            <ArrowLeft className="mr-2 h-4 w-4" />
+            <ArrowLeft className="mr-2 size-4" />
             Back to Domains
           </Button>
         </div>
@@ -375,806 +366,781 @@ export function DomainDetail() {
     )
   }
 
-  // Get challenge info from order (works for both DNS and HTTP challenges)
-  const challengeData = order?.authorizations as
-    | {
-        challenge_type: 'dns-01' | 'http-01'
-        dns_txt_records: {
-          name: string
-          value: string
-        }[]
-        key_authorization: string
-        token: string
-        validation_url: string
-      }
-    | undefined
-
-  // DNS-01 specific
+  const challengeData = order?.authorizations as ChallengeData | undefined
   const hasDnsChallenge = order && domain.verification_method === 'dns-01'
   const dnsTxtRecords = challengeData?.dns_txt_records || []
   const hasDnsValues = dnsTxtRecords.length > 0
-
-  // HTTP-01 specific
   const hasHttpChallenge =
     order && domain.verification_method === 'http-01' && challengeData
-  return (
-    <div className="flex-1 overflow-auto">
-      <div className="max-w-7xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => navigate('/settings/domains')}
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-            <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-bold">{domain.domain}</h1>
-                <Badge variant={getStatusBadgeVariant(domain.status)}>
-                  {domain.status}
-                </Badge>
-                {domain.is_wildcard && (
-                  <Badge variant="outline">Wildcard</Badge>
-                )}
-              </div>
-              <p className="text-sm text-muted-foreground mt-1">
-                SSL Certificate & Order Management
+
+  const isPendingState =
+    domain.status === 'challenge_requested' ||
+    domain.status === 'pending_dns' ||
+    domain.status === 'pending_http' ||
+    domain.status === 'pending'
+
+  // Stepper state
+  const steps: { key: string; label: string; state: 'done' | 'current' | 'upcoming' }[] = (() => {
+    if (domain.status === 'active') {
+      return [
+        { key: 'order', label: 'Order created', state: 'done' },
+        { key: 'challenge', label: 'Challenge added', state: 'done' },
+        { key: 'verify', label: 'Verified', state: 'done' },
+        { key: 'active', label: 'Certificate active', state: 'done' },
+      ]
+    }
+    if (domain.status === 'failed') {
+      return [
+        { key: 'order', label: 'Order created', state: 'done' },
+        { key: 'challenge', label: 'Challenge added', state: 'done' },
+        { key: 'verify', label: 'Verification failed', state: 'current' },
+      ]
+    }
+    const orderDone = !!order
+    const recordsReady = orderDone && hasDnsValues
+    return [
+      {
+        key: 'order',
+        label: 'Create ACME order',
+        state: orderDone ? 'done' : 'current',
+      },
+      {
+        key: 'challenge',
+        label:
+          domain.verification_method === 'dns-01'
+            ? 'Add DNS TXT record'
+            : 'Point DNS A record',
+        state: recordsReady ? 'current' : orderDone ? 'current' : 'upcoming',
+      },
+      {
+        key: 'verify',
+        label: 'Verify & finalize',
+        state: 'upcoming',
+      },
+    ]
+  })()
+
+  // Renew is only meaningful for ACME flows we can automate.
+  // DNS-01 renewals require the user to re-add TXT records, so we expose
+  // it as "Start renewal" instead of "Renew".
+  const canRenew =
+    canManageCertificates &&
+    (domain.verification_method === 'dns-01' ||
+      domain.verification_method === 'http-01')
+  const renewLabel =
+    domain.verification_method === 'dns-01' ? 'Start renewal' : 'Renew certificate'
+
+  const primaryActionButton = (() => {
+    if (domain.status === 'active') return null
+    if (!order && isPendingState) {
+      return (
+        <Button
+          onClick={handleCreateOrder}
+          disabled={!canManageCertificates || createOrder.isPending}
+        >
+          {createOrder.isPending ? (
+            <>
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              Creating order…
+            </>
+          ) : (
+            <>
+              <Shield className="mr-2 size-4" />
+              Create order
+            </>
+          )}
+        </Button>
+      )
+    }
+    if (order && (hasDnsChallenge || hasHttpChallenge)) {
+      return (
+        <Button
+          onClick={handleCompleteDns}
+          disabled={!canManageCertificates || finalizeOrder.isPending}
+        >
+          {finalizeOrder.isPending ? (
+            <>
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              Verifying…
+            </>
+          ) : (
+            <>
+              <CheckCircle className="mr-2 size-4" />
+              Verify & finalize
+            </>
+          )}
+        </Button>
+      )
+    }
+    return null
+  })()
+
+  // Shared compact TXT record row
+  const DnsRecordsList = ({ keyPrefix }: { keyPrefix: string }) =>
+    hasDnsValues ? (
+      <div className="divide-y divide-gray-950/5 rounded-lg border border-gray-950/10 overflow-hidden">
+        {dnsTxtRecords.map((record, index) => (
+          <div key={`${keyPrefix}-${index}`} className="grid grid-cols-[auto_1fr_auto] items-start gap-x-3 gap-y-1 px-3 py-2.5 sm:px-4">
+            <Badge variant="outline" className="mt-0.5">TXT</Badge>
+            <div className="min-w-0 space-y-1">
+              <p className="font-mono text-xs break-all text-foreground">
+                <span className="text-muted-foreground">Name:</span> {record.name}
+              </p>
+              <p className="font-mono text-xs break-all text-foreground">
+                <span className="text-muted-foreground">Value:</span> {record.value}
               </p>
             </div>
+            <div className="flex flex-col gap-1">
+              <CopyButton
+                value={record.name}
+                minimal
+                className="h-7 rounded-md border border-gray-950/10 px-2 py-1 text-xs"
+              >
+                <span className="hidden sm:inline">Name</span>
+              </CopyButton>
+              <CopyButton
+                value={record.value}
+                minimal
+                className="h-7 rounded-md border border-gray-950/10 px-2 py-1 text-xs"
+              >
+                <span className="hidden sm:inline">Value</span>
+              </CopyButton>
+            </div>
           </div>
-          <div className="flex gap-2">
-            {(domain.status === 'pending_dns' || domain.status === 'pending') &&
-              !order && (
+        ))}
+      </div>
+    ) : null
+
+  const DnsAutoProvision = () =>
+    dnsProviders && dnsProviders.length > 0 ? (
+      <div className="flex flex-col gap-3 rounded-lg border border-gray-950/10 bg-muted/40 p-4 sm:flex-row sm:items-center">
+        <div className="flex items-start gap-3 flex-1">
+          <div className="rounded-md bg-primary/10 p-2 shrink-0">
+            <Wand2 className="size-4 text-primary" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Auto-provision records</p>
+            <p className="text-xs text-muted-foreground">
+              Create TXT records using a configured DNS provider.
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:shrink-0">
+          <Select value={selectedDnsProvider} onValueChange={setSelectedDnsProvider}>
+            <SelectTrigger className="w-full sm:w-[200px]">
+              <SelectValue placeholder="Select provider" />
+            </SelectTrigger>
+            <SelectContent>
+              {dnsProviders.map((provider) => (
+                <SelectItem key={provider.id} value={provider.id.toString()}>
+                  {provider.name} ({provider.provider_type})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleSetupDnsRecords}
+            disabled={
+              !selectedDnsProvider || setupDns.isPending || !canManageCertificates
+            }
+          >
+            {setupDns.isPending ? (
+              <>
+                <Loader2 className="mr-2 size-4 animate-spin" />
+                Creating…
+              </>
+            ) : (
+              <>
+                <Wand2 className="mr-2 size-4" />
+                Auto-create
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+    ) : null
+
+  // ==========================================================================
+  // Variant 2: TIMELINE — stepper at top, single active task panel
+  // ==========================================================================
+  const TimelineVariant = (
+    <div className="space-y-6">
+      <Card>
+        <div className="p-6">
+          <ol role="list" className="flex items-start gap-0 overflow-x-auto">
+            {steps.map((step, idx) => (
+              <li
+                key={step.key}
+                className="flex items-start gap-3 flex-1 min-w-[140px]"
+              >
+                <div className="flex flex-col items-center shrink-0">
+                  <div
+                    className={
+                      step.state === 'done'
+                        ? 'flex size-8 items-center justify-center rounded-full bg-green-600 text-white'
+                        : step.state === 'current'
+                          ? 'flex size-8 items-center justify-center rounded-full bg-primary text-primary-foreground ring-4 ring-primary/15'
+                          : 'flex size-8 items-center justify-center rounded-full border border-gray-950/15 bg-background text-muted-foreground'
+                    }
+                  >
+                    {step.state === 'done' ? (
+                      <Check className="size-4" />
+                    ) : step.state === 'current' ? (
+                      <span className="text-sm font-medium tabular-nums">{idx + 1}</span>
+                    ) : (
+                      <Circle className="size-3" />
+                    )}
+                  </div>
+                  {idx < steps.length - 1 && (
+                    <div
+                      className={
+                        step.state === 'done'
+                          ? 'mt-1 w-px h-6 bg-green-600/40'
+                          : 'mt-1 w-px h-6 bg-gray-950/10'
+                      }
+                    />
+                  )}
+                </div>
+                <div className="pt-1 pb-4">
+                  <p
+                    className={
+                      step.state === 'upcoming'
+                        ? 'text-sm text-muted-foreground'
+                        : 'text-sm font-medium'
+                    }
+                  >
+                    {step.label}
+                  </p>
+                  {step.state === 'current' && (
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Current step
+                    </p>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </Card>
+
+      {domain.status === 'active' ? (
+        <ActiveCertificateCard
+          domain={domain}
+          onRenew={handleRenewDomain}
+          canManage={canManageCertificates}
+          renewing={renewDomain.isPending}
+        />
+      ) : (
+        <Card>
+          <div className="p-6 space-y-5">
+            {!order && isPendingState && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Shield className="size-4 text-primary" />
+                  <h2 className="text-base font-semibold">Create ACME order</h2>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Start the Let&apos;s Encrypt order to receive your validation
+                  challenge.
+                </p>
                 <Button
-                  variant="default"
-                  size="sm"
                   onClick={handleCreateOrder}
                   disabled={!canManageCertificates || createOrder.isPending}
                 >
                   {createOrder.isPending ? (
                     <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Creating Order...
+                      <Loader2 className="mr-2 size-4 animate-spin" />
+                      Creating order…
                     </>
                   ) : (
                     <>
-                      <Shield className="mr-2 h-4 w-4" />
-                      Create Order
+                      <Shield className="mr-2 size-4" />
+                      Create order
                     </>
                   )}
                 </Button>
-              )}
-            {(domain.status === 'pending_dns' || domain.status === 'pending') &&
-              order &&
-              hasDnsChallenge && (
-                <Button
-                  variant="default"
-                  size="sm"
-                  onClick={handleCompleteDns}
-                  disabled={!canManageCertificates || finalizeOrder.isPending}
-                >
-                  {finalizeOrder.isPending ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Verifying...
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle className="mr-2 h-4 w-4" />
-                      Verify & Finalize
-                    </>
+              </div>
+            )}
+
+            {order && hasDnsValues && domain.verification_method === 'dns-01' && (
+              <div className="space-y-4">
+                <div>
+                  <h2 className="text-base font-semibold">Add DNS TXT record{dnsTxtRecords.length > 1 ? 's' : ''}</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Add {dnsTxtRecords.length > 1 ? 'these records' : 'this record'} to your DNS, then verify.
+                  </p>
+                </div>
+                <DnsRecordsList keyPrefix="timeline" />
+                <DnsAutoProvision />
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <Button
+                    onClick={handleCompleteDns}
+                    disabled={finalizeOrder.isPending || !canManageCertificates}
+                  >
+                    {finalizeOrder.isPending ? (
+                      <>
+                        <Loader2 className="mr-2 size-4 animate-spin" />
+                        Verifying…
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="mr-2 size-4" />
+                        Verify & finalize
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={handleCancelOrder}
+                    disabled={!canManageCertificates}
+                  >
+                    <XCircle className="mr-2 size-4" />
+                    Cancel order
+                  </Button>
+                  {dnsTxtRecords[0] && (
+                    <a
+                      href={`https://www.whatsmydns.net/#TXT/${dnsTxtRecords[0].name}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 px-3 py-2 text-sm text-muted-foreground hover:text-foreground"
+                    >
+                      Check propagation
+                      <ExternalLink className="size-3" />
+                    </a>
                   )}
-                </Button>
-              )}
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                refetchDomain()
-                refetchOrder()
-              }}
-            >
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh
-            </Button>
+                </div>
+              </div>
+            )}
+
+            {hasHttpChallenge && challengeData && (
+              <HttpChallengePanel
+                domain={domain}
+                challengeData={challengeData}
+                publicIpData={publicIpData}
+                httpDebugInfo={httpDebugInfo}
+                onVerify={handleCompleteDns}
+                onCancel={handleCancelOrder}
+                verifying={finalizeOrder.isPending}
+                canManage={canManageCertificates}
+              />
+            )}
+
+            {domain.status === 'failed' && (
+              <FailedPanel
+                domain={domain}
+                dnsTxtRecords={dnsTxtRecords}
+                onRetry={handleCompleteDns}
+                onCancel={handleCancelOrder}
+                retrying={finalizeOrder.isPending}
+                canManage={canManageCertificates}
+                keyPrefix="timeline-failed"
+              />
+            )}
+          </div>
+        </Card>
+      )}
+
+      <MetadataGrid domain={domain} order={order} />
+    </div>
+  )
+
+  // ==========================================================================
+  // Variant 3: FOCUS — "what should I do right now" front and centre
+  // ==========================================================================
+  const focusTitle = (() => {
+    if (domain.status === 'active') return 'Certificate active'
+    if (domain.status === 'failed') return 'Verification failed — retry below'
+    if (!order) return 'Create the ACME order to get started'
+    if (hasDnsValues) return 'Add the DNS records, then verify'
+    if (hasHttpChallenge) return 'Point DNS to this server, then verify'
+    return 'Preparing challenge…'
+  })()
+
+  const focusDescription = (() => {
+    if (domain.status === 'active') return 'Your TLS certificate is provisioned and serving HTTPS.'
+    if (domain.status === 'failed') return domain.last_error || 'The previous verification attempt failed.'
+    if (!order) return 'An order is needed before Let\u2019s Encrypt issues a certificate.'
+    if (hasDnsValues) return 'Let\u2019s Encrypt will check for these TXT records to prove ownership.'
+    if (hasHttpChallenge) return 'Let\u2019s Encrypt needs to fetch a challenge file from your server over HTTP.'
+    return 'Waiting for the ACME server to return challenge data.'
+  })()
+
+  const FocusVariant = (
+    <div className="space-y-6">
+      <Card className="overflow-hidden">
+        <div className="flex flex-col gap-4 border-b border-gray-950/5 bg-muted/30 p-6 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Next action
+            </p>
+            <h2 className="text-xl font-semibold text-balance">{focusTitle}</h2>
+            <p className="text-sm text-muted-foreground text-pretty max-w-[70ch]">{focusDescription}</p>
+          </div>
+          <div className="flex flex-wrap gap-2 shrink-0">
+            {primaryActionButton}
+            {order && isPendingState && (
+              <Button variant="outline" onClick={handleCancelOrder} disabled={!canManageCertificates}>
+                <XCircle className="mr-2 size-4" />
+                Cancel
+              </Button>
+            )}
+            {domain.status === 'active' && (
+              <Button
+                variant="outline"
+                onClick={handleRenewDomain}
+                disabled={!canManageCertificates || renewDomain.isPending}
+              >
+                <RefreshCw className="mr-2 size-4" />
+                Renew
+              </Button>
+            )}
           </div>
         </div>
 
-        {/* Cloudflare mode information */}
-        {isUsingCloudflare() && (
-          <Alert className="border-purple-200 bg-purple-50/50 dark:bg-purple-950/10">
-            <Info className="h-4 w-4 text-purple-600" />
-            <AlertDescription>
-              Domain and certificate management is handled automatically by
-              Cloudflare Tunnel.
-            </AlertDescription>
-          </Alert>
-        )}
+        <div className="p-6 space-y-5">
+          {domain.status === 'active' && (
+            <ActiveCertificateInner domain={domain} />
+          )}
 
-        {/* Expiring Soon Alert */}
-        {domain.status === 'active' &&
-          isExpiringSoon(domain.expiration_time) && (
-            <Alert variant="warning">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertTitle>Certificate Expiring Soon</AlertTitle>
-              <AlertDescription className="flex items-center justify-between">
-                <span>
-                  The SSL certificate will expire on{' '}
-                  {formatUTCDate(domain.expiration_time || 0)}. Renew it before
-                  expiration to avoid service interruption.
-                </span>
-                <Button
-                  size="sm"
-                  onClick={handleRenewDomain}
-                  disabled={!canManageCertificates || renewDomain.isPending}
-                >
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  {canManageCertificates
-                    ? 'Renew Now'
-                    : 'Managed by Cloudflare'}
-                </Button>
+          {order && hasDnsValues && domain.verification_method === 'dns-01' && (
+            <>
+              <DnsRecordsList keyPrefix="focus" />
+              <DnsAutoProvision />
+              {dnsTxtRecords[0] && (
+                <p className="text-xs text-muted-foreground">
+                  Typical propagation is 5–15 min.{' '}
+                  <a
+                    href={`https://www.whatsmydns.net/#TXT/${dnsTxtRecords[0].name}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 underline text-foreground"
+                  >
+                    Check propagation
+                    <ExternalLink className="size-3" />
+                  </a>
+                </p>
+              )}
+            </>
+          )}
+
+          {hasHttpChallenge && challengeData && (
+            <HttpChallengePanel
+              domain={domain}
+              challengeData={challengeData}
+              publicIpData={publicIpData}
+              httpDebugInfo={httpDebugInfo}
+              onVerify={handleCompleteDns}
+              onCancel={handleCancelOrder}
+              verifying={finalizeOrder.isPending}
+              canManage={canManageCertificates}
+              hideActions
+            />
+          )}
+
+          {domain.status === 'failed' && (
+            <FailedPanel
+              domain={domain}
+              dnsTxtRecords={dnsTxtRecords}
+              onRetry={handleCompleteDns}
+              onCancel={handleCancelOrder}
+              retrying={finalizeOrder.isPending}
+              canManage={canManageCertificates}
+              keyPrefix="focus-failed"
+            />
+          )}
+
+          {order && !hasDnsValues && !hasHttpChallenge && domain.status !== 'active' && (
+            <Alert>
+              <Clock className="size-4" />
+              <AlertTitle>Waiting for challenge data</AlertTitle>
+              <AlertDescription>
+                The DNS challenge is being prepared. This usually takes a few moments.
               </AlertDescription>
             </Alert>
           )}
+        </div>
+      </Card>
 
-        {/* Error Alert */}
-        {domain.last_error && (
-          <Alert variant="warning">
-            <AlertTriangle className="h-4 w-4" />
-            <AlertTitle>
-              Error: {domain.last_error_type || 'Certificate Error'}
-            </AlertTitle>
-            <AlertDescription>{domain.last_error}</AlertDescription>
-          </Alert>
-        )}
+      <MetadataGrid domain={domain} order={order} compact />
+    </div>
+  )
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Main Content */}
-          <div className="lg:col-span-2 space-y-6">
-            <Card>
-              <div className="p-6 space-y-4">
-                {/* Active Certificate */}
-                {domain.status === 'active' && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <CheckCircle className="h-5 w-5 text-green-600" />
-                        <h2 className="text-lg font-semibold">
-                          Active SSL Certificate
-                        </h2>
-                      </div>
-                      <Button
-                        onClick={handleRenewDomain}
-                        variant="outline"
-                        size="sm"
-                        disabled={
-                          !canManageCertificates || renewDomain.isPending
-                        }
-                      >
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                        {canManageCertificates
-                          ? 'Renew Certificate'
-                          : 'Managed by Cloudflare'}
-                      </Button>
-                    </div>
+  // ==========================================================================
+  // Variant 4: DENSE — everything visible, metadata-forward
+  // ==========================================================================
+  const DenseVariant = (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
+      <div className="space-y-6">
+        <Card>
+          <div className="p-6 space-y-4">
+            <div className="flex items-center justify-between gap-4">
+              <h2 className="text-base font-semibold">Certificate state</h2>
+              <Badge variant={getStatusBadgeVariant(domain.status)}>
+                {domain.status}
+              </Badge>
+            </div>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4 border-t border-gray-950/5 pt-4">
+              <DenseStat label="Method" value={domain.verification_method} />
+              <DenseStat
+                label="Last renewed"
+                value={domain.last_renewed ? formatUTCDate(domain.last_renewed) : '—'}
+              />
+              <DenseStat
+                label="Expires"
+                value={
+                  domain.expiration_time
+                    ? formatUTCDate(domain.expiration_time)
+                    : '—'
+                }
+              />
+              <DenseStat
+                label="Wildcard"
+                value={domain.is_wildcard ? 'Yes' : 'No'}
+              />
+            </div>
+          </div>
+        </Card>
 
-                    <Alert className="border-green-200 bg-green-50/50 dark:bg-green-950/10">
-                      <CheckCircle className="h-4 w-4 text-green-600" />
-                      <AlertDescription>
-                        Your SSL certificate is active and your domain is
-                        secured with HTTPS.
-                      </AlertDescription>
-                    </Alert>
+        {domain.status !== 'active' && (
+          <Card>
+            <div className="p-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-semibold">Challenge</h2>
+                {order && (
+                  <Badge variant={getStatusBadgeVariant(order.status)}>
+                    Order {order.status}
+                  </Badge>
+                )}
+              </div>
 
-                    {/* Certificate Validity */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-muted/50 rounded-lg">
-                      {domain.last_renewed ? (
-                        <div className="space-y-1">
-                          <span className="text-xs font-medium text-muted-foreground">
-                            Last Renewed
-                          </span>
-                          <p className="text-sm font-medium flex items-center gap-2">
-                            <Clock className="h-4 w-4" />
-                            {formatUTCDate(domain.last_renewed)}
-                          </p>
-                        </div>
-                      ) : null}
-                      {domain.expiration_time ? (
-                        <div className="space-y-1">
-                          <span className="text-xs font-medium text-muted-foreground">
-                            Expires
-                          </span>
-                          <p className="text-sm font-medium flex items-center gap-2">
-                            <Calendar className="h-4 w-4" />
-                            {formatUTCDate(domain.expiration_time || 0)}
-                          </p>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {/* Certificate PEM */}
-                    {domain.certificate && (
+              {!order && isPendingState && (
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="text-sm text-muted-foreground">
+                    No active ACME order. Create one to receive the challenge.
+                  </p>
+                  <Button
+                    onClick={handleCreateOrder}
+                    disabled={!canManageCertificates || createOrder.isPending}
+                  >
+                    {createOrder.isPending ? (
                       <>
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium">
-                              Certificate (PEM Format)
-                            </span>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-8 w-8 p-0"
-                              onClick={() =>
-                                handleCopy(
-                                  domain.certificate || '',
-                                  'certificate'
-                                )
-                              }
-                            >
-                              {copiedField === 'certificate' ? (
-                                <CopyCheck className="h-4 w-4" />
-                              ) : (
-                                <Copy className="h-4 w-4" />
-                              )}
-                            </Button>
-                          </div>
-                          <div className="relative">
-                            <pre className="p-4 bg-muted rounded-lg text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto">
-                              {domain.certificate}
-                            </pre>
-                          </div>
-                        </div>
+                        <Loader2 className="mr-2 size-4 animate-spin" />
+                        Creating…
+                      </>
+                    ) : (
+                      <>
+                        <Shield className="mr-2 size-4" />
+                        Create order
                       </>
                     )}
-                  </>
-                )}
+                  </Button>
+                </div>
+              )}
 
-                {/* DNS Challenge Instructions */}
-                {(domain.status === 'challenge_requested' ||
-                  domain.status === 'pending_dns' ||
-                  domain.status === 'pending_http' ||
-                  domain.status === 'pending') &&
-                  domain.verification_method === 'dns-01' && (
-                    <>
-                      <div className="flex items-center justify-between">
-                        <h2 className="text-lg font-semibold">
-                          DNS Challenge Required
-                        </h2>
-                        <Badge variant={getStatusBadgeVariant(domain.status)}>
-                          {domain.status}
-                        </Badge>
-                      </div>
-
-                      {!order && (
-                        <Alert>
-                          <Info className="h-4 w-4" />
-                          <AlertTitle>Create ACME Order</AlertTitle>
-                          <AlertDescription>
-                            <p className="mb-4">
-                              Create an ACME order to get your DNS challenge
-                              token.
-                            </p>
-                            <Button
-                              onClick={handleCreateOrder}
-                              disabled={
-                                !canManageCertificates || createOrder.isPending
-                              }
-                            >
-                              {createOrder.isPending ? (
-                                <>
-                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                  Creating...
-                                </>
-                              ) : (
-                                <>
-                                  <Shield className="mr-2 h-4 w-4" />
-                                  Create Order
-                                </>
-                              )}
-                            </Button>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      {order && hasDnsValues && (
+              {order && hasDnsValues && domain.verification_method === 'dns-01' && (
+                <div className="space-y-3">
+                  <DnsRecordsList keyPrefix="dense" />
+                  <DnsAutoProvision />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      onClick={handleCompleteDns}
+                      disabled={finalizeOrder.isPending || !canManageCertificates}
+                    >
+                      {finalizeOrder.isPending ? (
                         <>
-                          <Alert>
-                            <Info className="h-4 w-4" />
-                            <AlertTitle>Step 1: Add DNS TXT Record</AlertTitle>
-                            <AlertDescription>
-                              Add the following TXT record
-                              {dnsTxtRecords.length > 1 ? 's' : ''} to your DNS
-                              provider:
-                            </AlertDescription>
-                          </Alert>
-
-                          <div className="space-y-4">
-                            {dnsTxtRecords.map((record, index) => (
-                              <div
-                                key={index}
-                                className="space-y-3 p-4 bg-muted/50 rounded-lg"
-                              >
-                                {dnsTxtRecords.length > 1 && (
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-sm font-medium">
-                                      Record {index + 1}
-                                    </span>
-                                    <Badge variant="outline">TXT</Badge>
-                                  </div>
-                                )}
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="space-y-1 flex-1 min-w-0">
-                                    <span className="text-xs font-medium text-muted-foreground">
-                                      Name
-                                    </span>
-                                    <p className="font-mono text-sm break-all">
-                                      {record.name}
-                                    </p>
-                                  </div>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() =>
-                                      handleCopy(
-                                        record.name,
-                                        `main-name-${index}`
-                                      )
-                                    }
-                                  >
-                                    {copiedField === `main-name-${index}` ? (
-                                      <CopyCheck className="h-4 w-4" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
-                                </div>
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="space-y-1 flex-1 min-w-0">
-                                    <span className="text-xs font-medium text-muted-foreground">
-                                      Value
-                                    </span>
-                                    <p className="font-mono text-sm break-all">
-                                      {record.value}
-                                    </p>
-                                  </div>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() =>
-                                      handleCopy(
-                                        record.value,
-                                        `main-value-${index}`
-                                      )
-                                    }
-                                  >
-                                    {copiedField === `main-value-${index}` ? (
-                                      <CopyCheck className="h-4 w-4" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-
-                          {/* DNS Auto-Provisioning Option */}
-                          {dnsProviders && dnsProviders.length > 0 && (
-                            <div className="p-4 bg-muted/50 rounded-lg border">
-                              <div className="flex items-start gap-3">
-                                <div className="p-2 bg-primary/10 rounded-lg">
-                                  <Wand2 className="h-5 w-5 text-primary" />
-                                </div>
-                                <div className="flex-1 space-y-3">
-                                  <div>
-                                    <h4 className="font-medium">
-                                      Auto-Provision DNS Records
-                                    </h4>
-                                    <p className="text-sm text-muted-foreground">
-                                      Automatically create the required TXT
-                                      records using one of your configured DNS
-                                      providers.
-                                    </p>
-                                  </div>
-                                  <div className="flex flex-col sm:flex-row gap-2">
-                                    <Select
-                                      value={selectedDnsProvider}
-                                      onValueChange={setSelectedDnsProvider}
-                                    >
-                                      <SelectTrigger className="w-full sm:w-[220px]">
-                                        <SelectValue placeholder="Select DNS provider" />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        {dnsProviders.map((provider) => (
-                                          <SelectItem
-                                            key={provider.id}
-                                            value={provider.id.toString()}
-                                          >
-                                            {provider.name} (
-                                            {provider.provider_type})
-                                          </SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                    <Button
-                                      onClick={handleSetupDnsRecords}
-                                      disabled={
-                                        !selectedDnsProvider ||
-                                        setupDns.isPending ||
-                                        !canManageCertificates
-                                      }
-                                    >
-                                      {setupDns.isPending ? (
-                                        <>
-                                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                          Creating Records...
-                                        </>
-                                      ) : (
-                                        <>
-                                          <Wand2 className="mr-2 h-4 w-4" />
-                                          Auto-Create Records
-                                        </>
-                                      )}
-                                    </Button>
-                                  </div>
-                                  {!dnsProviders.length && (
-                                    <p className="text-xs text-muted-foreground">
-                                      <a
-                                        href="/settings/dns-providers/add"
-                                        className="underline"
-                                      >
-                                        Add a DNS provider
-                                      </a>{' '}
-                                      to enable automatic DNS record creation.
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          )}
-
-                          <Separator className="my-2" />
-
-                          <p className="text-sm text-muted-foreground text-center">
-                            — or add the records manually —
-                          </p>
-
-                          <Alert>
-                            <Clock className="h-4 w-4" />
-                            <AlertTitle>
-                              Step 2: Wait for DNS Propagation
-                            </AlertTitle>
-                            <AlertDescription>
-                              <p className="mb-2">
-                                After adding the TXT record
-                                {dnsTxtRecords.length > 1 ? 's' : ''}, wait for{' '}
-                                {dnsTxtRecords.length > 1 ? 'them' : 'it'} to
-                                propagate (usually 5-15 minutes, up to 24
-                                hours).
-                              </p>
-                              <p className="text-sm">
-                                Check propagation:
-                                {dnsTxtRecords.map((record, index) => (
-                                  <span key={index}>
-                                    {index > 0 && ', '}
-                                    <a
-                                      href={`https://www.whatsmydns.net/#TXT/${record.name}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="underline inline-flex items-center gap-1"
-                                    >
-                                      {record.name}{' '}
-                                      <ExternalLink className="h-3 w-3" />
-                                    </a>
-                                  </span>
-                                ))}
-                              </p>
-                            </AlertDescription>
-                          </Alert>
-
-                          <Alert>
-                            <CheckCircle className="h-4 w-4" />
-                            <AlertTitle>Step 3: Verify & Complete</AlertTitle>
-                            <AlertDescription>
-                              <p className="mb-4">
-                                Once the DNS record has propagated, click the
-                                button below to verify and provision your SSL
-                                certificate.
-                              </p>
-                              <div className="flex gap-2">
-                                <Button
-                                  onClick={handleCompleteDns}
-                                  disabled={
-                                    finalizeOrder.isPending ||
-                                    !canManageCertificates
-                                  }
-                                >
-                                  {finalizeOrder.isPending ? (
-                                    <>
-                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                      Verifying...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <CheckCircle className="mr-2 h-4 w-4" />
-                                      Verify & Finalize
-                                    </>
-                                  )}
-                                </Button>
-                                <Button
-                                  variant="outline"
-                                  onClick={handleCancelOrder}
-                                  disabled={!canManageCertificates}
-                                >
-                                  <XCircle className="mr-2 h-4 w-4" />
-                                  Cancel
-                                </Button>
-                              </div>
-                            </AlertDescription>
-                          </Alert>
+                          <Loader2 className="mr-2 size-4 animate-spin" />
+                          Verifying…
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle className="mr-2 size-4" />
+                          Verify & finalize
                         </>
                       )}
-                    </>
-                  )}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={handleCancelOrder}
+                      disabled={!canManageCertificates}
+                    >
+                      <XCircle className="mr-2 size-4" />
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
 
-                {/* HTTP Challenge */}
-                {(domain.status === 'challenge_requested' ||
-                  domain.status === 'pending' ||
-                  domain.status === 'pending_http') &&
-                  domain.verification_method === 'http-01' && (
-                    <>
-                      <div className="flex items-center justify-between">
-                        <h2 className="text-lg font-semibold">
-                          HTTP-01 Challenge
-                        </h2>
-                        <Badge variant={getStatusBadgeVariant(domain.status)}>
-                          {domain.status}
-                        </Badge>
-                      </div>
+              {hasHttpChallenge && challengeData && (
+                <HttpChallengePanel
+                  domain={domain}
+                  challengeData={challengeData}
+                  publicIpData={publicIpData}
+                  httpDebugInfo={httpDebugInfo}
+                  onVerify={handleCompleteDns}
+                  onCancel={handleCancelOrder}
+                  verifying={finalizeOrder.isPending}
+                  canManage={canManageCertificates}
+                />
+              )}
 
-                      <p className="text-sm text-muted-foreground">
-                        Your SSL certificate is being provisioned using HTTP-01
-                        validation. Ensure your domain&apos;s A record points to
-                        your server IP and port 80 is accessible.
-                      </p>
+              {domain.status === 'failed' && (
+                <FailedPanel
+                  domain={domain}
+                  dnsTxtRecords={dnsTxtRecords}
+                  onRetry={handleCompleteDns}
+                  onCancel={handleCancelOrder}
+                  retrying={finalizeOrder.isPending}
+                  canManage={canManageCertificates}
+                  keyPrefix="dense-failed"
+                />
+              )}
+            </div>
+          </Card>
+        )}
 
-                      {/* DNS A Record Instructions */}
-                      {publicIpData &&
-                        typeof publicIpData === 'object' &&
-                        'ip' in publicIpData &&
-                        publicIpData.ip && (
-                          <div className="space-y-2 p-4 bg-muted/50 rounded-lg border">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <Info className="h-4 w-4 text-blue-600" />
-                                <span className="text-sm font-medium">
-                                  DNS A Record Required
-                                </span>
-                              </div>
+        {domain.status === 'active' && (
+          <ActiveCertificateCard
+            domain={domain}
+            onRenew={handleRenewDomain}
+            canManage={canManageCertificates}
+            renewing={renewDomain.isPending}
+          />
+        )}
+      </div>
+
+      <div className="space-y-6">
+        <Card>
+          <div className="p-6 space-y-3">
+            <h3 className="text-sm font-semibold">Domain</h3>
+            <dl className="space-y-2.5 text-sm">
+              <DenseDl label="Created" value={formatUTCDate(domain.created_at)} />
+              <DenseDl label="Updated" value={formatUTCDate(domain.updated_at)} />
+            </dl>
+          </div>
+        </Card>
+        {order && (
+          <Card>
+            <div className="p-6 space-y-3">
+              <h3 className="text-sm font-semibold">ACME order</h3>
+              <dl className="space-y-2.5 text-sm">
+                <DenseDl label="Order ID" value={`#${order.id}`} mono />
+                <DenseDl label="Email" value={order.email} />
+                {order.expires_at && (
+                  <DenseDl label="Expires" value={formatUTCDate(order.expires_at)} />
+                )}
+                <DenseDl label="Created" value={formatUTCDate(order.created_at)} />
+                <DenseDl label="Updated" value={formatUTCDate(order.updated_at)} />
+                {order.error && (
+                  <div className="pt-2 border-t border-gray-950/5">
+                    <dt className="text-xs font-medium text-destructive">Error</dt>
+                    <dd className="text-xs text-destructive">{order.error_type}</dd>
+                    <dd className="text-xs text-muted-foreground mt-0.5">{order.error}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          </Card>
+        )}
+      </div>
+    </div>
+  )
+
+  // ==========================================================================
+  // Variant 1 (current): original layout, kept intact for comparison
+  // ==========================================================================
+  const CurrentVariant = (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="lg:col-span-2 space-y-6">
+        <Card>
+          <div className="p-6 space-y-4">
+            {domain.status === 'active' && (
+              <ActiveCertificateInner
+                domain={domain}
+                onRenew={canRenew ? handleRenewDomain : undefined}
+                renewLabel={renewLabel}
+                renewing={renewDomain.isPending}
+                withHeader
+              />
+            )}
+
+            {isPendingState && domain.verification_method === 'dns-01' && (
+              <>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold">DNS challenge required</h2>
+                  <Badge variant={getStatusBadgeVariant(domain.status)}>{domain.status}</Badge>
+                </div>
+                {!order ? (
+                  <div className="space-y-3 rounded-lg border border-gray-950/10 p-4">
+                    <p className="text-sm text-muted-foreground">
+                      Create an ACME order to get your DNS challenge token.
+                    </p>
+                    <Button
+                      onClick={handleCreateOrder}
+                      disabled={!canManageCertificates || createOrder.isPending}
+                    >
+                      {createOrder.isPending ? (
+                        <>
+                          <Loader2 className="mr-2 size-4 animate-spin" />
+                          Creating…
+                        </>
+                      ) : (
+                        <>
+                          <Shield className="mr-2 size-4" />
+                          Create order
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                ) : hasDnsValues ? (
+                  <div className="overflow-hidden rounded-lg border border-gray-950/10">
+                    <InlineStepStrip
+                      steps={[
+                        { label: `Add record${dnsTxtRecords.length > 1 ? 's' : ''}`, state: 'current' },
+                        { label: 'Wait for propagation', state: 'upcoming' },
+                        { label: 'Verify & finalize', state: 'upcoming' },
+                      ]}
+                    />
+                    <div className="space-y-4 border-t border-gray-950/5 p-4">
+                      <div>
+                        <p className="text-sm font-medium">
+                          Add TXT record{dnsTxtRecords.length > 1 ? 's' : ''} to your DNS provider
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Propagation typically takes 5–15 min (up to 24 h).
+                          {dnsTxtRecords[0] && (
+                            <>
+                              {' '}
                               <a
-                                href={`https://www.whatsmydns.net/#A/${domain.domain.replace('*.', '')}`}
+                                href={`https://www.whatsmydns.net/#TXT/${dnsTxtRecords[0].name}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
+                                className="inline-flex items-center gap-1 underline text-foreground"
                               >
-                                Check DNS propagation
-                                <ExternalLink className="h-3 w-3" />
+                                Check propagation
+                                <ExternalLink className="size-3" />
                               </a>
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              Add this A record to your DNS provider:
-                            </p>
-                            <div className="grid grid-cols-[auto_1fr_auto] gap-2 items-center">
-                              <div className="text-xs font-medium text-muted-foreground">
-                                Name:
-                              </div>
-                              <code className="p-2 bg-background rounded text-xs font-mono">
-                                {domain.is_wildcard
-                                  ? `*.${domain.domain.replace('*.', '')}`
-                                  : domain.domain}
-                              </code>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-8 w-8 p-0"
-                                onClick={() =>
-                                  handleCopy(
-                                    domain.is_wildcard
-                                      ? `*.${domain.domain.replace('*.', '')}`
-                                      : domain.domain,
-                                    'dns-name'
-                                  )
-                                }
-                              >
-                                {copiedField === 'dns-name' ? (
-                                  <CopyCheck className="h-3 w-3" />
-                                ) : (
-                                  <Copy className="h-3 w-3" />
-                                )}
-                              </Button>
-
-                              <div className="text-xs font-medium text-muted-foreground">
-                                Type:
-                              </div>
-                              <code className="p-2 bg-background rounded text-xs font-mono">
-                                A
-                              </code>
-                              <div />
-
-                              <div className="text-xs font-medium text-muted-foreground">
-                                Value:
-                              </div>
-                              <code className="p-2 bg-background rounded text-xs font-mono">
-                                {publicIpData.ip as string}
-                              </code>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-8 w-8 p-0"
-                                onClick={() =>
-                                  handleCopy(
-                                    publicIpData.ip as string,
-                                    'dns-value'
-                                  )
-                                }
-                              >
-                                {copiedField === 'dns-value' ? (
-                                  <CopyCheck className="h-3 w-3" />
-                                ) : (
-                                  <Copy className="h-3 w-3" />
-                                )}
-                              </Button>
-                            </div>
-                          </div>
-                        )}
-
-                      {/* Challenge URL and Expected Response */}
-                      {hasHttpChallenge && challengeData && (
-                        <div className="space-y-4">
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium">
-                                Challenge URL
-                              </span>
-                              <div className="flex items-center gap-3">
-                                <a
-                                  href={`https://letsdebug.net`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-xs text-blue-600 hover:underline inline-flex items-center gap-1"
-                                >
-                                  Let&apos;s Debug
-                                  <ExternalLink className="h-3 w-3" />
-                                </a>
-                              </div>
-                            </div>
-                            <p className="text-xs text-muted-foreground">
-                              Let&apos;s Encrypt will verify this URL:
-                            </p>
-                            <div className="flex items-center gap-2">
-                              <code className="flex-1 p-3 bg-muted rounded text-xs font-mono break-all">
-                                http://{domain.domain}
-                                /.well-known/acme-challenge/
-                                {challengeData.token}
-                              </code>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  handleCopy(
-                                    `http://${domain.domain}/.well-known/acme-challenge/${challengeData.token}`,
-                                    'challenge-url'
-                                  )
-                                }
-                              >
-                                {copiedField === 'challenge-url' ? (
-                                  <CopyCheck className="h-4 w-4" />
-                                ) : (
-                                  <Copy className="h-4 w-4" />
-                                )}
-                              </Button>
-                            </div>
-                          </div>
-
-                          <div className="space-y-2">
-                            <span className="text-sm font-medium">
-                              Expected Response
-                            </span>
-                            <p className="text-xs text-muted-foreground">
-                              The URL should return this exact value:
-                            </p>
-                            <div className="flex items-center gap-2">
-                              <code className="flex-1 p-3 bg-muted rounded text-xs font-mono break-all">
-                                {challengeData.key_authorization}
-                              </code>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  handleCopy(
-                                    challengeData.key_authorization,
-                                    'expected-response'
-                                  )
-                                }
-                              >
-                                {copiedField === 'expected-response' ? (
-                                  <CopyCheck className="h-4 w-4" />
-                                ) : (
-                                  <Copy className="h-4 w-4" />
-                                )}
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Status Messages */}
-                      {httpDebugInfo?.dns_error && (
-                        <Alert variant="destructive">
-                          <AlertTriangle className="h-4 w-4" />
-                          <AlertTitle>DNS Configuration Issue</AlertTitle>
-                          <AlertDescription>
-                            <p>{httpDebugInfo.dns_error}</p>
-                            <p className="text-sm mt-2">
-                              Please ensure your domain&apos;s A record points
-                              to your server IP address.
-                            </p>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      {!httpDebugInfo?.dns_error &&
-                        httpDebugInfo &&
-                        httpDebugInfo.dns_a_records.length === 0 && (
-                          <Alert variant="warning">
-                            <AlertTriangle className="h-4 w-4" />
-                            <AlertTitle>No DNS Records Found</AlertTitle>
-                            <AlertDescription>
-                              <p>
-                                Your domain doesn&apos;t have any A records
-                                pointing to a server.
-                              </p>
-                              <p className="text-sm mt-2">
-                                Add an A record in your DNS provider pointing to
-                                your server&apos;s IP address.
-                              </p>
-                            </AlertDescription>
-                          </Alert>
-                        )}
-
-                      {!httpDebugInfo?.dns_error &&
-                        httpDebugInfo &&
-                        httpDebugInfo.dns_a_records.length > 0 &&
-                        httpDebugInfo.challenge_exists && (
-                          <Alert className="border-green-200 bg-green-50/50 dark:bg-green-950/10">
-                            <CheckCircle className="h-4 w-4 text-green-600" />
-                            <AlertTitle>Ready for Validation</AlertTitle>
-                            <AlertDescription>
-                              Your domain is pointing to the server and the
-                              challenge is ready for validation.
-                            </AlertDescription>
-                          </Alert>
-                        )}
-
-                      <div className="flex gap-2">
+                            </>
+                          )}
+                        </p>
+                      </div>
+                      <DnsRecordsList keyPrefix="current-main" />
+                      <DnsAutoProvision />
+                      <div className="flex flex-wrap gap-2 pt-1">
                         <Button
                           onClick={handleCompleteDns}
-                          disabled={
-                            finalizeOrder.isPending || !canManageCertificates
-                          }
+                          disabled={finalizeOrder.isPending || !canManageCertificates}
                         >
                           {finalizeOrder.isPending ? (
                             <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Verifying...
+                              <Loader2 className="mr-2 size-4 animate-spin" />
+                              Verifying…
                             </>
                           ) : (
                             <>
-                              <CheckCircle className="mr-2 h-4 w-4" />
-                              Verify & Provision SSL
+                              <CheckCircle className="mr-2 size-4" />
+                              Verify &amp; finalize
                             </>
                           )}
                         </Button>
@@ -1183,525 +1149,859 @@ export function DomainDetail() {
                           onClick={handleCancelOrder}
                           disabled={!canManageCertificates}
                         >
-                          <XCircle className="mr-2 h-4 w-4" />
-                          Cancel Order
+                          <XCircle className="mr-2 size-4" />
+                          Cancel order
                         </Button>
                       </div>
-                    </>
-                  )}
-
-                {/* Failed */}
-                {domain.status === 'failed' && (
-                  <>
-                    <div className="flex items-center justify-between">
-                      <h2 className="text-lg font-semibold">
-                        DNS Challenge - Verification Failed
-                      </h2>
-                      <Badge variant="destructive">{domain.status}</Badge>
                     </div>
-
-                    <Alert variant="destructive">
-                      <AlertTriangle className="h-4 w-4" />
-                      <AlertTitle>
-                        Error: {domain.last_error_type || 'Validation Failed'}
-                      </AlertTitle>
-                      <AlertDescription>
-                        {domain.last_error ||
-                          'Certificate provisioning failed. Please verify your DNS records and try again.'}
-                      </AlertDescription>
-                    </Alert>
-
-                    {domain.verification_method === 'dns-01' &&
-                      order &&
-                      hasDnsValues && (
-                        <>
-                          <Alert>
-                            <Info className="h-4 w-4" />
-                            <AlertTitle>DNS TXT Record Required</AlertTitle>
-                            <AlertDescription>
-                              Verify the following TXT record
-                              {dnsTxtRecords.length > 1
-                                ? 's exist'
-                                : ' exists'}{' '}
-                              in your DNS provider:
-                            </AlertDescription>
-                          </Alert>
-
-                          <div className="space-y-4">
-                            {dnsTxtRecords.map((record, index) => (
-                              <div
-                                key={index}
-                                className="space-y-3 p-4 bg-muted/50 rounded-lg"
-                              >
-                                {dnsTxtRecords.length > 1 && (
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-sm font-medium">
-                                      Record {index + 1}
-                                    </span>
-                                    <Badge variant="outline">TXT</Badge>
-                                  </div>
-                                )}
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="space-y-1 flex-1 min-w-0">
-                                    <span className="text-xs font-medium text-muted-foreground">
-                                      Name
-                                    </span>
-                                    <p className="font-mono text-sm break-all">
-                                      {record.name}
-                                    </p>
-                                  </div>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() =>
-                                      handleCopy(
-                                        record.name,
-                                        `failed-name-${index}`
-                                      )
-                                    }
-                                  >
-                                    {copiedField === `failed-name-${index}` ? (
-                                      <CopyCheck className="h-4 w-4" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
-                                </div>
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="space-y-1 flex-1 min-w-0">
-                                    <span className="text-xs font-medium text-muted-foreground">
-                                      Value
-                                    </span>
-                                    <p className="font-mono text-sm break-all">
-                                      {record.value}
-                                    </p>
-                                  </div>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() =>
-                                      handleCopy(
-                                        record.value,
-                                        `failed-value-${index}`
-                                      )
-                                    }
-                                  >
-                                    {copiedField === `failed-value-${index}` ? (
-                                      <CopyCheck className="h-4 w-4" />
-                                    ) : (
-                                      <Copy className="h-4 w-4" />
-                                    )}
-                                  </Button>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-
-                          <Alert>
-                            <Clock className="h-4 w-4" />
-                            <AlertTitle>Troubleshooting</AlertTitle>
-                            <AlertDescription>
-                              <ul className="list-disc list-inside space-y-1 text-sm">
-                                <li>
-                                  Verify the TXT record
-                                  {dnsTxtRecords.length > 1
-                                    ? 's are'
-                                    : ' is'}{' '}
-                                  correctly added to your DNS provider
-                                </li>
-                                <li>
-                                  Check DNS propagation:
-                                  {dnsTxtRecords.map((record, index) => (
-                                    <span key={index}>
-                                      {index > 0 && ', '}
-                                      <a
-                                        href={`https://www.whatsmydns.net/#TXT/${record.name}`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="underline inline-flex items-center gap-1"
-                                      >
-                                        {record.name}{' '}
-                                        <ExternalLink className="h-3 w-3" />
-                                      </a>
-                                    </span>
-                                  ))}
-                                </li>
-                                <li>
-                                  Wait for full DNS propagation (can take up to
-                                  24 hours)
-                                </li>
-                                <li>
-                                  Ensure there are no conflicting TXT records
-                                </li>
-                              </ul>
-                            </AlertDescription>
-                          </Alert>
-
-                          <div className="flex gap-2">
-                            <Button
-                              onClick={handleCompleteDns}
-                              disabled={
-                                finalizeOrder.isPending ||
-                                !canManageCertificates
-                              }
-                            >
-                              {finalizeOrder.isPending ? (
-                                <>
-                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                  Retrying...
-                                </>
-                              ) : (
-                                <>
-                                  <RefreshCw className="mr-2 h-4 w-4" />
-                                  Retry Verification
-                                </>
-                              )}
-                            </Button>
-                            <Button
-                              variant="outline"
-                              onClick={handleCancelOrder}
-                              disabled={!canManageCertificates}
-                            >
-                              <XCircle className="mr-2 h-4 w-4" />
-                              Cancel Order
-                            </Button>
-                          </div>
-                        </>
-                      )}
-                  </>
+                  </div>
+                ) : (
+                  <Alert>
+                    <Clock className="size-4" />
+                    <AlertTitle>Waiting for challenge data</AlertTitle>
+                    <AlertDescription>
+                      The DNS challenge is being prepared. This usually takes a few moments.
+                    </AlertDescription>
+                  </Alert>
                 )}
+              </>
+            )}
 
-                {/* Catch-all for other pending/challenge states */}
-                {!domain.status.includes('active') &&
-                  !(
-                    (domain.status === 'challenge_requested' ||
-                      domain.status === 'pending_dns' ||
-                      domain.status === 'pending_http' ||
-                      domain.status === 'pending') &&
-                    domain.verification_method === 'dns-01'
-                  ) &&
-                  !(
-                    (domain.status === 'pending' ||
-                      domain.status === 'pending_http') &&
-                    domain.verification_method === 'http-01'
-                  ) &&
-                  domain.status !== 'failed' && (
-                    <>
-                      <div className="flex items-center justify-between">
-                        <h2 className="text-lg font-semibold">
-                          SSL Certificate Provisioning
-                        </h2>
-                        <Badge variant={getStatusBadgeVariant(domain.status)}>
-                          {domain.status}
-                        </Badge>
-                      </div>
+            {(domain.status === 'pending' ||
+              domain.status === 'pending_http' ||
+              domain.status === 'challenge_requested') &&
+              domain.verification_method === 'http-01' && hasHttpChallenge && challengeData && (
+                <HttpChallengePanel
+                  domain={domain}
+                  challengeData={challengeData}
+                  publicIpData={publicIpData}
+                  httpDebugInfo={httpDebugInfo}
+                  onVerify={handleCompleteDns}
+                  onCancel={handleCancelOrder}
+                  verifying={finalizeOrder.isPending}
+                  canManage={canManageCertificates}
+                  withHeader
+                />
+              )}
 
-                      {domain.verification_method === 'http-01' && (
-                        <Alert>
-                          <Globe className="h-4 w-4" />
-                          <AlertTitle>HTTP-01 Challenge</AlertTitle>
-                          <AlertDescription>
-                            <p className="mb-2">
-                              Your SSL certificate is being provisioned using
-                              HTTP-01 validation.
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              Ensure your domain&apos;s A record points to your
-                              server IP and port 80 is accessible.
-                            </p>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      {domain.verification_method === 'dns-01' && !order && (
-                        <Alert>
-                          <Info className="h-4 w-4" />
-                          <AlertTitle>DNS-01 Challenge</AlertTitle>
-                          <AlertDescription>
-                            <p className="mb-4">
-                              Create an ACME order to get started with DNS
-                              validation.
-                            </p>
-                            <Button
-                              onClick={handleCreateOrder}
-                              disabled={
-                                !canManageCertificates || createOrder.isPending
-                              }
-                            >
-                              {createOrder.isPending ? (
-                                <>
-                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                  Creating Order...
-                                </>
-                              ) : (
-                                <>
-                                  <Shield className="mr-2 h-4 w-4" />
-                                  Create ACME Order
-                                </>
-                              )}
-                            </Button>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      {domain.verification_method === 'dns-01' &&
-                        order &&
-                        !hasDnsValues && (
-                          <Alert>
-                            <Clock className="h-4 w-4" />
-                            <AlertTitle>Waiting for Challenge Data</AlertTitle>
-                            <AlertDescription>
-                              The DNS challenge is being prepared. This usually
-                              takes a few moments.
-                            </AlertDescription>
-                          </Alert>
-                        )}
-                    </>
-                  )}
-              </div>
-            </Card>
+            {domain.status === 'failed' && (
+              <FailedPanel
+                domain={domain}
+                dnsTxtRecords={dnsTxtRecords}
+                onRetry={handleCompleteDns}
+                onCancel={handleCancelOrder}
+                retrying={finalizeOrder.isPending}
+                canManage={canManageCertificates}
+                keyPrefix="current-failed"
+                withHeader
+              />
+            )}
           </div>
+        </Card>
+      </div>
 
-          {/* Sidebar */}
-          <div className="space-y-6">
-            {/* Domain Information */}
-            <Card>
-              <div className="p-6 space-y-4">
-                <h2 className="text-lg font-semibold">Domain Information</h2>
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <span className="text-xs text-muted-foreground">
-                      Status
-                    </span>
-                    <div>
-                      <Badge variant={getStatusBadgeVariant(domain.status)}>
-                        {domain.status}
-                      </Badge>
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <span className="text-xs text-muted-foreground">
-                      Verification Method
-                    </span>
-                    <p className="text-sm font-medium">
-                      {domain.verification_method}
-                    </p>
-                  </div>
-                  {domain.status === 'active' && (
+      <div className="space-y-6">
+        {order?.error && (
+          <Card className="border-destructive/30">
+            <div className="p-5 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="size-4 text-destructive" />
+                <h3 className="text-sm font-semibold text-destructive">Order error</h3>
+              </div>
+              <p className="text-sm font-medium text-destructive">{order.error_type}</p>
+              <p className="text-xs text-muted-foreground">{order.error}</p>
+            </div>
+          </Card>
+        )}
+
+        <Card>
+          <div className="p-5 space-y-4">
+            <h2 className="text-sm font-semibold">Key facts</h2>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+              <KeyFact label="Method" value={domain.verification_method} />
+              <KeyFact
+                label="Wildcard"
+                value={domain.is_wildcard ? 'Yes' : 'No'}
+              />
+            </dl>
+          </div>
+        </Card>
+
+        {order && (
+          <Card>
+            <div className="p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">ACME order</h2>
+                <Badge variant={getStatusBadgeVariant(order.status)}>
+                  {order.status}
+                </Badge>
+              </div>
+              <dl className="space-y-2">
+                <CompactDl label="Order ID" value={`#${order.id}`} mono />
+                <CompactDl label="Email" value={order.email} />
+                {order.expires_at && (
+                  <CompactDl label="Expires" value={formatUTCDate(order.expires_at)} />
+                )}
+                <CompactDl label="Created" value={formatUTCDate(order.created_at)} />
+                <CompactDl label="Updated" value={formatUTCDate(order.updated_at)} />
+              </dl>
+            </div>
+          </Card>
+        )}
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="flex-1 overflow-auto">
+      <div className="max-w-7xl mx-auto space-y-6 p-4 sm:p-6">
+        {/* Header (shared across variants) */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+          <div className="flex items-start gap-3 min-w-0 sm:items-center sm:gap-4">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="shrink-0"
+              onClick={() => navigate('/settings/domains')}
+            >
+              <ArrowLeft className="size-4" />
+            </Button>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                <h1 className="text-xl sm:text-2xl font-semibold tracking-tight truncate">
+                  {domain.domain}
+                </h1>
+                <Badge variant={getStatusBadgeVariant(domain.status)}>{domain.status}</Badge>
+                {domain.is_wildcard && <Badge variant="outline">Wildcard</Badge>}
+              </div>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                TLS certificate &amp; order management
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {primaryActionButton}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshAll()}
+              disabled={isRefreshing}
+            >
+              {isRefreshing ? (
+                <Loader2 className="mr-2 size-4 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-2 size-4" />
+              )}
+              Refresh
+            </Button>
+            {(canRenew || (order && isPendingState)) && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="icon" aria-label="More actions">
+                    <MoreHorizontal className="size-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  {canRenew && domain.status === 'active' && (
+                    <DropdownMenuItem
+                      onSelect={() => handleRenewDomain()}
+                      disabled={renewDomain.isPending}
+                    >
+                      <RefreshCw className="mr-2 size-4" />
+                      {renewLabel}
+                    </DropdownMenuItem>
+                  )}
+                  {order && isPendingState && (
                     <>
-                      <Separator />
-                      {!!domain.last_renewed && (
-                        <div className="space-y-1">
-                          <span className="text-xs text-muted-foreground">
-                            Last Renewed
-                          </span>
-                          <p className="text-sm font-medium flex items-center gap-2">
-                            <Clock className="h-4 w-4" />
-                            {formatUTCDate(domain.last_renewed)}
-                          </p>
-                        </div>
-                      )}
-                      {!!domain.expiration_time && (
-                        <div className="space-y-1">
-                          <span className="text-xs text-muted-foreground">
-                            Expires
-                          </span>
-                          <p className="text-sm font-medium flex items-center gap-2">
-                            <Calendar className="h-4 w-4" />
-                            {formatUTCDate(domain.expiration_time)}
-                          </p>
-                        </div>
-                      )}
+                      {canRenew && domain.status === 'active' && <DropdownMenuSeparator />}
+                      <DropdownMenuItem
+                        onSelect={handleCancelOrder}
+                        disabled={!canManageCertificates || cancelOrder.isPending}
+                        className="text-destructive focus:text-destructive"
+                      >
+                        <XCircle className="mr-2 size-4" />
+                        Cancel order
+                      </DropdownMenuItem>
                     </>
                   )}
-                  <Separator />
-                  <div className="space-y-1">
-                    <span className="text-xs text-muted-foreground">
-                      Created
-                    </span>
-                    <p className="text-sm">
-                      {formatUTCDate(domain.created_at)}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <span className="text-xs text-muted-foreground">
-                      Last Updated
-                    </span>
-                    <p className="text-sm">
-                      {formatUTCDate(domain.updated_at)}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            </Card>
-
-            {/* ACME Order Information */}
-            {order && (
-              <Card>
-                <div className="p-6 space-y-4">
-                  <h2 className="text-lg font-semibold">ACME Order</h2>
-                  <div className="space-y-3">
-                    <div className="space-y-1">
-                      <span className="text-xs text-muted-foreground">
-                        Order Status
-                      </span>
-                      <div>
-                        <Badge variant={getStatusBadgeVariant(order.status)}>
-                          {order.status}
-                        </Badge>
-                      </div>
-                    </div>
-                    <div className="space-y-1">
-                      <span className="text-xs text-muted-foreground">
-                        Order ID
-                      </span>
-                      <p className="text-sm font-mono">#{order.id}</p>
-                    </div>
-                    <div className="space-y-1">
-                      <span className="text-xs text-muted-foreground">
-                        Email
-                      </span>
-                      <p className="text-sm">{order.email}</p>
-                    </div>
-                    {order.expires_at && (
-                      <div className="space-y-1">
-                        <span className="text-xs text-muted-foreground">
-                          Order Expires
-                        </span>
-                        <p className="text-sm">
-                          {formatUTCDate(order.expires_at)}
-                        </p>
-                      </div>
-                    )}
-                    {hasDnsChallenge &&
-                      domain.verification_method === 'dns-01' && (
-                        <>
-                          <Separator />
-                          <div className="space-y-2">
-                            <span className="text-xs text-muted-foreground">
-                              DNS Challenge
-                            </span>
-                            <div className="space-y-3">
-                              {dnsTxtRecords.map((record, index) => (
-                                <div
-                                  key={index}
-                                  className="space-y-2 p-3 bg-muted/50 rounded-md"
-                                >
-                                  {dnsTxtRecords.length > 1 && (
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-xs font-medium">
-                                        Record {index + 1}
-                                      </span>
-                                      <Badge
-                                        variant="outline"
-                                        className="text-xs"
-                                      >
-                                        TXT
-                                      </Badge>
-                                    </div>
-                                  )}
-                                  <div className="space-y-1">
-                                    <span className="text-xs font-medium">
-                                      Name:
-                                    </span>
-                                    <div className="flex items-center gap-2">
-                                      <code className="text-xs font-mono break-all flex-1">
-                                        {record.name}
-                                      </code>
-                                      <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        className="h-6 w-6 p-0"
-                                        onClick={() =>
-                                          handleCopy(
-                                            record.name,
-                                            `sidebar-name-${index}`
-                                          )
-                                        }
-                                      >
-                                        {copiedField ===
-                                        `sidebar-name-${index}` ? (
-                                          <CopyCheck className="h-3 w-3" />
-                                        ) : (
-                                          <Copy className="h-3 w-3" />
-                                        )}
-                                      </Button>
-                                    </div>
-                                  </div>
-                                  <div className="space-y-1">
-                                    <span className="text-xs font-medium">
-                                      Value:
-                                    </span>
-                                    <div className="flex items-center gap-2">
-                                      <code className="text-xs font-mono break-all flex-1">
-                                        {record.value}
-                                      </code>
-                                      <Button
-                                        size="sm"
-                                        variant="ghost"
-                                        className="h-6 w-6 p-0"
-                                        onClick={() =>
-                                          handleCopy(
-                                            record.value,
-                                            `sidebar-value-${index}`
-                                          )
-                                        }
-                                      >
-                                        {copiedField ===
-                                        `sidebar-value-${index}` ? (
-                                          <CopyCheck className="h-3 w-3" />
-                                        ) : (
-                                          <Copy className="h-3 w-3" />
-                                        )}
-                                      </Button>
-                                    </div>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    {order.error && (
-                      <>
-                        <Separator />
-                        <div className="space-y-1">
-                          <span className="text-xs text-muted-foreground text-destructive">
-                            Error
-                          </span>
-                          <p className="text-sm text-destructive">
-                            {order.error_type}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {order.error}
-                          </p>
-                        </div>
-                      </>
-                    )}
-                    <Separator />
-                    <div className="space-y-1">
-                      <span className="text-xs text-muted-foreground">
-                        Created
-                      </span>
-                      <p className="text-sm">
-                        {formatUTCDate(order.created_at)}
-                      </p>
-                    </div>
-                    <div className="space-y-1">
-                      <span className="text-xs text-muted-foreground">
-                        Updated
-                      </span>
-                      <p className="text-sm">
-                        {formatUTCDate(order.updated_at)}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </Card>
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
           </div>
         </div>
+
+        {/* Alerts (shared across variants) */}
+        {isUsingCloudflare() && (
+          <Alert className="border-purple-200 bg-purple-50/50 dark:bg-purple-950/10">
+            <Info className="size-4 text-purple-600" />
+            <AlertDescription>
+              Domain and certificate management is handled automatically by Cloudflare Tunnel.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {domain.status === 'active' && isExpiringSoon(domain.expiration_time) && (
+          <Alert variant="warning">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Certificate expiring soon</AlertTitle>
+            <AlertDescription className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <span>
+                The TLS certificate will expire on {formatUTCDate(domain.expiration_time || 0)}.
+                Renew it before expiration to avoid service interruption.
+              </span>
+              {canRenew && (
+                <Button
+                  size="sm"
+                  onClick={handleRenewDomain}
+                  disabled={renewDomain.isPending}
+                >
+                  <RefreshCw className="mr-2 size-4" />
+                  {renewLabel}
+                </Button>
+              )}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {domain.last_error && domain.status !== 'failed' && (
+          <Alert variant="warning">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>Error: {domain.last_error_type || 'Certificate error'}</AlertTitle>
+            <AlertDescription>{domain.last_error}</AlertDescription>
+          </Alert>
+        )}
+
+        {/* Variant picker */}
+        <div data-uidotsh-pick="Domain detail layout" className="contents">
+          <div data-uidotsh-option="Split (current)" className="contents" hidden>
+            {CurrentVariant}
+          </div>
+          <div data-uidotsh-option="Timeline" className="contents">
+            {TimelineVariant}
+          </div>
+          <div data-uidotsh-option="Focus" className="contents" hidden>
+            {FocusVariant}
+          </div>
+          <div data-uidotsh-option="Dense ops" className="contents" hidden>
+            {DenseVariant}
+          </div>
+        </div>
+
+        {domain.verification_method === 'http-01' &&
+          isPendingState &&
+          !hasHttpChallenge && (
+            <Alert>
+              <Globe className="size-4" />
+              <AlertTitle>HTTP-01 challenge</AlertTitle>
+              <AlertDescription>
+                Your TLS certificate is being provisioned using HTTP-01 validation.
+                Ensure your domain&apos;s A record points to your server IP and port 80 is accessible.
+              </AlertDescription>
+            </Alert>
+          )}
       </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// Sub-components
+// ============================================================================
+
+type Domain = {
+  id: number
+  domain: string
+  status: string
+  verification_method: string
+  is_wildcard?: boolean
+  last_renewed?: number | null
+  expiration_time?: number | null
+  certificate?: string | null
+  last_error?: string | null
+  last_error_type?: string | null
+  created_at: number
+  updated_at: number
+}
+
+function DenseStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="text-xs font-medium text-muted-foreground truncate">{label}</p>
+      <p className="text-sm font-medium truncate tabular-nums">{value}</p>
+    </div>
+  )
+}
+
+function DenseDl({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-xs font-medium text-muted-foreground shrink-0">{label}</dt>
+      <dd className={mono ? 'text-xs font-mono text-right truncate' : 'text-xs text-right truncate'}>
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+function KeyFact({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 text-sm font-medium truncate tabular-nums">{value}</dd>
+    </div>
+  )
+}
+
+function CompactDl({
+  label,
+  value,
+  mono,
+}: {
+  label: string
+  value: React.ReactNode
+  mono?: boolean
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-xs font-medium text-muted-foreground shrink-0">{label}</dt>
+      <dd
+        className={
+          mono
+            ? 'text-xs font-mono text-right truncate min-w-0'
+            : 'text-sm text-right truncate min-w-0'
+        }
+      >
+        {value}
+      </dd>
+    </div>
+  )
+}
+
+type InlineStep = {
+  label: string
+  state: 'current' | 'upcoming' | 'complete'
+}
+
+function InlineStepStrip({ steps }: { steps: InlineStep[] }) {
+  return (
+    <ol className="flex items-stretch divide-x divide-gray-950/5 bg-muted/40">
+      {steps.map((step, idx) => {
+        const stateClasses =
+          step.state === 'current'
+            ? 'text-foreground'
+            : step.state === 'complete'
+            ? 'text-muted-foreground'
+            : 'text-muted-foreground/70'
+        const indicatorClasses =
+          step.state === 'current'
+            ? 'bg-foreground text-background'
+            : step.state === 'complete'
+            ? 'bg-foreground/70 text-background'
+            : 'bg-muted-foreground/20 text-muted-foreground'
+        return (
+          <li
+            key={idx}
+            className={`flex flex-1 items-center gap-2 px-3 py-2 text-xs font-medium ${stateClasses}`}
+          >
+            <span
+              className={`inline-flex size-5 items-center justify-center rounded-full text-[11px] tabular-nums ${indicatorClasses}`}
+            >
+              {idx + 1}
+            </span>
+            <span className="truncate">{step.label}</span>
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+function MetadataGrid({
+  domain,
+  order,
+  compact,
+}: {
+  domain: Domain
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  order: any
+  compact?: boolean
+}) {
+  return (
+    <div
+      className={
+        compact
+          ? 'grid grid-cols-1 gap-4 md:grid-cols-2'
+          : 'grid grid-cols-1 gap-6 md:grid-cols-2'
+      }
+    >
+      <Card>
+        <div className="p-5 space-y-3">
+          <h3 className="text-sm font-semibold">Domain</h3>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+            <dt className="text-xs font-medium text-muted-foreground">Method</dt>
+            <dd className="text-xs text-right">{domain.verification_method}</dd>
+            <dt className="text-xs font-medium text-muted-foreground">Wildcard</dt>
+            <dd className="text-xs text-right">{domain.is_wildcard ? 'Yes' : 'No'}</dd>
+            {domain.last_renewed ? (
+              <>
+                <dt className="text-xs font-medium text-muted-foreground">Last renewed</dt>
+                <dd className="text-xs text-right">{formatUTCDate(domain.last_renewed)}</dd>
+              </>
+            ) : null}
+            {domain.expiration_time ? (
+              <>
+                <dt className="text-xs font-medium text-muted-foreground">Expires</dt>
+                <dd className="text-xs text-right">{formatUTCDate(domain.expiration_time)}</dd>
+              </>
+            ) : null}
+            <dt className="text-xs font-medium text-muted-foreground">Created</dt>
+            <dd className="text-xs text-right">{formatUTCDate(domain.created_at)}</dd>
+            <dt className="text-xs font-medium text-muted-foreground">Updated</dt>
+            <dd className="text-xs text-right">{formatUTCDate(domain.updated_at)}</dd>
+          </dl>
+        </div>
+      </Card>
+      {order ? (
+        <Card>
+          <div className="p-5 space-y-3">
+            <h3 className="text-sm font-semibold">ACME order</h3>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 text-sm">
+              <dt className="text-xs font-medium text-muted-foreground">Status</dt>
+              <dd className="text-xs text-right">{order.status}</dd>
+              <dt className="text-xs font-medium text-muted-foreground">Order ID</dt>
+              <dd className="text-xs font-mono text-right">#{order.id}</dd>
+              <dt className="text-xs font-medium text-muted-foreground">Email</dt>
+              <dd className="text-xs text-right truncate">{order.email}</dd>
+              {order.expires_at ? (
+                <>
+                  <dt className="text-xs font-medium text-muted-foreground">Expires</dt>
+                  <dd className="text-xs text-right">{formatUTCDate(order.expires_at)}</dd>
+                </>
+              ) : null}
+              <dt className="text-xs font-medium text-muted-foreground">Created</dt>
+              <dd className="text-xs text-right">{formatUTCDate(order.created_at)}</dd>
+              <dt className="text-xs font-medium text-muted-foreground">Updated</dt>
+              <dd className="text-xs text-right">{formatUTCDate(order.updated_at)}</dd>
+            </dl>
+            {order.error ? (
+              <div className="pt-2 mt-2 border-t border-gray-950/5">
+                <p className="text-xs font-medium text-destructive">{order.error_type}</p>
+                <p className="text-xs text-muted-foreground">{order.error}</p>
+              </div>
+            ) : null}
+          </div>
+        </Card>
+      ) : (
+        <Card>
+          <div className="p-5 space-y-2">
+            <h3 className="text-sm font-semibold">ACME order</h3>
+            <p className="text-xs text-muted-foreground">No active order.</p>
+          </div>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+function ActiveCertificateCard({
+  domain,
+  onRenew,
+  canManage,
+  renewing,
+}: {
+  domain: Domain
+  onRenew: () => void
+  canManage: boolean
+  renewing: boolean
+}) {
+  return (
+    <Card>
+      <div className="p-6 space-y-4">
+        <ActiveCertificateInner
+          domain={domain}
+          onRenew={onRenew}
+          canManage={canManage}
+          renewing={renewing}
+          withHeader
+        />
+      </div>
+    </Card>
+  )
+}
+
+function ActiveCertificateInner({
+  domain,
+  onRenew,
+  renewLabel = 'Renew certificate',
+  canManage,
+  renewing,
+  withHeader,
+}: {
+  domain: Domain
+  onRenew?: () => void
+  renewLabel?: string
+  canManage?: boolean
+  renewing?: boolean
+  withHeader?: boolean
+}) {
+  const [pemOpen, setPemOpen] = useState(false)
+  return (
+    <>
+      {withHeader && (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="size-5 text-green-600" />
+            <h2 className="text-lg font-semibold">Active TLS certificate</h2>
+          </div>
+          {onRenew && (
+            <Button
+              onClick={onRenew}
+              variant="outline"
+              size="sm"
+              disabled={(canManage === false) || renewing}
+            >
+              <RefreshCw className="mr-2 size-4" />
+              {renewLabel}
+            </Button>
+          )}
+        </div>
+      )}
+      <Alert className="border-green-200 bg-green-50/50 dark:bg-green-950/10">
+        <CheckCircle className="size-4 text-green-600" />
+        <AlertDescription>
+          Your TLS certificate is active and your domain is secured with HTTPS.
+        </AlertDescription>
+      </Alert>
+      <div className="grid grid-cols-1 gap-4 rounded-lg bg-muted/50 p-4 md:grid-cols-2">
+        {domain.last_renewed ? (
+          <div className="space-y-1">
+            <span className="text-xs font-medium text-muted-foreground">Last renewed</span>
+            <p
+              className="text-sm font-medium flex items-center gap-2"
+              title={formatUTCDate(domain.last_renewed)}
+            >
+              <Clock className="size-4" />
+              {formatDistanceToNowStrict(new Date(domain.last_renewed), { addSuffix: true })}
+            </p>
+          </div>
+        ) : null}
+        {domain.expiration_time ? (
+          <div className="space-y-1">
+            <span className="text-xs font-medium text-muted-foreground">Expires</span>
+            <p
+              className="text-sm font-medium flex items-center gap-2"
+              title={formatUTCDate(domain.expiration_time)}
+            >
+              <Calendar className="size-4" />
+              in {formatDistanceToNowStrict(new Date(domain.expiration_time))}
+            </p>
+          </div>
+        ) : null}
+      </div>
+      {domain.certificate && (
+        <Collapsible open={pemOpen} onOpenChange={setPemOpen}>
+          <div className="flex items-center justify-between">
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" size="sm" className="-ml-2 px-2">
+                <ChevronDown
+                  className={
+                    pemOpen
+                      ? 'mr-2 size-4 rotate-180 transition-transform'
+                      : 'mr-2 size-4 transition-transform'
+                  }
+                />
+                {pemOpen ? 'Hide certificate' : 'Show certificate (PEM)'}
+              </Button>
+            </CollapsibleTrigger>
+            <CopyButton
+              value={domain.certificate}
+              minimal
+              className="size-8 rounded-md"
+            />
+          </div>
+          <CollapsibleContent>
+            <pre className="mt-2 p-4 bg-muted rounded-lg text-xs font-mono overflow-x-auto max-h-64 overflow-y-auto">
+              {domain.certificate}
+            </pre>
+          </CollapsibleContent>
+        </Collapsible>
+      )}
+    </>
+  )
+}
+
+function HttpChallengePanel({
+  domain,
+  challengeData,
+  publicIpData,
+  httpDebugInfo,
+  onVerify,
+  onCancel,
+  verifying,
+  canManage,
+  hideActions,
+  withHeader,
+}: {
+  domain: Domain
+  challengeData: ChallengeData
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  publicIpData: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  httpDebugInfo: any
+  onVerify: () => void
+  onCancel: () => void
+  verifying: boolean
+  canManage: boolean
+  hideActions?: boolean
+  withHeader?: boolean
+}) {
+  const ip =
+    publicIpData && typeof publicIpData === 'object' && 'ip' in publicIpData
+      ? (publicIpData.ip as string)
+      : undefined
+  const dnsName = domain.is_wildcard
+    ? `*.${domain.domain.replace('*.', '')}`
+    : domain.domain
+  const challengeUrl = `http://${domain.domain}/.well-known/acme-challenge/${challengeData.token}`
+
+  return (
+    <div className="space-y-4">
+      {withHeader && (
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">HTTP-01 challenge</h2>
+        </div>
+      )}
+
+      {ip && (
+        <div className="rounded-lg border border-gray-950/10 bg-muted/40">
+          <div className="flex items-center justify-between border-b border-gray-950/5 px-4 py-2.5">
+            <div className="flex items-center gap-2">
+              <Info className="size-4 text-blue-600" />
+              <span className="text-sm font-medium">DNS A record required</span>
+            </div>
+            <a
+              href={`https://www.whatsmydns.net/#A/${domain.domain.replace('*.', '')}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
+            >
+              Check propagation
+              <ExternalLink className="size-3" />
+            </a>
+          </div>
+          <dl className="divide-y divide-gray-950/5 text-sm">
+            <DnsKvRow label="Name" value={dnsName} />
+            <DnsKvRow label="Type" value="A" copyable={false} />
+            <DnsKvRow label="Value" value={ip} />
+          </dl>
+        </div>
+      )}
+
+      <div className="space-y-3 rounded-lg border border-gray-950/10 p-4">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Challenge URL</span>
+          <a
+            href="https://letsdebug.net"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
+          >
+            Let&apos;s Debug
+            <ExternalLink className="size-3" />
+          </a>
+        </div>
+        <div className="flex items-center gap-2">
+          <code className="flex-1 p-2.5 bg-muted rounded text-xs font-mono break-all">
+            {challengeUrl}
+          </code>
+          <CopyButton value={challengeUrl} minimal className="size-8 rounded-md" />
+        </div>
+        <div>
+          <span className="text-sm font-medium">Expected response</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <code className="flex-1 p-2.5 bg-muted rounded text-xs font-mono break-all">
+            {challengeData.key_authorization}
+          </code>
+          <CopyButton
+            value={challengeData.key_authorization}
+            minimal
+            className="size-8 rounded-md"
+          />
+        </div>
+      </div>
+
+      {httpDebugInfo?.dns_error && (
+        <Alert variant="destructive">
+          <AlertTriangle className="size-4" />
+          <AlertTitle>DNS configuration issue</AlertTitle>
+          <AlertDescription>
+            <p>{httpDebugInfo.dns_error}</p>
+            <p className="text-sm mt-2">
+              Ensure your domain&apos;s A record points to your server IP address.
+            </p>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {!httpDebugInfo?.dns_error &&
+        httpDebugInfo &&
+        httpDebugInfo.dns_a_records.length === 0 && (
+          <Alert variant="warning">
+            <AlertTriangle className="size-4" />
+            <AlertTitle>No DNS records found</AlertTitle>
+            <AlertDescription>
+              Your domain doesn&apos;t have any A records pointing to a server.
+            </AlertDescription>
+          </Alert>
+        )}
+
+      {!httpDebugInfo?.dns_error &&
+        httpDebugInfo &&
+        httpDebugInfo.dns_a_records.length > 0 &&
+        httpDebugInfo.challenge_exists && (
+          <Alert className="border-green-200 bg-green-50/50 dark:bg-green-950/10">
+            <CheckCircle className="size-4 text-green-600" />
+            <AlertTitle>Ready for validation</AlertTitle>
+            <AlertDescription>
+              Your domain is pointing to the server and the challenge is ready.
+            </AlertDescription>
+          </Alert>
+        )}
+
+      {!hideActions && (
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={onVerify} disabled={verifying || !canManage}>
+            {verifying ? (
+              <>
+                <Loader2 className="mr-2 size-4 animate-spin" />
+                Verifying…
+              </>
+            ) : (
+              <>
+                <CheckCircle className="mr-2 size-4" />
+                Verify & provision TLS
+              </>
+            )}
+          </Button>
+          <Button variant="outline" onClick={onCancel} disabled={!canManage}>
+            <XCircle className="mr-2 size-4" />
+            Cancel order
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DnsKvRow({
+  label,
+  value,
+  copyable = true,
+}: {
+  label: string
+  value: string
+  copyable?: boolean
+}) {
+  return (
+    <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-2.5">
+      <dt className="text-xs font-medium text-muted-foreground w-16">{label}</dt>
+      <dd className="min-w-0">
+        <code className="text-xs font-mono break-all">{value}</code>
+      </dd>
+      {copyable ? (
+        <CopyButton value={value} minimal className="size-8 rounded-md" />
+      ) : (
+        <span />
+      )}
+    </div>
+  )
+}
+
+function FailedPanel({
+  domain,
+  dnsTxtRecords,
+  onRetry,
+  onCancel,
+  retrying,
+  canManage,
+  keyPrefix,
+  withHeader,
+}: {
+  domain: Domain
+  dnsTxtRecords: { name: string; value: string }[]
+  onRetry: () => void
+  onCancel: () => void
+  retrying: boolean
+  canManage: boolean
+  keyPrefix: string
+  withHeader?: boolean
+}) {
+  return (
+    <div className="space-y-4">
+      {withHeader && (
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Verification failed</h2>
+          <Badge variant="destructive">{domain.status}</Badge>
+        </div>
+      )}
+      <Alert variant="destructive">
+        <AlertTriangle className="size-4" />
+        <AlertTitle>Error: {domain.last_error_type || 'Validation failed'}</AlertTitle>
+        <AlertDescription>
+          {domain.last_error ||
+            'Certificate provisioning failed. Verify your DNS records and try again.'}
+        </AlertDescription>
+      </Alert>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={onRetry} disabled={retrying || !canManage}>
+          {retrying ? (
+            <>
+              <Loader2 className="mr-2 size-4 animate-spin" />
+              Retrying…
+            </>
+          ) : (
+            <>
+              <RefreshCw className="mr-2 size-4" />
+              Retry verification
+            </>
+          )}
+        </Button>
+        <Button variant="outline" onClick={onCancel} disabled={!canManage}>
+          <XCircle className="mr-2 size-4" />
+          Cancel order
+        </Button>
+      </div>
+      {dnsTxtRecords.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Reference — verify {dnsTxtRecords.length > 1 ? 'these records exist' : 'this record exists'} in DNS:
+          </p>
+          <div className="divide-y divide-gray-950/5 rounded-lg border border-gray-950/10 overflow-hidden">
+            {dnsTxtRecords.map((record, index) => (
+              <div
+                key={`${keyPrefix}-${index}`}
+                className="grid grid-cols-[auto_1fr_auto] items-start gap-3 px-4 py-2.5"
+              >
+                <Badge variant="outline" className="mt-0.5">TXT</Badge>
+                <div className="min-w-0 space-y-1">
+                  <p className="font-mono text-xs break-all">
+                    <span className="text-muted-foreground">Name:</span> {record.name}
+                  </p>
+                  <p className="font-mono text-xs break-all">
+                    <span className="text-muted-foreground">Value:</span> {record.value}
+                  </p>
+                </div>
+                <CopyButton
+                  value={record.value}
+                  minimal
+                  className="size-8 rounded-md"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

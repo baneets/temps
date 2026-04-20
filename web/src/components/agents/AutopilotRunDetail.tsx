@@ -17,7 +17,7 @@ import {
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -34,11 +34,24 @@ import {
   Webhook,
 } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { getAgentRun, retryRun } from './api'
-import type { AgentRunLog } from './api'
+import {
+  getErrorGroupOptions,
+  getRunWithLogsOptions,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { AgentRunLogResponse as AgentRunLog } from '@/api/client/types.gen'
 import { AutopilotStatusBadge } from './AutopilotStatusBadge'
-import { startSession } from '@/components/workspace/api'
+import {
+  addContext,
+  createPr,
+  reAnalyze,
+  retryRun,
+  startAnalysis,
+  startFix,
+  workspaceStartSession,
+} from '@/api/client/sdk.gen'
 import { cn } from '@/lib/utils'
+import { toast } from 'sonner'
+import { GitBranch, Send, Sparkles } from 'lucide-react'
 
 const proseClasses = 'prose prose-sm dark:prose-invert max-w-none prose-pre:bg-black/30 prose-pre:text-muted-foreground prose-pre:text-xs prose-pre:border-0 prose-code:before:content-none prose-code:after:content-none prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1.5 prose-ul:list-disc prose-ul:pl-5 prose-ol:my-1.5 prose-ol:list-decimal prose-ol:pl-5 prose-li:my-0.5 prose-li:marker:text-foreground/60 prose-hr:my-3 prose-hr:border-border prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1'
 
@@ -56,7 +69,16 @@ const activeStatuses = new Set([
   'deploying',
 ])
 
-function formatDuration(startedAt: string | null, completedAt: string | null): string {
+/** Autofixer phases that are actively doing work (worth streaming/refetching). */
+const autofixerActivePhases = new Set(['analyzing', 'fixing'])
+
+/** Autofixer phases that expose an action (generate fix, create PR, or chat). */
+const autofixerInteractivePhases = new Set(['analyzed', 'fix_ready'])
+
+function formatDuration(
+  startedAt: string | null | undefined,
+  completedAt: string | null | undefined,
+): string {
   if (!startedAt) return '-'
   const start = new Date(startedAt).getTime()
   const end = completedAt ? new Date(completedAt).getTime() : Date.now()
@@ -835,33 +857,63 @@ function ConversationViewer({
 export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
   const { runId } = useParams()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [streamLogs, setStreamLogs] = useState<AgentRunLog[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [isOpeningWorkspace, setIsOpeningWorkspace] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [contextInput, setContextInput] = useState('')
+  const [isSendingContext, setIsSendingContext] = useState(false)
+  const [isStartingFix, setIsStartingFix] = useState(false)
+  const [isCreatingPr, setIsCreatingPr] = useState(false)
+  const [isStartingOver, setIsStartingOver] = useState(false)
+
+  const runQueryOptions = getRunWithLogsOptions({
+    path: { project_id: project.id, run_id: Number(runId) },
+  })
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['agent-run', project.id, runId],
-    queryFn: () => getAgentRun(project.id, runId!),
+    ...runQueryOptions,
     enabled: !!runId,
     refetchInterval: (query) => {
       const run = query.state.data?.run
-      if (run && activeStatuses.has(run.status)) {
-        return 5000
-      }
+      if (!run) return false
+      const phase = run.phase || ''
+      if (activeStatuses.has(run.status)) return 5000
+      if (autofixerActivePhases.has(phase)) return 5000
       return false
     },
+  })
+
+  const currentRun = data?.run
+  const isAutofixerRun = currentRun?.trigger_source_type === 'error_group'
+  const errorGroupId = isAutofixerRun ? currentRun?.trigger_source_id ?? null : null
+
+  const { data: errorGroup } = useQuery({
+    ...getErrorGroupOptions({
+      path: {
+        project_id: project.id,
+        group_id: Number(errorGroupId),
+      },
+    }),
+    enabled: !!errorGroupId,
   })
 
   // SSE real-time streaming
   useEffect(() => {
     if (!runId || !data?.run) return
-    if (!activeStatuses.has(data.run.status)) return
+    const phase = data.run.phase || ''
+    const shouldStream =
+      activeStatuses.has(data.run.status) || autofixerActivePhases.has(phase)
+    if (!shouldStream) return
 
     setIsStreaming(true)
-    const eventSource = new EventSource(
-      `/api/projects/${project.id}/agents/runs/${runId}/stream`
-    )
+    // Autofixer runs have their own SSE endpoint; regular runs use the generic one.
+    const streamUrl =
+      data.run.trigger_source_type === 'error_group'
+        ? `/api/projects/${project.id}/autofixer/runs/${runId}/stream`
+        : `/api/projects/${project.id}/agents/runs/${runId}/stream`
+    const eventSource = new EventSource(streamUrl)
 
     eventSource.onmessage = (event) => {
       try {
@@ -877,9 +929,10 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
     }
 
     eventSource.addEventListener('status', () => {
-      // Run completed — close stream
+      // Run completed / phase changed — close stream and refetch
       eventSource.close()
       setIsStreaming(false)
+      queryClient.invalidateQueries({ queryKey: runQueryOptions.queryKey })
     })
 
     eventSource.onerror = () => {
@@ -891,7 +944,15 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
       eventSource.close()
       setIsStreaming(false)
     }
-  }, [runId, data?.run?.status, project.id])
+  }, [
+    runId,
+    data?.run?.status,
+    data?.run?.phase,
+    data?.run?.trigger_source_type,
+    project.id,
+    queryClient,
+    runQueryOptions.queryKey,
+  ])
 
   if (isLoading) {
     return (
@@ -932,27 +993,130 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
 
   const logs = allLogs
 
-  const isActive = activeStatuses.has(run.status)
-  const canRetry = !isActive && run.source !== 'cli_ephemeral'
+  const phase = run.phase || ''
+  const isAutofixer = run.trigger_source_type === 'error_group'
+  const isAutofixerActive = isAutofixer && autofixerActivePhases.has(phase)
+  const isAutofixerWaiting = isAutofixer && autofixerInteractivePhases.has(phase)
+  const isActive = activeStatuses.has(run.status) || isAutofixerActive
+  // Autofixer runs in interactive phases (analyzed / fix_ready) are NOT "done" —
+  // a retry would throw away the user's analysis work. Only offer Retry when
+  // the run is terminal (completed/failed/cancelled).
+  const canRetry =
+    !isActive && !isAutofixerWaiting && run.source !== 'cli_ephemeral'
 
   const onRetry = async () => {
     setIsRetrying(true)
     try {
-      const newRun = await retryRun(project.id, run.id)
-      navigate(`../agents/${newRun.id}`)
+      if (isAutofixer && run.trigger_source_id) {
+        // Autofixer retry = start a fresh analysis on the same error group
+        const { data: newRun } = await startAnalysis({
+          path: { project_id: project.id },
+          body: { error_group_id: run.trigger_source_id },
+          throwOnError: true,
+        })
+        navigate(`../agents/${newRun.id}`)
+      } else {
+        const { data: newRun } = await retryRun({
+          path: { project_id: project.id, run_id: run.id },
+          throwOnError: true,
+        })
+        navigate(`../agents/${newRun.id}`)
+      }
     } catch (e) {
       console.error('Failed to retry run:', e)
+      toast.error(e instanceof Error ? e.message : 'Retry failed')
     } finally {
       setIsRetrying(false)
+    }
+  }
+
+  const onStartFix = async () => {
+    setIsStartingFix(true)
+    try {
+      await startFix({
+        path: { project_id: project.id, run_id: run.id },
+        throwOnError: true,
+      })
+      setStreamLogs([])
+      queryClient.invalidateQueries({ queryKey: runQueryOptions.queryKey })
+      toast.success('Fix generation started')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to start fix')
+    } finally {
+      setIsStartingFix(false)
+    }
+  }
+
+  const onCreatePr = async () => {
+    setIsCreatingPr(true)
+    try {
+      await createPr({
+        path: { project_id: project.id, run_id: run.id },
+        throwOnError: true,
+      })
+      queryClient.invalidateQueries({ queryKey: runQueryOptions.queryKey })
+      toast.success('Pull request created')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to create PR')
+    } finally {
+      setIsCreatingPr(false)
+    }
+  }
+
+  const onSendContext = async () => {
+    const message = contextInput.trim()
+    if (!message || isSendingContext) return
+    setContextInput('')
+    setIsSendingContext(true)
+    try {
+      await addContext({
+        path: { project_id: project.id, run_id: run.id },
+        body: { message },
+        throwOnError: true,
+      })
+      if (phase === 'analyzed') {
+        await reAnalyze({
+          path: { project_id: project.id, run_id: run.id },
+          throwOnError: true,
+        })
+      }
+      queryClient.invalidateQueries({ queryKey: runQueryOptions.queryKey })
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to send message')
+    } finally {
+      setIsSendingContext(false)
+    }
+  }
+
+  // "Start Over" — for autofixer runs only. Kicks off a fresh analysis on the
+  // same error group, then navigates to the new run.
+  const onStartOver = async () => {
+    if (!run.trigger_source_id) return
+    setIsStartingOver(true)
+    try {
+      const { data: newRun } = await startAnalysis({
+        path: { project_id: project.id },
+        body: { error_group_id: run.trigger_source_id },
+        throwOnError: true,
+      })
+      navigate(`../agents/${newRun.id}`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to start over')
+    } finally {
+      setIsStartingOver(false)
     }
   }
 
   const onOpenWorkspace = async () => {
     setIsOpeningWorkspace(true)
     try {
-      const session = await startSession(project.id, {
-        branch_name: run.branch_name || undefined,
-        agent_run_id: run.id,
+      const { data: session } = await workspaceStartSession({
+        path: { project_id: project.id },
+        body: {
+          branch_name: run.branch_name || undefined,
+          agent_run_id: run.id,
+        },
+        throwOnError: true,
       })
       navigate(`../workspace?session=${session.id}`)
     } catch (e) {
@@ -1042,7 +1206,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           ) : (
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
           )}
-          Retry
+          {isAutofixer ? 'Start over' : 'Retry'}
         </Button>
       )}
       {isActive && (
@@ -1052,6 +1216,147 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
       )}
     </>
   )
+
+  // ── Autofixer phase action bar + chat ─────────────────────────────────
+  const autofixerActionBar = isAutofixer ? (
+    <>
+      {(phase === 'analyzed' ||
+        phase === 'fix_ready' ||
+        phase === 'completed' ||
+        phase === 'no_fix' ||
+        phase === 'pr_created' ||
+        run.status === 'failed' ||
+        run.status === 'cancelled') && (
+        <Card
+          className={cn(
+            phase === 'completed' || phase === 'pr_created'
+              ? 'border-green-500/20 bg-green-500/5'
+              : run.status === 'failed' || run.status === 'cancelled'
+                ? 'border-red-500/20 bg-red-500/5'
+                : 'border-blue-500/20 bg-blue-500/5',
+          )}
+        >
+          <CardContent className="p-4 flex items-center justify-between gap-4 flex-wrap">
+            <div className="text-sm min-w-0">
+              {phase === 'analyzed' &&
+                'Analysis complete. Send feedback below to refine, or generate a fix.'}
+              {phase === 'fix_ready' &&
+                'Fix is ready. Review the changes, then create a pull request.'}
+              {(phase === 'completed' || phase === 'pr_created') && run.pr_url && (
+                <span className="flex items-center gap-2">
+                  Pull request created —
+                  <a
+                    href={run.pr_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-green-400 hover:underline font-medium inline-flex items-center gap-1"
+                  >
+                    View PR #{run.pr_number}{' '}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </span>
+              )}
+              {phase === 'no_fix' && (
+                <span className="text-muted-foreground">
+                  No automatic fix available. Send feedback to retry.
+                </span>
+              )}
+              {(run.status === 'failed' || run.status === 'cancelled') && (
+                <span className="text-red-400">
+                  {run.status === 'failed' ? 'Run failed' : 'Run cancelled'}
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2 flex-shrink-0">
+              {(['completed', 'failed', 'cancelled'] as const).includes(
+                run.status as 'completed' | 'failed' | 'cancelled',
+              ) && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isStartingOver}
+                  onClick={onStartOver}
+                >
+                  {isStartingOver ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                  )}
+                  Start Over
+                </Button>
+              )}
+              {phase === 'analyzed' && (
+                <Button
+                  onClick={onStartFix}
+                  disabled={isStartingFix}
+                  size="sm"
+                >
+                  {isStartingFix ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-4 w-4 mr-2" />
+                  )}
+                  Generate Fix
+                </Button>
+              )}
+              {phase === 'fix_ready' && (
+                <Button
+                  onClick={onCreatePr}
+                  disabled={isCreatingPr}
+                  size="sm"
+                >
+                  {isCreatingPr ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <GitBranch className="h-4 w-4 mr-2" />
+                  )}
+                  Create PR
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {(phase === 'analyzing' || phase === 'analyzed') && (
+        <div className="flex gap-2 items-end">
+          <textarea
+            placeholder={
+              phase === 'analyzed'
+                ? "Send feedback to re-analyze — e.g. 'Check the auth middleware'"
+                : "Add context — e.g. 'This started after the auth migration'"
+            }
+            value={contextInput}
+            onChange={(e) => {
+              setContextInput(e.target.value)
+              e.target.style.height = 'auto'
+              e.target.style.height = e.target.scrollHeight + 'px'
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                onSendContext()
+              }
+            }}
+            rows={1}
+            className="flex-1 rounded-md border border-border bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary resize-none overflow-hidden"
+            disabled={isSendingContext}
+          />
+          <Button
+            size="sm"
+            onClick={onSendContext}
+            disabled={!contextInput.trim() || isSendingContext}
+          >
+            {isSendingContext ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
+      )}
+    </>
+  ) : null
 
 
 
@@ -1124,6 +1429,50 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
 
   const DetailsTab = (
     <div className="space-y-4">
+      {isAutofixer && errorGroup && (
+        <Card className="border-red-500/20 bg-red-500/5">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 text-red-500" />
+              <CardTitle className="text-sm">
+                Error group{' '}
+                <Link
+                  to={`../errors/${errorGroup.id}`}
+                  className="hover:underline inline-flex items-center gap-1"
+                >
+                  #{errorGroup.id}
+                  <ExternalLink className="h-3 w-3" />
+                </Link>
+              </CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0 space-y-2">
+            <p className="text-sm font-medium leading-snug break-words">
+              {errorGroup.title}
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              {errorGroup.error_type && (
+                <span>
+                  <span className="text-muted-foreground/70">Type:</span>{' '}
+                  <code className="text-xs">{errorGroup.error_type}</code>
+                </span>
+              )}
+              {errorGroup.total_count != null && (
+                <span>
+                  <span className="text-muted-foreground/70">Occurrences:</span>{' '}
+                  {errorGroup.total_count}
+                </span>
+              )}
+              {errorGroup.first_seen && (
+                <span>
+                  <span className="text-muted-foreground/70">First seen:</span>{' '}
+                  {new Date(errorGroup.first_seen).toLocaleString()}
+                </span>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {run.error_message && (
         <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
@@ -1274,16 +1623,6 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
             </dd>
           </div>
         )}
-        <div className="space-y-0.5">
-          <dt className="text-muted-foreground">Sandbox</dt>
-          <dd>
-            {run.sandbox_enabled ? (
-              <span className="text-orange-500">Docker</span>
-            ) : (
-              'Host'
-            )}
-          </dd>
-        </div>
         {run.ai_session_id && (
           <div className="space-y-0.5">
             <dt className="text-muted-foreground">Session</dt>
@@ -1328,6 +1667,10 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
                 {PrimaryActions}
               </div>
             </div>
+
+            {autofixerActionBar && (
+              <div className="space-y-2">{autofixerActionBar}</div>
+            )}
 
             {/* Tabs as plain text links, no pill, no card */}
             <Tabs defaultValue="conversation" className="w-full">

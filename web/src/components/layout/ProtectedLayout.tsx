@@ -1,4 +1,5 @@
 import { useAuth } from '@/contexts/AuthContext'
+import { captureReturnTo } from '@/lib/return-to'
 import { Login } from '@/pages/Login'
 import {
   AlertCircle,
@@ -226,6 +227,7 @@ export const ProtectedLayout = ({
       errorTitle === 'Authentication Required' ||
       errorTitle === 'Unauthorized'
     ) {
+      captureReturnTo()
       return <Login />
     }
 
@@ -340,6 +342,7 @@ export const ProtectedLayout = ({
   }
 
   if (!user) {
+    captureReturnTo()
     return <Login />
   }
 

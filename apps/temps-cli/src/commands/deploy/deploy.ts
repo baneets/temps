@@ -63,7 +63,7 @@ async function getRepositoryId(
     const { data } = await getRepositoryByName({
       client,
       path: { owner: repoOwner, name: repoName },
-      query: connectionId ? { connection_id: String(connectionId) } : undefined,
+      query: connectionId ? { connection_id: connectionId } : undefined,
     })
     return data?.id ?? null
   } catch {
@@ -331,7 +331,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
             { name: `${colors.bold('HEAD')} ${colors.muted('(latest on branch)')}`, value: HEAD_VALUE },
             ...commits.map(c => {
               const sha = colors.muted(c.sha.substring(0, 7))
-              const msg = c.message.split('\n')[0].substring(0, 60)
+              const msg = (c.message.split('\n')[0] ?? '').substring(0, 60)
               const ago = getRelativeTime(new Date(c.date))
               return {
                 name: `${sha} ${msg} ${colors.muted(`(${c.author}, ${ago})`)}`,

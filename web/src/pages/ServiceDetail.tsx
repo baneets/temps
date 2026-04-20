@@ -172,16 +172,16 @@ export function ServiceDetail() {
   useEffect(() => {
     if (service) {
       setBreadcrumbs([
-        { label: 'Storage', href: '/settings/storage' },
+        { label: 'Storage', href: '/storage' },
         {
           label: service.service.name || 'Service Details',
-          href: `/settings/storage/${id}`,
+          href: `/storage/${id}`,
         },
       ])
     } else {
       setBreadcrumbs([
-        { label: 'Storage', href: '/settings/storage' },
-        { label: 'Service Details', href: `/settings/storage/${id}` },
+        { label: 'Storage', href: '/storage' },
+        { label: 'Service Details', href: `/storage/${id}` },
       ])
     }
   }, [setBreadcrumbs, id, service])
@@ -261,7 +261,7 @@ export function ServiceDetail() {
     },
     onSuccess: () => {
       toast.success('Service deleted successfully')
-      navigate('/settings/storage')
+      navigate('/storage')
     },
     onError: (error: any) => {
       toast.error('Failed to delete service', {
@@ -344,7 +344,7 @@ export function ServiceDetail() {
       <div className="sm:p-4 space-y-6 md:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
-            <Link to="/settings/storage">
+            <Link to="/storage">
               <Button variant="ghost" size="icon">
                 <ArrowLeft className="h-4 w-4" />
               </Button>
@@ -391,7 +391,7 @@ export function ServiceDetail() {
           </div>
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
-            <Link to={`/settings/storage/${id}/browse`}>
+            <Link to={`/storage/${id}/browse`}>
               <Button variant="outline" size="sm" className="gap-2">
                 <Database className="h-4 w-4" />
                 Browse Data
@@ -870,7 +870,7 @@ export function ServiceDetail() {
                     return (
                       <Link
                         key={u.id}
-                        to={`/settings/storage/${id}/upgrades/${u.id}`}
+                        to={`/storage/${id}/upgrades/${u.id}`}
                         className="block rounded-lg border p-3 hover:bg-muted/50 transition-colors"
                       >
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

@@ -19,7 +19,8 @@ use tracing::{debug, error, info};
 use utoipa::OpenApi;
 
 use crate::services::{
-    DeploymentOperation, ExternalImage, ExternalImageResponse, OperationResult, PushImageRequest,
+    DeploymentOperation, ExternalImage, OperationResult, PushImageRequest,
+    PushedExternalImageResponse,
 };
 
 #[derive(OpenApi)]
@@ -34,7 +35,7 @@ use crate::services::{
     ),
     components(schemas(
         PushImageRequest,
-        ExternalImageResponse,
+        PushedExternalImageResponse,
         ExecuteOperationRequest,
         OperationResultResponse,
         OperationResultsResponse
@@ -90,7 +91,7 @@ pub struct OperationResultsResponse {
     path = "/projects/{project_id}/images/push",
     request_body = PushImageRequest,
     responses(
-        (status = 201, description = "Image pushed successfully", body = ExternalImageResponse),
+        (status = 201, description = "Image pushed successfully", body = PushedExternalImageResponse),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -152,7 +153,7 @@ pub async fn push_external_image(
 
             Ok((
                 StatusCode::CREATED,
-                Json(ExternalImageResponse::from(image)),
+                Json(PushedExternalImageResponse::from(image)),
             ))
         }
         Err(err) => {
@@ -169,7 +170,7 @@ pub async fn push_external_image(
     get,
     path = "/projects/{project_id}/images",
     responses(
-        (status = 200, description = "List of external images", body = Vec<ExternalImageResponse>),
+        (status = 200, description = "List of external images", body = Vec<PushedExternalImageResponse>),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 500, description = "Internal server error")
@@ -186,9 +187,9 @@ pub async fn list_external_images(
     debug!("Listing external images for project {}", project_id);
 
     let images = state.external_deployment_manager.list_images();
-    let responses: Vec<ExternalImageResponse> = images
+    let responses: Vec<PushedExternalImageResponse> = images
         .into_iter()
-        .map(ExternalImageResponse::from)
+        .map(PushedExternalImageResponse::from)
         .collect();
 
     Ok(Json(responses))
@@ -199,7 +200,7 @@ pub async fn list_external_images(
     get,
     path = "/projects/{project_id}/images/{image_id}",
     responses(
-        (status = 200, description = "Image details", body = ExternalImageResponse),
+        (status = 200, description = "Image details", body = PushedExternalImageResponse),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
         (status = 404, description = "Image not found"),
@@ -220,7 +221,7 @@ pub async fn get_external_image(
     );
 
     match state.external_deployment_manager.get_image(&image_id) {
-        Some(image) => Ok(Json(ExternalImageResponse::from(image))),
+        Some(image) => Ok(Json(PushedExternalImageResponse::from(image))),
         None => Err(problemdetails::new(StatusCode::NOT_FOUND)
             .with_title("Image Not Found")
             .with_detail(format!("Image {} not found", image_id))),

@@ -333,8 +333,8 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
             </Button>
 
             {/* Metadata Row - Single Line with Status and Actions */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4 text-sm text-muted-foreground">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm text-muted-foreground">
                 <Badge
                   variant={
                     deployment.status === 'completed'
@@ -371,7 +371,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                     Current
                   </Badge>
                 )}
-                <span className="text-muted-foreground/30">•</span>
+                <span className="hidden text-muted-foreground/30 sm:inline">•</span>
                 <div className="flex items-center gap-1.5">
                   <Clock className="h-4 w-4" />
                   <span>Started:</span>
@@ -379,7 +379,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                 </div>
                 {deployment.finished_at && (
                   <>
-                    <span className="text-muted-foreground/30">•</span>
+                    <span className="hidden text-muted-foreground/30 sm:inline">•</span>
                     <div className="flex items-center gap-1.5">
                       <Clock className="h-4 w-4" />
                       <span>Duration:</span>
@@ -402,7 +402,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                     </div>
                   </>
                 )}
-                <span className="text-muted-foreground/30">•</span>
+                <span className="hidden text-muted-foreground/30 sm:inline">•</span>
                 <div className="flex items-center gap-1.5">
                   <GitBranch className="h-4 w-4" />
                   <span>Branch:</span>
@@ -410,7 +410,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                     {deployment.branch}
                   </span>
                 </div>
-                <span className="text-muted-foreground/30">•</span>
+                <span className="hidden text-muted-foreground/30 sm:inline">•</span>
                 <div className="flex items-center gap-1.5">
                   <GitCommit className="h-4 w-4" />
                   <span>Commit:</span>
@@ -420,7 +420,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                 </div>
                 {deployment.environment && (
                   <>
-                    <span className="text-muted-foreground/30">•</span>
+                    <span className="hidden text-muted-foreground/30 sm:inline">•</span>
                     <div className="flex items-center gap-1.5">
                       <span>Environment:</span>
                       <Badge variant="secondary" className="capitalize">

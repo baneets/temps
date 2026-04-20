@@ -24,7 +24,7 @@ pub struct AppState {
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        get_events_count,
+        get_analytics_events_count,
         get_event_detail,
         get_event_visitors,
         get_visitors,
@@ -32,16 +32,16 @@ pub struct AppState {
         get_visitor_info,
         get_visitor_stats,
         enrich_visitor,
-        get_visitor_sessions,
+        get_analytics_visitor_sessions,
         get_visitor_journey,
         get_session_details,
-        get_session_events,
+        get_analytics_session_events,
         get_session_logs,
-        has_analytics_events,
+        check_analytics_has_events,
         get_page_paths,
         get_page_path_detail,
         get_page_path_visitors,
-        get_active_visitors,
+        get_analytics_active_visitors,
         get_live_visitors_list,
         get_page_hourly_sessions,
         get_page_paths_sparklines,
@@ -167,7 +167,7 @@ pub struct AnalyticsApiDoc;
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/analytics/general-stats", get(get_general_stats))
-        .route("/analytics/events", get(get_events_count))
+        .route("/analytics/events", get(get_analytics_events_count))
         .route("/analytics/event-detail", get(get_event_detail))
         .route("/analytics/event-visitors", get(get_event_visitors))
         .route("/analytics/visitors", get(get_visitors))
@@ -186,7 +186,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/analytics/visitors/{visitor_id}/sessions",
-            get(get_visitor_sessions),
+            get(get_analytics_visitor_sessions),
         )
         .route(
             "/analytics/visitors/{visitor_id}/journey",
@@ -195,17 +195,20 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/analytics/sessions/{session_id}", get(get_session_details))
         .route(
             "/analytics/sessions/{session_id}/events",
-            get(get_session_events),
+            get(get_analytics_session_events),
         )
         .route(
             "/analytics/sessions/{session_id}/logs",
             get(get_session_logs),
         )
-        .route("/analytics/has-events", get(has_analytics_events))
+        .route("/analytics/has-events", get(check_analytics_has_events))
         .route("/analytics/page-paths", get(get_page_paths))
         .route("/analytics/page-path-detail", get(get_page_path_detail))
         .route("/analytics/page-path-visitors", get(get_page_path_visitors))
-        .route("/analytics/active-visitors", get(get_active_visitors))
+        .route(
+            "/analytics/active-visitors",
+            get(get_analytics_active_visitors),
+        )
         .route("/analytics/live-visitors", get(get_live_visitors_list))
         .route(
             "/analytics/page-hourly-sessions",
@@ -246,7 +249,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         ("bearer_auth" = [])
     )
 )]
-pub async fn get_events_count(
+pub async fn get_analytics_events_count(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<EventsCountQuery>,
@@ -456,7 +459,7 @@ pub async fn get_visitor_stats(
         ("bearer_auth" = [])
     )
 )]
-pub async fn get_visitor_sessions(
+pub async fn get_analytics_visitor_sessions(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     axum::extract::Path(visitor_id): axum::extract::Path<i32>,
@@ -577,7 +580,7 @@ pub async fn get_session_details(
         ("bearer_auth" = [])
     )
 )]
-pub async fn get_session_events(
+pub async fn get_analytics_session_events(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     axum::extract::Path(session_id): axum::extract::Path<i32>,
@@ -734,7 +737,7 @@ pub async fn enrich_visitor(
         ("bearer_auth" = [])
     )
 )]
-pub async fn has_analytics_events(
+pub async fn check_analytics_has_events(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<ProjectQuery>,
@@ -1000,7 +1003,7 @@ pub async fn get_active_visitors_count(
         ("bearer_auth" = [])
     )
 )]
-pub async fn get_active_visitors(
+pub async fn get_analytics_active_visitors(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Query(query): Query<ActiveVisitorsQuery>,

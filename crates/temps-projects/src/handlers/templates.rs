@@ -242,6 +242,7 @@ pub struct TemplatesApiDoc;
     get,
     path = "/templates",
     tag = "Templates",
+    operation_id = "list_templates",
     params(
         ("tag" = Option<String>, Query, description = "Filter templates by tag"),
         ("featured" = Option<bool>, Query, description = "Only return featured templates")
@@ -282,6 +283,7 @@ pub async fn list_templates(
     get,
     path = "/templates/{slug}",
     tag = "Templates",
+    operation_id = "get_template",
     params(
         ("slug" = String, Path, description = "Template slug")
     ),
@@ -318,6 +320,7 @@ pub async fn get_template(
     get,
     path = "/templates/tags",
     tag = "Templates",
+    operation_id = "list_template_tags",
     responses(
         (status = 200, description = "List of tags", body = ListTagsResponse),
         (status = 401, description = "Unauthorized"),

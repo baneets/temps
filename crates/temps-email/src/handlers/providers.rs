@@ -32,11 +32,11 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/email-providers",
-            post(create_provider).get(list_providers),
+            post(create_email_provider).get(list_email_providers),
         )
         .route(
             "/email-providers/{id}",
-            get(get_provider).delete(delete_provider),
+            get(get_email_provider).delete(delete_email_provider),
         )
         .route("/email-providers/{id}/test", post(test_provider))
 }
@@ -56,7 +56,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn create_provider(
+pub async fn create_email_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -161,7 +161,7 @@ pub async fn create_provider(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn list_providers(
+pub async fn list_email_providers(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -217,7 +217,7 @@ pub async fn list_providers(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn get_provider(
+pub async fn get_email_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(id): Path<i32>,
@@ -267,7 +267,7 @@ pub async fn get_provider(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn delete_provider(
+pub async fn delete_email_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,

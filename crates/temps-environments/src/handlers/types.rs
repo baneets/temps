@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use temps_core::{AuditLogger, DeploymentCanceller};
+use temps_core::{AuditLogger, DeploymentCanceller, ProjectEnvVarsProvider};
 use temps_entities::deployment_config::DeploymentConfig;
 use utoipa::ToSchema;
 
@@ -15,6 +15,9 @@ pub struct AppState {
     /// Optional on-demand waker for starting/stopping containers during wake/sleep.
     /// Only available when the proxy's OnDemandManager is registered.
     pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
+    /// Optional integration env-var provider. When absent (e.g. in tests without
+    /// the providers plugin) the resolved view falls back to manual vars only.
+    pub integration_env_provider: Option<Arc<dyn ProjectEnvVarsProvider>>,
 }
 
 pub fn create_environment_app_state(
@@ -23,6 +26,7 @@ pub fn create_environment_app_state(
     audit_service: Arc<dyn AuditLogger>,
     deployment_service: Arc<dyn DeploymentCanceller>,
     on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
+    integration_env_provider: Option<Arc<dyn ProjectEnvVarsProvider>>,
 ) -> Arc<AppState> {
     Arc::new(AppState {
         environment_service,
@@ -30,6 +34,7 @@ pub fn create_environment_app_state(
         audit_service,
         deployment_service,
         on_demand_waker,
+        integration_env_provider,
     })
 }
 
@@ -59,7 +64,7 @@ pub struct EnvironmentVariableResponse {
     pub include_in_preview: bool,
 }
 
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
 pub struct EnvironmentInfo {
     pub id: i32,
     pub name: String,
@@ -164,6 +169,52 @@ pub struct AddEnvironmentDomainRequest {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct EnvironmentVariableValueResponse {
     pub value: String,
+}
+
+/// Where a resolved env var comes from. Integration-sourced vars may be
+/// "shadowed" by a manual entry with the same key, in which case the response
+/// carries `Manual` with `overrides_service` populated so the UI can still show
+/// the integration icon.
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResolvedEnvVarSource {
+    /// Manually-defined env var. If `overrides_service` is set, this key would
+    /// otherwise have been supplied by an integration — the UI should show the
+    /// integration icon plus an "overridden" indicator.
+    Manual {
+        var_id: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        overrides_service: Option<EnvVarIntegrationInfo>,
+    },
+    /// Supplied by a linked external service (Postgres, Redis, S3, etc.).
+    Integration { service: EnvVarIntegrationInfo },
+}
+
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
+pub struct EnvVarIntegrationInfo {
+    pub service_id: i32,
+    pub service_name: String,
+    pub service_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_slug: Option<String>,
+}
+
+/// One entry in the computed env-var view that merges manual and integration
+/// sources and tags each result with its origin. `value_preview` is always
+/// masked — plaintext must be fetched per-key via the existing reveal endpoint,
+/// which is audit-logged.
+#[derive(Serialize, Deserialize, ToSchema, Clone)]
+pub struct ResolvedEnvVarResponse {
+    pub key: String,
+    /// Masked or truncated preview. Never the raw value.
+    pub value_preview: String,
+    pub source: ResolvedEnvVarSource,
+    /// Environments this var applies to. For integration-sourced vars this
+    /// reflects every environment of the project (integrations are global).
+    pub environments: Vec<EnvironmentInfo>,
+    /// Whether the var would be auto-applied to preview environments.
+    /// Integration vars always surface in preview; manual vars follow the flag.
+    pub include_in_preview: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, ToSchema)]

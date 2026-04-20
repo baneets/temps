@@ -35,6 +35,20 @@ pub struct SkillDefinitionResponse {
     pub updated_at: String,
 }
 
+/// Concrete list wrapper for skill definitions (utoipa requires non-generic types).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ListSkillsResponse {
+    pub items: Vec<SkillDefinitionResponse>,
+    pub total: usize,
+}
+
+/// Concrete list wrapper for MCP server definitions (utoipa requires non-generic types).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ListMcpsResponse {
+    pub items: Vec<McpDefinitionResponse>,
+    pub total: usize,
+}
+
 impl From<temps_entities::project_skill_definitions::Model> for SkillDefinitionResponse {
     fn from(m: temps_entities::project_skill_definitions::Model) -> Self {
         let has_archive = m.archive.is_some();
@@ -59,6 +73,7 @@ pub struct McpDefinitionResponse {
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
+    #[schema(value_type = Object)]
     pub config: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
@@ -77,12 +92,6 @@ impl From<temps_entities::project_mcp_definitions::Model> for McpDefinitionRespo
             updated_at: m.updated_at.to_rfc3339(),
         }
     }
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ListResponse<T: Serialize> {
-    pub items: Vec<T>,
-    pub total: usize,
 }
 
 // ── Request DTOs (re-export for OpenAPI) ────────────────────────────────────
@@ -107,6 +116,7 @@ pub struct CreateMcpRequest {
     pub slug: String,
     pub name: String,
     pub description: Option<String>,
+    #[schema(value_type = Object)]
     pub config: serde_json::Value,
 }
 
@@ -114,6 +124,7 @@ pub struct CreateMcpRequest {
 pub struct UpdateMcpRequest {
     pub name: Option<String>,
     pub description: Option<String>,
+    #[schema(value_type = Object)]
     pub config: Option<serde_json::Value>,
 }
 
@@ -234,7 +245,18 @@ async fn log_audit(app_state: &AppState, audit: DefinitionAudit) {
 
 // ── Project-scoped Skill handlers ──────────────────────────────────────────
 
-async fn list_skills(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/projects/{project_id}/skills",
+    params(("project_id" = i32, Path, description = "Project ID")),
+    responses(
+        (status = 200, body = ListSkillsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_skills(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
@@ -248,7 +270,7 @@ async fn list_skills(
         .map_err(Problem::from)?;
 
     let total = items.len();
-    Ok(Json(ListResponse {
+    Ok(Json(ListSkillsResponse {
         items: items
             .into_iter()
             .map(SkillDefinitionResponse::from)
@@ -257,7 +279,22 @@ async fn list_skills(
     }))
 }
 
-async fn get_skill(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/projects/{project_id}/skills/{slug}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Skill slug"),
+    ),
+    responses(
+        (status = 200, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -273,7 +310,19 @@ async fn get_skill(
     Ok(Json(SkillDefinitionResponse::from(skill)))
 }
 
-async fn create_skill(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/projects/{project_id}/skills",
+    params(("project_id" = i32, Path, description = "Project ID")),
+    request_body = CreateSkillRequest,
+    responses(
+        (status = 201, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn create_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -317,7 +366,23 @@ async fn create_skill(
     ))
 }
 
-async fn update_skill(
+#[utoipa::path(
+    tag = "Agents",
+    put,
+    path = "/api/projects/{project_id}/skills/{slug}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Skill slug"),
+    ),
+    request_body = UpdateSkillRequest,
+    responses(
+        (status = 200, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn update_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -358,7 +423,22 @@ async fn update_skill(
     Ok(Json(SkillDefinitionResponse::from(skill)))
 }
 
-async fn delete_skill(
+#[utoipa::path(
+    tag = "Agents",
+    delete,
+    path = "/api/projects/{project_id}/skills/{slug}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Skill slug"),
+    ),
+    responses(
+        (status = 204, description = "Skill deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn delete_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -391,7 +471,18 @@ async fn delete_skill(
 
 // ── Project-scoped MCP handlers ────────────────────────────────────────────
 
-async fn list_mcps(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/projects/{project_id}/mcp-servers",
+    params(("project_id" = i32, Path, description = "Project ID")),
+    responses(
+        (status = 200, body = ListMcpsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_mcps(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
@@ -405,13 +496,28 @@ async fn list_mcps(
         .map_err(Problem::from)?;
 
     let total = items.len();
-    Ok(Json(ListResponse {
+    Ok(Json(ListMcpsResponse {
         items: items.into_iter().map(McpDefinitionResponse::from).collect(),
         total,
     }))
 }
 
-async fn get_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/projects/{project_id}/mcp-servers/{slug}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "MCP server slug"),
+    ),
+    responses(
+        (status = 200, body = McpDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "MCP server not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -427,7 +533,19 @@ async fn get_mcp(
     Ok(Json(McpDefinitionResponse::from(mcp)))
 }
 
-async fn create_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/projects/{project_id}/mcp-servers",
+    params(("project_id" = i32, Path, description = "Project ID")),
+    request_body = CreateMcpRequest,
+    responses(
+        (status = 201, body = McpDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn create_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -467,7 +585,23 @@ async fn create_mcp(
     Ok((StatusCode::CREATED, Json(McpDefinitionResponse::from(mcp))))
 }
 
-async fn update_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    put,
+    path = "/api/projects/{project_id}/mcp-servers/{slug}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "MCP server slug"),
+    ),
+    request_body = UpdateMcpRequest,
+    responses(
+        (status = 200, body = McpDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "MCP server not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn update_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -507,7 +641,22 @@ async fn update_mcp(
     Ok(Json(McpDefinitionResponse::from(mcp)))
 }
 
-async fn delete_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    delete,
+    path = "/api/projects/{project_id}/mcp-servers/{slug}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "MCP server slug"),
+    ),
+    responses(
+        (status = 204, description = "MCP server deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "MCP server not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn delete_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -540,7 +689,17 @@ async fn delete_mcp(
 
 // ── Global Skill handlers ──────────────────────────────────────────────────
 
-async fn list_global_skills(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/settings/skills",
+    responses(
+        (status = 200, body = ListSkillsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_global_skills(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -553,7 +712,7 @@ async fn list_global_skills(
         .map_err(Problem::from)?;
 
     let total = items.len();
-    Ok(Json(ListResponse {
+    Ok(Json(ListSkillsResponse {
         items: items
             .into_iter()
             .map(SkillDefinitionResponse::from)
@@ -562,7 +721,19 @@ async fn list_global_skills(
     }))
 }
 
-async fn get_global_skill(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/settings/skills/{slug}",
+    params(("slug" = String, Path, description = "Skill slug")),
+    responses(
+        (status = 200, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -578,7 +749,18 @@ async fn get_global_skill(
     Ok(Json(SkillDefinitionResponse::from(skill)))
 }
 
-async fn create_global_skill(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/settings/skills",
+    request_body = CreateSkillRequest,
+    responses(
+        (status = 201, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn create_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -618,7 +800,20 @@ async fn create_global_skill(
     ))
 }
 
-async fn update_global_skill(
+#[utoipa::path(
+    tag = "Agents",
+    put,
+    path = "/api/settings/skills/{slug}",
+    params(("slug" = String, Path, description = "Skill slug")),
+    request_body = UpdateSkillRequest,
+    responses(
+        (status = 200, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn update_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -658,7 +853,19 @@ async fn update_global_skill(
     Ok(Json(SkillDefinitionResponse::from(skill)))
 }
 
-async fn delete_global_skill(
+#[utoipa::path(
+    tag = "Agents",
+    delete,
+    path = "/api/settings/skills/{slug}",
+    params(("slug" = String, Path, description = "Skill slug")),
+    responses(
+        (status = 204, description = "Skill deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn delete_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -691,7 +898,17 @@ async fn delete_global_skill(
 
 // ── Global MCP handlers ────────────────────────────────────────────────────
 
-async fn list_global_mcps(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/settings/mcp-servers",
+    responses(
+        (status = 200, body = ListMcpsResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_global_mcps(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -704,13 +921,25 @@ async fn list_global_mcps(
         .map_err(Problem::from)?;
 
     let total = items.len();
-    Ok(Json(ListResponse {
+    Ok(Json(ListMcpsResponse {
         items: items.into_iter().map(McpDefinitionResponse::from).collect(),
         total,
     }))
 }
 
-async fn get_global_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/settings/mcp-servers/{slug}",
+    params(("slug" = String, Path, description = "MCP server slug")),
+    responses(
+        (status = 200, body = McpDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "MCP server not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -726,7 +955,18 @@ async fn get_global_mcp(
     Ok(Json(McpDefinitionResponse::from(mcp)))
 }
 
-async fn create_global_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/settings/mcp-servers",
+    request_body = CreateMcpRequest,
+    responses(
+        (status = 201, body = McpDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn create_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -762,7 +1002,20 @@ async fn create_global_mcp(
     Ok((StatusCode::CREATED, Json(McpDefinitionResponse::from(mcp))))
 }
 
-async fn update_global_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    put,
+    path = "/api/settings/mcp-servers/{slug}",
+    params(("slug" = String, Path, description = "MCP server slug")),
+    request_body = UpdateMcpRequest,
+    responses(
+        (status = 200, body = McpDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "MCP server not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn update_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -801,7 +1054,19 @@ async fn update_global_mcp(
     Ok(Json(McpDefinitionResponse::from(mcp)))
 }
 
-async fn delete_global_mcp(
+#[utoipa::path(
+    tag = "Agents",
+    delete,
+    path = "/api/settings/mcp-servers/{slug}",
+    params(("slug" = String, Path, description = "MCP server slug")),
+    responses(
+        (status = 204, description = "MCP server deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "MCP server not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn delete_global_mcp(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -917,7 +1182,19 @@ async fn parse_skill_multipart(
 }
 
 /// Upload a skill with an archive (tar.gz) — project-scoped.
-async fn upload_skill(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/projects/{project_id}/skills/upload",
+    params(("project_id" = i32, Path, description = "Project ID")),
+    request_body(content_type = "multipart/form-data", content = String),
+    responses(
+        (status = 201, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn upload_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -954,7 +1231,18 @@ async fn upload_skill(
 }
 
 /// Upload a skill with an archive (tar.gz) — global.
-async fn upload_global_skill(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/settings/skills/upload",
+    request_body(content_type = "multipart/form-data", content = String),
+    responses(
+        (status = 201, body = SkillDefinitionResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn upload_global_skill(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -990,7 +1278,22 @@ async fn upload_global_skill(
 }
 
 /// Download a skill's archive (tar.gz) — project-scoped.
-async fn download_skill_archive(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/projects/{project_id}/skills/{slug}/archive",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Skill slug"),
+    ),
+    responses(
+        (status = 200, description = "Skill archive tar.gz", content_type = "application/gzip"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found or has no archive"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn download_skill_archive(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -1026,7 +1329,19 @@ async fn download_skill_archive(
 }
 
 /// Download a skill's archive (tar.gz) — global.
-async fn download_global_skill_archive(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/settings/skills/{slug}/archive",
+    params(("slug" = String, Path, description = "Skill slug")),
+    responses(
+        (status = 200, description = "Skill archive tar.gz", content_type = "application/gzip"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Skill not found or has no archive"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn download_global_skill_archive(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(slug): Path<String>,

@@ -524,6 +524,7 @@ impl TempsPlugin for AgentsPlugin {
                 run_service.clone(),
                 source_map_service,
                 sandbox_registry,
+                executor.clone(),
             ));
             context.register_service(autofixer_service.clone());
 
@@ -623,7 +624,8 @@ impl TempsPlugin for AgentsPlugin {
     }
 
     fn openapi_schema(&self) -> Option<utoipa::openapi::OpenApi> {
-        None
+        use utoipa::OpenApi;
+        Some(crate::handlers::AgentsApiDoc::openapi())
     }
 }
 

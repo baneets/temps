@@ -21,23 +21,26 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, Box, Loader2, Pencil, Play, Sparkles, Terminal } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Loader2, Pencil, Play, Sparkles, Terminal } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { AgentSettingsDialog } from './AgentSettingsDialog'
+import { AgentSettingsDialog, type Agent } from './AgentSettingsDialog'
 import { CodeBlock } from '@/components/ui/code-block'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { cn } from '@/lib/utils'
 import {
-  listAgents,
-  listAllRuns,
-  triggerAgent,
-  updateAgent,
-  type Agent,
-  type AgentRun,
-} from './api'
+  listAgentsOptions,
+  listAgentsQueryKey,
+  listAllRunsOptions,
+  listAllRunsQueryKey,
+  triggerAgentMutation,
+  updateAgentMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { AgentRunResponse } from '@/api/client/types.gen'
 import { AutopilotStatusBadge } from './AutopilotStatusBadge'
+
+type AgentRun = AgentRunResponse
 
 interface AutopilotPageProps {
   project: ProjectResponse
@@ -155,11 +158,12 @@ function AgentCard({
   const [userContext, setUserContext] = useState('')
 
   const toggleEnabled = useMutation({
-    mutationFn: () =>
-      updateAgent(projectId, agent.slug, { enabled: !agent.enabled }),
+    ...updateAgentMutation(),
     onSuccess: () => {
       toast.success(`${agent.name} ${agent.enabled ? 'disabled' : 'enabled'}`)
-      queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
+      queryClient.invalidateQueries({
+        queryKey: listAgentsQueryKey({ path: { project_id: projectId } }),
+      })
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Failed to toggle')
@@ -167,13 +171,14 @@ function AgentCard({
   })
 
   const trigger = useMutation({
-    mutationFn: (context?: string) =>
-      triggerAgent(projectId, agent.slug, context ? { user_context: context } : undefined),
+    ...triggerAgentMutation(),
     onSuccess: () => {
       toast.success(`${agent.name} triggered`)
       setShowTriggerDialog(false)
       setUserContext('')
-      queryClient.invalidateQueries({ queryKey: ['agent-runs', projectId] })
+      queryClient.invalidateQueries({
+        queryKey: listAllRunsQueryKey({ path: { project_id: projectId } }),
+      })
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Failed to trigger')
@@ -202,7 +207,12 @@ function AgentCard({
           <div className="flex items-center gap-2">
             <Switch
               checked={agent.enabled}
-              onCheckedChange={() => toggleEnabled.mutate()}
+              onCheckedChange={() =>
+                toggleEnabled.mutate({
+                  path: { project_id: projectId, slug: agent.slug },
+                  body: { slug: agent.slug, enabled: !agent.enabled },
+                })
+              }
               disabled={toggleEnabled.isPending}
             />
             <Button
@@ -243,7 +253,6 @@ function AgentCard({
               {agent.ai_model}
             </span>
           )}
-          {agent.sandbox_enabled && <span className="bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded">sandbox</span>}
         </div>
         <TriggerBadges agent={agent} nextRun={nextRun} />
       </CardContent>
@@ -277,7 +286,12 @@ function AgentCard({
             Cancel
           </Button>
           <Button
-            onClick={() => trigger.mutate(userContext || undefined)}
+            onClick={() =>
+              trigger.mutate({
+                path: { project_id: projectId, slug: agent.slug },
+                body: userContext ? { user_context: userContext } : {},
+              })
+            }
             disabled={trigger.isPending}
           >
             {trigger.isPending ? (
@@ -301,12 +315,12 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null)
 
   const {
-    data: agents,
+    data: agentsData,
     isLoading: isLoadingAgents,
   } = useQuery({
-    queryKey: ['agents', project.id],
-    queryFn: () => listAgents(project.id),
+    ...listAgentsOptions({ path: { project_id: project.id } }),
   })
+  const agents = (agentsData?.items ?? []) as Agent[]
 
   // Fetch the provider catalog to determine the platform's configured default
   // and whether credentials are saved (which is what actually matters for sandbox mode)
@@ -332,10 +346,9 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
     data: runsData,
     isLoading: isLoadingRuns,
   } = useQuery({
-    queryKey: ['agent-runs', project.id],
-    queryFn: () => listAllRuns(project.id),
+    ...listAllRunsOptions({ path: { project_id: project.id } }),
     refetchInterval: 5000,
-    enabled: !!agents && agents.length > 0,
+    enabled: agents.length > 0,
   })
 
   const runs = runsData?.items ?? []
@@ -551,7 +564,6 @@ prompt: |
                   <TableHead>Status</TableHead>
                   <TableHead>Workflow</TableHead>
                   <TableHead>Trigger</TableHead>
-                  <TableHead className="hidden md:table-cell">Sandbox</TableHead>
                   <TableHead className="hidden md:table-cell">PR</TableHead>
                   <TableHead className="hidden md:table-cell">Files</TableHead>
                   <TableHead className="hidden md:table-cell">Cost</TableHead>
@@ -592,16 +604,6 @@ prompt: |
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {run.trigger_type === 'autofixer' ? 'Autofix' : run.trigger_type}
-                    </TableCell>
-                    <TableCell className="hidden md:table-cell">
-                      {run.sandbox_enabled ? (
-                        <span className="text-xs bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                          <Box className="h-3 w-3" />
-                          Yes
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">No</span>
-                      )}
                     </TableCell>
                     <TableCell className="hidden md:table-cell text-sm">
                       {run.pr_number ? `#${run.pr_number}` : '-'}

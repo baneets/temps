@@ -1,4 +1,4 @@
-//! HTTP handlers for `/v1/sandbox/*`. Every handler follows the same
+//! HTTP handlers for `/v1/sandboxes/*`. Every handler follows the same
 //! shape: `RequireAuth` + `sandbox_permission_guard` + service call + typed DTO.
 //! No business logic lives here.
 
@@ -19,13 +19,13 @@ pub struct SandboxAppState {
     pub sandbox_service: Arc<SandboxService>,
 }
 
-/// OpenAPI document for the `/v1/sandbox/*` surface.
+/// OpenAPI document for the `/v1/sandboxes/*` surface.
 ///
 /// This is the canonical machine-readable contract for the sandbox API.
 /// The doc is merged into the unified Temps OpenAPI at
 /// `/api-docs/openapi.json` (and rendered in Swagger UI at `/swagger-ui`)
 /// via the plugin system's `openapi_schema()` hook. There is **no**
-/// separate `/v1/sandbox/openapi.json` endpoint — external SDK generators
+/// separate `/v1/sandboxes/openapi.json` endpoint — external SDK generators
 /// and compatibility tests should fetch the unified doc and filter by the
 /// `Sandboxes` tag.
 #[derive(OpenApi)]
@@ -47,6 +47,10 @@ pub struct SandboxAppState {
         sandboxes::job_status,
         sandboxes::job_logs,
         sandboxes::kill_job,
+        sandboxes::cmd,
+        sandboxes::get_cmd,
+        sandboxes::cmd_logs,
+        sandboxes::cmd_kill,
         sandboxes::read_file,
         sandboxes::write_file,
         sandboxes::write_files,
@@ -69,23 +73,27 @@ pub struct SandboxAppState {
         sandboxes::JobSummaryResponse,
         sandboxes::ListJobsResponse,
         sandboxes::KillJobBody,
+        sandboxes::CmdBody,
+        sandboxes::CmdInner,
+        sandboxes::CmdResponse,
+        sandboxes::CmdKillBody,
         sandboxes::WriteFileBody,
         sandboxes::WriteFilesBody,
         sandboxes::WriteFilesResponse,
         sandboxes::ReadFileResponse,
         sandboxes::MkdirBody,
         sandboxes::StatResponse,
-        sandboxes::DomainResponse,
+        sandboxes::SandboxDomainResponse,
         sandboxes::SetPreviewPasswordBody,
         sandboxes::SetPreviewPasswordResponse,
     )),
     tags(
-        (name = "Sandboxes", description = "Standalone sandbox API (`/v1/sandbox/*`) for running isolated containers.")
+        (name = "Sandboxes", description = "Standalone sandbox API (`/v1/sandboxes/*`) for running isolated containers.")
     )
 )]
 pub struct SandboxApiDoc;
 
-/// Configure all `/v1/sandbox/*` routes. Every response is stamped with
+/// Configure all `/v1/sandboxes/*` routes. Every response is stamped with
 /// the `X-Sandbox-API-Version` diagnostic header (see ADR-009).
 pub fn configure_routes() -> Router<Arc<SandboxAppState>> {
     sandboxes::routes().layer(middleware::from_fn(version_header::inject_version_header))
@@ -95,7 +103,7 @@ pub fn configure_routes() -> Router<Arc<SandboxAppState>> {
 mod tests {
     use super::*;
 
-    /// The OpenAPI doc must enumerate every `/v1/sandbox/*` route so external
+    /// The OpenAPI doc must enumerate every `/v1/sandboxes/*` route so external
     /// SDK generators (and the SDK compatibility tests) don't silently drift
     /// from the live router. If you add a route in `sandboxes::routes()`,
     /// update `SandboxApiDoc::paths` to match — this test is the guardrail.
@@ -105,28 +113,32 @@ mod tests {
         let paths = &api.paths.paths;
 
         for expected in [
-            "/v1/sandbox",
-            "/v1/sandbox/{id}",
-            "/v1/sandbox/{id}/stop",
-            "/v1/sandbox/{id}/destroy",
-            "/v1/sandbox/{id}/pause",
-            "/v1/sandbox/{id}/resume",
-            "/v1/sandbox/{id}/restart",
-            "/v1/sandbox/{id}/source",
-            "/v1/sandbox/{id}/extend-timeout",
-            "/v1/sandbox/{id}/exec",
-            "/v1/sandbox/{id}/exec-detached",
-            "/v1/sandbox/{id}/jobs",
-            "/v1/sandbox/{id}/jobs/{job_id}",
-            "/v1/sandbox/{id}/jobs/{job_id}/logs",
-            "/v1/sandbox/{id}/jobs/{job_id}/kill",
-            "/v1/sandbox/{id}/fs/read",
-            "/v1/sandbox/{id}/fs/write",
-            "/v1/sandbox/{id}/fs/write-batch",
-            "/v1/sandbox/{id}/fs/stat",
-            "/v1/sandbox/{id}/fs/mkdir",
-            "/v1/sandbox/{id}/domain",
-            "/v1/sandbox/{id}/preview-password",
+            "/v1/sandboxes",
+            "/v1/sandboxes/{id}",
+            "/v1/sandboxes/{id}/stop",
+            "/v1/sandboxes/{id}/destroy",
+            "/v1/sandboxes/{id}/pause",
+            "/v1/sandboxes/{id}/resume",
+            "/v1/sandboxes/{id}/restart",
+            "/v1/sandboxes/{id}/source",
+            "/v1/sandboxes/{id}/extend-timeout",
+            "/v1/sandboxes/{id}/exec",
+            "/v1/sandboxes/{id}/exec-detached",
+            "/v1/sandboxes/{id}/jobs",
+            "/v1/sandboxes/{id}/jobs/{job_id}",
+            "/v1/sandboxes/{id}/jobs/{job_id}/logs",
+            "/v1/sandboxes/{id}/jobs/{job_id}/kill",
+            "/v1/sandboxes/{id}/cmd",
+            "/v1/sandboxes/{id}/cmd/{cmd_id}",
+            "/v1/sandboxes/{id}/cmd/{cmd_id}/logs",
+            "/v1/sandboxes/{id}/{cmd_id}/kill",
+            "/v1/sandboxes/{id}/fs/read",
+            "/v1/sandboxes/{id}/fs/write",
+            "/v1/sandboxes/{id}/fs/write-batch",
+            "/v1/sandboxes/{id}/fs/stat",
+            "/v1/sandboxes/{id}/fs/mkdir",
+            "/v1/sandboxes/{id}/domain",
+            "/v1/sandboxes/{id}/preview-password",
         ] {
             assert!(
                 paths.contains_key(expected),

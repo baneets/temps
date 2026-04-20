@@ -29,6 +29,7 @@ temps-agents = { path = "../temps-agents" }
 temps-workspace = { path = "../temps-workspace" }
 temps-sandbox = { path = "../temps-sandbox" }
 temps-backup = { path = "../temps-backup" }
+temps-revenue = { path = "../temps-revenue" }
 temps-config = { path = "../temps-config" }
 temps-core = { path = "../temps-core" }
 temps-database = { path = "../temps-database" }

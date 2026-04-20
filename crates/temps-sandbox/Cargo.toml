@@ -32,6 +32,9 @@ hex = "0.4"
 url = { workspace = true }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 futures = { workspace = true }
+async-stream = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

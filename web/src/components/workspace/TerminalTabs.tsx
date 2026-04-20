@@ -29,10 +29,10 @@ import {
   type TerminalStatus,
 } from './SessionTerminal'
 import {
-  deleteTerminalTab,
-  listTerminalTabs,
-  type TerminalTab as TerminalTabRecord,
-} from './api'
+  workspaceDeleteTerminalTab,
+  workspaceListTerminalTabs,
+} from '@/api/client/sdk.gen'
+import type { WorkspaceTerminalTab as TerminalTabRecord } from '@/api/client/types.gen'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -127,7 +127,10 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       // drops the websocket. The reattach path auto-spawns a fresh tmux
       // session via `new-session -A`, which re-runs the provider's start
       // command — giving the user a clean AI session.
-      void deleteTerminalTab(projectId, sessionId, kind, id).catch(() => {
+      void workspaceDeleteTerminalTab({
+        path: { project_id: projectId, session_id: sessionId, tab_id: `${kind}-${id}` },
+        throwOnError: true,
+      }).catch(() => {
         // Best-effort. If the session was already dead, the reconnect
         // below still produces a fresh one.
       }).finally(() => {
@@ -178,21 +181,26 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   // `temps-{kind}-{id}` that we don't already know about gets added.
   useEffect(() => {
     let cancelled = false
-    listTerminalTabs(projectId, sessionId)
-      .then((existing) => {
+    workspaceListTerminalTabs({
+      path: { project_id: projectId, session_id: sessionId },
+      throwOnError: true,
+    })
+      .then((resp) => {
         if (cancelled) return
+        const existing = resp.data?.tabs ?? []
         setTabs((current) => {
           const seen = new Set(current.map(tabKey))
           const additions: LocalTab[] = []
           let shellCount = current.filter((t) => t.kind === 'shell').length
           for (const t of existing as TerminalTabRecord[]) {
-            const key = tabKey(t)
+            const kind = t.kind === 'shell' ? 'shell' : 'claude'
+            const key = tabKey({ kind, id: t.id })
             if (seen.has(key)) continue
             additions.push({
-              kind: t.kind,
+              kind,
               id: t.id,
               label:
-                t.kind === 'claude'
+                kind === 'claude'
                   ? t.id === 'main'
                     ? primaryLabel
                     : `${primaryLabel} (${t.id})`
@@ -236,7 +244,14 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       return next
     })
     try {
-      await deleteTerminalTab(projectId, sessionId, target.kind, target.id)
+      await workspaceDeleteTerminalTab({
+        path: {
+          project_id: projectId,
+          session_id: sessionId,
+          tab_id: `${target.kind}-${target.id}`,
+        },
+        throwOnError: true,
+      })
     } catch {
       // Best-effort: the tmux session might already be dead. Either way the
       // local tab is gone from the UI, which is what the user clicked for.
@@ -415,12 +430,14 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
                 if (!target) return
                 setRestartTarget(null)
                 try {
-                  await deleteTerminalTab(
-                    projectId,
-                    sessionId,
-                    target.kind,
-                    target.id
-                  )
+                  await workspaceDeleteTerminalTab({
+                    path: {
+                      project_id: projectId,
+                      session_id: sessionId,
+                      tab_id: `${target.kind}-${target.id}`,
+                    },
+                    throwOnError: true,
+                  })
                 } catch {
                   // Best-effort — reconnect still produces a fresh session.
                 }

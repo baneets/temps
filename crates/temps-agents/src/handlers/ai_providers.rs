@@ -130,18 +130,18 @@ pub struct UpdateProviderResponse {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/settings/ai-providers", get(list_providers))
+        .route("/settings/ai-providers", get(list_ai_providers))
         .route(
             "/settings/ai-providers/{provider_id}",
-            patch(update_provider),
+            patch(update_ai_provider),
         )
         .route(
             "/settings/ai-providers/{provider_id}/credential",
-            post(save_credential),
+            post(save_ai_provider_credential),
         )
         .route(
             "/settings/ai-providers/{provider_id}/activate",
-            post(activate_provider),
+            post(activate_ai_provider),
         )
 }
 
@@ -150,7 +150,17 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// List the AI provider catalog. Includes per-provider "is a credential
 /// configured?" so the settings UI can render configured/not-configured
 /// badges without leaking the encrypted credential.
-async fn list_providers(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/api/settings/ai-providers",
+    responses(
+        (status = 200, body = ProviderCatalogResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_ai_providers(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -214,7 +224,20 @@ async fn list_providers(
 /// The plaintext shape depends on the flavor's `credential_format`:
 ///   - `ApiKey` / `OauthToken`: the key/token string.
 ///   - `ConfigFile`: the full file body (e.g. OpenCode's `auth.json`).
-async fn save_credential(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/settings/ai-providers/{provider_id}/credential",
+    params(("provider_id" = String, Path, description = "AI provider ID")),
+    request_body = SaveCredentialRequest,
+    responses(
+        (status = 200, body = SaveCredentialResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn save_ai_provider_credential(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,
@@ -331,7 +354,19 @@ async fn save_credential(
 /// provider that doesn't have a credential saved yet — the UI enforces the
 /// same rule on the button, but we re-check server-side so a stale tab
 /// can't bypass it.
-async fn activate_provider(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/api/settings/ai-providers/{provider_id}/activate",
+    params(("provider_id" = String, Path, description = "AI provider ID")),
+    responses(
+        (status = 200, body = ActivateProviderResponse),
+        (status = 400, description = "Provider not configured"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn activate_ai_provider(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,
@@ -407,7 +442,20 @@ async fn activate_provider(
 /// Today that means just `default_model`; future per-provider settings
 /// (base URL overrides, request headers, etc.) can land here too without
 /// changing the shape of `save_credential`.
-async fn update_provider(
+#[utoipa::path(
+    tag = "Agents",
+    patch,
+    path = "/api/settings/ai-providers/{provider_id}",
+    params(("provider_id" = String, Path, description = "AI provider ID")),
+    request_body = UpdateProviderRequest,
+    responses(
+        (status = 200, body = UpdateProviderResponse),
+        (status = 400, description = "Unknown provider"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn update_ai_provider(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,

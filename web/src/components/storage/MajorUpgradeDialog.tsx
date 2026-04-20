@@ -135,7 +135,7 @@ export function MajorUpgradeDialog({
       toast.success(`Upgrade started for ${serviceName}`)
       queryClient.invalidateQueries({ queryKey: ['pg-upgrades', serviceId] })
       onOpenChange(false)
-      navigate(`/settings/storage/${serviceId}/upgrades/${upgrade.id}`)
+      navigate(`/storage/${serviceId}/upgrades/${upgrade.id}`)
     },
     onError: (error: Error) => {
       toast.error('Failed to start upgrade', {

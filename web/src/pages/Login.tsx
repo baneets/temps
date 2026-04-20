@@ -5,8 +5,11 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/contexts/AuthContext'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { consumeReturnTo } from '@/lib/return-to'
 
 export const Login = () => {
+  usePageTitle('Login')
   const [isLoading, setIsLoading] = useState(false)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -27,7 +30,7 @@ export const Login = () => {
       toast.success('Logged in successfully')
       await queryClient.invalidateQueries({ queryKey: ['getCurrentUser'] })
       await refetch()
-      navigate('/dashboard')
+      navigate(consumeReturnTo('/dashboard'), { replace: true })
     },
   })
 

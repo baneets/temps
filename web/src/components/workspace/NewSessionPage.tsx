@@ -26,15 +26,18 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
-import { startSession } from './api'
+import { workspaceStartSessionMutation } from '@/api/client/@tanstack/react-query.gen'
+import type { StartSessionRequest } from '@/api/client/types.gen'
 import {
-  listGlobalMcpDefinitions,
-  listGlobalSkillDefinitions,
-  listMcpDefinitions,
-  listSkillDefinitions,
-  type McpDefinition,
-  type SkillDefinition,
-} from '@/components/agents/api'
+  listGlobalMcpsOptions,
+  listGlobalSkillsOptions,
+  listMcpsOptions,
+  listSkillsOptions,
+} from '@/api/client/@tanstack/react-query.gen'
+import type {
+  McpDefinitionResponse as McpDefinition,
+  SkillDefinitionResponse as SkillDefinition,
+} from '@/api/client/types.gen'
 
 interface Project {
   id: number
@@ -213,39 +216,35 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
   // missing-endpoint response won't succeed on retry, and we'd rather show
   // an empty state than spin the "Loading…" spinner for ~7s.
   const projectSkillsQuery = useQuery({
-    queryKey: ['skill-definitions', project.id],
-    queryFn: () => listSkillDefinitions(project.id),
+    ...listSkillsOptions({ path: { project_id: project.id } }),
     retry: false,
   })
   const globalSkillsQuery = useQuery({
-    queryKey: ['global-skills'],
-    queryFn: () => listGlobalSkillDefinitions(),
+    ...listGlobalSkillsOptions(),
     retry: false,
   })
   const projectMcpsQuery = useQuery({
-    queryKey: ['mcp-definitions', project.id],
-    queryFn: () => listMcpDefinitions(project.id),
+    ...listMcpsOptions({ path: { project_id: project.id } }),
     retry: false,
   })
   const globalMcpsQuery = useQuery({
-    queryKey: ['global-mcp-servers'],
-    queryFn: () => listGlobalMcpDefinitions(),
+    ...listGlobalMcpsOptions(),
     retry: false,
   })
 
   const availableSkills: SkillDefinition[] = useMemo(
     () =>
       mergeProjectAndGlobal(
-        projectSkillsQuery.data ?? [],
-        globalSkillsQuery.data ?? [],
+        projectSkillsQuery.data?.items ?? [],
+        globalSkillsQuery.data?.items ?? [],
       ),
     [projectSkillsQuery.data, globalSkillsQuery.data],
   )
   const availableMcps: McpDefinition[] = useMemo(
     () =>
       mergeProjectAndGlobal(
-        projectMcpsQuery.data ?? [],
-        globalMcpsQuery.data ?? [],
+        projectMcpsQuery.data?.items ?? [],
+        globalMcpsQuery.data?.items ?? [],
       ),
     [projectMcpsQuery.data, globalMcpsQuery.data],
   )
@@ -319,54 +318,7 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
     )
 
   const createSession = useMutation({
-    mutationFn: () => {
-      const base = selectedBranch.trim()
-      const body: Parameters<typeof startSession>[1] = {}
-      if (createNewBranch) {
-        const newBranch = newBranchName.trim()
-        if (!newBranch) throw new Error('Enter a name for the new branch')
-        if (!base) throw new Error('Pick a base branch to fork from')
-        body.branch_name = newBranch
-        body.base_branch_name = base
-      } else if (base) {
-        body.branch_name = base
-      }
-      if (selectedSkills.length > 0) body.skills = selectedSkills
-      if (selectedMcpServers.length > 0) body.mcp_servers = selectedMcpServers
-      if (selectedProvider) body.ai_provider = selectedProvider
-      // Only send ai_model when the user explicitly chose one. An empty
-      // string would mean "clear it" on the backend — we want "omit" to
-      // fall through to the provider's configured default_model.
-      if (selectedModel && selectedModel.trim() !== '') {
-        body.ai_model = selectedModel.trim()
-      }
-
-      // Sandbox resources: send whatever the user sees in the input — even
-      // when it matches the UI's own DEFAULT constants. Previously we
-      // omitted the field in that case and the backend fell through to its
-      // *own* configured default (AgentSandboxSettings.memory_limit_mb),
-      // which on some installs is 2048 MB. The form then displayed "8192"
-      // but the container actually got 2 GB — a silent mismatch between
-      // what the user saw and what the sandbox enforced. An empty field
-      // still means "use the platform default" (deliberate escape hatch).
-      const cpuStr = cpuLimit.trim()
-      if (cpuStr !== '') {
-        const parsed = Number(cpuStr)
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-          throw new Error('CPU limit must be a positive number')
-        }
-        body.cpu_limit = parsed
-      }
-      const memStr = memoryLimitMb.trim()
-      if (memStr !== '') {
-        const parsed = Number(memStr)
-        if (!Number.isInteger(parsed) || parsed <= 0) {
-          throw new Error('Memory limit must be a positive integer (MB)')
-        }
-        body.memory_limit_mb = parsed
-      }
-      return startSession(project.id, body)
-    },
+    ...workspaceStartSessionMutation(),
     onSuccess: (session) => {
       queryClient.invalidateQueries({
         queryKey: ['workspace', project.id, 'sessions'],
@@ -383,6 +335,55 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
     },
     onError: (e: Error) => toast.error(e.message),
   })
+
+  const submitSession = () => {
+    const base = selectedBranch.trim()
+    const body: StartSessionRequest = {}
+    if (createNewBranch) {
+      const newBranch = newBranchName.trim()
+      if (!newBranch) return toast.error('Enter a name for the new branch')
+      if (!base) return toast.error('Pick a base branch to fork from')
+      body.branch_name = newBranch
+      body.base_branch_name = base
+    } else if (base) {
+      body.branch_name = base
+    }
+    if (selectedSkills.length > 0) body.skills = selectedSkills
+    if (selectedMcpServers.length > 0) body.mcp_servers = selectedMcpServers
+    if (selectedProvider) body.ai_provider = selectedProvider
+    // Only send ai_model when the user explicitly chose one. An empty
+    // string would mean "clear it" on the backend — we want "omit" to
+    // fall through to the provider's configured default_model.
+    if (selectedModel && selectedModel.trim() !== '') {
+      body.ai_model = selectedModel.trim()
+    }
+
+    // Sandbox resources: send whatever the user sees in the input — even
+    // when it matches the UI's own DEFAULT constants. Previously we
+    // omitted the field in that case and the backend fell through to its
+    // *own* configured default (AgentSandboxSettings.memory_limit_mb),
+    // which on some installs is 2048 MB. The form then displayed "8192"
+    // but the container actually got 2 GB — a silent mismatch between
+    // what the user saw and what the sandbox enforced. An empty field
+    // still means "use the platform default" (deliberate escape hatch).
+    const cpuStr = cpuLimit.trim()
+    if (cpuStr !== '') {
+      const parsed = Number(cpuStr)
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        return toast.error('CPU limit must be a positive number')
+      }
+      body.cpu_limit = parsed
+    }
+    const memStr = memoryLimitMb.trim()
+    if (memStr !== '') {
+      const parsed = Number(memStr)
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        return toast.error('Memory limit must be a positive integer (MB)')
+      }
+      body.memory_limit_mb = parsed
+    }
+    createSession.mutate({ path: { project_id: project.id }, body })
+  }
 
   return (
     <div className="mx-auto max-w-4xl w-full p-4 md:p-6 space-y-6">
@@ -778,8 +779,8 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
         ) : availableSkills.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No skills defined yet. Add one in{' '}
-            <a href="/settings/skills" className="underline">
-              Settings → Skills
+            <a href="/skills" className="underline">
+              Skills
             </a>
             .
           </p>
@@ -872,8 +873,8 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
         ) : availableMcps.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No MCP servers defined yet. Add one in{' '}
-            <a href="/settings/mcp-servers" className="underline">
-              Settings → MCP servers
+            <a href="/mcp-servers" className="underline">
+              MCP Servers
             </a>
             .
           </p>
@@ -943,7 +944,7 @@ export function NewSessionPage({ project }: NewSessionPageProps) {
             Cancel
           </Button>
           <Button
-            onClick={() => createSession.mutate()}
+            onClick={submitSession}
             disabled={createSession.isPending}
           >
             {createSession.isPending ? (

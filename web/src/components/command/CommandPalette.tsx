@@ -1,8 +1,8 @@
-import { getProjectsOptions } from '@/api/client/@tanstack/react-query.gen'
 import {
-  listGlobalMcpDefinitions,
-  listGlobalSkillDefinitions,
-} from '@/components/agents/api'
+  getProjectsOptions,
+  listGlobalMcpsOptions,
+  listGlobalSkillsOptions,
+} from '@/api/client/@tanstack/react-query.gen'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import {
   Command,
@@ -28,6 +28,7 @@ import {
   Bot,
   Boxes,
   Cloud,
+  CreditCard,
   Database,
   DatabaseBackup,
   Folder,
@@ -147,7 +148,7 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Storage',
-    url: '/settings/storage',
+    url: '/storage',
     icon: Database,
     keywords: ['database', 'files', 'data', 'services'],
   },
@@ -171,13 +172,13 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Skills',
-    url: '/settings/skills',
+    url: '/skills',
     icon: Wand2,
     keywords: ['skills', 'ai', 'agents', 'claude', 'instructions', 'prompts', 'global'],
   },
   {
     title: 'MCP Servers',
-    url: '/settings/mcp-servers',
+    url: '/mcp-servers',
     icon: Server,
     keywords: ['mcp', 'model', 'context', 'protocol', 'tools', 'servers', 'agents', 'claude', 'global'],
   },
@@ -313,46 +314,63 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['deploy', 'releases', 'versions'],
   },
   {
-    title: 'Analytics Overview',
+    title: 'Analytics',
     url: 'analytics',
     icon: BarChart3,
-    keywords: ['stats', 'metrics', 'analytics'],
+    keywords: ['stats', 'metrics', 'analytics', 'overview'],
   },
   {
-    title: 'Analytics - Visitors',
+    title: 'Revenue',
+    url: 'revenue',
+    icon: CreditCard,
+    keywords: [
+      'revenue',
+      'mrr',
+      'arr',
+      'stripe',
+      'billing',
+      'subscriptions',
+      'payments',
+      'churn',
+      'import',
+      'csv',
+    ],
+  },
+  {
+    title: 'Visitors',
     url: 'analytics/visitors',
     icon: Users,
-    keywords: ['users', 'visitors', 'traffic'],
+    keywords: ['users', 'visitors', 'traffic', 'analytics'],
   },
   {
-    title: 'Analytics - Pages',
+    title: 'Pages',
     url: 'analytics/pages',
     icon: Activity,
-    keywords: ['pages', 'views', 'pageviews'],
+    keywords: ['pages', 'views', 'pageviews', 'analytics'],
   },
   {
-    title: 'Analytics - Replays',
+    title: 'Session Replays',
     url: 'analytics/replays',
     icon: Monitor,
-    keywords: ['session', 'replays', 'recordings'],
+    keywords: ['session', 'replays', 'recordings', 'analytics'],
   },
   {
-    title: 'Analytics - Funnels',
+    title: 'Funnels',
     url: 'analytics/funnels',
     icon: BarChart3,
-    keywords: ['funnels', 'conversion', 'flow'],
+    keywords: ['funnels', 'conversion', 'flow', 'analytics'],
   },
   {
-    title: 'Analytics - Logs',
+    title: 'Request Logs',
     url: 'analytics/requests',
     icon: ScrollText,
-    keywords: ['logs', 'requests', 'http'],
+    keywords: ['logs', 'requests', 'http', 'analytics'],
   },
   {
-    title: 'Analytics - Setup',
+    title: 'Analytics Setup',
     url: 'analytics/setup',
     icon: Settings,
-    keywords: ['setup', 'configuration', 'install'],
+    keywords: ['setup', 'configuration', 'install', 'analytics'],
   },
   {
     title: 'Storage',
@@ -544,19 +562,19 @@ export function CommandPalette() {
     [projectResponse]
   )
 
-  const { data: globalSkills = [], refetch: refetchSkills } = useQuery({
-    queryKey: ['global-skills'],
-    queryFn: () => listGlobalSkillDefinitions(),
+  const { data: globalSkillsData, refetch: refetchSkills } = useQuery({
+    ...listGlobalSkillsOptions(),
     enabled: open,
     staleTime: 60_000,
   })
+  const globalSkills = globalSkillsData?.items ?? []
 
-  const { data: globalMcpServers = [], refetch: refetchMcp } = useQuery({
-    queryKey: ['global-mcp-servers'],
-    queryFn: () => listGlobalMcpDefinitions(),
+  const { data: globalMcpServersData, refetch: refetchMcp } = useQuery({
+    ...listGlobalMcpsOptions(),
     enabled: open,
     staleTime: 60_000,
   })
+  const globalMcpServers = globalMcpServersData?.items ?? []
 
   // Detect if user is on a project page and extract slug
   const currentProjectSlug = useMemo(() => {
@@ -896,7 +914,7 @@ export function CommandPalette() {
           title: skill.name,
           subtitle: skill.slug,
           icon: <Wand2 className="h-4 w-4" />,
-          run: () => navigate(`/settings/skills/${skill.slug}`),
+          run: () => navigate(`/skills/${skill.slug}`),
         })
       } else if (key.startsWith('mcp:')) {
         const mcp = mcpBySlug.get(key.slice('mcp:'.length))
@@ -906,7 +924,7 @@ export function CommandPalette() {
           title: mcp.name,
           subtitle: mcp.slug,
           icon: <Server className="h-4 w-4" />,
-          run: () => navigate(`/settings/mcp-servers/${mcp.slug}`),
+          run: () => navigate(`/mcp-servers/${mcp.slug}`),
         })
       } else if (key === 'action:toggle-theme') {
         out.push({
@@ -964,6 +982,7 @@ export function CommandPalette() {
                 {recentItems.map((entry) => (
                   <CommandItem
                     key={`recent-${entry.key}`}
+                    value={`recent-${entry.key}`}
                     onSelect={() => runWithFrecency(entry.key, entry.run)}
                     className="flex items-center gap-2"
                   >
@@ -988,6 +1007,7 @@ export function CommandPalette() {
                 {searchResults.projectNav.map((item) => (
                   <CommandItem
                     key={item.url}
+                    value={`project-nav-${item.url}`}
                     onSelect={() =>
                       runWithFrecency(item.url, () => navigate(item.url))
                     }
@@ -1009,6 +1029,7 @@ export function CommandPalette() {
                 {searchResults.navigation.map((item) => (
                   <CommandItem
                     key={item.url}
+                    value={`nav-${item.url}`}
                     onSelect={() =>
                       runWithFrecency(item.url, () => navigate(item.url))
                     }
@@ -1030,6 +1051,7 @@ export function CommandPalette() {
                 {searchResults.settings.map((item) => (
                   <CommandItem
                     key={item.url}
+                    value={`settings-${item.url}`}
                     onSelect={() =>
                       runWithFrecency(item.url, () => navigate(item.url))
                     }
@@ -1051,6 +1073,7 @@ export function CommandPalette() {
                 {searchResults.observe.map((item) => (
                   <CommandItem
                     key={item.url}
+                    value={`observe-${item.url}`}
                     onSelect={() =>
                       runWithFrecency(item.url, () => navigate(item.url))
                     }
@@ -1072,6 +1095,7 @@ export function CommandPalette() {
                 {searchResults.plugins.map((item) => (
                   <CommandItem
                     key={item.url}
+                    value={`plugins-${item.url}`}
                     onSelect={() =>
                       runWithFrecency(item.url, () => navigate(item.url))
                     }
@@ -1093,6 +1117,7 @@ export function CommandPalette() {
                 {searchResults.account.map((item) => (
                   <CommandItem
                     key={item.url}
+                    value={`account-${item.url}`}
                     onSelect={() =>
                       runWithFrecency(item.url, () => navigate(item.url))
                     }
@@ -1116,7 +1141,7 @@ export function CommandPalette() {
                     key={`skill-${skill.id}`}
                     onSelect={() =>
                       runWithFrecency(`skill:${skill.slug}`, () =>
-                        navigate(`/settings/skills/${skill.slug}`)
+                        navigate(`/skills/${skill.slug}`)
                       )
                     }
                     className="flex items-center gap-2"
@@ -1142,7 +1167,7 @@ export function CommandPalette() {
                     key={`mcp-${mcp.id}`}
                     onSelect={() =>
                       runWithFrecency(`mcp:${mcp.slug}`, () =>
-                        navigate(`/settings/mcp-servers/${mcp.slug}`)
+                        navigate(`/mcp-servers/${mcp.slug}`)
                       )
                     }
                     className="flex items-center gap-2"

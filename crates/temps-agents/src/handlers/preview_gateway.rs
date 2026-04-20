@@ -30,13 +30,13 @@ use crate::preview_gateway::{
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/preview-gateway/status", get(get_status))
-        .route("/preview-gateway/logs", get(get_logs))
-        .route("/preview-gateway/restart", post(restart))
-        .route("/preview-gateway/upgrade", post(upgrade))
+        .route("/preview-gateway/status", get(get_preview_gateway_status))
+        .route("/preview-gateway/logs", get(get_preview_gateway_logs))
+        .route("/preview-gateway/restart", post(restart_preview_gateway))
+        .route("/preview-gateway/upgrade", post(upgrade_preview_gateway))
         .route(
             "/preview-gateway/settings",
-            get(get_settings).patch(patch_settings),
+            get(get_preview_gateway_settings).patch(patch_preview_gateway_settings),
         )
 }
 
@@ -101,7 +101,7 @@ pub struct PatchSettingsRequest {
     responses((status = 200, body = GatewayStatus)),
     security(("bearer_auth" = []))
 )]
-async fn get_status(
+pub async fn get_preview_gateway_status(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -124,7 +124,7 @@ async fn get_status(
     responses((status = 200, body = LogsResponse)),
     security(("bearer_auth" = []))
 )]
-async fn get_logs(
+pub async fn get_preview_gateway_logs(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(q): Query<LogsQuery>,
@@ -144,7 +144,7 @@ async fn get_logs(
     responses((status = 204, description = "Gateway restarted")),
     security(("bearer_auth" = []))
 )]
-async fn restart(
+pub async fn restart_preview_gateway(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -170,7 +170,7 @@ async fn restart(
     responses((status = 204, description = "Gateway upgraded")),
     security(("bearer_auth" = []))
 )]
-async fn upgrade(
+pub async fn upgrade_preview_gateway(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpgradeRequest>,
@@ -210,7 +210,7 @@ async fn upgrade(
     responses((status = 200, body = PreviewGatewaySettingsResponse)),
     security(("bearer_auth" = []))
 )]
-async fn get_settings(
+pub async fn get_preview_gateway_settings(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -227,7 +227,7 @@ async fn get_settings(
     responses((status = 200, body = PreviewGatewaySettingsResponse)),
     security(("bearer_auth" = []))
 )]
-async fn patch_settings(
+pub async fn patch_preview_gateway_settings(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Json(patch): Json<PatchSettingsRequest>,

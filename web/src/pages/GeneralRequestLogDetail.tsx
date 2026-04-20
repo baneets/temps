@@ -137,7 +137,7 @@ export default function GeneralRequestLogDetail() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <h4 className="text-sm font-medium text-muted-foreground">
                           Method
@@ -229,7 +229,7 @@ export default function GeneralRequestLogDetail() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <h4 className="text-sm font-medium text-muted-foreground">
                           Project ID
@@ -295,7 +295,7 @@ export default function GeneralRequestLogDetail() {
                         </p>
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <h4 className="text-sm font-medium text-muted-foreground">
                           Is Entry Page
@@ -336,7 +336,7 @@ export default function GeneralRequestLogDetail() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <h4 className="text-sm font-medium text-muted-foreground">
                           IP Address
@@ -449,7 +449,7 @@ export default function GeneralRequestLogDetail() {
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div className="space-y-1">
                           <h4 className="text-sm font-medium text-muted-foreground">
                             Country

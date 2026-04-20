@@ -117,7 +117,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-async fn trigger_agent(
+pub async fn trigger_agent(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -227,28 +227,7 @@ async fn trigger_agent(
         );
     }
 
-    // Resolve sandbox against global setting
-    let global_sandbox_enabled = {
-        use sea_orm::EntityTrait;
-        temps_entities::settings::Entity::find_by_id(1)
-            .one(app_state.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data
-                    .get("agent_sandbox")
-                    .and_then(|v| v.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false)
-    };
-    let run_resp = AgentRunResponse::from_with_agent(
-        run,
-        Some(agent.slug),
-        Some(agent.name),
-        agent.sandbox_enabled.unwrap_or(global_sandbox_enabled),
-    );
+    let run_resp = AgentRunResponse::from_with_agent(run, Some(agent.slug), Some(agent.name));
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))
 }
@@ -292,7 +271,7 @@ pub struct WebhookTriggerResponse {
         (status = 422, description = "Agent disabled"),
     ),
 )]
-async fn webhook_trigger(
+pub async fn webhook_trigger(
     State(app_state): State<Arc<AppState>>,
     Path(webhook_id): Path<String>,
     headers: HeaderMap,
@@ -411,7 +390,7 @@ pub struct CliStatusQuery {
     ),
     security(("bearer_auth" = []))
 )]
-async fn get_cli_status(
+pub async fn get_cli_status(
     RequireAuth(auth): RequireAuth,
     State(_app_state): State<Arc<AppState>>,
     Path(_project_id): Path<i32>,
@@ -444,14 +423,28 @@ async fn get_cli_status(
 // ── Sandbox Status ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, ToSchema)]
-struct SandboxStatusResponse {
-    docker_available: bool,
-    image_ready: bool,
-    image_name: String,
-    error: Option<String>,
+pub struct SandboxStatusResponse {
+    pub docker_available: bool,
+    pub image_ready: bool,
+    pub image_name: String,
+    pub error: Option<String>,
 }
 
-async fn get_sandbox_status(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/projects/{project_id}/agents/sandbox-status",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+    ),
+    responses(
+        (status = 200, description = "Project-scoped sandbox readiness (Docker + agent image)", body = SandboxStatusResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_sandbox_status(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(_project_id): Path<i32>,
@@ -486,7 +479,18 @@ async fn get_sandbox_status(
     }))
 }
 
-async fn get_global_sandbox_status(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/settings/sandbox-status",
+    responses(
+        (status = 200, description = "Global sandbox readiness for the settings page", body = SandboxStatusResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_global_sandbox_status(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -516,7 +520,18 @@ async fn get_global_sandbox_status(
     }))
 }
 
-async fn rebuild_sandbox_image(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/settings/sandbox-rebuild",
+    responses(
+        (status = 200, description = "Server-Sent Events stream of rebuild progress; final event `{\"type\":\"done\",\"success\":bool,...}`", content_type = "text/event-stream"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn rebuild_sandbox_image(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, Problem> {
@@ -577,38 +592,53 @@ fn sse_keep_alive() -> KeepAlive {
 // ── Smoke Test ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, ToSchema)]
-struct SmokeTestResponse {
+pub struct SmokeTestResponse {
     /// Whether the smoke test passed
-    passed: bool,
+    pub passed: bool,
     /// Where the test ran: "host" or "sandbox"
-    environment: String,
+    pub environment: String,
     /// Claude CLI installed?
-    cli_installed: bool,
+    pub cli_installed: bool,
     /// Claude CLI authenticated?
-    cli_authenticated: bool,
+    pub cli_authenticated: bool,
     /// Claude CLI version
-    cli_version: Option<String>,
+    pub cli_version: Option<String>,
     /// Auth email / method
-    auth_info: Option<String>,
+    pub auth_info: Option<String>,
     /// What the user needs to do if the test failed
-    setup_hint: Option<String>,
+    pub setup_hint: Option<String>,
     /// Full output for debugging
-    detail: Option<String>,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SmokeTestQuery {
+pub struct SmokeTestQuery {
     /// Provider id to test. Defaults to the globally active provider when
     /// omitted so existing UI/CLI callers keep working. Per-provider Test
     /// buttons pass the explicit provider id so users can verify any
     /// credential, not just the one currently marked active.
-    provider_id: Option<String>,
+    pub provider_id: Option<String>,
 }
 
 /// Run a smoke test to verify the selected AI CLI works in the environment
 /// where agents will actually execute (host or sandbox container). If no
 /// `provider_id` is supplied the globally active provider is tested.
-async fn smoke_test_agent(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/projects/{project_id}/agents/smoke-test",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("provider_id" = Option<String>, Query, description = "Provider id to test; defaults to the globally active provider"),
+    ),
+    responses(
+        (status = 200, description = "Smoke test result for the AI CLI in the agent's execution environment", body = SmokeTestResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn smoke_test_agent(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(_project_id): Path<i32>,
@@ -663,8 +693,8 @@ async fn smoke_test_agent(
         .flavor(&provider_cfg.auth_type)
         .unwrap_or_else(|| catalog_entry.default_flavor());
 
-    if global_sandbox.enabled {
-        // Test inside a sandbox container
+    {
+        // Sandbox is the only execution mode. Test inside a sandbox container.
         let registry = app_state.executor.sandbox_registry();
         let provider = registry.provider();
 
@@ -843,39 +873,6 @@ async fn smoke_test_agent(
                 detail: None,
             })),
         }
-    } else {
-        // Test on host. `create_provider` returns the live probe for whichever
-        // CLI the user picked — claude, codex, or opencode — so switching the
-        // active provider (or clicking Test on an inactive card) now tests
-        // the right binary instead of always hitting claude.
-        match ai_cli::create_provider(&target_provider_id) {
-            Some(p) => {
-                let s = p.get_status().await;
-                Ok(Json(SmokeTestResponse {
-                    passed: s.authenticated,
-                    environment: "host".into(),
-                    cli_installed: s.installed,
-                    cli_authenticated: s.authenticated,
-                    cli_version: s.version,
-                    auth_info: s.email.or(s.auth_method),
-                    setup_hint: s.setup_hint,
-                    detail: None,
-                }))
-            }
-            None => Ok(Json(SmokeTestResponse {
-                passed: false,
-                environment: "host".into(),
-                cli_installed: false,
-                cli_authenticated: false,
-                cli_version: None,
-                auth_info: None,
-                setup_hint: Some(format!(
-                    "{} CLI not found. Install: {}",
-                    catalog_entry.name, catalog_entry.install_command
-                )),
-                detail: None,
-            })),
-        }
     }
 }
 
@@ -901,19 +898,32 @@ fn parse_auth_status(output: &str) -> (bool, Option<String>, Option<String>) {
 // ── Agent Token ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, ToSchema)]
-struct SaveAgentTokenRequest {
+pub struct SaveAgentTokenRequest {
     /// The OAuth token from `claude setup-token` or an API key.
     /// Will be encrypted before storage.
-    token: String,
+    pub token: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-struct SaveAgentTokenResponse {
-    saved: bool,
+pub struct SaveAgentTokenResponse {
+    pub saved: bool,
 }
 
 /// Save an encrypted AI provider token for use in sandbox containers.
-async fn save_agent_token(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/settings/agent-token",
+    request_body = SaveAgentTokenRequest,
+    responses(
+        (status = 200, description = "Token encrypted and persisted", body = SaveAgentTokenResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 500, description = "Encryption or database error"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn save_agent_token(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Json(request): Json<SaveAgentTokenRequest>,

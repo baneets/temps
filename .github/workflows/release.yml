@@ -99,6 +99,90 @@ jobs:
             temps-linux-amd64.tar.gz
             temps-linux-amd64.tar.gz.sha256
 
+  build-linux-arm64:
+    name: Build Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-arm64-release
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: web/node_modules
+          key: ${{ runner.os }}-arm64-bun-${{ hashFiles('web/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-bun-
+
+      - name: Install web dependencies
+        run: |
+          cd web
+          bun install
+
+      - name: Install wasm-pack and Build WASM
+        run: |
+          cargo install wasm-pack
+          cd crates/temps-captcha-wasm
+          bun run build
+
+      - name: Build release binary
+        run: cargo build --release --bin temps
+        env:
+          FORCE_WEB_BUILD: 1
+          CARGO_INCREMENTAL: 0
+          TEMPS_VERSION: ${{ github.ref_name }}
+
+      - name: Strip binary
+        run: strip target/release/temps
+
+      - name: Rename binary
+        run: cp target/release/temps temps
+
+      - name: Create tarball
+        run: |
+          tar -czf temps-linux-arm64.tar.gz temps
+          ls -lh temps-linux-arm64.tar.gz
+
+      - name: Generate checksum
+        run: |
+          sha256sum temps-linux-arm64.tar.gz > temps-linux-arm64.tar.gz.sha256
+          cat temps-linux-arm64.tar.gz.sha256
+
+      - name: Get binary info
+        run: |
+          file temps
+          ./temps --version || echo "Note: Binary may require runtime dependencies"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: temps-linux-arm64
+          path: |
+            temps-linux-arm64.tar.gz
+            temps-linux-arm64.tar.gz.sha256
+
   build-darwin-amd64:
     name: Build macOS AMD64
     runs-on: macos-15-intel
@@ -265,7 +349,7 @@ jobs:
 
   create-release:
     name: Create Release
-    needs: [build-linux-amd64, build-darwin-amd64, build-darwin-arm64]
+    needs: [build-linux-amd64, build-linux-arm64, build-darwin-amd64, build-darwin-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -282,6 +366,7 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/temps-linux-amd64/* release/
+          cp artifacts/temps-linux-arm64/* release/
           cp artifacts/temps-darwin-amd64/* release/
           cp artifacts/temps-darwin-arm64/* release/
           ls -lh release/
@@ -290,6 +375,7 @@ jobs:
         run: |
           cd release
           cat temps-linux-amd64.tar.gz.sha256 > checksums.txt
+          cat temps-linux-arm64.tar.gz.sha256 >> checksums.txt
           cat temps-darwin-amd64.tar.gz.sha256 >> checksums.txt
           cat temps-darwin-arm64.tar.gz.sha256 >> checksums.txt
           echo "Combined checksums:"
@@ -304,16 +390,19 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           SHA256_LINUX_AMD64=$(awk '{print $1}' release/temps-linux-amd64.tar.gz.sha256)
+          SHA256_LINUX_ARM64=$(awk '{print $1}' release/temps-linux-arm64.tar.gz.sha256)
           SHA256_DARWIN_AMD64=$(awk '{print $1}' release/temps-darwin-amd64.tar.gz.sha256)
           SHA256_DARWIN_ARM64=$(awk '{print $1}' release/temps-darwin-arm64.tar.gz.sha256)
 
           echo "Generating Homebrew formula for version $VERSION"
           echo "Linux AMD64 SHA256: $SHA256_LINUX_AMD64"
+          echo "Linux ARM64 SHA256: $SHA256_LINUX_ARM64"
           echo "macOS AMD64 SHA256: $SHA256_DARWIN_AMD64"
           echo "macOS ARM64 SHA256: $SHA256_DARWIN_ARM64"
 
           sed -e "s/{{VERSION}}/$VERSION/g" \
               -e "s/{{SHA256_LINUX_AMD64}}/$SHA256_LINUX_AMD64/g" \
+              -e "s/{{SHA256_LINUX_ARM64}}/$SHA256_LINUX_ARM64/g" \
               -e "s/{{SHA256_DARWIN_AMD64}}/$SHA256_DARWIN_AMD64/g" \
               -e "s/{{SHA256_DARWIN_ARM64}}/$SHA256_DARWIN_ARM64/g" \
               scripts/homebrew-formula.rb.template > release/temps.rb
@@ -359,6 +448,21 @@ jobs:
 
           # Extract
           tar -xzf temps-linux-amd64.tar.gz
+
+          # Move to PATH
+          sudo mv temps /usr/local/bin/temps
+
+          # Verify
+          temps --version
+          ```
+
+          #### Linux ARM64
+          ```bash
+          # Download
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/temps-linux-arm64.tar.gz
+
+          # Extract
+          tar -xzf temps-linux-arm64.tar.gz
 
           # Move to PATH
           sudo mv temps /usr/local/bin/temps
@@ -431,6 +535,8 @@ jobs:
             $PRERELEASE_FLAG \
             release/temps-linux-amd64.tar.gz \
             release/temps-linux-amd64.tar.gz.sha256 \
+            release/temps-linux-arm64.tar.gz \
+            release/temps-linux-arm64.tar.gz.sha256 \
             release/temps-darwin-amd64.tar.gz \
             release/temps-darwin-amd64.tar.gz.sha256 \
             release/temps-darwin-arm64.tar.gz \
@@ -446,8 +552,8 @@ jobs:
 
   build-and-push-docker:
     name: Build and Push Docker Image (${{ matrix.platform }})
-    needs: [build-linux-amd64, build-darwin-amd64, build-darwin-arm64]
-    runs-on: ubuntu-latest
+    needs: [build-linux-amd64, build-linux-arm64, build-darwin-amd64, build-darwin-arm64]
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -455,8 +561,13 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
+            runner: ubuntu-latest
             artifact: temps-linux-amd64
             tarball: temps-linux-amd64.tar.gz
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: temps-linux-arm64
+            tarball: temps-linux-arm64.tar.gz
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -543,9 +654,11 @@ jobs:
       - name: Create and push manifest for latest
         run: |
           docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/temps:latest \
-            ghcr.io/${{ github.repository_owner }}/temps:latest-linux-amd64
+            ghcr.io/${{ github.repository_owner }}/temps:latest-linux-amd64 \
+            ghcr.io/${{ github.repository_owner }}/temps:latest-linux-arm64
 
       - name: Create and push manifest for version
         run: |
           docker buildx imagetools create -t ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }} \
-            ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }}-linux-amd64
+            ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }}-linux-amd64 \
+            ghcr.io/${{ github.repository_owner }}/temps:${{ steps.version.outputs.version }}-linux-arm64

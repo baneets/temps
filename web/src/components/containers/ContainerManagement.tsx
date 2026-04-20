@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ContainerList } from './ContainerList'
+import { ContainerHeaderBar } from './ContainerHeaderBar'
 import { ContainerDetail } from './ContainerDetail'
 import { ContainerActionDialog } from './ContainerActionDialog'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -21,6 +21,7 @@ export function ContainerManagement({
     'start' | 'stop' | 'restart' | null
   >(null)
   const queryClient = useQueryClient()
+
   const { data: containers, isLoading } = useQuery({
     ...listContainersOptions({
       path: {
@@ -31,24 +32,22 @@ export function ContainerManagement({
     staleTime: 5000,
   })
 
-  // Get container ID from URL params or default to first container
+  const list = containers?.containers ?? []
   const userSelectedId = searchParams.get('container')
-  const selectedContainerId =
-    userSelectedId ?? containers?.containers?.[0]?.container_id ?? null
+  const selectedContainer =
+    list.find((c) => c.container_id === userSelectedId) ?? list[0] ?? null
+  const selectedContainerId = selectedContainer?.container_id ?? null
 
-  // Get tab from URL params or default to 'overview'
   const selectedTab =
     (searchParams.get('tab') as 'overview' | 'logs' | 'configuration' | null) ??
     'overview'
 
-  // Handle container selection with URL update
   const handleSelectContainer = (id: string) => {
     searchParams.set('container', id)
-    searchParams.set('tab', 'overview') // Reset tab when changing container
+    searchParams.set('tab', 'overview')
     setSearchParams(searchParams)
   }
 
-  // Handle tab change with URL update
   const handleTabChange = (tab: 'overview' | 'logs' | 'configuration') => {
     searchParams.set('tab', tab)
     setSearchParams(searchParams)
@@ -62,14 +61,14 @@ export function ContainerManagement({
     )
   }
 
-  if (!containers || containers?.containers?.length === 0) {
+  if (list.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-96 border rounded-lg bg-gradient-to-b from-muted/40 to-muted/20 p-6">
-        <div className="text-center space-y-2">
-          <p className="text-sm font-semibold text-foreground">
+      <div className="flex flex-col items-center justify-center h-96 rounded-lg border border-neutral-950/10 bg-neutral-50 p-6 dark:border-white/10 dark:bg-white/5">
+        <div className="text-center space-y-1">
+          <p className="text-sm font-semibold text-neutral-900 dark:text-white">
             No containers yet
           </p>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-neutral-600 dark:text-neutral-400">
             This environment doesn&apos;t have any running containers
           </p>
         </div>
@@ -78,31 +77,29 @@ export function ContainerManagement({
   }
 
   return (
-    <div className="flex gap-4 h-full rounded-lg overflow-hidden bg-background">
-      {/* Container List Sidebar */}
-      <div className="flex-shrink-0 overflow-y-auto">
-        <ContainerList
-          containers={containers?.containers}
-          selectedId={selectedContainerId}
-          onSelect={handleSelectContainer}
-        />
+    <div className="flex flex-col h-full -mx-4 -my-6 sm:-mx-6 sm:-my-8 lg:-mx-8">
+      <ContainerHeaderBar
+        containers={list}
+        selectedContainer={selectedContainer}
+        onSelect={handleSelectContainer}
+        tab={selectedTab}
+        onTabChange={handleTabChange}
+        onAction={setActionType}
+      />
+
+      <div className="flex-1 overflow-auto">
+        <div className="w-full px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+          {selectedContainerId && (
+            <ContainerDetail
+              projectId={project.id.toString()}
+              environmentId={environmentId}
+              containerId={selectedContainerId}
+              tab={selectedTab}
+            />
+          )}
+        </div>
       </div>
 
-      {/* Container Detail - Always show since first is selected by default */}
-      <div className="flex-1 overflow-hidden">
-        {selectedContainerId && (
-          <ContainerDetail
-            projectId={project.id.toString()}
-            environmentId={environmentId}
-            containerId={selectedContainerId}
-            tab={selectedTab}
-            onTabChange={handleTabChange}
-            onAction={setActionType}
-          />
-        )}
-      </div>
-
-      {/* Action Confirm Dialog */}
       <ContainerActionDialog
         projectId={project.id.toString()}
         environmentId={environmentId}
@@ -110,7 +107,6 @@ export function ContainerManagement({
         containerId={selectedContainerId}
         onClose={() => setActionType(null)}
         onSuccess={() => {
-          // Invalidate the containers list
           queryClient.invalidateQueries({
             queryKey: listContainersOptions({
               path: {

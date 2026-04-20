@@ -44,18 +44,22 @@ import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
 
 import {
-  cancelRun,
-  closeSession,
-  deleteSession,
-  reopenSession,
-  getSession,
-  listSessions,
-  sendMessage,
-  sessionStreamUrl,
-  updateSession,
-  type WorkspaceMessage,
-  type WorkspaceSession,
-} from './api'
+  workspaceCancelRunMutation,
+  workspaceCloseSessionMutation,
+  workspaceDeleteSessionMutation,
+  workspaceGetSessionOptions,
+  workspaceGetSessionQueryKey,
+  workspaceListSessionsOptions,
+  workspaceListSessionsQueryKey,
+  workspaceReopenSessionMutation,
+  workspaceSendMessageMutation,
+  workspaceUpdateSessionMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import type {
+  WorkspaceMessageResponse as WorkspaceMessage,
+  WorkspaceSessionResponse as WorkspaceSession,
+} from '@/api/client/types.gen'
+import { sessionStreamUrl } from './helpers'
 import { SessionPreviewCard } from './SessionPreviewCard'
 import { TerminalTabs, type TerminalTabsHandle } from './TerminalTabs'
 import { SandboxStatsBadge } from './SandboxStatsBadge'
@@ -63,8 +67,11 @@ import { TerminalKeysMenu } from './TerminalKeysMenu'
 import { usePageTitle } from '@/hooks/usePageTitle'
 
 /** Display title for a session — falls back to "Session #{id}" when blank. */
-function sessionDisplayTitle(s: { id: number; title: string | null }): string {
-  return s.title?.trim() ? s.title : `Session #${s.id}`
+function sessionDisplayTitle(s: {
+  id: number
+  title?: string | null
+}): string {
+  return s.title && s.title.trim() ? s.title : `Session #${s.id}`
 }
 
 interface Project {
@@ -114,15 +121,24 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   const terminalRef = useRef<TerminalTabsHandle | null>(null)
 
   // Fetch sessions list
-  const sessionsQuery = useQuery({
-    queryKey: ['workspace', project.id, 'sessions'],
-    queryFn: () => listSessions(project.id),
+  const sessionsListOptions = workspaceListSessionsOptions({
+    path: { project_id: project.id },
   })
+  const sessionsListKey = workspaceListSessionsQueryKey({
+    path: { project_id: project.id },
+  })
+  const sessionsQuery = useQuery(sessionsListOptions)
 
   // Fetch active session detail
+  const activeSessionOptions = workspaceGetSessionOptions({
+    path: { project_id: project.id, session_id: activeSessionId ?? 0 },
+  })
+  const activeSessionKey = (sessionId: number) =>
+    workspaceGetSessionQueryKey({
+      path: { project_id: project.id, session_id: sessionId },
+    })
   const activeSessionQuery = useQuery({
-    queryKey: ['workspace', project.id, 'session', activeSessionId],
-    queryFn: () => getSession(project.id, activeSessionId!),
+    ...activeSessionOptions,
     enabled: activeSessionId !== null,
   })
 
@@ -136,36 +152,38 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   // user sees loading → success → error transitions without a disconnected
   // trailing toast.
   const closeActiveSession = useMutation({
-    mutationFn: (sessionId: number) => closeSession(project.id, sessionId),
+    ...workspaceCloseSessionMutation(),
     onSuccess: () => {
       setActiveSessionId(null)
       setStreamedMessages([])
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'sessions'],
-      })
+      queryClient.invalidateQueries({ queryKey: sessionsListKey })
     },
   })
 
   const handleCloseActiveSession = (sessionId: number) => {
-    toast.promise(closeActiveSession.mutateAsync(sessionId), {
-      loading: 'Closing session…',
-      success: 'Session closed',
-      error: (error: Error) => `Failed to close session: ${error.message}`,
-    })
+    toast.promise(
+      closeActiveSession.mutateAsync({
+        path: { project_id: project.id, session_id: sessionId },
+      }),
+      {
+        loading: 'Closing session…',
+        success: 'Session closed',
+        error: (error: Error) => `Failed to close session: ${error.message}`,
+      },
+    )
   }
 
   // Delete session mutation (hard delete: cancels run, destroys sandbox,
   // cascades messages).
   const deleteSessionMutation = useMutation({
-    mutationFn: (sessionId: number) => deleteSession(project.id, sessionId),
-    onSuccess: (_, sessionId) => {
+    ...workspaceDeleteSessionMutation(),
+    onSuccess: (_, variables) => {
+      const sessionId = variables.path.session_id
       if (activeSessionId === sessionId) {
         setActiveSessionId(null)
         setStreamedMessages([])
       }
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'sessions'],
-      })
+      queryClient.invalidateQueries({ queryKey: sessionsListKey })
       toast.success('Session deleted')
     },
     onError: (error: Error) => {
@@ -231,20 +249,26 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
     return () => window.clearTimeout(id)
   }, [viewMode])
   const renameSessionMutation = useMutation({
-    mutationFn: (title: string | null) =>
-      updateSession(project.id, activeSessionId!, { title }),
+    ...workspaceUpdateSessionMutation(),
     onSuccess: () => {
       setEditingTitle(false)
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'session', activeSessionId],
-      })
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'sessions'],
-      })
+      if (activeSessionId !== null) {
+        queryClient.invalidateQueries({
+          queryKey: activeSessionKey(activeSessionId),
+        })
+      }
+      queryClient.invalidateQueries({ queryKey: sessionsListKey })
       toast.success('Session renamed')
     },
     onError: (e: Error) => toast.error(e.message),
   })
+  const renameSession = (title: string | null) => {
+    if (activeSessionId === null) return
+    renameSessionMutation.mutate({
+      path: { project_id: project.id, session_id: activeSessionId },
+      body: { title },
+    })
+  }
 
   // Drive the browser tab title from the active session.
   const activeSession = activeSessionQuery.data?.session
@@ -254,16 +278,14 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
 
   // Reopen session mutation
   const reopenActiveSession = useMutation({
-    mutationFn: (sessionId: number) => reopenSession(project.id, sessionId),
+    ...workspaceReopenSessionMutation(),
     onSuccess: (session) => {
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'sessions'],
-      })
+      queryClient.invalidateQueries({ queryKey: sessionsListKey })
       // Also invalidate the active session *detail* query — otherwise the
       // WorkspacePage keeps rendering the closed-session placeholder because
       // `activeSessionQuery.data.session.status` stays stale.
       queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'session', session.id],
+        queryKey: activeSessionKey(session.id),
       })
       setActiveSessionId(session.id)
       toast.success('Session reopened')
@@ -275,13 +297,14 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
 
   // Send message mutation
   const sendMessageMutation = useMutation({
-    mutationFn: (content: string) =>
-      sendMessage(project.id, activeSessionId!, { content }),
+    ...workspaceSendMessageMutation(),
     onSuccess: () => {
       setInputValue('')
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'session', activeSessionId],
-      })
+      if (activeSessionId !== null) {
+        queryClient.invalidateQueries({
+          queryKey: activeSessionKey(activeSessionId),
+        })
+      }
     },
     onError: (error: Error) => {
       toast.error(`Failed to send message: ${error.message}`)
@@ -292,11 +315,13 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   // the UI's "Thinking…" indicator clears immediately, regardless of whether
   // the underlying executor is actually wedged. The user is never trapped.
   const cancelMutation = useMutation({
-    mutationFn: () => cancelRun(project.id, activeSessionId!),
+    ...workspaceCancelRunMutation(),
     onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ['workspace', project.id, 'session', activeSessionId],
-      })
+      if (activeSessionId !== null) {
+        queryClient.invalidateQueries({
+          queryKey: activeSessionKey(activeSessionId),
+        })
+      }
       toast.success('Run cancelled')
     },
     onError: (error: Error) => {
@@ -420,7 +445,10 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
   const handleSend = () => {
     const trimmed = inputValue.trim()
     if (!trimmed || !activeSessionId || sendMessageMutation.isPending) return
-    sendMessageMutation.mutate(trimmed)
+    sendMessageMutation.mutate({
+      path: { project_id: project.id, session_id: activeSessionId },
+      body: { content: trimmed },
+    })
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -516,7 +544,7 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                           setEditingTitle(false)
                           return
                         }
-                        renameSessionMutation.mutate(trimmed || null)
+                        renameSession(trimmed || null)
                       }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
@@ -613,7 +641,12 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                     {activeSessionQuery.data?.session.status === 'closed' ? (
                       <DropdownMenuItem
                         onSelect={() =>
-                          reopenActiveSession.mutate(activeSessionId)
+                          reopenActiveSession.mutate({
+                            path: {
+                              project_id: project.id,
+                              session_id: activeSessionId!,
+                            },
+                          })
                         }
                         disabled={reopenActiveSession.isPending}
                       >
@@ -664,7 +697,12 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                       <AlertDialogCancel>Cancel</AlertDialogCancel>
                       <AlertDialogAction
                         onClick={() =>
-                          deleteSessionMutation.mutate(activeSessionId)
+                          deleteSessionMutation.mutate({
+                            path: {
+                              project_id: project.id,
+                              session_id: activeSessionId!,
+                            },
+                          })
                         }
                         className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                       >
@@ -688,7 +726,14 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 </p>
                 <Button
                   size="lg"
-                  onClick={() => reopenActiveSession.mutate(activeSessionId)}
+                  onClick={() =>
+                    reopenActiveSession.mutate({
+                      path: {
+                        project_id: project.id,
+                        session_id: activeSessionId!,
+                      },
+                    })
+                  }
                   disabled={reopenActiveSession.isPending}
                 >
                   {reopenActiveSession.isPending ? (
@@ -846,7 +891,7 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                               {activeSessionQuery.data.session.skills?.map((slug) => (
                                 <a
                                   key={`skill-${slug}`}
-                                  href={`/settings/skills/${slug}`}
+                                  href={`/skills/${slug}`}
                                   title={`Skill: ${slug}`}
                                   className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded hover:bg-muted/80"
                                 >
@@ -859,7 +904,7 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                             <div className="text-xs text-muted-foreground">
                               No skills attached.{' '}
                               <a
-                                href="/settings/skills"
+                                href="/skills"
                                 className="underline decoration-dotted underline-offset-2 hover:text-foreground"
                               >
                                 Manage
@@ -876,7 +921,7 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                               {activeSessionQuery.data.session.mcp_servers?.map((slug) => (
                                 <a
                                   key={`mcp-${slug}`}
-                                  href={`/settings/mcp-servers/${slug}`}
+                                  href={`/mcp-servers/${slug}`}
                                   title={`MCP server: ${slug}`}
                                   className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded hover:bg-muted/80"
                                 >
@@ -888,7 +933,7 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                             <div className="text-xs text-muted-foreground">
                               No MCP servers attached.{' '}
                               <a
-                                href="/settings/mcp-servers"
+                                href="/mcp-servers"
                                 className="underline decoration-dotted underline-offset-2 hover:text-foreground"
                               >
                                 Manage
@@ -979,7 +1024,14 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                     <Button
                       variant="destructive"
                       size="sm"
-                      onClick={() => cancelMutation.mutate()}
+                      onClick={() =>
+                        cancelMutation.mutate({
+                          path: {
+                            project_id: project.id,
+                            session_id: activeSessionId!,
+                          },
+                        })
+                      }
                       disabled={cancelMutation.isPending}
                       title="Cancel run and drop queued messages"
                     >

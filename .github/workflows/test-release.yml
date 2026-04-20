@@ -24,17 +24,20 @@ jobs:
           mkdir -p release
 
           # Create dummy binaries
-          echo "fake linux binary" > release/temps-linux-amd64
+          echo "fake linux amd64 binary" > release/temps-linux-amd64
+          echo "fake linux arm64 binary" > release/temps-linux-arm64
           echo "fake darwin amd64 binary" > release/temps-darwin-amd64
           echo "fake darwin arm64 binary" > release/temps-darwin-arm64
 
           # Generate checksums
           sha256sum release/temps-linux-amd64 > release/temps-linux-amd64.sha256
+          sha256sum release/temps-linux-arm64 > release/temps-linux-arm64.sha256
           sha256sum release/temps-darwin-amd64 > release/temps-darwin-amd64.sha256
           sha256sum release/temps-darwin-arm64 > release/temps-darwin-arm64.sha256
 
           # Combined checksums
           cat release/temps-linux-amd64.sha256 > release/checksums.txt
+          cat release/temps-linux-arm64.sha256 >> release/checksums.txt
           cat release/temps-darwin-amd64.sha256 >> release/checksums.txt
           cat release/temps-darwin-arm64.sha256 >> release/checksums.txt
 
@@ -47,11 +50,13 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/test-v}"
           SHA256_LINUX_AMD64=$(awk '{print $1}' release/temps-linux-amd64.sha256)
+          SHA256_LINUX_ARM64=$(awk '{print $1}' release/temps-linux-arm64.sha256)
           SHA256_DARWIN_AMD64=$(awk '{print $1}' release/temps-darwin-amd64.sha256)
           SHA256_DARWIN_ARM64=$(awk '{print $1}' release/temps-darwin-arm64.sha256)
 
           sed -e "s/{{VERSION}}/$VERSION/g" \
               -e "s/{{SHA256_LINUX_AMD64}}/$SHA256_LINUX_AMD64/g" \
+              -e "s/{{SHA256_LINUX_ARM64}}/$SHA256_LINUX_ARM64/g" \
               -e "s/{{SHA256_DARWIN_AMD64}}/$SHA256_DARWIN_AMD64/g" \
               -e "s/{{SHA256_DARWIN_ARM64}}/$SHA256_DARWIN_ARM64/g" \
               scripts/homebrew-formula.rb.template > release/temps.rb
@@ -83,6 +88,7 @@ jobs:
 
           ## Files Included
           - temps-linux-amd64 (dummy binary)
+          - temps-linux-arm64 (dummy binary)
           - temps-darwin-amd64 (dummy binary)
           - temps-darwin-arm64 (dummy binary)
           - install.sh (real install script)
@@ -105,6 +111,8 @@ jobs:
             --prerelease \
             release/temps-linux-amd64 \
             release/temps-linux-amd64.sha256 \
+            release/temps-linux-arm64 \
+            release/temps-linux-arm64.sha256 \
             release/temps-darwin-amd64 \
             release/temps-darwin-amd64.sha256 \
             release/temps-darwin-arm64 \

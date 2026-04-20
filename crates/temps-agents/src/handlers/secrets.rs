@@ -145,7 +145,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-async fn list_secrets(
+pub async fn list_secrets(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -177,7 +177,7 @@ async fn list_secrets(
     ),
     security(("bearer_auth" = []))
 )]
-async fn upsert_secret(
+pub async fn upsert_secret(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -236,7 +236,7 @@ async fn upsert_secret(
     ),
     security(("bearer_auth" = []))
 )]
-async fn delete_secret(
+pub async fn delete_secret(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,

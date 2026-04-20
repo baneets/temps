@@ -394,11 +394,7 @@ async function runAction(slug: string | undefined, options: RunOptions): Promise
   }
 
   success(`Run #${run.id} queued (status: ${statusColor(run.status)})`)
-  if (run.sandbox_enabled) {
-    info('Executing inside Docker sandbox')
-  } else {
-    warning('Sandbox disabled — workflow will run on the host')
-  }
+  info('Executing inside Docker sandbox')
 
   if (options.follow === false) {
     info(

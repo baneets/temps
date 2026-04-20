@@ -727,7 +727,7 @@ impl WorkspaceSessionManager {
     ///   flavors (Claude subscription, OpenCode config) leave the env empty
     ///   and rely on `seed_provider_credentials` writing the credential file
     ///   inside the container after creation.
-    /// - PATH — extended with /workspace/.temps/bin so `memory` is on PATH
+    /// - PATH — extended with /home/temps/.temps/bin so `memory` is on PATH
     ///
     /// Service credentials (DATABASE_URL, REDIS_URL) are NOT baked in.
     /// They are fetched at runtime via `temps services connect <name>`.
@@ -802,9 +802,11 @@ impl WorkspaceSessionManager {
         // providers — they ignore unknown env vars.
         env.insert("CLAUDE_CODE_ENTRYPOINT".to_string(), "cli".to_string());
 
-        // Put /workspace/.temps/bin on PATH so the memory script is callable
-        // as `memory` from anywhere (instead of by full path). Also include
-        // the AI CLI install locations baked into the sandbox image:
+        // Put /home/temps/.temps/bin on PATH so the memory script is callable
+        // as `memory` from anywhere (instead of by full path). `/home/temps`
+        // is the private named volume, NOT the bind-mounted `/workspace` repo,
+        // so scripts installed here don't leak into the user's PR diff.
+        // Also include the AI CLI install locations baked into the sandbox image:
         //   - /home/temps/.local/bin   → claude
         //   - /home/temps/.bun/bin     → codex (installed via `bun add -g`)
         //   - /home/temps/.opencode/bin → opencode (installer hardcodes this path)
@@ -813,7 +815,7 @@ impl WorkspaceSessionManager {
         // the CLIs even though they exist on disk.
         env.insert(
             "PATH".to_string(),
-            "/workspace/.temps/bin:/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "/home/temps/.temps/bin:/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 .to_string(),
         );
 
@@ -1394,7 +1396,7 @@ messages — they are short-lived and may rotate. Always re-read from `~/.env`.
         Ok(())
     }
 
-    /// Install the memory CLI script (`/workspace/.temps/bin/memory`) in the
+    /// Install the memory CLI script (`/home/temps/.temps/bin/memory`) in the
     /// sandbox so the AI can read/write workflow memory via simple shell commands.
     /// The script uses curl to call the Temps API; no CLI binary required.
     pub async fn inject_memory_script(&self, session_id: i32) -> Result<(), WorkspaceError> {
@@ -1841,7 +1843,7 @@ mod tests {
         );
         let path = env.get("PATH").expect("PATH should be set");
         assert!(
-            path.starts_with("/workspace/.temps/bin:"),
+            path.starts_with("/home/temps/.temps/bin:"),
             "memory script dir must come first in PATH (got: {})",
             path
         );

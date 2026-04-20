@@ -110,7 +110,7 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
 
   if (isLoadingGroup || isLoadingEvents) {
     return (
-      <div className="space-y-6 p-6">
+      <div className="space-y-6 p-4 sm:p-6">
         <div className="flex items-center justify-between">
           <Skeleton className="h-8 w-64" />
           <div className="flex gap-2">
@@ -150,7 +150,7 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
   const sentryEvent = latestEvent ? extractSentryEvent(latestEvent.data) : null
 
   return (
-    <div className="p-6">
+    <div className="p-4 sm:p-6">
       {/* Error Title Bar with Back Button */}
       <div className="mb-6">
         <div className="flex items-start gap-3 mb-2">
@@ -163,7 +163,7 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <div className="flex-1">
-            <div className="flex items-center gap-3 mb-2">
+            <div className="flex flex-wrap items-center gap-3 mb-2">
               <Badge
                 className={cn(
                   getSeverityColor(errorGroup.error_type || 'error')
@@ -171,8 +171,8 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
               >
                 {errorGroup.error_type || 'error'}
               </Badge>
-              <h1 className="text-2xl font-semibold flex-1">{errorGroup.title}</h1>
-              <div className="flex gap-2 flex-shrink-0">
+              <h1 className="text-xl sm:text-2xl font-semibold flex-1 min-w-0 break-words">{errorGroup.title}</h1>
+              <div className="flex flex-wrap gap-2 flex-shrink-0">
                 {(errorGroup as any).status !== 'resolved' && (
                   <Button
                     variant="outline"
@@ -208,7 +208,7 @@ export function ErrorGroupDetail({ project }: { project: ProjectResponse }) {
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-6 text-sm text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
               {(errorGroup as any).status && (errorGroup as any).status !== 'unresolved' && (
                 <Badge variant={(errorGroup as any).status === 'resolved' ? 'default' : 'secondary'} className="text-xs">
                   {(errorGroup as any).status}

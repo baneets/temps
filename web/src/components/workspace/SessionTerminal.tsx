@@ -28,7 +28,7 @@ export type TerminalStatus = 'connecting' | 'open' | 'closed' | 'error'
 import { FitAddon, Ghostty, Terminal } from 'ghostty-web'
 import { toast } from 'sonner'
 
-import { pasteTerminalImage, sessionTerminalUrl } from './api'
+import { pasteTerminalImage, sessionTerminalUrl } from './helpers'
 
 // Ghostty is a singleton WASM module — load it once per page and reuse
 // across every Terminal instance. The .wasm file is served from /public

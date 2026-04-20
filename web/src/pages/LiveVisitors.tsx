@@ -31,7 +31,7 @@ export function LiveVisitors({ project: projectProp }: LiveVisitorsProps = {}) {
   if (isLoading) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="p-6 space-y-6">
+        <div className="p-4 sm:p-6 space-y-6">
           <Button variant="outline" size="sm" disabled>
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Project
@@ -48,7 +48,7 @@ export function LiveVisitors({ project: projectProp }: LiveVisitorsProps = {}) {
   if (!project) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="p-6 space-y-6">
+        <div className="p-4 sm:p-6 space-y-6">
           <Button variant="outline" size="sm" asChild>
             <Link to="/projects">
               <ArrowLeft className="mr-2 h-4 w-4" />
@@ -65,7 +65,7 @@ export function LiveVisitors({ project: projectProp }: LiveVisitorsProps = {}) {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         <Button variant="outline" size="sm" asChild>
           <Link to={`/projects/${project.slug}`}>
             <ArrowLeft className="mr-2 h-4 w-4" />

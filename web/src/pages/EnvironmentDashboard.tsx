@@ -3,21 +3,27 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { ContainerManagement } from '@/components/containers/ContainerManagement'
 import { EnvironmentSettingsContent } from '@/components/environments/EnvironmentSettingsContent'
-import { EnvironmentSidebar } from '@/components/environments/EnvironmentSidebar'
+import { EnvironmentHeaderBar } from '@/components/environments/EnvironmentHeaderBar'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { ProjectResponse } from '@/api/client'
+import { EnvironmentResponse, ProjectResponse } from '@/api/client'
 import { useCallback } from 'react'
 
 interface EnvironmentDashboardProps {
   project: ProjectResponse
   environmentId: number
+  environments?: EnvironmentResponse[]
+  onEnvironmentChange?: (id: number) => void
+  onCreateEnvironment?: () => void
   onDelete?: () => void
 }
 
 export function EnvironmentDashboard({
   project,
   environmentId,
+  environments,
+  onEnvironmentChange,
+  onCreateEnvironment,
   onDelete,
 }: EnvironmentDashboardProps) {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -31,7 +37,6 @@ export function EnvironmentDashboard({
     [searchParams, setSearchParams]
   )
 
-  // Then, get the environment using the project ID
   const {
     data: environment,
     isLoading: isEnvironmentLoading,
@@ -47,17 +52,14 @@ export function EnvironmentDashboard({
     enabled: !!project?.id && !!environmentId,
   })
 
-  const isLoading = isEnvironmentLoading
-  const error = environmentError
-
-  if (error) {
+  if (environmentError) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <ErrorAlert
           title="Failed to load environment"
           description={
-            error instanceof Error
-              ? error.message
+            environmentError instanceof Error
+              ? environmentError.message
               : 'An unexpected error occurred'
           }
           retry={() => refetch()}
@@ -66,7 +68,7 @@ export function EnvironmentDashboard({
     )
   }
 
-  if (isLoading) {
+  if (isEnvironmentLoading) {
     return (
       <div className="flex flex-col h-full">
         <div className="p-6 border-b bg-background">
@@ -90,7 +92,7 @@ export function EnvironmentDashboard({
 
   if (!environment) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <ErrorAlert
           title="Environment not found"
           description="The environment you're looking for does not exist"
@@ -100,51 +102,49 @@ export function EnvironmentDashboard({
     )
   }
 
-  // Check if the project is static (preset === 'custom' means it's a static site)
   const isStatic = project?.preset === 'custom'
 
-  // Render content based on active view
-  const renderContent = () => {
-    switch (activeView) {
-      case 'settings':
-        return (
-          <EnvironmentSettingsContent
-            environment={environment}
-            project={project}
-            environmentId={environmentId.toString()}
-            onDelete={onDelete}
-          />
-        )
-      case 'containers':
-      default:
-        return isStatic ? (
-          <div className="flex flex-col items-center justify-center h-96 text-center">
-            <p className="text-muted-foreground">
-              This static site does not have running containers to manage.
-            </p>
-          </div>
-        ) : (
-          <ContainerManagement
-            project={project}
-            environmentId={environmentId.toString()}
-          />
-        )
-    }
-  }
+  const containersContent = isStatic ? (
+    <div className="flex flex-col items-center justify-center h-96 text-center">
+      <p className="text-muted-foreground">
+        This static site does not have running containers to manage.
+      </p>
+    </div>
+  ) : (
+    <ContainerManagement
+      project={project}
+      environmentId={environmentId.toString()}
+    />
+  )
+
+  const settingsContent = (
+    <EnvironmentSettingsContent
+      environment={environment}
+      project={project}
+      environmentId={environmentId.toString()}
+      onDelete={onDelete}
+    />
+  )
+
+  const content =
+    activeView === 'settings' ? settingsContent : containersContent
 
   return (
-    <div className="flex flex-col lg:flex-row h-full">
-      {/* Sidebar/Navigation */}
-      <EnvironmentSidebar
+    <div className="flex flex-col h-full bg-white dark:bg-neutral-950">
+      <EnvironmentHeaderBar
         environment={environment}
+        project={project}
         activeView={activeView}
         onViewChange={handleViewChange}
         isStatic={isStatic}
+        environments={environments}
+        onEnvironmentChange={onEnvironmentChange}
+        onCreateEnvironment={onCreateEnvironment}
       />
-
-      {/* Main Content */}
-      <div className="flex-1 overflow-auto flex flex-col">
-        <div className="flex-1 p-3 sm:p-6">{renderContent()}</div>
+      <div className="flex-1 overflow-auto">
+        <div className="w-full px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+          {content}
+        </div>
       </div>
     </div>
   )

@@ -19,8 +19,12 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { KbdBadge } from '@/components/ui/kbd-badge'
+import {
+  Card,
+  CardContent,
+  CardHeader,
+} from '@/components/ui/card'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,21 +36,18 @@ import { FeedbackAlert } from '@/components/ui/feedback-alert'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useFeedback } from '@/hooks/useFeedback'
-import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertCircle,
-  CheckCircle2,
+  ChevronRight,
+  EllipsisVertical,
   GitBranch,
   GithubIcon,
-  Link as LinkIcon,
   Loader2,
-  MoreVertical,
   Plus,
   RefreshCw,
   Trash2,
-  XCircle,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -167,35 +168,36 @@ export function GitSources() {
     setBreadcrumbs([{ label: 'Git Providers' }])
   }, [setBreadcrumbs])
 
-  // Keyboard shortcut: N to add new git provider
-  useKeyboardShortcut({ key: 'n', path: '/git-providers/add' })
-
   usePageTitle('Git Providers')
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="space-y-6 p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">Git Providers</h1>
-            <p className="text-muted-foreground">
+      <div className="space-y-6 p-4 sm:p-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <h1 className="text-xl font-bold sm:text-2xl">Git Providers</h1>
+            <p className="text-sm text-muted-foreground sm:text-base">
               Manage your Git providers for repository access and deployments
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => refetch()}>
-              <RefreshCw className="mr-2 h-4 w-4" />
-              Refresh
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              aria-label="Refresh"
+            >
+              <RefreshCw className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Refresh</span>
             </Button>
-            <Button onClick={() => navigate('/settings/git-providers/add')}>
-              <Plus className="mr-2 h-4 w-4" />
-              Add Git Provider
-              <KbdBadge keys="N" className="ml-2" />
-            </Button>
+            <CreateActionButton
+              size="sm"
+              onClick={() => navigate('/git-providers/add')}
+              label="Add Git Provider"
+            />
           </div>
         </div>
 
-        {/* Feedback Alert */}
         <FeedbackAlert feedback={feedback} onDismiss={clearFeedback} />
 
         {error ? (
@@ -207,214 +209,195 @@ export function GitSources() {
               support if the issue persists.
             </AlertDescription>
           </Alert>
+        ) : isLoading ? (
+          <div className="divide-y rounded-lg border">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-4 px-4 py-3 animate-pulse"
+              >
+                <div className="size-9 shrink-0 rounded-md bg-muted" />
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <div className="h-4 w-48 bg-muted rounded" />
+                  <div className="h-3 w-64 bg-muted rounded" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : !gitProviders?.length ? (
+          <EmptyPlaceholder
+            icon={GitBranch}
+            title="No git providers found"
+            description="Get started by setting up a Git provider like GitHub or GitLab"
+          >
+            <Button onClick={() => navigate('/git-providers/add')}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add Git Provider
+            </Button>
+          </EmptyPlaceholder>
         ) : (
-          <Card>
-            <CardHeader>
-              <CardTitle>Active Providers</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {isLoading ? (
-                <div className="grid gap-4">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className="p-4 border rounded-lg space-y-3 animate-pulse"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="h-5 w-48 bg-muted rounded" />
-                        <div className="h-6 w-20 bg-muted rounded" />
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <div className="h-4 w-24 bg-muted rounded" />
-                          <div className="h-4 w-32 bg-muted rounded" />
-                        </div>
-                        <div className="space-y-2">
-                          <div className="h-4 w-24 bg-muted rounded" />
-                          <div className="h-4 w-32 bg-muted rounded" />
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : !gitProviders?.length ? (
-                <EmptyPlaceholder
-                  icon={GitBranch}
-                  title="No git providers found"
-                  description="Get started by setting up a Git provider like GitHub or GitLab"
-                >
-                  <Button onClick={() => navigate('/settings/git-providers/add')}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add Git Provider
-                  </Button>
-                </EmptyPlaceholder>
+          (() => {
+            const goToDetail = (id: number) =>
+              navigate(`/git-providers/${id}`)
+
+            const ProviderIcon = ({
+              provider,
+              className = 'size-4 text-muted-foreground',
+            }: {
+              provider: ProviderResponse
+              className?: string
+            }) =>
+              provider.provider_type === 'github' ? (
+                <GithubIcon className={className} />
               ) : (
-                <div className="grid gap-4">
-                  {gitProviders.map((provider: ProviderResponse) => (
-                    <div
-                      key={provider.id}
-                      className="group relative p-4 border rounded-lg transition-colors hover:bg-muted/50 cursor-pointer"
-                      onClick={() => navigate(`/settings/git-providers/${provider.id}`)}
-                    >
-                      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-                        <div className="flex-1 min-w-0 space-y-1">
-                          <div className="flex items-center gap-3">
-                            {provider.provider_type === 'github' ? (
-                              <GithubIcon className="h-4 w-4" />
-                            ) : (
-                              <GitBranch className="h-4 w-4" />
-                            )}
-                            <span className="font-medium truncate">
-                              {provider.name}
-                            </span>
-                            <Badge variant="outline">
-                              {provider.provider_type.charAt(0).toUpperCase() +
-                                provider.provider_type.slice(1)}
-                            </Badge>
-                            {provider.is_active ? (
-                              <Badge
-                                variant="secondary"
-                                className="flex items-center gap-1"
-                              >
-                                <CheckCircle2 className="h-3 w-3" />
-                                Active
-                              </Badge>
-                            ) : (
-                              <Badge
-                                variant="destructive"
-                                className="flex items-center gap-1"
-                              >
-                                <XCircle className="h-3 w-3" />
-                                Inactive
-                              </Badge>
-                            )}
-                            {provider.is_default && (
-                              <Badge
-                                variant="outline"
-                                className="flex items-center gap-1"
-                              >
-                                <span>Default</span>
-                              </Badge>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-1 sm:flex sm:items-center gap-x-6 gap-y-1 text-sm text-muted-foreground">
-                            <div className="flex items-center gap-2">
-                              <span>Method: {provider.auth_method}</span>
-                            </div>
-                            {provider.base_url && (
-                              <div className="flex items-center gap-2">
-                                <LinkIcon className="h-4 w-4" />
-                                <span className="truncate">
-                                  {provider.base_url}
-                                </span>
-                              </div>
-                            )}
-                            <div className="flex items-center gap-2">
-                              <span>Created </span>
-                              <TimeAgo
-                                date={provider.created_at}
-                                className=""
-                              />
-                            </div>
-                          </div>
-                        </div>
-                        <div
-                          className="flex items-center gap-2"
-                          onClick={(e) => e.stopPropagation()}
+                <GitBranch className={className} />
+              )
+
+            const ActionsMenu = ({ provider }: { provider: ProviderResponse }) => (
+              <div
+                className="flex shrink-0 items-center gap-1 sm:gap-2"
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                {isGitHubApp(provider) && (
+                  <Button
+                    variant={provider.is_active ? 'outline' : 'default'}
+                    size="sm"
+                    onClick={() => handleInstallGitHubApp(provider)}
+                    className="gap-2 hidden lg:inline-flex"
+                  >
+                    <GithubIcon className="h-4 w-4" />
+                    Install GitHub App
+                  </Button>
+                )}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8">
+                      <EllipsisVertical className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {isGitHubApp(provider) && (
+                      <>
+                        <DropdownMenuItem
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            handleInstallGitHubApp(provider)
+                          }}
                         >
-                          {isGitHubApp(provider) && (
-                            <Button
-                              variant={
-                                provider.is_active ? 'outline' : 'default'
-                              }
-                              size="sm"
-                              onClick={() => handleInstallGitHubApp(provider)}
-                              className="gap-2"
-                            >
-                              <GithubIcon className="h-4 w-4" />
-                              Install GitHub App
-                            </Button>
-                          )}
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon">
-                                <MoreVertical className="h-4 w-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              {isGitHubApp(provider) && (
-                                <DropdownMenuItem
-                                  onClick={() =>
-                                    handleInstallGitHubApp(provider)
-                                  }
-                                >
-                                  <GithubIcon className="h-4 w-4 mr-2" />
-                                  Install GitHub App
-                                </DropdownMenuItem>
-                              )}
-                              {isGitHubApp(provider) && (
-                                <DropdownMenuSeparator />
-                              )}
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <DropdownMenuItem
-                                    className="text-destructive cursor-pointer"
-                                    onSelect={(e) => {
-                                      e.preventDefault()
-                                      setProviderToDelete(provider)
-                                    }}
-                                  >
-                                    <Trash2 className="h-4 w-4 mr-2" />
-                                    Remove Provider
-                                  </DropdownMenuItem>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>
-                                      Remove Git Provider
-                                    </AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      Are you sure you want to remove &quot;
-                                      {provider.name}&quot;? This action cannot
-                                      be undone and will remove all associated
-                                      connections and repositories.
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel
-                                      onClick={() => {
-                                        setProviderToDelete(null)
-                                      }}
-                                    >
-                                      Cancel
-                                    </AlertDialogCancel>
-                                    <AlertDialogAction
-                                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                      disabled={deleteProviderMut.isPending}
-                                      onClick={handleConfirmDeleteProvider}
-                                    >
-                                      {deleteProviderMut.isPending ? (
-                                        <>
-                                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                          Removing...
-                                        </>
-                                      ) : (
-                                        'Remove Provider'
-                                      )}
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
+                          <GithubIcon className="h-4 w-4 mr-2" />
+                          Install GitHub App
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                      </>
+                    )}
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <DropdownMenuItem
+                          className="text-destructive cursor-pointer"
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            setProviderToDelete(provider)
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Remove Provider
+                        </DropdownMenuItem>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>
+                            Remove Git Provider
+                          </AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Are you sure you want to remove &quot;
+                            {provider.name}&quot;? This action cannot be undone
+                            and will remove all associated connections and
+                            repositories.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel
+                            onClick={() => setProviderToDelete(null)}
+                          >
+                            Cancel
+                          </AlertDialogCancel>
+                          <AlertDialogAction
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            disabled={deleteProviderMut.isPending}
+                            onClick={handleConfirmDeleteProvider}
+                          >
+                            {deleteProviderMut.isPending ? (
+                              <>
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                Removing...
+                              </>
+                            ) : (
+                              'Remove Provider'
+                            )}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            )
+
+            return (
+              <div className="overflow-hidden rounded-lg border">
+                <ul role="list" className="divide-y">
+                  {gitProviders.map((provider: ProviderResponse) => (
+                    <li
+                      key={provider.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => goToDetail(provider.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          goToDetail(provider.id)
+                        }
+                      }}
+                      className="flex cursor-pointer items-center gap-3 px-3 py-3 sm:gap-4 sm:px-4 hover:bg-muted/40 transition-colors focus:outline-none focus:bg-muted/40"
+                    >
+                      <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                        <ProviderIcon provider={provider} />
                       </div>
-                    </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="truncate text-sm font-medium">
+                            {provider.name}
+                          </p>
+                          <Badge variant="secondary" className="font-mono text-xs">
+                            {provider.provider_type}
+                          </Badge>
+                          {!provider.is_active && (
+                            <Badge variant="destructive" className="text-xs">
+                              Inactive
+                            </Badge>
+                          )}
+                          {provider.is_default && (
+                            <Badge variant="outline" className="text-xs">
+                              Default
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {provider.auth_method}
+                          {provider.base_url ? ` · ${provider.base_url}` : ''}
+                          {' · created '}
+                          <TimeAgo date={provider.created_at} />
+                        </p>
+                      </div>
+                      <ActionsMenu provider={provider} />
+                      <ChevronRight className="hidden size-4 shrink-0 text-muted-foreground/50 sm:block" />
+                    </li>
                   ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                </ul>
+              </div>
+            )
+          })()
         )}
       </div>
     </div>

@@ -1,10 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Box,
   ChevronDown,
@@ -18,6 +14,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -42,18 +39,21 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import {
-  extendTimeout,
-  listSandboxes,
-  pauseSandbox,
-  restartSandbox,
-  resumeSandbox,
-  stopSandbox,
-  type SandboxResponse,
-} from '@/components/sandboxes/api'
+  extendTimeoutMutation,
+  listSandboxesOptions,
+  pauseSandboxMutation,
+  restartSandboxMutation,
+  resumeSandboxMutation,
+  stopSandboxMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import {
+  toSandboxView,
+  type SandboxView,
+} from '@/components/sandboxes/helpers'
 import { CreateSandboxDocs } from '@/components/sandboxes/CreateSandboxDocs'
 
 function statusVariant(
-  status: string,
+  status: string
 ): 'default' | 'secondary' | 'success' | 'warning' | 'destructive' | 'outline' {
   switch (status) {
     case 'running':
@@ -128,31 +128,70 @@ function useNow(enabled: boolean) {
 
 const PAGE_SIZE = 20
 
+type StatusFilter = 'active' | 'expired' | 'all'
+
+// Expired = either status explicitly says so OR the timer has elapsed.
+// Stopped sandboxes whose timer is still running count as active — they
+// can still be resumed. Destroyed rows are hidden from Active but live
+// under Expired for audit.
+function isExpired(s: SandboxView, now: number): boolean {
+  if (s.status === 'destroyed') return true
+  return new Date(s.expires_at).getTime() <= now
+}
+
 export default function Sandboxes() {
+  usePageTitle('Sandboxes')
   const [page, setPage] = useState(1)
-  const [stopTarget, setStopTarget] = useState<SandboxResponse | null>(null)
+  const [filter, setFilter] = useState<StatusFilter>('active')
+  const [stopTarget, setStopTarget] = useState<SandboxView | null>(null)
   const queryClient = useQueryClient()
 
+  const listQuery = listSandboxesOptions({
+    query: { page, page_size: PAGE_SIZE },
+  })
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ['sandboxes', page],
-    queryFn: () => listSandboxes(page, PAGE_SIZE),
+    ...listQuery,
     refetchInterval: 15_000,
   })
 
-  const items = data?.items ?? []
-  const total = data?.total ?? 0
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const items: SandboxView[] = (data?.sandboxes ?? []).map(toSandboxView)
+  const pageCount = data?.pagination?.count ?? items.length
+  const hasNext = data?.pagination?.next != null
+  const hasPrev = data?.pagination?.prev != null
 
   // Only tick when at least one row has a live countdown to render. Avoids
   // pointless re-renders on an all-destroyed page.
   const needsTick = items.some((s) => s.status !== 'destroyed')
   const now = useNow(needsTick)
 
+  // Bucketing is derived from `now`, so it naturally refreshes as the
+  // countdown ticks — a row crossing its expiry moves to the Expired tab
+  // on the next second. Counts are page-local (matches the paginated
+  // items we actually have); acceptable until we add server-side filtering.
+  const { visible, activeCount, expiredCount } = useMemo(() => {
+    let active = 0
+    let expired = 0
+    const visible: SandboxView[] = []
+    for (const s of items) {
+      const exp = isExpired(s, now)
+      if (exp) expired += 1
+      else active += 1
+      if (
+        filter === 'all' ||
+        (filter === 'active' && !exp) ||
+        (filter === 'expired' && exp)
+      ) {
+        visible.push(s)
+      }
+    }
+    return { visible, activeCount: active, expiredCount: expired }
+  }, [items, now, filter])
+
   const invalidate = () =>
     queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => stopSandbox(id),
+    ...stopSandboxMutation(),
     meta: { errorTitle: 'Failed to delete sandbox' },
     onSuccess: () => {
       invalidate()
@@ -169,12 +208,44 @@ export default function Sandboxes() {
           <h1 className="text-2xl font-semibold tracking-tight">Sandboxes</h1>
           <p className="text-sm text-muted-foreground">
             Standalone containers for one-off commands, tests, or agent work.
-            {total > 0 && (
-              <span className="ml-1 tabular-nums">· {total}</span>
-            )}
+            {pageCount > 0 && <span className="ml-1 tabular-nums">· {pageCount}</span>}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Segmented filter — defaults to Active so expired/destroyed rows
+              don't clutter the everyday view, but stay one click away for
+              cleanup or audit. Counts are computed from the current page. */}
+          {items.length > 0 && (
+            <div className="inline-flex rounded-md border bg-background p-0.5">
+              {(
+                [
+                  { key: 'active', label: 'Active', count: activeCount },
+                  { key: 'expired', label: 'Expired', count: expiredCount },
+                  { key: 'all', label: 'All', count: items.length },
+                ] as const
+              ).map((tab) => {
+                const selected = filter === tab.key
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setFilter(tab.key)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                      selected
+                        ? 'bg-muted text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                    aria-pressed={selected}
+                  >
+                    {tab.label}
+                    <span className="ml-1 tabular-nums text-muted-foreground">
+                      {tab.count}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -238,45 +309,60 @@ export default function Sandboxes() {
               the UI, so keep the instructions one click away even when the
               user already has sandboxes. */}
           <CreateSandboxDocs variant="compact" />
-          {items.map((sbx) => (
-            <SandboxRow
-              key={sbx.id}
-              sandbox={sbx}
-              now={now}
-              onDeleteRequest={setStopTarget}
-            />
-          ))}
+          {visible.length === 0 ? (
+            <Card>
+              <CardContent className="py-10 text-center space-y-2">
+                <Box className="mx-auto h-6 w-6 text-muted-foreground" />
+                <p className="text-sm font-medium">No {filter} sandboxes</p>
+                <p className="text-xs text-muted-foreground">
+                  {filter === 'active'
+                    ? 'All sandboxes on this page have expired.'
+                    : 'Nothing to show in this view.'}
+                </p>
+                {filter !== 'all' && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setFilter('all')}
+                    className="mt-2"
+                  >
+                    Show all
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          ) : (
+            visible.map((sbx) => (
+              <SandboxRow
+                key={sbx.id}
+                sandbox={sbx}
+                now={now}
+                onDeleteRequest={setStopTarget}
+              />
+            ))
+          )}
         </div>
       )}
 
-      {total > PAGE_SIZE && (
+      {(hasNext || hasPrev) && (
         <div className="flex flex-col gap-2 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-muted-foreground tabular-nums">
-            <span className="hidden sm:inline">
-              Showing {(page - 1) * PAGE_SIZE + 1}–
-              {Math.min(page * PAGE_SIZE, total)} of {total}
-            </span>
-            <span className="sm:hidden">
-              Page {page} / {totalPages}
-            </span>
+            Page {page}
           </p>
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
               size="sm"
-              disabled={page <= 1}
+              disabled={!hasPrev}
               onClick={() => setPage((p) => Math.max(1, p - 1))}
             >
               Previous
             </Button>
-            <span className="hidden text-xs text-muted-foreground tabular-nums sm:inline">
-              Page {page} / {totalPages}
-            </span>
             <Button
               variant="outline"
               size="sm"
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={!hasNext}
+              onClick={() => setPage((p) => p + 1)}
             >
               Next
             </Button>
@@ -303,7 +389,8 @@ export default function Sandboxes() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (stopTarget) deleteMutation.mutate(stopTarget.id)
+                if (stopTarget)
+                  deleteMutation.mutate({ path: { id: stopTarget.id } })
               }}
               disabled={deleteMutation.isPending}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
@@ -333,9 +420,9 @@ function SandboxRow({
   now,
   onDeleteRequest,
 }: {
-  sandbox: SandboxResponse
+  sandbox: SandboxView
   now: number
-  onDeleteRequest: (s: SandboxResponse) => void
+  onDeleteRequest: (s: SandboxView) => void
 }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -345,7 +432,7 @@ function SandboxRow({
     queryClient.invalidateQueries({ queryKey: ['sandboxes'] })
 
   const pauseMutation = useMutation({
-    mutationFn: () => pauseSandbox(sandbox.id),
+    ...pauseSandboxMutation(),
     meta: { errorTitle: 'Failed to stop sandbox' },
     onSuccess: () => {
       invalidate()
@@ -354,7 +441,7 @@ function SandboxRow({
   })
 
   const resumeMutation = useMutation({
-    mutationFn: () => resumeSandbox(sandbox.id),
+    ...resumeSandboxMutation(),
     meta: { errorTitle: 'Failed to resume sandbox' },
     onSuccess: () => {
       invalidate()
@@ -363,7 +450,7 @@ function SandboxRow({
   })
 
   const restartMutation = useMutation({
-    mutationFn: () => restartSandbox(sandbox.id),
+    ...restartSandboxMutation(),
     meta: { errorTitle: 'Failed to restart sandbox' },
     onSuccess: () => {
       invalidate()
@@ -372,12 +459,13 @@ function SandboxRow({
   })
 
   const extendMutation = useMutation({
-    mutationFn: (secs: number) => extendTimeout(sandbox.id, secs),
+    ...extendTimeoutMutation(),
     meta: { errorTitle: 'Failed to extend timeout' },
-    onSuccess: (_data, secs) => {
+    onSuccess: (_data, vars) => {
       invalidate()
+      const secs = vars.body?.extra_secs ?? 0
       toast.success(
-        `Timeout extended by ${secs >= 3600 ? `${secs / 3600}h` : `${secs / 60}m`}`,
+        `Timeout extended by ${secs >= 3600 ? `${secs / 3600}h` : `${secs / 60}m`}`
       )
     },
   })
@@ -449,10 +537,7 @@ function SandboxRow({
             </div>
           </div>
 
-          <div
-            className="flex flex-wrap items-center gap-2"
-            onClick={stop}
-          >
+          <div className="flex flex-wrap items-center gap-2" onClick={stop}>
             {hasPreview && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -519,7 +604,9 @@ function SandboxRow({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => pauseMutation.mutate()}
+                onClick={() =>
+                  pauseMutation.mutate({ path: { id: sandbox.id } })
+                }
                 disabled={pauseMutation.isPending}
               >
                 <Square className="mr-1 h-4 w-4" />
@@ -530,7 +617,9 @@ function SandboxRow({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => resumeMutation.mutate()}
+                onClick={() =>
+                  resumeMutation.mutate({ path: { id: sandbox.id } })
+                }
                 disabled={resumeMutation.isPending}
               >
                 <Play className="mr-1 h-4 w-4" />
@@ -541,7 +630,9 @@ function SandboxRow({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => restartMutation.mutate()}
+                onClick={() =>
+                  restartMutation.mutate({ path: { id: sandbox.id } })
+                }
                 disabled={restartMutation.isPending}
                 title="Restart"
               >
@@ -597,7 +688,12 @@ function SandboxRow({
                 variant="outline"
                 size="sm"
                 className="h-7 text-xs"
-                onClick={() => extendMutation.mutate(900)}
+                onClick={() =>
+                  extendMutation.mutate({
+                    path: { id: sandbox.id },
+                    body: { extra_secs: 900 },
+                  })
+                }
                 disabled={extendMutation.isPending}
               >
                 +15m
@@ -606,7 +702,12 @@ function SandboxRow({
                 variant="outline"
                 size="sm"
                 className="h-7 text-xs"
-                onClick={() => extendMutation.mutate(3600)}
+                onClick={() =>
+                  extendMutation.mutate({
+                    path: { id: sandbox.id },
+                    body: { extra_secs: 3600 },
+                  })
+                }
                 disabled={extendMutation.isPending}
               >
                 +1h
@@ -615,7 +716,12 @@ function SandboxRow({
                 variant="outline"
                 size="sm"
                 className="h-7 text-xs"
-                onClick={() => extendMutation.mutate(14400)}
+                onClick={() =>
+                  extendMutation.mutate({
+                    path: { id: sandbox.id },
+                    body: { extra_secs: 14400 },
+                  })
+                }
                 disabled={extendMutation.isPending}
               >
                 +4h

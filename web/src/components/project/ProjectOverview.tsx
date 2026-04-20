@@ -5,6 +5,8 @@ import {
   getUniqueCountsOptions,
   hasAnalyticsEventsOptions,
   hasErrorGroupsOptions,
+  revenueListIntegrationsOptions,
+  revenueMetricsSummaryOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { LastDeployment } from '@/components/deployments/LastDeployment'
 import { Badge } from '@/components/ui/badge'
@@ -200,10 +202,10 @@ export function ProjectOverview({
   return (
     <>
       {!isLoadingOnboarding && !allDone && (
-        <section className="mb-6 overflow-hidden rounded-xl border bg-card">
-          <div className="flex flex-col gap-4 border-b p-5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
+        <section className="mb-4 overflow-hidden rounded-xl border bg-card sm:mb-6">
+          <div className="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between sm:gap-4 sm:p-5">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
                 <h2 className="text-base font-semibold tracking-tight">
                   Finish setting up {project.slug}
                 </h2>
@@ -216,7 +218,7 @@ export function ProjectOverview({
                 your app.
               </p>
             </div>
-            <div className="flex items-center gap-3 sm:w-64">
+            <div className="flex items-center gap-3 sm:w-64 sm:shrink-0">
               <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
                 <div
                   className="h-full bg-primary [transition-duration:400ms] transition-all"
@@ -234,7 +236,7 @@ export function ProjectOverview({
                 <Link
                   to={step.href}
                   className={cn(
-                    'group flex items-center gap-4 px-5 py-4 transition-colors hover:bg-muted/50',
+                    'group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/50 sm:gap-4 sm:px-5 sm:py-4',
                     step.done && 'opacity-60'
                   )}
                 >
@@ -253,7 +255,7 @@ export function ProjectOverview({
                     )}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                       <p
                         className={cn(
                           'text-sm font-medium',
@@ -282,7 +284,7 @@ export function ProjectOverview({
         </section>
       )}
 
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 lg:gap-6">
         {isLoadingVisitors ? (
           <Skeleton className="h-24" />
         ) : visitorError ? (
@@ -305,19 +307,8 @@ export function ProjectOverview({
           />
         )}
 
-        <div className="relative">
-          <MetricCard
-            title="Revenue"
-            value="$0"
-            change=""
-            icon={<DollarSign className="h-5 w-5" />}
-          />
-          <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/80">
-            <Badge variant="secondary" className="text-xs">
-              Coming Soon
-            </Badge>
-          </div>
-        </div>
+        <RevenueMetric project={project} />
+
 
         <Link
           to={`/projects/${project.slug}/analytics/requests?from=${oneDayAgo}&to=${now}&status_code=500`}
@@ -332,7 +323,7 @@ export function ProjectOverview({
         </Link>
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 sm:mt-6">
         {currentDeployment && (
           <LastDeployment
             deployment={currentDeployment}
@@ -341,9 +332,66 @@ export function ProjectOverview({
         )}
       </div>
 
-      <div className="mt-6">
+      <div className="mt-4 sm:mt-6">
         <DeploymentActivityGraph projectId={project.id} />
       </div>
     </>
+  )
+}
+
+function RevenueMetric({ project }: { project: ProjectResponse }) {
+  const integrationsQuery = useQuery({
+    ...revenueListIntegrationsOptions({ path: { project_id: project.id } }),
+  })
+  const hasIntegrations = (integrationsQuery.data?.length ?? 0) > 0
+
+  const summaryQuery = useQuery({
+    ...revenueMetricsSummaryOptions({ path: { project_id: project.id } }),
+    enabled: hasIntegrations,
+  })
+
+  if (!hasIntegrations) {
+    return (
+      <Link to={`/projects/${project.slug}/revenue`} className="h-full w-full">
+        <div className="relative">
+          <MetricCard
+            title="Revenue"
+            value="Connect"
+            change=""
+            icon={<DollarSign className="h-5 w-5" />}
+          />
+          <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/60">
+            <Badge variant="secondary" className="text-xs">
+              Connect a provider
+            </Badge>
+          </div>
+        </div>
+      </Link>
+    )
+  }
+
+  const mrr = summaryQuery.data?.current_mrr_minor ?? 0
+  const currency = summaryQuery.data?.currency ?? 'usd'
+  const display = (() => {
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency: currency.toUpperCase(),
+        maximumFractionDigits: 0,
+      }).format(mrr / 100)
+    } catch {
+      return `${(mrr / 100).toFixed(0)} ${currency.toUpperCase()}`
+    }
+  })()
+
+  return (
+    <Link to={`/projects/${project.slug}/revenue`} className="h-full w-full">
+      <MetricCard
+        title="MRR"
+        value={summaryQuery.isLoading ? '…' : display}
+        change=""
+        icon={<DollarSign className="h-5 w-5" />}
+      />
+    </Link>
   )
 }

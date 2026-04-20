@@ -32,8 +32,8 @@ export function BackupDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Backups', href: '/settings/backups' },
-      { label: 'S3 Source', href: `/settings/backups/s3-sources/${id}` },
+      { label: 'Backups', href: '/backups' },
+      { label: 'S3 Source', href: `/backups/s3-sources/${id}` },
       { label: backup?.name || 'Backup Details' },
     ])
   }, [setBreadcrumbs, id, backup?.name])
@@ -56,7 +56,7 @@ export function BackupDetail() {
           The requested backup could not be found.
         </p>
         <Button asChild className="mt-4">
-          <Link to={`/settings/backups/s3-sources/${id}`}>
+          <Link to={`/backups/s3-sources/${id}`}>
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to S3 Source
           </Link>
@@ -70,7 +70,7 @@ export function BackupDetail() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
-            <Link to={`/settings/backups/s3-sources/${id}`}>
+            <Link to={`/backups/s3-sources/${id}`}>
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
             </Link>

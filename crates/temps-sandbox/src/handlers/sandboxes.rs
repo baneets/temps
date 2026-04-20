@@ -1,6 +1,6 @@
 //! Standalone sandbox API.
 //!
-//! All routes live under `/v1/sandbox/*`. The surface intentionally
+//! All routes live under `/v1/sandboxes/*`. The surface intentionally
 //! mirrors the `@vercel/sandbox` npm SDK so drop-in clients work without
 //! code changes beyond base URL + auth (see `tests/vercel_compat.rs` for
 //! the pinned contract).
@@ -286,17 +286,30 @@ impl From<SourceBody> for SandboxSource {
     }
 }
 
+/// Nested `resources: { memory, vcpus }` as sent by `@vercel/sandbox`.
+/// `memory` is in MB, `vcpus` is fractional CPU count.
 #[derive(Debug, Deserialize, ToSchema, Default)]
-#[serde(deny_unknown_fields)]
+pub struct ResourcesBody {
+    #[serde(default)]
+    pub memory: Option<u64>,
+    #[serde(default)]
+    pub vcpus: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct CreateSandboxBody {
     /// Docker image override. `null` uses the platform default.
     #[serde(default)]
     pub image: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
-    /// Idle timeout in seconds. Clamped to `[60, 86400]`.
+    /// Idle timeout in seconds (temps-native). Clamped to `[60, 86400]`.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Idle timeout as sent by `@vercel/sandbox` (milliseconds). Converted
+    /// to seconds when `timeout_secs` is absent.
+    #[serde(default)]
+    pub timeout: Option<u64>,
     /// Extra env vars baked into the container on create.
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -306,6 +319,11 @@ pub struct CreateSandboxBody {
     pub memory_limit_mb: Option<u64>,
     #[serde(default)]
     pub pids_limit: Option<i64>,
+    /// `@vercel/sandbox`'s nested resources object. When present, its
+    /// `memory` / `vcpus` populate `memory_limit_mb` / `cpu_limit` if those
+    /// weren't sent directly.
+    #[serde(default)]
+    pub resources: Option<ResourcesBody>,
     /// Optional initial content to seed into the work dir. Clones a
     /// repo or extracts a tarball after the sandbox is created.
     #[serde(default)]
@@ -317,74 +335,160 @@ pub struct CreateSandboxBody {
     /// surfaced in `SandboxResponse.preview_password_hint`.
     #[serde(default)]
     pub preview_password: Option<String>,
+    /// Ports the sandbox will listen on. Each port becomes a `routes[]`
+    /// entry in the create/get response so `@vercel/sandbox`'s
+    /// `sandbox.domain(port)` can resolve it client-side without an
+    /// extra round-trip.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+
+    // ── `@vercel/sandbox` fields accepted for compatibility and ignored.
+    // We accept them so SDK calls don't 422 on `deny_unknown_fields`; we
+    // don't act on them because temps has no equivalent concept today.
+    #[serde(default, rename = "projectId")]
+    pub _project_id: Option<String>,
+    #[serde(default)]
+    pub _runtime: Option<String>,
+    #[serde(default, rename = "networkPolicy")]
+    pub _network_policy: Option<serde_json::Value>,
 }
 
 impl From<CreateSandboxBody> for CreateSandboxRequest {
     fn from(b: CreateSandboxBody) -> Self {
+        let resources = b.resources.unwrap_or_default();
         Self {
             image: b.image,
             name: b.name,
-            timeout_secs: b.timeout_secs,
+            timeout_secs: b.timeout_secs.or_else(|| b.timeout.map(|ms| ms / 1000)),
             env: b.env,
-            cpu_limit: b.cpu_limit,
-            memory_limit_mb: b.memory_limit_mb,
+            cpu_limit: b.cpu_limit.or(resources.vcpus),
+            memory_limit_mb: b.memory_limit_mb.or(resources.memory),
             pids_limit: b.pids_limit,
             source: b.source.map(SandboxSource::from),
             preview_password: b.preview_password,
+            ports: b.ports,
         }
     }
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SandboxResponse {
-    pub id: String,
-    pub name: String,
-    pub status: String,
-    pub image: Option<String>,
-    pub work_dir: String,
-    pub created_at: String,
-    pub expires_at: String,
-    /// Public URL template with a `{port}` placeholder. Clients substitute
-    /// the dev-server port to construct the preview URL for any port the
-    /// sandbox exposes (matches the shape of `sandbox.domain(port)` from
-    /// `@vercel/sandbox`).
-    ///
-    /// Empty string when preview URLs aren't configured for this install
-    /// (e.g. local dev without a `preview_domain` setting).
-    pub preview_url_template: String,
+/// Map our internal status to the Vercel SDK status enum
+/// (`pending|running|stopping|stopped|failed|aborted|snapshotting`).
+fn map_status(s: &str) -> &'static str {
+    match s {
+        "running" => "running",
+        "stopped" => "stopped",
+        "destroyed" => "aborted",
+        "failed" => "failed",
+        _ => "pending",
+    }
+}
 
-    /// Last 4 chars of the preview password when one is configured.
-    /// Absent means "no password set — preview URL relies on the
-    /// unguessable 16-hex public_id". Never contains the full plaintext.
+/// A single preview route, one per declared port. We don't know ports
+/// upfront, so we surface an empty array by default — SDK clients use
+/// their own port when calling `sandbox.domain(port)`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxRoute {
+    pub url: String,
+    pub subdomain: String,
+    pub port: u32,
+}
+
+/// Inner `sandbox` object in `@vercel/sandbox` responses. Strict shape —
+/// the SDK's zod validator rejects missing required fields.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxInner {
+    pub id: String,
+    pub memory: u64,
+    pub vcpus: f64,
+    pub region: String,
+    pub runtime: String,
+    /// Idle timeout in milliseconds (SDK convention).
+    pub timeout: u64,
+    pub status: String,
+    /// Creation time as Unix epoch milliseconds.
+    #[serde(rename = "requestedAt")]
+    pub requested_at: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: i64,
+    pub cwd: String,
+
+    // temps-native extras — the SDK ignores fields it doesn't know about.
+    pub name: String,
+    pub image: Option<String>,
+    pub preview_url_template: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_password_hint: Option<String>,
 }
 
+/// `@vercel/sandbox` wraps every single-sandbox response as
+/// `{ sandbox: {...}, routes: [...] }`. The SDK reads both.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxResponse {
+    pub sandbox: SandboxInner,
+    pub routes: Vec<SandboxRoute>,
+}
+
 impl SandboxResponse {
     /// Build a response from an entity row, attaching the preview URL
-    /// template for the given public_id. Keeping URL construction out of
-    /// `From` impls is intentional — the template depends on platform
-    /// settings which only the service layer has access to.
-    pub fn with_template(s: SandboxSummary, template: String) -> Self {
+    /// template for the given public_id and materialising `routes[]` for
+    /// each declared port. Keeping URL construction out of `From` impls
+    /// is intentional — the template depends on platform settings which
+    /// only the service layer has access to.
+    pub fn with_template(
+        s: SandboxSummary,
+        template: String,
+        parts: &crate::services::preview_urls::PreviewUrlParts,
+    ) -> Self {
+        let created_ms = s.created_at.timestamp_millis();
+        let expires_ms = s.expires_at.timestamp_millis();
+        let timeout_ms = (expires_ms - created_ms).max(0) as u64;
+        let label = s
+            .public_id
+            .strip_prefix("sbx_")
+            .unwrap_or(&s.public_id)
+            .to_string();
+        let routes = s
+            .ports
+            .iter()
+            .map(|port| SandboxRoute {
+                url: parts.url_for(&s.public_id, *port),
+                subdomain: format!("ws-{}-{}", label, port),
+                port: *port as u32,
+            })
+            .collect();
         Self {
-            id: s.public_id,
-            name: s.name,
-            status: s.status,
-            image: s.image,
-            work_dir: s.work_dir,
-            created_at: s.created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            expires_at: s.expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            preview_url_template: template,
-            preview_password_hint: s.preview_password_hint,
+            sandbox: SandboxInner {
+                id: s.public_id,
+                memory: 0,
+                vcpus: 0.0,
+                region: "local".to_string(),
+                runtime: "node24".to_string(),
+                timeout: timeout_ms,
+                status: map_status(&s.status).to_string(),
+                requested_at: created_ms,
+                created_at: created_ms,
+                updated_at: created_ms,
+                cwd: s.work_dir,
+                name: s.name,
+                image: s.image,
+                preview_url_template: template,
+                preview_password_hint: s.preview_password_hint,
+            },
+            routes,
         }
     }
 }
 
 impl From<SandboxSummary> for SandboxResponse {
     fn from(s: SandboxSummary) -> Self {
-        // Fallback path for call sites that haven't been wired to the
-        // preview-URL template yet (tests, intermediate conversions).
-        Self::with_template(s, String::new())
+        let parts = crate::services::preview_urls::PreviewUrlParts {
+            protocol: "https".to_string(),
+            domain: "localho.st".to_string(),
+            port: None,
+        };
+        Self::with_template(s, String::new(), &parts)
     }
 }
 
@@ -394,26 +498,50 @@ impl From<temps_entities::sandboxes::Model> for SandboxResponse {
     }
 }
 
+/// SDK pagination cursor. We use opaque page numbers internally but
+/// expose `count`/`next`/`prev` the way `@vercel/sandbox` expects.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Pagination {
+    pub count: u64,
+    pub next: Option<u64>,
+    pub prev: Option<u64>,
+}
+
+/// SDK list response: `{ sandboxes: [...], pagination: {...} }`.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ListSandboxesResponse {
-    pub items: Vec<SandboxResponse>,
-    pub total: u64,
-    pub page: u64,
-    pub page_size: u64,
+    pub sandboxes: Vec<SandboxInner>,
+    pub pagination: Pagination,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PaginationParams {
     pub page: Option<u64>,
     pub page_size: Option<u64>,
+    /// SDK-compat: `limit` maps to `page_size` when the latter isn't set.
+    pub limit: Option<u64>,
+    /// Accepted and ignored — temps has no project scoping on sandboxes.
+    pub project: Option<String>,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ExtendTimeoutBody {
-    /// Extra seconds to add to the existing `expires_at`.
-    pub extra_secs: u64,
+    /// Extra seconds to add to the existing `expires_at` (temps-native).
+    #[serde(default)]
+    pub extra_secs: Option<u64>,
+    /// `@vercel/sandbox`-compatible alternative — duration in milliseconds.
+    /// Used when `extra_secs` is absent.
+    #[serde(default)]
+    pub duration: Option<u64>,
+}
+
+impl ExtendTimeoutBody {
+    pub fn resolve_secs(&self) -> Option<u64> {
+        self.extra_secs
+            .or_else(|| self.duration.map(|ms| ms / 1000))
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -589,7 +717,7 @@ pub struct DomainQuery {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct DomainResponse {
+pub struct SandboxDomainResponse {
     pub url: String,
 }
 
@@ -602,7 +730,7 @@ async fn build_response(
 ) -> SandboxResponse {
     let parts = state.sandbox_service.preview_parts().await;
     let template = parts.host_template(&row.public_id);
-    SandboxResponse::with_template(SandboxSummary::from(&row), template)
+    SandboxResponse::with_template(SandboxSummary::from(&row), template, &parts)
 }
 
 /// Batched variant of `build_response` for list endpoints that return
@@ -617,7 +745,7 @@ async fn build_summary_responses(
         .into_iter()
         .map(|s| {
             let template = parts.host_template(&s.public_id);
-            SandboxResponse::with_template(s, template)
+            SandboxResponse::with_template(s, template, &parts)
         })
         .collect()
 }
@@ -627,7 +755,7 @@ async fn build_summary_responses(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox",
+    path = "/v1/sandboxes",
     request_body = CreateSandboxBody,
     responses(
         (status = 201, description = "Sandbox created", body = SandboxResponse),
@@ -657,7 +785,7 @@ pub async fn create_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox",
+    path = "/v1/sandboxes",
     params(("page" = Option<u64>, Query, description = "Page (1-indexed)"),
            ("page_size" = Option<u64>, Query, description = "Items per page (default 20, max 100)")),
     responses((status = 200, description = "List sandboxes", body = ListSandboxesResponse)),
@@ -670,17 +798,21 @@ pub async fn list_sandboxes(
 ) -> Result<impl IntoResponse, Problem> {
     sandbox_permission_guard(&auth, Permission::SandboxesRead, Permission::ProjectsRead)?;
     let page = q.page.unwrap_or(1);
-    let page_size = q.page_size.unwrap_or(20);
+    let page_size = q.page_size.or(q.limit).unwrap_or(20);
     let (items, total) = state
         .sandbox_service
         .list_for_user(auth.user_id(), Some(page), Some(page_size))
         .await?;
-    let items = build_summary_responses(&state, items).await;
+    let envelopes = build_summary_responses(&state, items).await;
+    let sandboxes: Vec<SandboxInner> = envelopes.into_iter().map(|e| e.sandbox).collect();
+    let has_next = (page * page_size) < total;
     let resp = ListSandboxesResponse {
-        items,
-        total,
-        page,
-        page_size,
+        sandboxes,
+        pagination: Pagination {
+            count: total,
+            next: if has_next { Some(page + 1) } else { None },
+            prev: if page > 1 { Some(page - 1) } else { None },
+        },
     };
     Ok(Json(resp))
 }
@@ -688,7 +820,7 @@ pub async fn list_sandboxes(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}",
+    path = "/v1/sandboxes/{id}",
     responses(
         (status = 200, description = "Sandbox details", body = SandboxResponse),
         (status = 404, description = "Not found")
@@ -711,7 +843,7 @@ pub async fn get_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/stop",
+    path = "/v1/sandboxes/{id}/stop",
     responses(
         (status = 204, description = "Sandbox stopped and destroyed"),
         (status = 404, description = "Not found")
@@ -734,7 +866,7 @@ pub async fn stop_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/destroy",
+    path = "/v1/sandboxes/{id}/destroy",
     responses(
         (status = 204, description = "Sandbox destroyed (alias for `/stop` with an explicit verb)"),
         (status = 404, description = "Not found")
@@ -757,7 +889,7 @@ pub async fn destroy_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/extend-timeout",
+    path = "/v1/sandboxes/{id}/extend-timeout",
     request_body = ExtendTimeoutBody,
     responses(
         (status = 200, description = "Timeout extended", body = SandboxResponse),
@@ -775,7 +907,15 @@ pub async fn extend_timeout(
     sandbox_permission_guard(&auth, Permission::SandboxesWrite, Permission::ProjectsWrite)?;
     let row = state
         .sandbox_service
-        .extend_timeout(&id, auth.user_id(), body.extra_secs)
+        .extend_timeout(
+            &id,
+            auth.user_id(),
+            body.resolve_secs().ok_or_else(|| {
+                Problem::from(SandboxError::Validation {
+                    message: "either extra_secs or duration must be provided".to_string(),
+                })
+            })?,
+        )
         .await?;
     Ok(Json(build_response(&state, row).await))
 }
@@ -783,7 +923,7 @@ pub async fn extend_timeout(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/pause",
+    path = "/v1/sandboxes/{id}/pause",
     responses(
         (status = 200, description = "Sandbox paused (container stopped, state preserved)", body = SandboxResponse),
         (status = 404, description = "Not found"),
@@ -807,7 +947,7 @@ pub async fn pause_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/resume",
+    path = "/v1/sandboxes/{id}/resume",
     responses(
         (status = 200, description = "Sandbox resumed; expires_at refreshed", body = SandboxResponse),
         (status = 404, description = "Not found"),
@@ -831,7 +971,7 @@ pub async fn resume_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/restart",
+    path = "/v1/sandboxes/{id}/restart",
     responses(
         (status = 200, description = "Sandbox container restarted in place", body = SandboxResponse),
         (status = 404, description = "Not found"),
@@ -855,7 +995,7 @@ pub async fn restart_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/source",
+    path = "/v1/sandboxes/{id}/source",
     request_body = SourceBody,
     responses(
         (status = 200, description = "Source content seeded into the sandbox work dir", body = SandboxResponse),
@@ -887,7 +1027,7 @@ pub async fn source_sandbox(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/exec",
+    path = "/v1/sandboxes/{id}/exec",
     request_body = ExecBody,
     responses(
         (status = 200, description = "Command finished (non-zero exit is NOT an error)", body = ExecResponse),
@@ -912,7 +1052,7 @@ pub async fn exec(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/exec-detached",
+    path = "/v1/sandboxes/{id}/exec-detached",
     request_body = ExecBody,
     responses(
         (status = 202, description = "Command accepted; poll /jobs/{job_id}", body = ExecDetachedResponse),
@@ -937,7 +1077,7 @@ pub async fn exec_detached(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}/jobs",
+    path = "/v1/sandboxes/{id}/jobs",
     responses(
         (status = 200, description = "Detached jobs for this sandbox", body = ListJobsResponse),
         (status = 404, description = "Sandbox not found")
@@ -963,7 +1103,7 @@ pub async fn list_jobs(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}/jobs/{job_id}",
+    path = "/v1/sandboxes/{id}/jobs/{job_id}",
     responses(
         (status = 200, description = "Job status snapshot", body = JobStatusResponse),
         (status = 404, description = "Sandbox or job not found")
@@ -996,7 +1136,7 @@ pub async fn job_status(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}/jobs/{job_id}/logs",
+    path = "/v1/sandboxes/{id}/jobs/{job_id}/logs",
     responses(
         (status = 200, description = "SSE stream of log events"),
         (status = 404, description = "Sandbox or job not found")
@@ -1060,7 +1200,7 @@ pub struct KillJobBody {
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/jobs/{job_id}/kill",
+    path = "/v1/sandboxes/{id}/jobs/{job_id}/kill",
     request_body = KillJobBody,
     responses(
         (status = 204, description = "Job killed"),
@@ -1083,12 +1223,409 @@ pub async fn kill_job(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ── SDK-compatible `/cmd` surface (`@vercel/sandbox` drop-in) ──────────────
+//
+// The Vercel SDK speaks a different command shape than our native `/exec`
+// and `/jobs` endpoints: it sends `{command, args, cwd, env, sudo, wait}`
+// and expects `{ command: { id, name, args, cwd, sandboxId, exitCode,
+// startedAt } }` back. When `wait=true`, it consumes an
+// `application/x-ndjson` stream where the first line carries the running
+// command envelope and the second line carries the finished envelope.
+//
+// This is a thin adapter on top of `exec_detached` + `job_status`. The
+// SDK's `cmdId` IS our internal `job_id` — no mapping table needed.
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CmdBody {
+    /// Binary name (argv[0]) — e.g. `"ls"`, `"node"`. The SDK sends this
+    /// separately from `args`.
+    pub command: String,
+    /// Arguments to pass to the binary. Defaults to empty.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory override.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Extra env vars.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// When true, the SDK runs the command privileged. We ignore it today
+    /// — the underlying provider always runs as the sandbox's own user.
+    #[serde(default)]
+    pub sudo: bool,
+    /// When true, the response is an `application/x-ndjson` stream where
+    /// the first line is the running-command envelope and the second line
+    /// is the finished-command envelope with `exitCode`.
+    #[serde(default)]
+    pub wait: bool,
+}
+
+impl CmdBody {
+    fn into_exec_options(self) -> crate::services::exec::ExecOptions {
+        let mut cmd = Vec::with_capacity(1 + self.args.len());
+        cmd.push(self.command);
+        cmd.extend(self.args);
+        crate::services::exec::ExecOptions {
+            cmd,
+            env: self.env,
+            cwd: self.cwd,
+        }
+    }
+}
+
+/// Inner `command` object — matches the SDK's zod validator exactly.
+/// `exitCode` is `null` until the command terminates; `startedAt` is Unix
+/// epoch milliseconds.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CmdInner {
+    pub id: String,
+    pub name: String,
+    pub args: Vec<String>,
+    pub cwd: String,
+    #[serde(rename = "sandboxId")]
+    pub sandbox_id: String,
+    #[serde(rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    #[serde(rename = "startedAt")]
+    pub started_at: i64,
+}
+
+/// `@vercel/sandbox` envelope: `{ command: {...} }`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CmdResponse {
+    pub command: CmdInner,
+}
+
+impl CmdInner {
+    fn from_summary(sandbox_id: String, s: crate::services::job_tracker::JobSummary) -> Self {
+        let (name, args) = split_cmd_display(&s.cmd);
+        let exit_code = match s.status {
+            JobStatus::Exited { exit_code } => Some(exit_code),
+            _ => None,
+        };
+        Self {
+            id: s.id,
+            name,
+            args,
+            cwd: String::new(),
+            sandbox_id,
+            exit_code,
+            started_at: s.started_at.timestamp_millis(),
+        }
+    }
+}
+
+/// `cmd_display` is `argv.join(" ")`. The SDK wants `name` + `args`
+/// separately, so we split on the first space. Args that contained
+/// spaces in the original input are collapsed — acceptable because the
+/// SDK doesn't round-trip args through `name`.
+fn split_cmd_display(s: &str) -> (String, Vec<String>) {
+    let mut it = s.splitn(2, ' ');
+    let name = it.next().unwrap_or("").to_string();
+    let args = match it.next() {
+        Some(rest) if !rest.is_empty() => rest.split(' ').map(String::from).collect(),
+        _ => Vec::new(),
+    };
+    (name, args)
+}
+
+async fn fetch_cmd_summary(
+    state: &Arc<SandboxAppState>,
+    sandbox_id: &str,
+    user_id: i32,
+    cmd_id: &str,
+) -> Result<crate::services::job_tracker::JobSummary, SandboxError> {
+    let summaries = state.sandbox_service.list_jobs(sandbox_id, user_id).await?;
+    summaries
+        .into_iter()
+        .find(|s| s.id == cmd_id)
+        .ok_or_else(|| SandboxError::JobNotFound {
+            sandbox_id: sandbox_id.to_string(),
+            job_id: cmd_id.to_string(),
+        })
+}
+
+/// Run a command inside the sandbox (`@vercel/sandbox`-compatible).
+///
+/// `wait=false` (default) returns `{ command: {..., exitCode: null} }`
+/// immediately once the background task is spawned.
+///
+/// `wait=true` streams `application/x-ndjson`: the first line is the
+/// running envelope, the second is the finished envelope with `exitCode`.
+#[utoipa::path(
+    tag = "Sandboxes",
+    post,
+    path = "/v1/sandboxes/{id}/cmd",
+    request_body = CmdBody,
+    responses(
+        (status = 200, description = "Command started (wait=false) or finished (wait=true)", body = CmdResponse),
+        (status = 404, description = "Sandbox not found")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn cmd(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<SandboxAppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<CmdBody>,
+) -> Result<axum::response::Response, Problem> {
+    sandbox_permission_guard(&auth, Permission::SandboxesExec, Permission::ProjectsWrite)?;
+
+    let wait = body.wait;
+    let options = body.into_exec_options();
+    let user_id = auth.user_id();
+
+    let cmd_id = state
+        .sandbox_service
+        .exec_detached(&id, user_id, options)
+        .await?;
+    let started = fetch_cmd_summary(&state, &id, user_id, &cmd_id).await?;
+
+    if !wait {
+        let env = CmdResponse {
+            command: CmdInner::from_summary(id.clone(), started),
+        };
+        return Ok(Json(env).into_response());
+    }
+
+    // `wait=true` — stream ndjson. First line is the running envelope
+    // (which we already have), second line is the finished envelope
+    // produced by polling `job_status` until the job leaves `Running`.
+    // Polling is acceptable here because job state transitions exactly
+    // once; we aren't racing producers.
+    let first = serde_json::to_vec(&CmdResponse {
+        command: CmdInner::from_summary(id.clone(), started.clone()),
+    })
+    .map_err(|e| {
+        Problem::from(SandboxError::Validation {
+            message: e.to_string(),
+        })
+    })?;
+
+    let sandbox_id = id.clone();
+    let cmd_id_for_poll = cmd_id.clone();
+    let state_for_poll = state.clone();
+    let finished_stream = async_stream::stream! {
+        // Emit the start envelope immediately so clients unblock on
+        // `for await (const line of stream)`.
+        let mut start = first;
+        start.push(b'\n');
+        yield Ok::<_, std::io::Error>(axum::body::Bytes::from(start));
+
+        // Poll until the job is no longer Running. Exponential backoff
+        // (50ms → 500ms) keeps short-lived commands snappy without
+        // hammering the tracker for long-lived ones.
+        let mut delay_ms = 50u64;
+        loop {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            delay_ms = std::cmp::min(delay_ms.saturating_mul(2), 500);
+
+            let summaries = match state_for_poll
+                .sandbox_service
+                .list_jobs(&sandbox_id, user_id)
+                .await
+            {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            let Some(summary) = summaries.into_iter().find(|s| s.id == cmd_id_for_poll)
+            else {
+                break;
+            };
+            if matches!(summary.status, JobStatus::Running) {
+                continue;
+            }
+            let env = CmdResponse {
+                command: CmdInner::from_summary(sandbox_id.clone(), summary),
+            };
+            if let Ok(mut bytes) = serde_json::to_vec(&env) {
+                bytes.push(b'\n');
+                yield Ok(axum::body::Bytes::from(bytes));
+            }
+            break;
+        }
+    };
+
+    let body = axum::body::Body::from_stream(finished_stream);
+    let response = axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        .body(body)
+        .map_err(|e| {
+            Problem::from(SandboxError::Validation {
+                message: e.to_string(),
+            })
+        })?;
+    Ok(response)
+}
+
+/// Fetch a command's current state (`@vercel/sandbox`-compatible).
+///
+/// When `?wait=true`, blocks until the command terminates, then returns
+/// the finished envelope. Otherwise returns the current snapshot with
+/// `exitCode` potentially null.
+#[derive(Debug, Deserialize)]
+pub struct GetCmdQuery {
+    #[serde(default)]
+    pub wait: Option<String>,
+}
+
+#[utoipa::path(
+    tag = "Sandboxes",
+    get,
+    path = "/v1/sandboxes/{id}/cmd/{cmd_id}",
+    responses(
+        (status = 200, description = "Command snapshot", body = CmdResponse),
+        (status = 404, description = "Sandbox or command not found")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_cmd(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<SandboxAppState>>,
+    Path((id, cmd_id)): Path<(String, String)>,
+    Query(q): Query<GetCmdQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    sandbox_permission_guard(&auth, Permission::SandboxesRead, Permission::ProjectsRead)?;
+
+    let wait = matches!(q.wait.as_deref(), Some("true") | Some("1"));
+    let user_id = auth.user_id();
+
+    let mut delay_ms = 50u64;
+    loop {
+        let summary = fetch_cmd_summary(&state, &id, user_id, &cmd_id).await?;
+        if !wait || !matches!(summary.status, JobStatus::Running) {
+            return Ok(Json(CmdResponse {
+                command: CmdInner::from_summary(id, summary),
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        delay_ms = std::cmp::min(delay_ms.saturating_mul(2), 500);
+    }
+}
+
+/// Stream a command's stdout/stderr as `application/x-ndjson`
+/// (`@vercel/sandbox`-compatible). Each line is either
+/// `{stream:"stdout"|"stderr", data:"..."}` or
+/// `{stream:"error", data:{code, message}}`.
+#[utoipa::path(
+    tag = "Sandboxes",
+    get,
+    path = "/v1/sandboxes/{id}/cmd/{cmd_id}/logs",
+    responses(
+        (status = 200, description = "NDJSON stream of log events"),
+        (status = 404, description = "Sandbox or command not found")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn cmd_logs(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<SandboxAppState>>,
+    Path((id, cmd_id)): Path<(String, String)>,
+) -> Result<axum::response::Response, Problem> {
+    sandbox_permission_guard(&auth, Permission::SandboxesRead, Permission::ProjectsRead)?;
+
+    let rx = state
+        .sandbox_service
+        .subscribe_job_logs(&id, auth.user_id(), &cmd_id)
+        .await?;
+
+    let stream = BroadcastStream::new(rx).filter_map(|msg| async move {
+        match msg {
+            Ok(ev) => {
+                let stream_name = match ev.stream {
+                    ExecStream::Stdout => "stdout",
+                    ExecStream::Stderr => "stderr",
+                };
+                let line = serde_json::json!({
+                    "stream": stream_name,
+                    "data": ev.line,
+                });
+                let mut bytes = line.to_string().into_bytes();
+                bytes.push(b'\n');
+                Some(Ok::<_, std::io::Error>(axum::body::Bytes::from(bytes)))
+            }
+            Err(_lagged) => {
+                let line = serde_json::json!({
+                    "stream": "error",
+                    "data": {
+                        "code": "lagged",
+                        "message": "subscriber fell behind; reconcile via GET /cmd/{cmd_id}",
+                    },
+                });
+                let mut bytes = line.to_string().into_bytes();
+                bytes.push(b'\n');
+                Some(Ok::<_, std::io::Error>(axum::body::Bytes::from(bytes)))
+            }
+        }
+    });
+
+    let body = axum::body::Body::from_stream(stream);
+    let response = axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "application/x-ndjson")
+        .body(body)
+        .map_err(|e| {
+            Problem::from(SandboxError::Validation {
+                message: e.to_string(),
+            })
+        })?;
+    Ok(response)
+}
+
+/// SDK-shaped kill body. The SDK sends `{signal: AbortSignal}` but only
+/// uses the signal for HTTP request abortion client-side; there's no
+/// signal name on the wire.
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct CmdKillBody {
+    /// Optional: when true, SIGKILL instead of SIGTERM.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Kill a running command (`@vercel/sandbox`-compatible). The SDK
+/// calls `POST /v1/sandboxes/{id}/{cmdId}/kill` — note the path has the
+/// command ID directly under the sandbox, NOT under `/jobs/` or `/cmd/`.
+#[utoipa::path(
+    tag = "Sandboxes",
+    post,
+    path = "/v1/sandboxes/{id}/{cmd_id}/kill",
+    responses(
+        (status = 200, description = "Command killed; returns final snapshot", body = CmdResponse),
+        (status = 404, description = "Sandbox or command not found")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn cmd_kill(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<SandboxAppState>>,
+    Path((id, cmd_id)): Path<(String, String)>,
+    body: Option<Json<CmdKillBody>>,
+) -> Result<impl IntoResponse, Problem> {
+    sandbox_permission_guard(&auth, Permission::SandboxesExec, Permission::ProjectsWrite)?;
+    let force = body.map(|Json(b)| b.force).unwrap_or(false);
+    let user_id = auth.user_id();
+
+    // Snapshot before killing — `kill_job` removes the job from the
+    // tracker, so we'd lose the summary otherwise.
+    let summary = fetch_cmd_summary(&state, &id, user_id, &cmd_id).await?;
+
+    state
+        .sandbox_service
+        .kill_job(&id, user_id, &cmd_id, force)
+        .await?;
+
+    Ok(Json(CmdResponse {
+        command: CmdInner::from_summary(id, summary),
+    }))
+}
+
 // ── Filesystem ──────────────────────────────────────────────────────────────
 
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}/fs/read",
+    path = "/v1/sandboxes/{id}/fs/read",
     params(("path" = String, Query, description = "Absolute file path inside the sandbox")),
     responses(
         (status = 200, description = "File contents (base64)", body = ReadFileResponse),
@@ -1116,15 +1653,30 @@ pub async fn read_file(
     }))
 }
 
+/// Write a file into the sandbox. Accepts two body shapes — the SDK
+/// picks one based on `Content-Type`:
+///
+/// - **`application/json`** (temps-native): `{path, contents_b64, mode}`
+///   — one file, base64-encoded.
+/// - **`application/gzip`** (`@vercel/sandbox`): a gzipped tarball of
+///   one-or-more entries, with the target extract dir carried in the
+///   `x-cwd` header. The SDK's `writeFile` and `writeFiles` both post
+///   here; they differ only in how many entries the tarball contains.
+///
+/// Why merge them on one route: the SDK is hardcoded to
+/// `POST /fs/write`, so splitting tar uploads onto a separate path would
+/// force us to break SDK compat. Instead we dispatch on Content-Type,
+/// preserve JSON for native callers, and add tar for SDK callers.
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/fs/write",
+    path = "/v1/sandboxes/{id}/fs/write",
     request_body = WriteFileBody,
     responses(
-        (status = 204, description = "File written"),
+        (status = 204, description = "File(s) written"),
         (status = 400, description = "Validation error or invalid base64"),
-        (status = 404, description = "Sandbox not found")
+        (status = 404, description = "Sandbox not found"),
+        (status = 415, description = "Unsupported Content-Type (expected application/json or application/gzip)")
     ),
     security(("bearer_auth" = []))
 )]
@@ -1132,20 +1684,128 @@ pub async fn write_file(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<SandboxAppState>>,
     Path(id): Path<String>,
-    Json(body): Json<WriteFileBody>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<impl IntoResponse, Problem> {
     sandbox_permission_guard(&auth, Permission::SandboxesWrite, Permission::ProjectsWrite)?;
-    let contents = B64.decode(body.contents_b64.as_bytes()).map_err(|e| {
-        Problem::from(SandboxError::Validation {
-            message: format!("contents_b64 is not valid base64: {}", e),
-        })
-    })?;
-    let mode = body.mode.unwrap_or(0o644);
-    state
-        .sandbox_service
-        .fs_write(&id, auth.user_id(), &body.path, &contents, mode)
-        .await?;
-    Ok(StatusCode::NO_CONTENT)
+
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    // SDK path: gzipped tar. The `x-cwd` header tells us where to extract.
+    if content_type.starts_with("application/gzip")
+        || content_type.starts_with("application/x-gzip")
+        || content_type.starts_with("application/x-tar+gzip")
+    {
+        let cwd = headers
+            .get("x-cwd")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let entries = extract_tar_gz(&body).map_err(|e| {
+            Problem::from(SandboxError::Validation {
+                message: format!("failed to decode gzipped tar body: {}", e),
+            })
+        })?;
+        let user_id = auth.user_id();
+        for entry in entries {
+            let abs_path = resolve_extract_path(&cwd, &entry.name);
+            state
+                .sandbox_service
+                .fs_write(&id, user_id, &abs_path, &entry.content, entry.mode)
+                .await?;
+        }
+        return Ok(StatusCode::OK);
+    }
+
+    // Native JSON path: unchanged behaviour.
+    if content_type.starts_with("application/json") || content_type.is_empty() {
+        let body_parsed: WriteFileBody = serde_json::from_slice(&body).map_err(|e| {
+            Problem::from(SandboxError::Validation {
+                message: format!("invalid JSON body: {}", e),
+            })
+        })?;
+        let contents = B64
+            .decode(body_parsed.contents_b64.as_bytes())
+            .map_err(|e| {
+                Problem::from(SandboxError::Validation {
+                    message: format!("contents_b64 is not valid base64: {}", e),
+                })
+            })?;
+        let mode = body_parsed.mode.unwrap_or(0o644);
+        state
+            .sandbox_service
+            .fs_write(&id, auth.user_id(), &body_parsed.path, &contents, mode)
+            .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    Err(Problem::from(SandboxError::Validation {
+        message: format!(
+            "unsupported Content-Type '{}'; expected 'application/json' or 'application/gzip'",
+            content_type
+        ),
+    }))
+}
+
+/// One extracted tar entry. We only carry what `fs_write` needs.
+struct TarEntry {
+    name: String,
+    content: Vec<u8>,
+    mode: u32,
+}
+
+/// Extract a gzipped tar stream into in-memory entries. Bounded by the
+/// request's size limit — callers control that upstream. We skip
+/// directory entries (the sandbox's `write_file` auto-creates parents).
+fn extract_tar_gz(body: &[u8]) -> Result<Vec<TarEntry>, String> {
+    use std::io::Read;
+    let gz = flate2::read::GzDecoder::new(body);
+    let mut archive = tar::Archive::new(gz);
+    let mut out = Vec::new();
+    for entry in archive.entries().map_err(|e| e.to_string())? {
+        let mut entry = entry.map_err(|e| e.to_string())?;
+        let header = entry.header();
+        if header.entry_type().is_dir() {
+            continue;
+        }
+        let name = entry
+            .path()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        let mode = header.mode().map_err(|e| e.to_string())? & 0o7777;
+        let mut content = Vec::with_capacity(header.size().unwrap_or(0) as usize);
+        entry.read_to_end(&mut content).map_err(|e| e.to_string())?;
+        out.push(TarEntry {
+            name,
+            content,
+            mode: if mode == 0 { 0o644 } else { mode },
+        });
+    }
+    Ok(out)
+}
+
+/// Combine the SDK's `x-cwd` extract directory with a tarball entry
+/// path. When the entry is already absolute, it wins (the SDK encodes
+/// full paths in `writeFile` single-file uploads); otherwise we join
+/// under the cwd. When cwd is empty, treat entries as absolute.
+fn resolve_extract_path(cwd: &str, entry_name: &str) -> String {
+    if entry_name.starts_with('/') {
+        return entry_name.to_string();
+    }
+    if cwd.is_empty() {
+        return if entry_name.starts_with('/') {
+            entry_name.to_string()
+        } else {
+            format!("/{}", entry_name)
+        };
+    }
+    let cwd = cwd.trim_end_matches('/');
+    let entry = entry_name.trim_start_matches("./");
+    format!("{}/{}", cwd, entry)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1170,7 +1830,7 @@ pub struct WriteFilesResponse {
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/fs/write-batch",
+    path = "/v1/sandboxes/{id}/fs/write-batch",
     request_body = WriteFilesBody,
     responses(
         (status = 200, description = "All files written", body = WriteFilesResponse),
@@ -1209,7 +1869,7 @@ pub async fn write_files(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}/fs/stat",
+    path = "/v1/sandboxes/{id}/fs/stat",
     params(("path" = String, Query, description = "Absolute path inside the sandbox")),
     responses(
         (status = 200, description = "Stat info (exists=false when missing — not an error)", body = StatResponse),
@@ -1234,7 +1894,7 @@ pub async fn stat_path(
 #[utoipa::path(
     tag = "Sandboxes",
     post,
-    path = "/v1/sandbox/{id}/fs/mkdir",
+    path = "/v1/sandboxes/{id}/fs/mkdir",
     request_body = MkdirBody,
     responses(
         (status = 204, description = "Directory created (or already existed)"),
@@ -1261,10 +1921,10 @@ pub async fn mkdir(
 #[utoipa::path(
     tag = "Sandboxes",
     get,
-    path = "/v1/sandbox/{id}/domain",
+    path = "/v1/sandboxes/{id}/domain",
     params(("port" = u16, Query, description = "Port inside the sandbox (1..=65535)")),
     responses(
-        (status = 200, description = "Preview URL for the port", body = DomainResponse),
+        (status = 200, description = "Preview URL for the port", body = SandboxDomainResponse),
         (status = 400, description = "Invalid port"),
         (status = 404, description = "Sandbox not found")
     ),
@@ -1281,7 +1941,7 @@ pub async fn domain(
         .sandbox_service
         .domain(&id, auth.user_id(), q.port)
         .await?;
-    Ok(Json(DomainResponse { url }))
+    Ok(Json(SandboxDomainResponse { url }))
 }
 
 // ── Preview password ────────────────────────────────────────────────────────
@@ -1304,7 +1964,7 @@ pub struct SetPreviewPasswordResponse {
 #[utoipa::path(
     tag = "Sandboxes",
     put,
-    path = "/v1/sandbox/{id}/preview-password",
+    path = "/v1/sandboxes/{id}/preview-password",
     request_body = SetPreviewPasswordBody,
     responses(
         (status = 200, description = "Preview password set or rotated", body = SetPreviewPasswordResponse),
@@ -1332,7 +1992,7 @@ pub async fn set_preview_password(
 #[utoipa::path(
     tag = "Sandboxes",
     delete,
-    path = "/v1/sandbox/{id}/preview-password",
+    path = "/v1/sandboxes/{id}/preview-password",
     responses(
         (status = 204, description = "Preview password removed (sandbox is now URL-only protected)"),
         (status = 404, description = "Sandbox not found")
@@ -1356,29 +2016,38 @@ pub async fn clear_preview_password(
 
 pub fn routes() -> Router<Arc<SandboxAppState>> {
     Router::new()
-        .route("/v1/sandbox", post(create_sandbox).get(list_sandboxes))
-        .route("/v1/sandbox/{id}", get(get_sandbox))
-        .route("/v1/sandbox/{id}/stop", post(stop_sandbox))
-        .route("/v1/sandbox/{id}/destroy", post(destroy_sandbox))
-        .route("/v1/sandbox/{id}/pause", post(pause_sandbox))
-        .route("/v1/sandbox/{id}/resume", post(resume_sandbox))
-        .route("/v1/sandbox/{id}/restart", post(restart_sandbox))
-        .route("/v1/sandbox/{id}/source", post(source_sandbox))
-        .route("/v1/sandbox/{id}/extend-timeout", post(extend_timeout))
-        .route("/v1/sandbox/{id}/exec", post(exec))
-        .route("/v1/sandbox/{id}/exec-detached", post(exec_detached))
-        .route("/v1/sandbox/{id}/jobs", get(list_jobs))
-        .route("/v1/sandbox/{id}/jobs/{job_id}", get(job_status))
-        .route("/v1/sandbox/{id}/jobs/{job_id}/logs", get(job_logs))
-        .route("/v1/sandbox/{id}/jobs/{job_id}/kill", post(kill_job))
-        .route("/v1/sandbox/{id}/fs/read", get(read_file))
-        .route("/v1/sandbox/{id}/fs/write", post(write_file))
-        .route("/v1/sandbox/{id}/fs/write-batch", post(write_files))
-        .route("/v1/sandbox/{id}/fs/stat", get(stat_path))
-        .route("/v1/sandbox/{id}/fs/mkdir", post(mkdir))
-        .route("/v1/sandbox/{id}/domain", get(domain))
+        .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
+        .route("/v1/sandboxes/{id}", get(get_sandbox))
+        .route("/v1/sandboxes/{id}/stop", post(stop_sandbox))
+        .route("/v1/sandboxes/{id}/destroy", post(destroy_sandbox))
+        .route("/v1/sandboxes/{id}/pause", post(pause_sandbox))
+        .route("/v1/sandboxes/{id}/resume", post(resume_sandbox))
+        .route("/v1/sandboxes/{id}/restart", post(restart_sandbox))
+        .route("/v1/sandboxes/{id}/source", post(source_sandbox))
+        .route("/v1/sandboxes/{id}/extend-timeout", post(extend_timeout))
+        .route("/v1/sandboxes/{id}/exec", post(exec))
+        .route("/v1/sandboxes/{id}/exec-detached", post(exec_detached))
+        .route("/v1/sandboxes/{id}/jobs", get(list_jobs))
+        .route("/v1/sandboxes/{id}/jobs/{job_id}", get(job_status))
+        .route("/v1/sandboxes/{id}/jobs/{job_id}/logs", get(job_logs))
+        .route("/v1/sandboxes/{id}/jobs/{job_id}/kill", post(kill_job))
+        // `@vercel/sandbox`-compatible command surface. Wires through the
+        // same `exec_detached` machinery as `/exec-detached` but speaks
+        // the SDK's shape (`{command, args, cwd, env, sudo, wait}` /
+        // `{command: {...}}`) and uses the SDK's path layout (`/cmd`,
+        // `/cmd/{cmdId}`, `/cmd/{cmdId}/logs`, `/{cmdId}/kill`).
+        .route("/v1/sandboxes/{id}/cmd", post(cmd))
+        .route("/v1/sandboxes/{id}/cmd/{cmd_id}", get(get_cmd))
+        .route("/v1/sandboxes/{id}/cmd/{cmd_id}/logs", get(cmd_logs))
+        .route("/v1/sandboxes/{id}/{cmd_id}/kill", post(cmd_kill))
+        .route("/v1/sandboxes/{id}/fs/read", get(read_file))
+        .route("/v1/sandboxes/{id}/fs/write", post(write_file))
+        .route("/v1/sandboxes/{id}/fs/write-batch", post(write_files))
+        .route("/v1/sandboxes/{id}/fs/stat", get(stat_path))
+        .route("/v1/sandboxes/{id}/fs/mkdir", post(mkdir))
+        .route("/v1/sandboxes/{id}/domain", get(domain))
         .route(
-            "/v1/sandbox/{id}/preview-password",
+            "/v1/sandboxes/{id}/preview-password",
             put(set_preview_password).delete(clear_preview_password),
         )
 }
@@ -1387,6 +2056,75 @@ pub fn routes() -> Router<Arc<SandboxAppState>> {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    // ── Tar extraction (SDK fs/write path) ─────────────────────────────────
+
+    fn build_gzip_tar(entries: &[(&str, &[u8], u32)]) -> Vec<u8> {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            for (name, content, mode) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_size(content.len() as u64);
+                header.set_mode(*mode);
+                header.set_cksum();
+                builder.append(&header, *content).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        gz.finish().unwrap()
+    }
+
+    #[test]
+    fn extract_tar_gz_round_trips_entries() {
+        let body = build_gzip_tar(&[
+            ("hello.txt", b"hi", 0o644),
+            ("subdir/data.bin", b"\x00\x01\x02", 0o600),
+        ]);
+        let entries = extract_tar_gz(&body).expect("decodes");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "hello.txt");
+        assert_eq!(entries[0].content, b"hi");
+        assert_eq!(entries[0].mode, 0o644);
+        assert_eq!(entries[1].name, "subdir/data.bin");
+        assert_eq!(entries[1].content, b"\x00\x01\x02");
+        assert_eq!(entries[1].mode, 0o600);
+    }
+
+    #[test]
+    fn extract_tar_gz_rejects_garbage() {
+        assert!(extract_tar_gz(b"not a gzip stream").is_err());
+    }
+
+    #[test]
+    fn resolve_extract_path_joins_cwd() {
+        assert_eq!(
+            resolve_extract_path("/workspace", "a.txt"),
+            "/workspace/a.txt"
+        );
+        assert_eq!(
+            resolve_extract_path("/workspace/", "a.txt"),
+            "/workspace/a.txt"
+        );
+        assert_eq!(
+            resolve_extract_path("/workspace", "./a.txt"),
+            "/workspace/a.txt"
+        );
+    }
+
+    #[test]
+    fn resolve_extract_path_respects_absolute_entries() {
+        assert_eq!(
+            resolve_extract_path("/workspace", "/etc/config"),
+            "/etc/config"
+        );
+    }
+
+    #[test]
+    fn resolve_extract_path_handles_empty_cwd() {
+        assert_eq!(resolve_extract_path("", "a.txt"), "/a.txt");
+    }
 
     #[test]
     fn job_status_running_serializes_without_exit_or_reason() {
@@ -1436,11 +2174,46 @@ mod tests {
             created_at: now,
             expires_at: now,
             preview_password_hint: None,
+            ports: vec![],
         };
         let r = SandboxResponse::from(summary);
-        assert_eq!(r.id, "sbx_abc");
-        assert_eq!(r.status, "running");
-        assert!(r.created_at.ends_with('Z'));
+        assert_eq!(r.sandbox.id, "sbx_abc");
+        assert_eq!(r.sandbox.status, "running");
+        // `@vercel/sandbox` expects epoch millisecond timestamps, not ISO strings.
+        assert_eq!(r.sandbox.created_at, now.timestamp_millis());
+        assert!(r.routes.is_empty());
+    }
+
+    #[test]
+    fn sandbox_response_populates_routes_from_ports() {
+        use crate::services::preview_urls::PreviewUrlParts;
+
+        let now = Utc::now();
+        let summary = SandboxSummary {
+            public_id: "sbx_abcd1234ef567890".into(),
+            name: "name".into(),
+            status: "running".into(),
+            image: None,
+            work_dir: "/workspace".into(),
+            created_at: now,
+            expires_at: now,
+            preview_password_hint: None,
+            ports: vec![3000, 5173],
+        };
+        let parts = PreviewUrlParts {
+            protocol: "https".into(),
+            domain: "localho.st".into(),
+            port: None,
+        };
+        let r = SandboxResponse::with_template(summary, String::new(), &parts);
+        assert_eq!(r.routes.len(), 2);
+        assert_eq!(r.routes[0].port, 3000);
+        assert_eq!(r.routes[0].subdomain, "ws-abcd1234ef567890-3000");
+        assert_eq!(
+            r.routes[0].url,
+            "https://ws-abcd1234ef567890-3000.localho.st"
+        );
+        assert_eq!(r.routes[1].port, 5173);
     }
 
     #[test]
@@ -1455,11 +2228,17 @@ mod tests {
         assert_eq!(req.timeout_secs, Some(120));
     }
 
-    // ── DTO stability: unknown fields are rejected ──────────────────────────
+    // ── DTO stability: unknown fields ───────────────────────────────────────
     //
-    // Every input DTO carries `#[serde(deny_unknown_fields)]` so clients
-    // can't silently pass fields that drift from the `@vercel/sandbox`
-    // contract. These tests lock that behaviour in.
+    // SDK-facing bodies (`CreateSandboxBody`, `ExtendTimeoutBody`,
+    // `PaginationParams`) deliberately *accept* unknown fields so that
+    // `@vercel/sandbox` payloads carrying SDK-only extras like `projectId`,
+    // `networkPolicy`, or `teamId` don't break us. See `tests/vercel_compat.rs`
+    // for the forward-compat pin.
+    //
+    // Bodies the SDK doesn't send or sends with a fixed shape (exec, write,
+    // mkdir, kill, fs queries, source) remain strict — a typo there is a
+    // client bug we want to surface, not silently swallow.
 
     fn assert_rejects_unknown<T: for<'de> serde::Deserialize<'de>>(json: &str) {
         match serde_json::from_str::<T>(json) {
@@ -1479,18 +2258,8 @@ mod tests {
     }
 
     #[test]
-    fn create_body_rejects_unknown_field() {
-        assert_rejects_unknown::<CreateSandboxBody>(r#"{"bogus":"x"}"#);
-    }
-
-    #[test]
     fn exec_body_rejects_unknown_field() {
         assert_rejects_unknown::<ExecBody>(r#"{"cmd":["ls"],"surprise":1}"#);
-    }
-
-    #[test]
-    fn extend_timeout_body_rejects_unknown_field() {
-        assert_rejects_unknown::<ExtendTimeoutBody>(r#"{"extra_secs":60,"other":1}"#);
     }
 
     #[test]
@@ -1516,11 +2285,6 @@ mod tests {
     }
 
     #[test]
-    fn pagination_params_rejects_unknown_field() {
-        assert_rejects_unknown::<PaginationParams>(r#"{"page":1,"unexpected":2}"#);
-    }
-
-    #[test]
     fn read_file_query_rejects_unknown_field() {
         assert_rejects_unknown::<ReadFileQuery>(r#"{"path":"/a","extra":"b"}"#);
     }
@@ -1538,6 +2302,23 @@ mod tests {
     #[test]
     fn source_body_git_rejects_unknown_field() {
         assert_rejects_unknown::<SourceBody>(r#"{"type":"git","url":"https://x","other":1}"#);
+    }
+
+    #[test]
+    fn create_body_tolerates_unknown_sdk_fields() {
+        // `@vercel/sandbox` sends `projectId`, `networkPolicy`, `ports`, etc.
+        // These must parse cleanly so the SDK works without modification.
+        let body: CreateSandboxBody =
+            serde_json::from_str(r#"{"projectId":"x","unknownFuture":42}"#)
+                .expect("SDK extras must not break create");
+        assert!(body.image.is_none());
+    }
+
+    #[test]
+    fn extend_timeout_body_tolerates_unknown_sdk_fields() {
+        let body: ExtendTimeoutBody = serde_json::from_str(r#"{"duration":60000,"extra":1}"#)
+            .expect("SDK extras must not break extend-timeout");
+        assert_eq!(body.resolve_secs(), Some(60));
     }
 
     // ── SourceBody::validate ────────────────────────────────────────────────

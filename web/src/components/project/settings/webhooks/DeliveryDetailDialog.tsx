@@ -116,7 +116,7 @@ export function DeliveryDetailDialog({
         <ScrollArea className="max-h-[calc(90vh-120px)]">
           <div className="space-y-6 pr-4">
             {/* Overview */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <div className="text-sm font-medium text-muted-foreground mb-1">
                   Event Type

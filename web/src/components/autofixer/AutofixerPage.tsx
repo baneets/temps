@@ -1,6 +1,5 @@
 import { ProjectResponse } from '@/api/client'
 import { listErrorGroupsOptions } from '@/api/client/@tanstack/react-query.gen'
-import { AutopilotStatusBadge } from '@/components/agents/AutopilotStatusBadge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -39,24 +38,6 @@ export function AutofixerPage({ project }: AutofixerPageProps) {
       query: { status: 'unresolved', page_size: 20, page: 1 },
     }),
   })
-
-  // Fetch autofix runs to show status per error
-  const { data: autofixRuns } = useQuery({
-    queryKey: ['autofix-runs', project.id],
-    queryFn: async () => {
-      const res = await fetch(`/api/projects/${project.id}/agents/runs?page=1&page_size=100`)
-      const data = await res.json()
-      const runs = data.items || data || []
-      return runs.filter((r: any) => r.trigger_type === 'autofixer')
-    },
-    refetchInterval: 10000,
-  })
-
-  const getAutofixStatus = (errorGroupId: number) => {
-    if (!autofixRuns) return null
-    const run = autofixRuns.find((r: any) => r.trigger_source_id === errorGroupId)
-    return run || null
-  }
 
   const groups = (errorGroups as any)?.data || (errorGroups as any)?.items || errorGroups || []
 

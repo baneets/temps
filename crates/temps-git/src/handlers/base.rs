@@ -1193,7 +1193,7 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/git-providers/{provider_id}",
-            get(get_git_provider).delete(delete_provider),
+            get(get_git_provider).delete(delete_git_provider),
         )
         .route(
             "/git-providers/{provider_id}/deletion-check",
@@ -1528,7 +1528,7 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
         create_github_pat_provider,
         create_gitlab_pat_provider,
         create_gitlab_oauth_provider,
-        delete_provider,
+        delete_git_provider,
         check_provider_deletion_safety,
         delete_provider_safely,
         deactivate_provider,
@@ -1909,7 +1909,7 @@ pub async fn activate_provider(
         ("bearer_auth" = [])
     )
 )]
-pub async fn delete_provider(
+pub async fn delete_git_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(provider_id): Path<i32>,

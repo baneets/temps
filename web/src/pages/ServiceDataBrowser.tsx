@@ -462,7 +462,7 @@ export function ServiceDataBrowser() {
   // Update breadcrumbs
   useEffect(() => {
     const crumbs = [
-      { label: 'Storage', href: '/settings/storage' },
+      { label: 'Storage', href: '/storage' },
       {
         label: service?.service?.name || 'Service',
         href: `/storage/${id}`,
@@ -999,7 +999,7 @@ export function ServiceDataBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate(`/settings/storage/${id}`)}
+              onClick={() => navigate(`/storage/${id}`)}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -1043,7 +1043,7 @@ export function ServiceDataBrowser() {
                   Retry
                 </Button>
                 <Button
-                  onClick={() => navigate(`/settings/storage/${id}`)}
+                  onClick={() => navigate(`/storage/${id}`)}
                   variant="outline"
                   className="gap-2"
                 >
@@ -1068,7 +1068,7 @@ export function ServiceDataBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate(`/settings/storage/${id}`)}
+              onClick={() => navigate(`/storage/${id}`)}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -1115,7 +1115,7 @@ export function ServiceDataBrowser() {
             )}
             <CardContent className="text-center pt-0">
               <Button
-                onClick={() => navigate(`/settings/storage/${id}`)}
+                onClick={() => navigate(`/storage/${id}`)}
                 variant="outline"
                 className="gap-2"
               >
@@ -1137,7 +1137,7 @@ export function ServiceDataBrowser() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate(`/settings/storage/${id}`)}
+            onClick={() => navigate(`/storage/${id}`)}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -2174,7 +2174,7 @@ function ContainerEntitiesView({
                       entityInfo.size_bytes !== undefined) ||
                     (entityInfo.row_count !== null &&
                       entityInfo.row_count !== undefined) ? (
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {entityInfo.size_bytes !== null &&
                           entityInfo.size_bytes !== undefined && (
                             <div>

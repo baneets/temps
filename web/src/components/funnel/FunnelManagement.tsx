@@ -2,6 +2,7 @@ import { ProjectResponse, FunnelResponse } from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Calendar } from '@/components/ui/calendar'
+import { KbdBadge } from '@/components/ui/kbd-badge'
 import {
   Popover,
   PopoverContent,
@@ -76,6 +77,35 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
     },
   })
 
+  // Keyboard shortcut: press "N" (no modifiers) to create a new funnel.
+  // Skipped when typing in inputs / textareas / contenteditable.
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.key !== 'n' ||
+        e.metaKey ||
+        e.ctrlKey ||
+        e.shiftKey ||
+        e.altKey
+      ) {
+        return
+      }
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      e.preventDefault()
+      navigate(`/projects/${project.slug}/analytics/funnels/create`)
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [navigate, project.slug])
+
   const handleDelete = (funnelId: number) => {
     setDeletingId(funnelId)
   }
@@ -145,6 +175,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
           >
             <Plus className="h-4 w-4 sm:mr-2" />
             <span className="hidden sm:inline">Create Funnel</span>
+            <KbdBadge keys={['N']} className="ml-2 hidden sm:inline-flex" />
           </Button>
         </div>
       </div>
@@ -205,6 +236,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
             >
               <Plus className="h-4 w-4 mr-2" />
               Create Funnel
+              <KbdBadge keys={['N']} className="ml-2" />
             </Button>
           </CardContent>
         </Card>

@@ -33,6 +33,10 @@ const SERVICE_TYPE_LABELS: Record<ServiceTypeRoute, string> = {
   mongodb: 'MongoDB',
   redis: 'Redis',
   s3: 'MinIO (S3)',
+  kv: 'KV',
+  blob: 'Blob',
+  minio: 'MinIO',
+  rustfs: 'RustFS',
 }
 
 // Default parameters for each service type when using automation mode (-y)

@@ -12,28 +12,38 @@ import {
 } from '@/components/ui/sidebar'
 import {
   Activity,
+  AlarmClock,
   ArrowLeft,
   BadgeCheck,
+  BarChart3,
   Bell,
   Bot,
   Box,
   Boxes,
   ChevronsUpDown,
+  Clock,
   Cloud,
+  CreditCard,
   Database,
   DatabaseBackup,
+  FileText,
+  Filter,
   Folder,
+  Gauge,
   GitBranch,
   Globe,
   HardDrive,
   Home,
   Key,
+  KeyRound,
   Layers,
   LogOut,
   Mail,
   Monitor,
   Network,
+  Play,
   Puzzle,
+  Rss,
   Search,
   ScrollText,
   Server,
@@ -41,9 +51,12 @@ import {
   Settings2,
   Shield,
   ShieldAlert,
+  SlidersHorizontal,
   Sparkles,
   Users,
   Wand2,
+  Webhook,
+  Zap,
 } from 'lucide-react'
 
 import { getProjectBySlugOptions } from '@/api/client/@tanstack/react-query.gen'
@@ -84,7 +97,7 @@ const navWorkflow: PlatformNavItem[] = [
     url: '/storage',
     icon: Database,
     subItems: [
-      { title: 'Linked Services', url: '/storage', icon: Database },
+      { title: 'Databases', url: '/storage', icon: Database },
       { title: 'Backups', url: '/backups', icon: DatabaseBackup },
     ],
   },
@@ -182,7 +195,9 @@ function NavPlugins({
       </SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
-          const isActive = location.pathname.startsWith(item.url)
+          const isActive =
+            location.pathname === item.url ||
+            location.pathname.startsWith(item.url + '/')
           return (
             <SidebarMenuItem key={item.title}>
               <SidebarMenuButton
@@ -374,7 +389,9 @@ function NavSection({
       </SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
-          const isActive = location.pathname.startsWith(item.url)
+          const isActive =
+            location.pathname === item.url ||
+            location.pathname.startsWith(item.url + '/')
           return (
             <SidebarMenuItem key={item.title}>
               <SidebarMenuButton
@@ -555,67 +572,69 @@ function SettingsNav({ onBack }: { onBack: () => void }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Project nav — replaces the whole sidebar when on /projects/:slug/*.
-// Reuses the existing ProjectDetailSidebar nav model.
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ProjectNavItem {
   title: string
   url: string
   icon: LucideIcon
-  subItems?: { title: string; url: string }[]
+  subItems?: { title: string; url: string; icon: LucideIcon }[]
+  // When true, clicking the row navigates to `url`; the chevron is the
+  // only affordance that opens the drill-down submenu.
+  navigateOnClick?: boolean
 }
 
 const projectBaseNav: ProjectNavItem[] = [
   { title: 'Overview', url: 'project', icon: Home },
   { title: 'Deployments', url: 'deployments', icon: GitBranch },
   {
-    title: 'Observability',
+    title: 'Analytics',
     url: 'analytics',
+    icon: BarChart3,
+    navigateOnClick: true,
+    subItems: [
+      { title: 'Overview', url: 'analytics', icon: BarChart3 },
+      { title: 'Visitors', url: 'analytics/visitors', icon: Users },
+      { title: 'Pages', url: 'analytics/pages', icon: FileText },
+      { title: 'Funnels', url: 'analytics/funnels', icon: Filter },
+      { title: 'Session Replays', url: 'analytics/replays', icon: Play },
+      { title: 'Speed', url: 'speed', icon: Zap },
+    ],
+  },
+  {
+    title: 'Observability',
+    url: 'monitors',
     icon: Eye,
     subItems: [
-      { title: 'Analytics', url: 'analytics' },
-      { title: 'Visitors', url: 'analytics/visitors' },
-      { title: 'Pages', url: 'analytics/pages' },
-      { title: 'Funnels', url: 'analytics/funnels' },
-      { title: 'Session Replays', url: 'analytics/replays' },
-      { title: 'Uptime', url: 'monitors' },
-      { title: 'Metrics', url: 'monitoring' },
-      { title: 'Request Logs', url: 'request-logs' },
-      { title: 'Traces', url: 'traces' },
-      { title: 'Speed', url: 'speed' },
+      { title: 'Uptime', url: 'monitors', icon: Activity },
+      { title: 'Metrics', url: 'monitoring', icon: Gauge },
+      { title: 'Traces', url: 'traces', icon: Network },
+      { title: 'Request Logs', url: 'request-logs', icon: Rss },
     ],
   },
   { title: 'Error Tracking', url: 'errors', icon: ShieldAlert },
   { title: 'Logs', url: 'runtime', icon: ScrollText },
   { title: 'AI Gateway', url: 'ai-gateway', icon: Bot },
+  { title: 'Revenue', url: 'revenue', icon: CreditCard },
   { title: 'Workspace', url: 'workspace', icon: Sparkles },
   { title: 'Workflows', url: 'agents', icon: Bot },
-  {
-    title: 'Databases',
-    url: 'storage',
-    icon: Boxes,
-    subItems: [
-      { title: 'Linked Services', url: 'storage' },
-      { title: 'KV Store', url: 'services/kv' },
-      { title: 'Blob Storage', url: 'services/blob' },
-    ],
-  },
+  { title: 'Databases', url: 'storage', icon: Database },
   { title: 'Environments', url: 'environments', icon: Layers },
   {
     title: 'Settings',
     url: 'settings',
     icon: Settings,
     subItems: [
-      { title: 'General', url: 'settings/general' },
-      { title: 'Domains', url: 'settings/domains' },
-      { title: 'Env Variables', url: 'settings/environment-variables' },
-      { title: 'Git', url: 'settings/git' },
-      { title: 'Security', url: 'settings/security' },
-      { title: 'Cron Jobs', url: 'settings/cron-jobs' },
-      { title: 'Webhooks', url: 'settings/webhooks' },
-      { title: 'Skills', url: 'settings/skills' },
-      { title: 'MCP Servers', url: 'settings/mcp-servers' },
-      { title: 'Alert Rules', url: 'errors/alert-rules' },
+      { title: 'General', url: 'settings/general', icon: SlidersHorizontal },
+      { title: 'Domains', url: 'settings/domains', icon: Globe },
+      { title: 'Environment Variables', url: 'settings/environment-variables', icon: KeyRound },
+      { title: 'Git', url: 'settings/git', icon: GitBranch },
+      { title: 'Security', url: 'settings/security', icon: Shield },
+      { title: 'Cron Jobs', url: 'settings/cron-jobs', icon: Clock },
+      { title: 'Webhooks', url: 'settings/webhooks', icon: Webhook },
+      { title: 'Skills', url: 'settings/skills', icon: Wand2 },
+      { title: 'MCP Servers', url: 'settings/mcp-servers', icon: Server },
+      { title: 'Alert Rules', url: 'errors/alert-rules', icon: AlarmClock },
     ],
   },
 ]
@@ -703,10 +722,11 @@ function ProjectNav({
                       className={cn(
                         'justify-start',
                         active &&
-                          'bg-sidebar-accent text-sidebar-accent-foreground'
+                        'bg-sidebar-accent text-sidebar-accent-foreground'
                       )}
                     >
                       <Link to={`/projects/${project.slug}/${sub.url}`}>
+                        <sub.icon />
                         <span>{sub.title}</span>
                       </Link>
                     </SidebarMenuButton>
@@ -729,15 +749,32 @@ function ProjectNav({
           {items.map((item) => {
             const active = isActive(item.url) || isParentActive(item)
             const hasSub = !!item.subItems?.length
+            const splitRow = hasSub && item.navigateOnClick
             return (
               <SidebarMenuItem key={item.title}>
-                {hasSub ? (
+                {splitRow ? (
+                  <SidebarMenuButton
+                    asChild
+                    onClick={() => setDrilledTo(item.title)}
+                    className={cn(
+                      'justify-start',
+                      active &&
+                      'bg-sidebar-accent text-sidebar-accent-foreground'
+                    )}
+                  >
+                    <Link to={`/projects/${project.slug}/${item.url}`}>
+                      <item.icon />
+                      <span className="flex-1 text-left">{item.title}</span>
+                      <ChevronRight className="size-4 text-muted-foreground" />
+                    </Link>
+                  </SidebarMenuButton>
+                ) : hasSub ? (
                   <SidebarMenuButton
                     onClick={() => setDrilledTo(item.title)}
                     className={cn(
                       'justify-start',
                       active &&
-                        'bg-sidebar-accent text-sidebar-accent-foreground'
+                      'bg-sidebar-accent text-sidebar-accent-foreground'
                     )}
                   >
                     <item.icon />
@@ -750,7 +787,7 @@ function ProjectNav({
                     className={cn(
                       'justify-start',
                       active &&
-                        'bg-sidebar-accent text-sidebar-accent-foreground'
+                      'bg-sidebar-accent text-sidebar-accent-foreground'
                     )}
                   >
                     <Link to={`/projects/${project.slug}/${item.url}`}>

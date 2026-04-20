@@ -26,7 +26,7 @@ export const ReviewStep = memo(function ReviewStep({
             <CardTitle className="text-lg">Project Details</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <p className="text-sm font-medium">Name</p>
                 <p className="text-sm text-muted-foreground">{formData.name}</p>

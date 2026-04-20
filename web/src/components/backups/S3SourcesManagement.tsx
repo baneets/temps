@@ -7,8 +7,8 @@ import {
 } from '@/api/client/@tanstack/react-query.gen'
 import { listS3Sources } from '@/api/client/sdk.gen'
 import { S3SourceResponse } from '@/api/client/types.gen'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -20,14 +20,6 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import {
   setDefaultS3Source,
   testS3SourceConnection,
 } from '@/lib/s3-sources'
@@ -35,8 +27,9 @@ import { cn } from '@/lib/utils'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   CheckCircle2,
+  ChevronRight,
   Database,
-  MoreHorizontal,
+  EllipsisVertical,
   Pencil,
   PlugZap,
   Plus,
@@ -45,7 +38,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   DropdownMenu,
@@ -202,6 +195,7 @@ function S3SourceForm({
 }
 
 export function S3SourcesManagement() {
+  const navigate = useNavigate()
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [selectedSource, setSelectedSource] = useState<
     (Partial<NewS3Source> & { id?: number }) | null
@@ -328,15 +322,15 @@ export function S3SourcesManagement() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-lg font-semibold">S3 Sources</h2>
           <p className="text-sm text-muted-foreground">
             Configure S3 storage for backups
           </p>
         </div>
-        <Button asChild>
-          <Link to="/settings/backups/s3-sources/new">
+        <Button asChild className="w-full sm:w-auto">
+          <Link to="/backups/s3-sources/new">
             <Plus className="mr-2 h-4 w-4" />
             Add S3 Source
           </Link>
@@ -401,138 +395,167 @@ export function S3SourcesManagement() {
         </DialogContent>
       </Dialog>
 
-      <Card>
-        <div className="p-4">
-          {isLoading ? (
-            <div className="flex items-center justify-center py-6">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      {isLoading ? (
+        <div className="divide-y rounded-lg border">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-4 px-4 py-3 animate-pulse">
+              <div className="size-9 shrink-0 rounded-md bg-muted" />
+              <div className="flex-1 min-w-0 space-y-1.5">
+                <div className="h-4 w-48 bg-muted rounded" />
+                <div className="h-3 w-64 bg-muted rounded" />
+              </div>
             </div>
-          ) : sources.length === 0 ? (
-            <EmptyState
-              icon={Database}
-              title="No S3 sources configured"
-              description="Add an S3 source to store your backups"
-              action={
-                <Button asChild>
-                  <Link to="/settings/backups/s3-sources/new">
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add S3 Source
-                  </Link>
-                </Button>
-              }
-            />
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Bucket</TableHead>
-                  <TableHead>Region</TableHead>
-                  <TableHead className="w-[100px]">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sources.map((source) => {
-                  const isDefault =
-                    (source as S3SourceResponse & { is_default?: boolean })
-                      .is_default === true
-                  const isTestingThis =
-                    testConnectionMutation.isPending &&
-                    testConnectionMutation.variables === source.id
-                  return (
-                    <TableRow key={source.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Link
-                            to={`/settings/backups/s3-sources/${source.id}`}
-                            className="font-medium hover:underline"
-                          >
-                            {source.name}
-                          </Link>
-                          {isDefault ? (
-                            <span
-                              title="Default source — used by backups and external services when no source is specified"
-                              className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200"
-                            >
-                              <Star className="h-3 w-3 fill-current" />
-                              Default
-                            </span>
-                          ) : null}
-                        </div>
-                      </TableCell>
-                      <TableCell>{source.bucket_name}</TableCell>
-                      <TableCell>{source.region}</TableCell>
-                      <TableCell>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon">
-                              <MoreHorizontal className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem
-                              onClick={() => handleEditSource(source)}
-                            >
-                              <Pencil className="mr-2 h-4 w-4" />
-                              Edit
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onClick={() =>
-                                testConnectionMutation.mutate(source.id)
-                              }
-                              disabled={testConnectionMutation.isPending}
-                            >
-                              {isTestingThis ? (
-                                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                              ) : (
-                                <PlugZap className="mr-2 h-4 w-4" />
-                              )}
-                              {isTestingThis
-                                ? 'Testing...'
-                                : 'Test connection'}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onClick={() => handleRunBackup(source.id)}
-                              disabled={runBackupMutation.isPending}
-                            >
-                              <RefreshCw
-                                className={cn('mr-2 h-4 w-4', {
-                                  'animate-spin':
-                                    runBackupMutation.isPending,
-                                })}
-                              />
-                              {runBackupMutation.isPending
-                                ? 'Starting...'
-                                : 'Run Now'}
-                            </DropdownMenuItem>
-                            {!isDefault ? (
-                              <DropdownMenuItem
-                                onClick={() => setPendingDefault(source)}
-                              >
-                                <CheckCircle2 className="mr-2 h-4 w-4" />
-                                Set as default
-                              </DropdownMenuItem>
-                            ) : null}
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              onClick={() => handleDeleteSource(source.id)}
-                              className="text-destructive"
-                              disabled={deleteMutation.isPending}
-                            >
-                              <Trash2 className="mr-2 h-4 w-4" />
-                              Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          )}
+          ))}
         </div>
-      </Card>
+      ) : sources.length === 0 ? (
+        <EmptyState
+          icon={Database}
+          title="No S3 sources configured"
+          description="Add an S3 source to store your backups"
+          action={
+            <Button asChild>
+              <Link to="/backups/s3-sources/new">
+                <Plus className="mr-2 h-4 w-4" />
+                Add S3 Source
+              </Link>
+            </Button>
+          }
+        />
+      ) : (
+        <div className="overflow-hidden rounded-lg border">
+          <ul role="list" className="divide-y">
+            {sources.map((source) => {
+              const isDefault =
+                (source as S3SourceResponse & { is_default?: boolean })
+                  .is_default === true
+              const isTestingThis =
+                testConnectionMutation.isPending &&
+                testConnectionMutation.variables === source.id
+              return (
+                <li
+                  key={source.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => navigate(`/backups/s3-sources/${source.id}`)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      navigate(`/backups/s3-sources/${source.id}`)
+                    }
+                  }}
+                  className="flex cursor-pointer items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors focus:outline-none focus:bg-muted/40"
+                >
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                    <Database className="size-4 text-muted-foreground" />
+                  </div>
+                  <div className="flex min-w-0 flex-1 items-center gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="truncate text-sm font-medium">
+                          {source.name}
+                        </p>
+                        <Badge variant="secondary" className="font-mono text-xs">
+                          {source.bucket_name}
+                        </Badge>
+                        {isDefault && (
+                          <Badge
+                            variant="outline"
+                            className="gap-1 border-amber-400/40 text-amber-600 dark:text-amber-300"
+                          >
+                            <Star className="size-3 fill-current" />
+                            Default
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {source.region}
+                        {source.endpoint ? ` · ${source.endpoint}` : ''}
+                      </p>
+                    </div>
+                  </div>
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                          <EllipsisVertical className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            handleEditSource(source)
+                          }}
+                        >
+                          <Pencil className="mr-2 h-4 w-4" />
+                          Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            testConnectionMutation.mutate(source.id)
+                          }}
+                          disabled={testConnectionMutation.isPending}
+                        >
+                          {isTestingThis ? (
+                            <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <PlugZap className="mr-2 h-4 w-4" />
+                          )}
+                          {isTestingThis ? 'Testing...' : 'Test connection'}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            handleRunBackup(source.id)
+                          }}
+                          disabled={runBackupMutation.isPending}
+                        >
+                          <RefreshCw
+                            className={cn('mr-2 h-4 w-4', {
+                              'animate-spin': runBackupMutation.isPending,
+                            })}
+                          />
+                          {runBackupMutation.isPending
+                            ? 'Starting...'
+                            : 'Run Now'}
+                        </DropdownMenuItem>
+                        {!isDefault && (
+                          <DropdownMenuItem
+                            onSelect={(e) => {
+                              e.preventDefault()
+                              setPendingDefault(source)
+                            }}
+                          >
+                            <CheckCircle2 className="mr-2 h-4 w-4" />
+                            Set as default
+                          </DropdownMenuItem>
+                        )}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            handleDeleteSource(source.id)
+                          }}
+                          className="text-destructive"
+                          disabled={deleteMutation.isPending}
+                        >
+                          <Trash2 className="mr-2 h-4 w-4" />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                  <ChevronRight className="size-4 shrink-0 text-muted-foreground/50" />
+                </li>
+              )
+            })}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

@@ -9,6 +9,7 @@ import {
   NodeInfoResponse,
   ServiceTypeRoute,
 } from '@/api/client/types.gen'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { Button } from '@/components/ui/button'
 import { JsonSchemaForm } from '@/components/forms/JsonSchemaForm'
 import { Input } from '@/components/ui/input'
@@ -247,6 +248,7 @@ function ClusterMemberConfig({
 }
 
 export function CreateService() {
+  usePageTitle('Create Service')
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const serviceType = searchParams.get('type') as ServiceTypeRoute | null
@@ -309,8 +311,8 @@ export function CreateService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/settings/storage' },
-      { label: 'Create Service', href: '/settings/storage/create' },
+      { label: 'Storage', href: '/storage' },
+      { label: 'Create Service', href: '/storage/create' },
     ])
   }, [setBreadcrumbs])
 
@@ -345,7 +347,7 @@ export function CreateService() {
       } else {
         toast.success('Service created successfully')
       }
-      navigate(`/settings/storage/${data.id}`)
+      navigate(`/storage/${data.id}`)
     },
   })
 
@@ -398,7 +400,7 @@ export function CreateService() {
               Please select a service type from the URL parameter.
             </p>
           </div>
-          <Link to="/settings/storage">
+          <Link to="/storage">
             <Button variant="outline">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Storage
@@ -438,7 +440,7 @@ export function CreateService() {
       <div className="sm:p-4 space-y-6 md:p-6 max-w-4xl mx-auto">
         {/* Header with provider info */}
         <div className="space-y-4">
-          <Link to="/settings/storage">
+          <Link to="/storage">
             <Button variant="ghost" size="sm" className="gap-2">
               <ArrowLeft className="h-4 w-4" />
               Back to Storage
@@ -555,7 +557,7 @@ export function CreateService() {
         <JsonSchemaForm
           schema={jsonSchema as any}
           onSubmit={handleSubmit}
-          onCancel={() => navigate('/settings/storage')}
+          onCancel={() => navigate('/storage')}
           submitText="Create Service"
           isSubmitting={createServiceMut.isPending}
           hiddenFields={

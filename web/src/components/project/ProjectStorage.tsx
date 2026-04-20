@@ -1,6 +1,5 @@
 import { ExternalServiceInfo, ProjectResponse } from '@/api/client'
 import {
-  getServicePreviewEnvironmentVariablesMaskedOptions,
   linkServiceToProjectMutation,
   listProjectServicesOptions,
   listServicesOptions,
@@ -11,278 +10,204 @@ import EmptyStateStorage from '@/components/storage/EmptyStateStorage'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
-  ArrowRight,
-  ChevronDown,
   ChevronRight,
   Database,
-  Eye,
-  EyeOff,
-  Loader2,
+  Link2,
+  Link2Off,
+  MoreHorizontal,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { CopyButton } from '../ui/copy-button'
-import { TimeAgo } from '@/components/utils/TimeAgo'
 
 /**
- * Compute the resource path (database/bucket name) for a project linked to a service.
- * Mirrors the backend naming conventions in temps-providers/src/externalsvc/.
+ * Mirrors backend naming conventions in temps-providers/src/externalsvc/.
  */
 function getProjectResourcePath(
   serviceType: string,
   projectSlug: string,
-  environment = 'production'
+  environment = 'production',
 ): string {
   if (serviceType === 's3' || serviceType === 'rustfs' || serviceType === 'minio') {
-    // S3/RustFS: {slug}-{env} with underscores replaced by hyphens
     return `${projectSlug}-${environment}`.replace(/_/g, '-').toLowerCase()
   }
-  // Postgres/MongoDB/Redis: {slug}_{env} normalized (lowercase, non-alphanumeric -> _)
   const raw = `${projectSlug}_${environment}`.toLowerCase()
   const normalized = raw.replace(/[^a-z0-9]/g, '_')
-  // Prefix with db_ if starting with a digit
   return /^\d/.test(normalized) ? `db_${normalized}` : normalized
 }
 
-function ServiceCard({
+function ServiceRow({
   service,
   isLinked,
-  onToggle,
+  isBusy,
   projectSlug,
+  onToggle,
 }: {
   service: ExternalServiceInfo
   isLinked: boolean
-  onToggle: () => Promise<void>
+  isBusy: boolean
   projectSlug: string
+  onToggle: () => Promise<void>
 }) {
-  const [isEnvPreviewOpen, setIsEnvPreviewOpen] = useState(false)
-  const [showEnvPreview, setShowEnvPreview] = useState(false)
+  const navigate = useNavigate()
 
-  const {
-    data: envVars,
-    isLoading: envVarsLoading,
-    error: envVarsError,
-  } = useQuery({
-    ...getServicePreviewEnvironmentVariablesMaskedOptions({
-      path: { id: service.id },
-    }),
-    enabled: isEnvPreviewOpen && isLinked, // Only load when expanded and service is linked
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
-  })
+  const primaryHref = isLinked
+    ? `/storage/${service.id}/browse?path=${encodeURIComponent(
+        getProjectResourcePath(service.service_type, projectSlug),
+      )}`
+    : `/storage/${service.id}`
 
-  // Auto-show environment variables when section is expanded and data is loaded
-  useEffect(() => {
-    if (isEnvPreviewOpen && envVars) {
-      setShowEnvPreview(true)
-    }
-  }, [isEnvPreviewOpen, envVars])
+  const goToPrimary = () => navigate(primaryHref)
 
-  const handleEnvPreviewToggle = () => {
-    setShowEnvPreview(!showEnvPreview)
-  }
-
-  const envVarCount = envVars ? Object.keys(envVars).length : 0
   return (
-    <Collapsible open={isEnvPreviewOpen} onOpenChange={setIsEnvPreviewOpen}>
-      <Card>
-        <CardHeader>
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="flex-1 space-y-1">
-              <CardTitle className="flex items-center gap-2">
-                <ServiceLogo service={service.service_type} />
-                {service.name}
-                {isLinked && (
-                  <CollapsibleTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 w-6 p-0 ml-2 text-muted-foreground hover:text-foreground"
-                    >
-                      {isEnvPreviewOpen ? (
-                        <ChevronDown className="h-4 w-4" />
-                      ) : (
-                        <ChevronRight className="h-4 w-4" />
-                      )}
-                    </Button>
-                  </CollapsibleTrigger>
-                )}
-              </CardTitle>
-              <CardDescription className="flex items-center gap-2 flex-wrap">
-                <span>{service.service_type}</span>
-                {service.created_at && (
-                  <>
-                    <span>•</span>
-                    <span className="text-xs">
-                      Created <TimeAgo date={service.created_at} />
-                    </span>
-                  </>
-                )}
-                <span>•</span>
-                <Badge variant={isLinked ? 'default' : 'secondary'}>
-                  {isLinked ? 'Linked' : 'Available'}
-                </Badge>
-                {isLinked && envVars && (
-                  <Badge variant="secondary" className="text-xs">
-                    {envVarCount} env var{envVarCount !== 1 ? 's' : ''}
-                  </Badge>
-                )}
-              </CardDescription>
-            </div>
-            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2">
-              {isLinked ? (
-                <>
-                  <Link
-                    to={`/settings/storage/${service.id}/browse?path=${encodeURIComponent(getProjectResourcePath(service.service_type, projectSlug))}`}
-                  >
-                    <Button variant="outline" size="sm" className="gap-2">
-                      <Database className="h-4 w-4" />
-                      Browse Data
-                    </Button>
-                  </Link>
-                  <Link to={`/settings/storage/${service.id}`}>
-                    <Button variant="outline" size="sm" className="gap-2">
-                      View Details
-                      <ArrowRight className="h-4 w-4" />
-                    </Button>
-                  </Link>
-                  <Button variant="destructive" size="sm" onClick={onToggle}>
-                    Unlink
-                  </Button>
-                </>
-              ) : (
-                <Button size="sm" onClick={onToggle}>
-                  Link
-                </Button>
-              )}
-            </div>
-          </div>
-        </CardHeader>
+    <li
+      role="button"
+      tabIndex={0}
+      onClick={goToPrimary}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          goToPrimary()
+        }
+      }}
+      className={cn(
+        'group flex items-center gap-4 rounded-md px-3 py-3 -mx-3',
+        'cursor-pointer transition-colors',
+        'hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none',
+      )}
+    >
+      <div className="shrink-0">
+        <ServiceLogo service={service.service_type} />
+      </div>
 
-        {/* Environment Variables Preview Section */}
-        <CollapsibleContent>
-          {isLinked && (
-            <CardContent className="pt-0 border-t">
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-medium text-muted-foreground">
-                    Environment Variables
-                  </h4>
-                  <div className="flex items-center gap-3">
-                    {envVars && showEnvPreview && (
-                      <CopyButton
-                        value={Object.entries(envVars)
-                          .map(([key, value]) => `${key}=${value}`)
-                          .join('\n')}
-                      />
-                    )}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={handleEnvPreviewToggle}
-                      className="h-8 text-xs text-muted-foreground hover:text-foreground gap-2 px-3"
-                    >
-                      {showEnvPreview ? (
-                        <>
-                          <EyeOff className="h-3.5 w-3.5" />
-                          Hide
-                        </>
-                      ) : (
-                        <>
-                          <Eye className="h-3.5 w-3.5" />
-                          Show
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="truncate text-sm font-medium text-foreground">
+            {service.name}
+          </p>
+          {isLinked ? (
+            <Badge
+              variant="outline"
+              className="shrink-0 border-emerald-600/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            >
+              Linked
+            </Badge>
+          ) : null}
+        </div>
+        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+          {service.service_type}
+          {isLinked
+            ? ` · ${getProjectResourcePath(service.service_type, projectSlug)}`
+            : ''}
+        </p>
+      </div>
 
-                {envVarsLoading && (
-                  <div className="flex items-center justify-center py-8 text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                    <span className="text-sm">
-                      Loading environment variables...
-                    </span>
-                  </div>
-                )}
+      <div
+        className="flex items-center gap-1"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {isLinked ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-2 text-muted-foreground hover:text-foreground"
+            onClick={(e) => {
+              e.stopPropagation()
+              goToPrimary()
+            }}
+          >
+            <Database className="size-3.5" />
+            <span className="hidden sm:inline">Browse</span>
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8"
+            disabled={isBusy}
+            onClick={(e) => {
+              e.stopPropagation()
+              void onToggle()
+            }}
+          >
+            <Link2 className="size-3.5" />
+            Link
+          </Button>
+        )}
 
-                {envVarsError && (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-muted-foreground">
-                      Unable to load environment variables
-                    </p>
-                  </div>
-                )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="relative size-8 p-0 text-muted-foreground hover:text-foreground"
+              aria-label={`Actions for ${service.name}`}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <MoreHorizontal className="size-4" />
+              <span
+                aria-hidden="true"
+                className="absolute top-1/2 left-1/2 size-[max(100%,3rem)] -translate-1/2 pointer-fine:hidden"
+              />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem onSelect={() => navigate(`/storage/${service.id}`)}>
+              View details
+            </DropdownMenuItem>
+            {isLinked ? (
+              <DropdownMenuItem
+                onSelect={() =>
+                  navigate(
+                    `/storage/${service.id}/browse?path=${encodeURIComponent(
+                      getProjectResourcePath(service.service_type, projectSlug),
+                    )}`,
+                  )
+                }
+              >
+                Browse data
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuSeparator />
+            {isLinked ? (
+              <DropdownMenuItem
+                disabled={isBusy}
+                className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                onSelect={() => void onToggle()}
+              >
+                <Link2Off className="size-3.5" />
+                Unlink from project
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem
+                disabled={isBusy}
+                onSelect={() => void onToggle()}
+              >
+                <Link2 className="size-3.5" />
+                Link to project
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-                {!showEnvPreview && !envVarsLoading && !envVarsError && (
-                  <div className="text-center py-8">
-                    <p className="text-sm text-muted-foreground">
-                      Click &quot;Show&quot; to preview environment variables
-                    </p>
-                  </div>
-                )}
-
-                {envVars && showEnvPreview && (
-                  <div className="space-y-3">
-                    {/* Code block style display */}
-                    <div className="relative">
-                      <pre
-                        className={cn(
-                          'bg-muted/50 border rounded-lg p-4 text-sm font-mono',
-                          'max-h-48 overflow-y-auto',
-                          'whitespace-pre-wrap leading-tight'
-                        )}
-                      >
-                        {Object.entries(envVars).map(([key, value], index) => (
-                          <span key={key}>
-                            <span className="text-blue-600 dark:text-blue-400 font-medium">
-                              {key}
-                            </span>
-                            <span className="text-muted-foreground">=</span>
-                            <span className="text-foreground">{value}</span>
-                            {index < Object.entries(envVars).length - 1
-                              ? '\n'
-                              : ''}
-                          </span>
-                        ))}
-                      </pre>
-                    </div>
-
-                    <div className="flex items-center justify-center">
-                      <Badge
-                        variant="outline"
-                        className="text-xs text-muted-foreground"
-                      >
-                        Masked for security • Available in project runtime
-                      </Badge>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          )}
-        </CollapsibleContent>
-      </Card>
-    </Collapsible>
+        <ChevronRight
+          className="size-4 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground"
+          aria-hidden="true"
+        />
+      </div>
+    </li>
   )
 }
 
@@ -309,30 +234,20 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
 
   const { data: servicesLinked, refetch: refetchServicesLinked } = useQuery({
     ...listProjectServicesOptions({
-      path: {
-        project_id: project.id,
-      },
+      path: { project_id: project.id },
     }),
   })
 
   const linkServiceMutation = useMutation({
     ...linkServiceToProjectMutation(),
-    meta: {
-      errorTitle: 'Failed to link service to project',
-    },
-    onSuccess: () => {
-      refetchServicesLinked()
-    },
+    meta: { errorTitle: 'Failed to link service to project' },
+    onSuccess: () => refetchServicesLinked(),
   })
 
   const unlinkServiceMutation = useMutation({
     ...unlinkServiceFromProjectMutation(),
-    meta: {
-      errorTitle: 'Failed to unlink service from project',
-    },
-    onSuccess: () => {
-      refetchServicesLinked()
-    },
+    meta: { errorTitle: 'Failed to unlink service from project' },
+    onSuccess: () => refetchServicesLinked(),
   })
 
   const handleServiceToggle = async (serviceId: number) => {
@@ -340,55 +255,78 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
 
     if (isLinked) {
       const promise = unlinkServiceMutation.mutateAsync({
-        path: {
-          id: serviceId,
-          project_id: project.id,
-        },
+        path: { id: serviceId, project_id: project.id },
       })
-      await toast.promise(promise, {
+      toast.promise(promise, {
         loading: 'Unlinking service...',
-        success: 'Service unlinked successfully',
+        success: 'Service unlinked',
         error: 'Failed to unlink service',
       })
+      await promise.catch(() => {})
     } else {
       const promise = linkServiceMutation.mutateAsync({
-        path: {
-          id: serviceId,
-        },
-        body: {
-          project_id: project.id,
-        },
+        path: { id: serviceId },
+        body: { project_id: project.id },
       })
-      await toast.promise(promise, {
+      toast.promise(promise, {
         loading: 'Linking service...',
-        success: 'Service linked successfully',
+        success: 'Service linked',
         error: 'Failed to link service',
       })
+      await promise.catch(() => {})
     }
 
     await refetchServicesLinked()
   }
 
+  const linkedCount = servicesLinked?.length ?? 0
+  const totalCount = services?.length ?? 0
+  const isToggling =
+    linkServiceMutation.isPending || unlinkServiceMutation.isPending
+
+  const header = (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
+          Databases
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Link Postgres, MongoDB, Redis, or S3-compatible services to this project.
+          {totalCount > 0 ? (
+            <span className="ml-1 tabular-nums">
+              {linkedCount} of {totalCount} linked.
+            </span>
+          ) : null}
+        </p>
+      </div>
+      <CreateServiceButton
+        open={isCreateDropdownOpen}
+        onOpenChange={setIsCreateDropdownOpen}
+        onSuccess={() => {
+          refetchServices()
+          refetchServicesLinked()
+        }}
+      />
+    </div>
+  )
+
   if (isLoadingServices) {
     return (
-      <div className="flex-1 p-6">
-        <div className="animate-pulse space-y-4">
-          <div className="h-8 w-1/4 bg-muted rounded" />
-          <div className="space-y-4">
-            {[...Array(3)].map((_, i) => (
-              <Card key={i}>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-2">
-                      <div className="h-5 w-40 bg-muted rounded" />
-                      <div className="h-4 w-24 bg-muted rounded" />
-                    </div>
-                    <div className="h-8 w-20 bg-muted rounded" />
-                  </div>
-                </CardHeader>
-              </Card>
+      <div className="flex-1 overflow-auto">
+        <div className="space-y-6 p-4 md:p-6">
+          {header}
+          <ul role="list" className="divide-y divide-gray-950/5 dark:divide-white/10">
+            {[...Array(4)].map((_, i) => (
+              <li key={i} className="flex items-center gap-4 py-3">
+                <div className="size-8 shrink-0 animate-pulse rounded-md bg-muted" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
+                  <div className="h-3 w-1/5 animate-pulse rounded bg-muted" />
+                </div>
+                <div className="h-8 w-20 animate-pulse rounded bg-muted" />
+              </li>
             ))}
-          </div>
+          </ul>
         </div>
       </div>
     )
@@ -397,63 +335,71 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
   if (!services?.length) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="sm:p-4 space-y-6 md:p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h1 className="text-xl font-semibold sm:text-2xl">Databases</h1>
-              <p className="text-muted-foreground text-sm mt-1">
-                Link Postgres, MongoDB, Redis, or S3-compatible services to this project
-              </p>
-            </div>
-            <CreateServiceButton
-              open={isCreateDropdownOpen}
-              onOpenChange={setIsCreateDropdownOpen}
-              onSuccess={() => {
-                refetchServices()
-                refetchServicesLinked()
-              }}
-            />
-          </div>
+        <div className="space-y-6 p-4 md:p-6">
+          {header}
           <EmptyStateStorage />
         </div>
       </div>
     )
   }
 
+  const linkedServices = services.filter((s) =>
+    servicesLinked?.some((l) => l.service.id === s.id),
+  )
+  const availableServices = services.filter(
+    (s) => !servicesLinked?.some((l) => l.service.id === s.id),
+  )
+
   return (
     <div className="flex-1 overflow-auto">
-      <div className="sm:p-4 space-y-6 md:p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold sm:text-2xl">Databases</h1>
-            <p className="text-muted-foreground text-sm mt-1">
-              Link Postgres, MongoDB, Redis, or S3-compatible services to this project
-            </p>
-          </div>
-          <CreateServiceButton
-            open={isCreateDropdownOpen}
-            onOpenChange={setIsCreateDropdownOpen}
-            onSuccess={() => {
-              refetchServices()
-              refetchServicesLinked()
-            }}
-          />
-        </div>
+      <div className="space-y-8 p-4 md:p-6">
+        {header}
 
-        <div className="grid gap-4">
-          {services.map((service) => (
-            <ServiceCard
-              key={service.id}
-              service={service}
-              isLinked={
-                servicesLinked?.some((s) => s.service.id === service.id) ??
-                false
-              }
-              onToggle={() => handleServiceToggle(service.id)}
-              projectSlug={project.slug}
-            />
-          ))}
-        </div>
+        {linkedServices.length > 0 ? (
+          <section>
+            <div className="mb-2 flex items-baseline justify-between">
+              <h2 className="text-sm font-medium text-foreground">Linked</h2>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {linkedServices.length}
+              </span>
+            </div>
+            <ul role="list" className="divide-y divide-gray-950/5 dark:divide-white/10">
+              {linkedServices.map((service) => (
+                <ServiceRow
+                  key={service.id}
+                  service={service}
+                  isLinked
+                  isBusy={isToggling}
+                  projectSlug={project.slug}
+                  onToggle={() => handleServiceToggle(service.id)}
+                />
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {availableServices.length > 0 ? (
+          <section>
+            <div className="mb-2 flex items-baseline justify-between">
+              <h2 className="text-sm font-medium text-foreground">Available</h2>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {availableServices.length}
+              </span>
+            </div>
+            <ul role="list" className="divide-y divide-gray-950/5 dark:divide-white/10">
+              {availableServices.map((service) => (
+                <ServiceRow
+                  key={service.id}
+                  service={service}
+                  isLinked={false}
+                  isBusy={isToggling}
+                  projectSlug={project.slug}
+                  onToggle={() => handleServiceToggle(service.id)}
+                />
+              ))}
+            </ul>
+          </section>
+        ) : null}
       </div>
     </div>
   )

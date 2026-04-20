@@ -102,15 +102,15 @@ export function EnvironmentsList() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="p-6 border-b bg-background">
-        <div className="flex items-start justify-between">
+      <div className="p-4 sm:p-6 border-b bg-background">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h1 className="text-3xl font-bold">Environments</h1>
+            <h1 className="text-2xl sm:text-3xl font-bold">Environments</h1>
             <p className="text-sm text-muted-foreground mt-1">
               Select an environment to view its dashboard and manage containers
             </p>
           </div>
-          <Button onClick={() => setIsDialogOpen(true)}>
+          <Button onClick={() => setIsDialogOpen(true)} className="w-full sm:w-auto">
             <Plus className="h-4 w-4 mr-2" />
             New Environment
           </Button>
@@ -119,7 +119,7 @@ export function EnvironmentsList() {
 
       {/* Environments Grid */}
       <div className="flex-1 overflow-auto">
-        <div className="p-6">
+        <div className="p-4 sm:p-6">
           {!environments || environments.length === 0 ? (
             <div className="flex items-center justify-center h-96">
               <Card className="p-8 text-center max-w-sm">

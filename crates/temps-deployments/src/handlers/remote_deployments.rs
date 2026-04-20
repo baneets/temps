@@ -41,8 +41,8 @@ use crate::services::{ExternalImageInfo, RegisterExternalImageRequest, StaticBun
         deploy_from_static,
         upload_static_bundle,
         register_external_image,
-        list_external_images,
-        get_external_image,
+        list_remote_external_images,
+        get_remote_external_image,
         delete_external_image,
         list_static_bundles,
         get_static_bundle,
@@ -52,7 +52,7 @@ use crate::services::{ExternalImageInfo, RegisterExternalImageRequest, StaticBun
         DeployFromImageRequest,
         DeployFromImageUploadQuery,
         DeployFromStaticRequest,
-        DeploymentResponse,
+        RemoteDeploymentResponse,
         ExternalImageResponse,
         StaticBundleResponse,
         PaginatedExternalImagesResponse,
@@ -122,7 +122,7 @@ pub struct DeployFromImageUploadQuery {
 // Response Types
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct DeploymentResponse {
+pub struct RemoteDeploymentResponse {
     pub id: i32,
     pub project_id: i32,
     pub environment_id: i32,
@@ -226,7 +226,7 @@ pub struct PaginatedStaticBundlesResponse {
     path = "/projects/{project_id}/environments/{environment_id}/deploy/image",
     request_body = DeployFromImageRequest,
     responses(
-        (status = 202, description = "Deployment started", body = DeploymentResponse),
+        (status = 202, description = "Deployment started", body = RemoteDeploymentResponse),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -505,7 +505,7 @@ pub async fn deploy_from_image(
     // 9. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
-        Json(DeploymentResponse {
+        Json(RemoteDeploymentResponse {
             id: deployment.id,
             project_id: deployment.project_id,
             environment_id: deployment.environment_id,
@@ -525,7 +525,7 @@ pub async fn deploy_from_image(
     path = "/projects/{project_id}/environments/{environment_id}/deploy/static",
     request_body = DeployFromStaticRequest,
     responses(
-        (status = 202, description = "Deployment started", body = DeploymentResponse),
+        (status = 202, description = "Deployment started", body = RemoteDeploymentResponse),
         (status = 400, description = "Invalid request"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -781,7 +781,7 @@ pub async fn deploy_from_static(
     // 10. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
-        Json(DeploymentResponse {
+        Json(RemoteDeploymentResponse {
             id: deployment.id,
             project_id: deployment.project_id,
             environment_id: deployment.environment_id,
@@ -806,7 +806,7 @@ pub async fn deploy_from_static(
     path = "/projects/{project_id}/environments/{environment_id}/deploy/image-upload",
     params(DeployFromImageUploadQuery),
     responses(
-        (status = 202, description = "Image imported and deployment started", body = DeploymentResponse),
+        (status = 202, description = "Image imported and deployment started", body = RemoteDeploymentResponse),
         (status = 400, description = "Invalid request or unsupported format"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Insufficient permissions"),
@@ -1199,7 +1199,7 @@ pub async fn deploy_from_image_upload(
     // 15. Return deployment info
     Ok((
         StatusCode::ACCEPTED,
-        Json(DeploymentResponse {
+        Json(RemoteDeploymentResponse {
             id: deployment.id,
             project_id: deployment.project_id,
             environment_id: deployment.environment_id,
@@ -1608,7 +1608,7 @@ pub async fn register_external_image(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn list_external_images(
+pub async fn list_remote_external_images(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
@@ -1654,7 +1654,7 @@ pub async fn list_external_images(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn get_external_image(
+pub async fn get_remote_external_image(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path((_project_id, image_id)): Path<(i32, i32)>,
@@ -1911,11 +1911,11 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         // External images CRUD
         .route(
             "/projects/{project_id}/external-images",
-            post(register_external_image).get(list_external_images),
+            post(register_external_image).get(list_remote_external_images),
         )
         .route(
             "/projects/{project_id}/external-images/{image_id}",
-            get(get_external_image).delete(delete_external_image),
+            get(get_remote_external_image).delete(delete_external_image),
         )
         // Static bundles CRUD
         .route(

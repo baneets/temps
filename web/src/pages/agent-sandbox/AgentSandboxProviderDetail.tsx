@@ -18,6 +18,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -65,6 +66,7 @@ async function fetchCatalog(): Promise<ProviderCatalogResponse> {
 
 export function AgentSandboxProviderDetail() {
   const { id } = useParams<{ id: string }>()
+  usePageTitle(id ? `Provider · ${id}` : 'AI Provider')
   const { data, isPending, isError } = useQuery({
     queryKey: ['ai-provider-catalog'],
     queryFn: fetchCatalog,

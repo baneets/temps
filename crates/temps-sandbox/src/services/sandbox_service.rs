@@ -88,6 +88,10 @@ pub struct CreateSandboxRequest {
     /// the sandbox ID is known). The plaintext is never returned — only
     /// the last-4 hint round-trips in `SandboxSummary`.
     pub preview_password: Option<String>,
+    /// Ports the sandbox is expected to listen on. Persisted to the
+    /// `metadata` JSON column and surfaced as `routes[]` in the SDK-
+    /// shaped responses.
+    pub ports: Vec<u16>,
 }
 
 /// Output DTO — what the service returns to handlers and what handlers
@@ -106,6 +110,10 @@ pub struct SandboxSummary {
     /// last 4 chars of the plaintext — safe to display in the UI so
     /// users can tell two passwords apart.
     pub preview_password_hint: Option<String>,
+    /// Ports the sandbox advertises (read from the `metadata` JSON
+    /// column). Empty when the sandbox was created without declaring
+    /// any ports.
+    pub ports: Vec<u16>,
 }
 
 impl From<&sandboxes::Model> for SandboxSummary {
@@ -119,8 +127,26 @@ impl From<&sandboxes::Model> for SandboxSummary {
             created_at: m.created_at,
             expires_at: m.expires_at,
             preview_password_hint: m.preview_password_hint.clone(),
+            ports: ports_from_metadata(m.metadata.as_ref()),
         }
     }
+}
+
+/// Extract the `ports` array from a sandbox's `metadata` JSON blob.
+/// Tolerates missing/malformed data — a sandbox created before ports
+/// were tracked simply returns `[]`, and a value we can't parse is
+/// dropped silently rather than erroring out list reads.
+fn ports_from_metadata(metadata: Option<&serde_json::Value>) -> Vec<u16> {
+    metadata
+        .and_then(|v| v.get("ports"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.as_u64())
+                .filter_map(|p| u16::try_from(p).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Bounds on `timeout_secs` at the service layer. The upper bound
@@ -273,6 +299,11 @@ impl SandboxService {
             None => None,
         };
 
+        let metadata_value = if req.ports.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ "ports": req.ports }))
+        };
         let active = sandboxes::ActiveModel {
             public_id: Set(public_id_value.clone()),
             user_id: Set(user_id),
@@ -281,7 +312,7 @@ impl SandboxService {
             image: Set(req.image.clone()),
             work_dir: Set("/workspace".to_string()),
             timeout_secs: Set(timeout as i32),
-            metadata: Set(None),
+            metadata: Set(metadata_value),
             created_at: Set(now),
             last_activity_at: Set(now),
             expires_at: Set(expires_at),

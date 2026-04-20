@@ -383,7 +383,6 @@ const FullAppRoutes = () => {
                 <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
                 {/* Backward-compat: old /settings/<resource> links → new top-level */}
                 <Route path="/settings/domains/*" element={<Navigate to="/domains" replace />} />
-                <Route path="/settings/storage/*" element={<Navigate to="/storage" replace />} />
                 <Route path="/settings/email/*" element={<Navigate to="/email" replace />} />
                 <Route path="/settings/ai-gateway/*" element={<Navigate to="/ai-gateway" replace />} />
                 <Route path="/settings/agent-sandbox/*" element={<Navigate to="/agent-sandbox" replace />} />

@@ -13,7 +13,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
-  Box,
   Copy,
   Cpu,
   Pencil,
@@ -25,14 +24,14 @@ import {
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
-import { AgentSettingsDialog } from './AgentSettingsDialog'
+import { AgentSettingsDialog, type Agent } from './AgentSettingsDialog'
 import {
-  getAgent,
-  listRunsForAgent,
-  triggerAgent,
-  type Agent,
-  type AgentRun,
-} from './api'
+  getAgentOptions,
+  listAgentRunsOptions,
+  listAgentRunsQueryKey,
+  triggerAgentMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { AgentRunResponse as AgentRun } from '@/api/client/types.gen'
 import { AutopilotStatusBadge } from './AutopilotStatusBadge'
 
 interface AgentDetailPageProps {
@@ -344,16 +343,6 @@ function AgentProperties({ agent }: { agent: Agent }) {
           <PropertyRow label="Branch prefix">
             <code className="text-xs bg-muted px-1.5 py-0.5 rounded">{agent.branch_prefix}</code>
           </PropertyRow>
-          <PropertyRow label="Sandbox">
-            {agent.sandbox_enabled ? (
-              <span className="text-xs bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded flex items-center gap-1 w-fit">
-                <Box className="h-3 w-3" />
-                Docker sandbox
-              </span>
-            ) : (
-              <span className="text-muted-foreground">Disabled (runs on host)</span>
-            )}
-          </PropertyRow>
         </CardContent>
       </Card>
     </div>
@@ -367,13 +356,20 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
   const [dialogOpen, setDialogOpen] = useState(false)
 
   const {
-    data: agent,
+    data: agentRaw,
     isLoading: isLoadingAgent,
     error: agentError,
   } = useQuery({
-    queryKey: ['agent', project.id, agentSlug],
-    queryFn: () => getAgent(project.id, agentSlug!),
+    ...getAgentOptions({
+      path: { project_id: project.id, slug: agentSlug! },
+    }),
     enabled: !!agentSlug,
+  })
+
+  const agent = agentRaw as Agent | undefined
+
+  const runsListKey = listAgentRunsQueryKey({
+    path: { project_id: project.id, slug: agentSlug ?? '' },
   })
 
   const {
@@ -381,17 +377,18 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
     isLoading: isLoadingRuns,
     isError: isRunsError,
   } = useQuery({
-    queryKey: ['agent-runs', project.id, agentSlug],
-    queryFn: () => listRunsForAgent(project.id, agentSlug!),
+    ...listAgentRunsOptions({
+      path: { project_id: project.id, slug: agentSlug! },
+    }),
     refetchInterval: 5000,
     enabled: !!agentSlug,
   })
 
   const trigger = useMutation({
-    mutationFn: () => triggerAgent(project.id, agentSlug!),
+    ...triggerAgentMutation(),
     onSuccess: () => {
       toast.success('Workflow triggered')
-      queryClient.invalidateQueries({ queryKey: ['agent-runs', project.id, agentSlug] })
+      queryClient.invalidateQueries({ queryKey: runsListKey })
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Failed to trigger')
@@ -434,12 +431,6 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
           <span className={`text-xs px-2 py-0.5 rounded ${agent.enabled ? 'bg-green-500/10 text-green-400' : 'bg-muted text-muted-foreground'}`}>
             {agent.enabled ? 'Active' : 'Disabled'}
           </span>
-          {agent.sandbox_enabled && (
-            <span className="text-xs bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded flex items-center gap-1">
-              <Box className="h-3 w-3" />
-              Sandbox
-            </span>
-          )}
         </div>
         <div className="flex items-center gap-2">
           {agent.source !== 'yaml' && (
@@ -451,7 +442,12 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
           {agent.trigger_config?.manual && (
             <Button
               size="sm"
-              onClick={() => trigger.mutate()}
+              onClick={() =>
+                trigger.mutate({
+                  path: { project_id: project.id, slug: agentSlug! },
+                  body: {},
+                })
+              }
               disabled={trigger.isPending || !agent.enabled}
             >
               <Play className="h-3 w-3 mr-1" />
@@ -500,7 +496,6 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
                 <TableRow>
                   <TableHead>Status</TableHead>
                   <TableHead>Trigger</TableHead>
-                  <TableHead className="hidden md:table-cell">Sandbox</TableHead>
                   <TableHead className="hidden md:table-cell">PR</TableHead>
                   <TableHead className="hidden md:table-cell">Files</TableHead>
                   <TableHead className="hidden md:table-cell">Cost</TableHead>
@@ -519,16 +514,6 @@ export function AgentDetailPage({ project }: AgentDetailPageProps) {
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {run.trigger_type === 'autofixer' ? 'Autofix' : run.trigger_type}
-                    </TableCell>
-                    <TableCell className="hidden md:table-cell">
-                      {run.sandbox_enabled ? (
-                        <span className="text-xs bg-orange-500/10 text-orange-400 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                          <Box className="h-3 w-3" />
-                          Yes
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">No</span>
-                      )}
                     </TableCell>
                     <TableCell className="hidden md:table-cell text-sm">
                       {run.pr_number ? `#${run.pr_number}` : '-'}

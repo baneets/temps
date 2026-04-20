@@ -140,7 +140,7 @@ export function AddDomain() {
         </div>
 
         <Card>
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <Form {...form}>
               <form
                 onSubmit={form.handleSubmit(handleSubmit)}

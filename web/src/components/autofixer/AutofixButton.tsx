@@ -2,7 +2,10 @@ import { Button } from '@/components/ui/button'
 import { useQuery } from '@tanstack/react-query'
 import { Check, ExternalLink, Loader2, Wand2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { getLatestRunForError } from './api'
+import {
+  getRunOptions,
+  latestRunForSourceOptions,
+} from '@/api/client/@tanstack/react-query.gen'
 
 interface AutofixButtonProps {
   projectId: number
@@ -13,12 +16,27 @@ interface AutofixButtonProps {
 export function AutofixButton({ projectId, projectSlug, errorGroupId }: AutofixButtonProps) {
   const navigate = useNavigate()
 
-  const { data: latestRun } = useQuery({
-    queryKey: ['autofix-status', projectId, errorGroupId],
-    queryFn: () => getLatestRunForError(projectId, errorGroupId),
+  const { data: latestAgentRun } = useQuery({
+    ...latestRunForSourceOptions({
+      path: { project_id: projectId },
+      query: {
+        trigger_source_type: 'error_group',
+        trigger_source_id: errorGroupId,
+      },
+    }),
     refetchInterval: 10000,
   })
 
+  const runId = latestAgentRun?.id
+  const { data: runWithLogs } = useQuery({
+    ...getRunOptions({
+      path: { project_id: projectId, run_id: runId ?? 0 },
+    }),
+    enabled: runId !== undefined,
+    refetchInterval: 10000,
+  })
+
+  const latestRun = runWithLogs?.run
   const goToAutofix = () => navigate(`/projects/${projectSlug}/errors/${errorGroupId}/autofix`)
 
   const phase = latestRun?.phase || latestRun?.status

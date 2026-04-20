@@ -26,6 +26,7 @@ import { Card } from '@/components/ui/card'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { ArrowLeft, AlertCircle, Loader2, CheckCircle } from 'lucide-react'
@@ -42,6 +43,7 @@ const generateId = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz', 4)
 type Step = 'select-container' | 'configure-service'
 
 export function ImportService() {
+  usePageTitle('Import Service')
   const navigate = useNavigate()
   const { setBreadcrumbs } = useBreadcrumbs()
   const [step, setStep] = useState<Step>('select-container')
@@ -53,8 +55,8 @@ export function ImportService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/settings/storage' },
-      { label: 'Import Service', href: '/settings/storage/import' },
+      { label: 'Storage', href: '/storage' },
+      { label: 'Import Service', href: '/storage/import' },
     ])
   }, [setBreadcrumbs])
 
@@ -237,7 +239,7 @@ export function ImportService() {
     },
     onSuccess: () => {
       toast.success('Service imported successfully')
-      navigate('/settings/storage')
+      navigate('/storage')
     },
     onError: (error) => {
       toast.error(error?.message || 'Failed to import service')
@@ -276,7 +278,7 @@ export function ImportService() {
       <div className="sm:p-4 space-y-6 md:p-6 max-w-4xl mx-auto">
         {/* Header */}
         <div className="flex items-center gap-3">
-          <Link to="/settings/storage">
+          <Link to="/storage">
             <Button variant="ghost" size="icon">
               <ArrowLeft className="h-4 w-4" />
             </Button>

@@ -83,7 +83,7 @@ export function ErrorEventDetail({ project }: { project: ProjectResponse }) {
 
   if (isLoading) {
     return (
-      <div className="space-y-6 p-6">
+      <div className="space-y-6 p-4 sm:p-6">
         <Skeleton className="h-8 w-64" />
         <Card>
           <CardHeader>
@@ -114,7 +114,7 @@ export function ErrorEventDetail({ project }: { project: ProjectResponse }) {
   }
 
   return (
-    <div className="p-6">
+    <div className="p-4 sm:p-6">
       {/* Event Title with Back Button */}
       <div className="mb-6">
         <div className="flex items-start gap-3 mb-2">

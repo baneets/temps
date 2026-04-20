@@ -777,6 +777,19 @@ impl AgentConfigService {
         project_id: i32,
         yaml_agents: Vec<AgentYamlConfig>,
     ) -> Result<SyncResult, AgentError> {
+        // Sandbox is mandatory. Reject any YAML that tries to opt out so the
+        // author gets a clear error instead of a silently-ignored toggle.
+        for a in &yaml_agents {
+            if a.sandbox == Some(false) {
+                return Err(AgentError::Validation {
+                    message: format!(
+                        "Agent '{}' sets `sandbox: false`. Sandbox execution is mandatory — remove the field or set `sandbox: true`.",
+                        a.slug()
+                    ),
+                });
+            }
+        }
+
         // 1. Load ALL existing agents for this project (not just yaml-sourced)
         let existing = project_agents::Entity::find()
             .filter(project_agents::Column::ProjectId.eq(project_id))

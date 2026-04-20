@@ -354,7 +354,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-async fn list_agents(
+pub async fn list_agents(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
@@ -391,7 +391,7 @@ async fn list_agents(
     ),
     security(("bearer_auth" = []))
 )]
-async fn create_agent(
+pub async fn create_agent(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -444,7 +444,7 @@ async fn create_agent(
     ),
     security(("bearer_auth" = []))
 )]
-async fn get_agent(
+pub async fn get_agent(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -485,7 +485,7 @@ async fn get_agent(
     ),
     security(("bearer_auth" = []))
 )]
-async fn update_agent(
+pub async fn update_agent(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -539,7 +539,7 @@ async fn update_agent(
     ),
     security(("bearer_auth" = []))
 )]
-async fn delete_agent(
+pub async fn delete_agent(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,

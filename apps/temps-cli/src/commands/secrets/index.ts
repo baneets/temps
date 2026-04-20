@@ -162,7 +162,7 @@ async function listAction(options: ListOptions): Promise<void> {
       '  env:  temps secrets create -n my_api_key -v "sk-..."',
     )
     info(
-      '  file: temps secrets create -n gsc_creds -t file -m /workspace/.mcp/gsc.json -v @./gsc.json',
+      '  file: temps secrets create -n gsc_creds -t file -m gsc.json -v @./gsc.json',
     )
     newline()
     return

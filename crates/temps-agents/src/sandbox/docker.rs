@@ -50,7 +50,7 @@ const CONTAINER_WORK_DIR: &str = "/workspace";
 /// because it installs to `$HOME/.local/bin`. We `su - temps` after creating
 /// the user (see the trailing block) instead of running as root.
 pub fn dockerfile_for_runtime(runtime: &str) -> String {
-    // `jq` is required by the workspace memory script (/workspace/.temps/bin/memory)
+    // `jq` is required by the workspace memory script (/home/temps/.temps/bin/memory)
     // — it's used to build/parse JSON for the API calls. Always installed.
     //
     // `extra_run` is reserved for runtime-specific extras the base image

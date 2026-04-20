@@ -2,9 +2,7 @@
 
 import {
   deleteDomainMutation,
-  provisionDomainMutation,
   renewDomainMutation,
-  finalizeOrderMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { DomainResponse } from '@/api/client/types.gen'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -20,35 +18,29 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card } from '@/components/ui/card'
-import { KbdBadge } from '@/components/ui/kbd-badge'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { EmptyState } from '@/components/ui/empty-state'
 import { useMutation } from '@tanstack/react-query'
 import { Input } from '@/components/ui/input'
 import {
-  Calendar,
-  CheckCircle,
+  AlertTriangle,
   ChevronLeft,
   ChevronRight,
-  Clock,
-  CopyIcon,
+  EllipsisVertical,
   Globe,
-  Loader2,
-  MoreHorizontal,
+  Info,
   Plus,
   RefreshCw,
   Search,
   Trash2,
-  AlertTriangle,
-  Info,
 } from 'lucide-react'
-import { Spinner } from '@/components/ui/spinner'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { formatUTCDate } from '@/lib/date'
@@ -97,12 +89,10 @@ export function DomainsManagement({
   )
   const navigate = useNavigate()
 
-  // Get platform capabilities
   const {
     canManageCertificates,
     canCreateDomains,
     isUsingCloudflare,
-    getAccessModeWarning: _getAccessModeWarning,
   } = usePlatformCapabilities()
 
   const deleteDomain = useMutation({
@@ -116,52 +106,12 @@ export function DomainsManagement({
     },
   })
 
-  const provisionDomain = useMutation({
-    ...provisionDomainMutation(),
-    meta: {
-      errorTitle: 'Failed to provision domain',
-    },
-    onSuccess: () => {
-      toast.success('Domain provisioning started')
-      reloadDomains()
-    },
-  })
-
   const renewDomain = useMutation({
     ...renewDomainMutation(),
     meta: {
       errorTitle: 'Failed to renew domain certificate',
     },
   })
-
-  const finalizeOrder = useMutation({
-    ...finalizeOrderMutation(),
-    meta: {
-      errorTitle: 'Failed to finalize DNS challenge',
-    },
-    onSuccess: () => {
-      toast.success(
-        'DNS challenge verified! SSL certificate provisioning in progress.'
-      )
-      reloadDomains()
-    },
-  })
-
-  const handleCompleteDns = (domainId: number) => {
-    finalizeOrder.mutate({
-      path: {
-        domain_id: domainId,
-      },
-    })
-  }
-
-  // Helper to check if a specific domain is being finalized
-  const isDomainBeingFinalized = (domainId: number) => {
-    return (
-      finalizeOrder.isPending &&
-      finalizeOrder.variables?.path?.domain_id === domainId
-    )
-  }
 
   const handleDeleteDomain = async (domain: string) => {
     try {
@@ -173,23 +123,6 @@ export function DomainsManagement({
     } finally {
       setDomainToDelete(null)
     }
-  }
-
-  const handleProvisionDomain = async (domainName: string) => {
-    toast.promise(
-      provisionDomain.mutateAsync({
-        path: {
-          domain: domainName,
-        },
-      }),
-      {
-        loading: `Provisioning SSL certificate for ${domainName}...`,
-        success: () => {
-          return `SSL certificate provisioning started for ${domainName}`
-        },
-        error: `Failed to provision SSL certificate for ${domainName}`,
-      }
-    )
   }
 
   const handleRenewDomain = async (domainName: string) => {
@@ -210,7 +143,6 @@ export function DomainsManagement({
     )
   }
 
-  // Helper function to generate pagination button numbers
   const getPaginationPages = (currentPage: number, total: number) => {
     const pageNumbers = []
     const maxButtons = 5
@@ -228,7 +160,6 @@ export function DomainsManagement({
     return pageNumbers
   }
 
-  // Count pending provisioning domains
   const pendingProvisioningCount =
     domains?.filter(
       (domain) =>
@@ -239,10 +170,8 @@ export function DomainsManagement({
 
   return (
     <div className="space-y-4">
-      {/* DNS Configuration Helper - shows IP and instructions based on platform mode */}
       <DNSConfigurationHelper />
 
-      {/* Cloudflare mode information */}
       {isUsingCloudflare() && (
         <Alert className="border-purple-200 bg-purple-50/50 dark:bg-purple-950/10">
           <Info className="h-4 w-4 text-purple-600" />
@@ -254,18 +183,17 @@ export function DomainsManagement({
         </Alert>
       )}
 
-      {/* SSL Provisioning Alert */}
       {pendingProvisioningCount > 0 && (
         <Alert className="border-yellow-200 bg-yellow-50/50 dark:bg-yellow-950/10">
           <AlertTriangle className="h-4 w-4 text-yellow-600" />
           <AlertTitle className="flex items-center gap-2">
-            <span>SSL Certificates Pending</span>
+            <span>TLS Certificates Pending</span>
             <Badge variant="secondary">{pendingProvisioningCount}</Badge>
           </AlertTitle>
           <AlertDescription>
             {pendingProvisioningCount} domain
             {pendingProvisioningCount > 1 ? 's' : ''} require
-            {pendingProvisioningCount === 1 ? 's' : ''} SSL certificate
+            {pendingProvisioningCount === 1 ? 's' : ''} TLS certificate
             provisioning or DNS verification.
           </AlertDescription>
         </Alert>
@@ -275,20 +203,23 @@ export function DomainsManagement({
         <div>
           <h2 className="text-lg font-semibold">Domains</h2>
           <p className="text-sm text-muted-foreground">
-            Manage your custom domains and SSL certificates
+            Manage your custom domains and TLS certificates
           </p>
         </div>
-        <Button
-          disabled={!canCreateDomains}
-          onClick={() => navigate('/settings/domains/add')}
-        >
-          <Globe className="mr-2 h-4 w-4" />
-          {canCreateDomains ? 'Add Domain' : 'Managed by Cloudflare'}
-          {canCreateDomains && <KbdBadge keys="N" className="ml-2" />}
-        </Button>
+        {canCreateDomains ? (
+          <CreateActionButton
+            to="/domains/add"
+            label="Add Domain"
+            icon={<Globe className="h-4 w-4" />}
+          />
+        ) : (
+          <Button disabled>
+            <Globe className="mr-2 h-4 w-4" />
+            Managed by Cloudflare
+          </Button>
+        )}
       </div>
 
-      {/* Search */}
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
@@ -313,7 +244,7 @@ export function DomainsManagement({
             <AlertDialogTitle>Are you sure?</AlertDialogTitle>
             <AlertDialogDescription>
               This action cannot be undone. This will permanently delete the
-              domain and remove all associated SSL certificates.
+              domain and remove all associated TLS certificates.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -331,395 +262,105 @@ export function DomainsManagement({
         </AlertDialogContent>
       </AlertDialog>
 
-      <Card>
-        <div className="p-6">
-          {isLoading ? (
-            <div className="grid gap-4">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="p-4 border rounded-lg space-y-3 animate-pulse"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="h-5 w-48 bg-muted rounded" />
-                    <div className="h-6 w-20 bg-muted rounded" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <div className="h-4 w-24 bg-muted rounded" />
-                      <div className="h-4 w-32 bg-muted rounded" />
-                    </div>
-                    <div className="space-y-2">
-                      <div className="h-4 w-24 bg-muted rounded" />
-                      <div className="h-4 w-32 bg-muted rounded" />
-                    </div>
-                  </div>
-                </div>
-              ))}
+      {isLoading ? (
+        <div className="divide-y rounded-lg border">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-4 px-4 py-3 animate-pulse">
+              <div className="size-9 shrink-0 rounded-md bg-muted" />
+              <div className="flex-1 min-w-0 space-y-1.5">
+                <div className="h-4 w-48 bg-muted rounded" />
+                <div className="h-3 w-64 bg-muted rounded" />
+              </div>
+              <div className="h-6 w-20 bg-muted rounded" />
             </div>
-          ) : !domains?.length ? (
-            searchQuery ? (
-              <EmptyState
-                icon={Search}
-                title="No domains match your search"
-                description={`No domains found matching "${searchQuery}"`}
-                action={
-                  <Button variant="outline" onClick={() => onSearchChange('')}>
-                    Clear search
-                  </Button>
-                }
-              />
-            ) : (
-              <EmptyState
-                icon={Globe}
-                title="No domains found"
-                description="Get started by adding a custom domain"
-                action={
-                  <Button onClick={() => navigate('/settings/domains/add')}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add Domain
-                  </Button>
-                }
-              />
-            )
-          ) : (
-            <div data-uidotsh-pick="Domains layout" className="contents">
-              <div data-uidotsh-option="Card grid (current)" className="contents" hidden>
-            <div className="grid gap-4">
-              {domains.map((domain) => (
-                <div
-                  key={domain.id}
-                  className="group relative p-4 border rounded-lg hover:bg-muted/50 transition-colors"
-                >
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <div className="flex items-center gap-3">
-                        <button
-                          onClick={() => navigate(`/settings/domains/${domain.id}`)}
-                          className="font-medium truncate hover:underline text-left"
-                        >
-                          {domain.domain}
-                        </button>
-                        <Badge
-                          variant={
-                            domain.status === 'active' ? 'default' : 'secondary'
-                          }
-                        >
-                          {domain.status}
-                        </Badge>
-                        {domain.is_wildcard && (
-                          <Badge variant="outline">Wildcard</Badge>
-                        )}
-                        {domain.status === 'pending_dns' && (
-                          <Badge variant="secondary" className="text-xs">
-                            DNS Pending
-                          </Badge>
-                        )}
-                      </div>
-
-                      {domain.status === 'pending_dns' &&
-                        domain.dns_challenge_token &&
-                        domain.dns_challenge_value && (
-                          <Alert className="mt-4">
-                            <AlertTitle className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                DNS Verification Required
-                              </div>
-                              <Button
-                                size="sm"
-                                onClick={() =>
-                                  handleProvisionDomain(domain.domain)
-                                }
-                                disabled={
-                                  provisionDomain.isPending ||
-                                  !canManageCertificates
-                                }
-                              >
-                                {provisionDomain.isPending ? (
-                                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                ) : (
-                                  <CheckCircle className="h-4 w-4 mr-2" />
-                                )}
-                                {canManageCertificates
-                                  ? 'Check DNS'
-                                  : 'Managed by Cloudflare'}
-                              </Button>
-                            </AlertTitle>
-                            <AlertDescription>
-                              <div className="mt-2 space-y-4">
-                                <p className="text-sm text-muted-foreground">
-                                  Add the following DNS record to verify domain
-                                  ownership:
-                                </p>
-                                <div className="space-y-3">
-                                  <div className="space-y-2">
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-sm font-medium">
-                                        Record Name
-                                      </span>
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-8"
-                                        onClick={() => {
-                                          navigator.clipboard.writeText(
-                                            domain.dns_challenge_token || ''
-                                          )
-                                          toast.success('Copied to clipboard')
-                                        }}
-                                      >
-                                        <CopyIcon className="h-3 w-3 mr-2" />
-                                        Copy
-                                      </Button>
-                                    </div>
-                                    <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
-                                      {domain.dns_challenge_token}
-                                    </code>
-                                  </div>
-                                  <div className="space-y-2">
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-sm font-medium">
-                                        Record Value
-                                      </span>
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-8"
-                                        onClick={() => {
-                                          navigator.clipboard.writeText(
-                                            domain.dns_challenge_value || ''
-                                          )
-                                          toast.success('Copied to clipboard')
-                                        }}
-                                      >
-                                        <CopyIcon className="h-3 w-3 mr-2" />
-                                        Copy
-                                      </Button>
-                                    </div>
-                                    <code className="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm">
-                                      {domain.dns_challenge_value}
-                                    </code>
-                                  </div>
-                                </div>
-                                <p className="text-sm text-muted-foreground">
-                                  DNS changes can take up to 24 hours to
-                                  propagate. Once you&apos;ve added the DNS
-                                  records, click &quot;Complete DNS
-                                  Challenge&quot; to verify and provision the
-                                  SSL certificate.
-                                </p>
-                                <div className="mt-4">
-                                  <Button
-                                    onClick={() => handleCompleteDns(domain.id)}
-                                    disabled={
-                                      isDomainBeingFinalized(domain.id) ||
-                                      !canManageCertificates
-                                    }
-                                    className="w-full sm:w-auto"
-                                  >
-                                    {isDomainBeingFinalized(domain.id) ? (
-                                      <>
-                                        <Spinner className="mr-2 h-4 w-4" />
-                                        Completing DNS Challenge...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <CheckCircle className="mr-2 h-4 w-4" />
-                                        {canManageCertificates
-                                          ? 'Complete DNS Challenge'
-                                          : 'Managed by Cloudflare'}
-                                      </>
-                                    )}
-                                  </Button>
-                                </div>
-                              </div>
-                            </AlertDescription>
-                          </Alert>
-                        )}
-
-                      {domain.status === 'active' &&
-                        isExpiringSoon(domain.expiration_time || 0) && (
-                          <Alert variant="warning" className="mt-4">
-                            <AlertTriangle className="h-4 w-4" />
-                            <AlertTitle>Certificate Expiring Soon</AlertTitle>
-                            <AlertDescription>
-                              The SSL certificate for this domain will expire on{' '}
-                              {formatUTCDate(domain.expiration_time || 0)}.
-                              Please renew it before expiration to avoid service
-                              interruption.
-                            </AlertDescription>
-                          </Alert>
-                        )}
-
-                      {domain.last_error && (
-                        <Alert variant="warning" className="mt-4">
-                          <AlertTriangle className="h-4 w-4" />
-                          <AlertDescription className="flex items-center gap-2">
-                            <span className="font-medium">
-                              {domain.last_error_type}
-                            </span>
-                            <span className="text-muted-foreground">
-                              {domain.last_error}
-                            </span>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      <div className="grid grid-cols-2 sm:flex sm:items-center gap-x-6 gap-y-1 text-sm text-muted-foreground">
-                        {domain.status === 'active' && (
-                          <>
-                            <div className="flex items-center gap-2">
-                              <Clock className="h-4 w-4" />
-                              <span>
-                                Renewed{' '}
-                                {formatUTCDate(domain.last_renewed || 0)}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <Calendar className="h-4 w-4" />
-                              <span>
-                                Expires{' '}
-                                {formatUTCDate(domain.expiration_time || 0)}
-                              </span>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-end sm:justify-start gap-2">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon">
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          {domain.status === 'active' &&
-                            canManageCertificates && (
-                              <DropdownMenuItem
-                                onClick={() => handleRenewDomain(domain.domain)}
-                                disabled={
-                                  renewDomain.isPending ||
-                                  !canManageCertificates
-                                }
-                              >
-                                <RefreshCw className="mr-2 h-4 w-4" />
-                                {canManageCertificates
-                                  ? 'Renew Certificate'
-                                  : 'Managed by Cloudflare'}
-                              </DropdownMenuItem>
-                            )}
-                          <DropdownMenuItem
-                            onClick={() => setDomainToDelete(domain)}
-                            disabled={deleteDomain.isPending}
-                            className="text-destructive"
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-              </div>
-
-              <div data-uidotsh-option="Data table" className="contents">
-                <DomainsTableVariant
-                  domains={domains}
-                  onOpen={(id) => navigate(`/settings/domains/${id}`)}
-                  onRenew={handleRenewDomain}
-                  onDelete={setDomainToDelete}
-                  canManageCertificates={canManageCertificates}
-                />
-              </div>
-
-              <div data-uidotsh-option="Tile grid" className="contents" hidden>
-                <DomainsTileGridVariant
-                  domains={domains}
-                  onOpen={(id) => navigate(`/settings/domains/${id}`)}
-                  onRenew={handleRenewDomain}
-                  onDelete={setDomainToDelete}
-                  canManageCertificates={canManageCertificates}
-                />
-              </div>
-
-              <div
-                data-uidotsh-option="Status-grouped"
-                className="contents"
-                hidden
-              >
-                <DomainsGroupedVariant
-                  domains={domains}
-                  onOpen={(id) => navigate(`/settings/domains/${id}`)}
-                  onRenew={handleRenewDomain}
-                  onDelete={setDomainToDelete}
-                  canManageCertificates={canManageCertificates}
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6">
-              <div className="text-xs sm:text-sm text-muted-foreground text-center sm:text-left">
-                Showing {(page - 1) * pageSize + 1} to{' '}
-                {Math.min(page * pageSize, total)} of {total} domains
-              </div>
-              <div className="flex items-center gap-1 sm:gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onPageChange(Math.max(1, page - 1))}
-                  disabled={page === 1}
-                  className="h-8 px-2 sm:h-9 sm:px-3"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                  <span className="hidden sm:inline ml-1">Previous</span>
-                </Button>
-                <div className="hidden sm:flex items-center gap-1">
-                  {getPaginationPages(page, totalPages).map((pageNum) => (
-                    <Button
-                      key={pageNum}
-                      variant={pageNum === page ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => onPageChange(pageNum)}
-                      className="w-10"
-                    >
-                      {pageNum}
-                    </Button>
-                  ))}
-                </div>
-                <span className="sm:hidden text-xs text-muted-foreground px-2">
-                  {page} / {totalPages}
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    onPageChange(Math.min(totalPages, page + 1))
-                  }
-                  disabled={page === totalPages}
-                  className="h-8 px-2 sm:h-9 sm:px-3"
-                >
-                  <span className="hidden sm:inline mr-1">Next</span>
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          )}
+          ))}
         </div>
-      </Card>
+      ) : !domains?.length ? (
+        searchQuery ? (
+          <EmptyState
+            icon={Search}
+            title="No domains match your search"
+            description={`No domains found matching "${searchQuery}"`}
+            action={
+              <Button variant="outline" onClick={() => onSearchChange('')}>
+                Clear search
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState
+            icon={Globe}
+            title="No domains found"
+            description="Get started by adding a custom domain"
+            action={
+              <Button onClick={() => navigate('/domains/add')}>
+                <Plus className="mr-2 h-4 w-4" />
+                Add Domain
+              </Button>
+            }
+          />
+        )
+      ) : (
+        <DomainsCompactRows
+          domains={domains}
+          onOpen={(id) => navigate(`/domains/${id}`)}
+          onRenew={handleRenewDomain}
+          onDelete={setDomainToDelete}
+          canManageCertificates={canManageCertificates}
+        />
+      )}
+
+      {totalPages > 1 && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="text-xs sm:text-sm text-muted-foreground text-center sm:text-left">
+            Showing {(page - 1) * pageSize + 1} to{' '}
+            {Math.min(page * pageSize, total)} of {total} domains
+          </div>
+          <div className="flex items-center gap-1 sm:gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onPageChange(Math.max(1, page - 1))}
+              disabled={page === 1}
+              className="h-8 px-2 sm:h-9 sm:px-3"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              <span className="hidden sm:inline ml-1">Previous</span>
+            </Button>
+            <div className="hidden sm:flex items-center gap-1">
+              {getPaginationPages(page, totalPages).map((pageNum) => (
+                <Button
+                  key={pageNum}
+                  variant={pageNum === page ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => onPageChange(pageNum)}
+                  className="w-10"
+                >
+                  {pageNum}
+                </Button>
+              ))}
+            </div>
+            <span className="sm:hidden text-xs text-muted-foreground px-2">
+              {page} / {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+              disabled={page === totalPages}
+              className="h-8 px-2 sm:h-9 sm:px-3"
+            >
+              <span className="hidden sm:inline mr-1">Next</span>
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-// ── Shared variant helpers ──
-
-interface DomainsVariantProps {
+interface DomainsCompactRowsProps {
   domains: DomainResponse[]
   onOpen: (id: number) => void
   onRenew: (domain: string) => void
@@ -736,10 +377,14 @@ function DomainStatusBadge({ status }: { status: string }) {
         : status === 'pending_dns'
           ? 'warning'
           : 'secondary'
-  return <Badge variant={variant}>{status.replace('_', ' ')}</Badge>
+  return (
+    <Badge variant={variant} className="text-xs">
+      {status.replace('_', ' ')}
+    </Badge>
+  )
 }
 
-function DomainRowActions({
+function DomainRowMenu({
   domain,
   onOpen,
   onRenew,
@@ -753,284 +398,125 @@ function DomainRowActions({
   canManageCertificates: boolean
 }) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-        <Button variant="ghost" size="icon" className="h-8 w-8">
-          <MoreHorizontal className="h-4 w-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
-        <DropdownMenuItem onClick={() => onOpen(domain.id)}>
-          <Globe className="mr-2 h-4 w-4" />
-          View details
-        </DropdownMenuItem>
-        {domain.status === 'active' && canManageCertificates && (
-          <DropdownMenuItem onClick={() => onRenew(domain.domain)}>
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Renew certificate
+    <div
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-8 w-8">
+            <EllipsisVertical className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault()
+              onOpen(domain.id)
+            }}
+          >
+            <Globe className="mr-2 h-4 w-4" />
+            View details
           </DropdownMenuItem>
-        )}
-        <DropdownMenuItem
-          className="text-destructive"
-          onClick={() => onDelete(domain)}
-        >
-          <Trash2 className="mr-2 h-4 w-4" />
-          Delete
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
-
-// ── Variant: Data table ──
-
-function DomainsTableVariant({
-  domains,
-  onOpen,
-  onRenew,
-  onDelete,
-  canManageCertificates,
-}: DomainsVariantProps) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead className="border-b bg-muted/50">
-          <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
-            <th className="px-4 py-3 font-medium">Domain</th>
-            <th className="px-4 py-3 font-medium">Status</th>
-            <th className="hidden px-4 py-3 font-medium md:table-cell">Type</th>
-            <th className="hidden px-4 py-3 font-medium md:table-cell">
-              Renewed
-            </th>
-            <th className="hidden px-4 py-3 font-medium lg:table-cell">
-              Expires
-            </th>
-            <th className="px-4 py-3" />
-          </tr>
-        </thead>
-        <tbody className="divide-y">
-          {domains.map((domain) => (
-            <tr
-              key={domain.id}
-              onClick={() => onOpen(domain.id)}
-              className="cursor-pointer transition-colors hover:bg-muted/40"
+          {domain.status === 'active' && canManageCertificates && (
+            <DropdownMenuItem
+              onSelect={(e) => {
+                e.preventDefault()
+                onRenew(domain.domain)
+              }}
             >
-              <td className="px-4 py-3">
-                <div className="flex items-center gap-2">
-                  <Globe className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate font-medium">{domain.domain}</span>
-                </div>
-              </td>
-              <td className="px-4 py-3">
-                <DomainStatusBadge status={domain.status} />
-              </td>
-              <td className="hidden px-4 py-3 md:table-cell">
-                {domain.is_wildcard ? (
-                  <Badge variant="outline">Wildcard</Badge>
-                ) : (
-                  <span className="text-xs text-muted-foreground">Apex</span>
-                )}
-              </td>
-              <td className="hidden px-4 py-3 text-xs text-muted-foreground md:table-cell">
-                {domain.last_renewed
-                  ? formatUTCDate(domain.last_renewed)
-                  : '—'}
-              </td>
-              <td className="hidden px-4 py-3 text-xs text-muted-foreground lg:table-cell">
-                {domain.expiration_time ? (
-                  <span
-                    className={
-                      isExpiringSoon(domain.expiration_time)
-                        ? 'text-warning-foreground'
-                        : ''
-                    }
-                  >
-                    {formatUTCDate(domain.expiration_time)}
-                  </span>
-                ) : (
-                  '—'
-                )}
-              </td>
-              <td className="px-4 py-3 text-right">
-                <DomainRowActions
-                  domain={domain}
-                  onOpen={onOpen}
-                  onRenew={onRenew}
-                  onDelete={onDelete}
-                  canManageCertificates={canManageCertificates}
-                />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Renew certificate
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive"
+            onSelect={(e) => {
+              e.preventDefault()
+              onDelete(domain)
+            }}
+          >
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   )
 }
 
-// ── Variant: Tile grid ──
-
-function DomainsTileGridVariant({
+function DomainsCompactRows({
   domains,
   onOpen,
   onRenew,
   onDelete,
   canManageCertificates,
-}: DomainsVariantProps) {
+}: DomainsCompactRowsProps) {
   return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-      {domains.map((domain) => {
-        const expiringSoon =
-          domain.status === 'active' &&
-          isExpiringSoon(domain.expiration_time || 0)
-        return (
-          <div
-            key={domain.id}
-            onClick={() => onOpen(domain.id)}
-            className="group cursor-pointer rounded-lg border p-4 transition-colors hover:bg-muted/40"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex size-9 items-center justify-center rounded-md bg-muted">
+    <div className="overflow-hidden rounded-lg border">
+      <ul role="list" className="divide-y">
+        {domains.map((domain) => {
+          const expiringSoon =
+            domain.status === 'active' &&
+            isExpiringSoon(domain.expiration_time || 0)
+          const expires = domain.expiration_time
+            ? formatUTCDate(domain.expiration_time)
+            : null
+          return (
+            <li
+              key={domain.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => onOpen(domain.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  onOpen(domain.id)
+                }
+              }}
+              className="flex cursor-pointer items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors focus:outline-none focus:bg-muted/40"
+            >
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
                 <Globe className="size-4 text-muted-foreground" />
               </div>
-              <DomainRowActions
+              <div className="flex min-w-0 flex-1 items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="truncate text-sm font-medium">
+                      {domain.domain}
+                    </p>
+                    <DomainStatusBadge status={domain.status} />
+                    {domain.is_wildcard && (
+                      <Badge variant="outline" className="text-xs">
+                        Wildcard
+                      </Badge>
+                    )}
+                    {expiringSoon && (
+                      <Badge variant="warning" className="text-xs">
+                        Expires soon
+                      </Badge>
+                    )}
+                  </div>
+                  {expires && (
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                      Expires {expires}
+                    </p>
+                  )}
+                </div>
+              </div>
+              <DomainRowMenu
                 domain={domain}
                 onOpen={onOpen}
                 onRenew={onRenew}
                 onDelete={onDelete}
                 canManageCertificates={canManageCertificates}
               />
-            </div>
-            <p className="mt-3 truncate text-sm font-medium">{domain.domain}</p>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <DomainStatusBadge status={domain.status} />
-              {domain.is_wildcard && (
-                <Badge variant="outline" className="text-xs">
-                  Wildcard
-                </Badge>
-              )}
-              {expiringSoon && (
-                <Badge variant="warning" className="text-xs">
-                  Expires soon
-                </Badge>
-              )}
-            </div>
-            {domain.status === 'active' && (
-              <dl className="mt-4 grid grid-cols-2 gap-2 border-t pt-3 text-xs text-muted-foreground tabular-nums">
-                <div>
-                  <dt className="text-[10px] uppercase tracking-wide">
-                    Renewed
-                  </dt>
-                  <dd className="mt-0.5 truncate text-foreground">
-                    {domain.last_renewed
-                      ? formatUTCDate(domain.last_renewed)
-                      : '—'}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-[10px] uppercase tracking-wide">
-                    Expires
-                  </dt>
-                  <dd className="mt-0.5 truncate text-foreground">
-                    {domain.expiration_time
-                      ? formatUTCDate(domain.expiration_time)
-                      : '—'}
-                  </dd>
-                </div>
-              </dl>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-// ── Variant: Status grouped ──
-
-function DomainsGroupedVariant({
-  domains,
-  onOpen,
-  onRenew,
-  onDelete,
-  canManageCertificates,
-}: DomainsVariantProps) {
-  const groups = [
-    {
-      key: 'active',
-      label: 'Active',
-      match: (d: DomainResponse) => d.status === 'active',
-    },
-    {
-      key: 'pending',
-      label: 'Pending verification',
-      match: (d: DomainResponse) =>
-        d.status === 'pending_dns' || d.status === 'pending',
-    },
-    {
-      key: 'failed',
-      label: 'Needs attention',
-      match: (d: DomainResponse) => d.status === 'failed',
-    },
-  ]
-    .map((g) => ({ ...g, items: domains.filter(g.match) }))
-    .filter((g) => g.items.length > 0)
-
-  return (
-    <div className="space-y-6">
-      {groups.map((group) => (
-        <section key={group.key}>
-          <div className="mb-2 flex items-baseline gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              {group.label}
-            </h3>
-            <span className="text-xs tabular-nums text-muted-foreground/70">
-              {group.items.length}
-            </span>
-          </div>
-          <div className="overflow-hidden rounded-lg border">
-            <ul role="list" className="divide-y">
-              {group.items.map((domain) => (
-                <li
-                  key={domain.id}
-                  onClick={() => onOpen(domain.id)}
-                  className="flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors hover:bg-muted/40"
-                >
-                  <Globe className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium">
-                        {domain.domain}
-                      </span>
-                      {domain.is_wildcard && (
-                        <Badge variant="outline" className="text-xs">
-                          Wildcard
-                        </Badge>
-                      )}
-                    </div>
-                    {domain.status === 'active' && domain.expiration_time ? (
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
-                        Expires {formatUTCDate(domain.expiration_time)}
-                      </p>
-                    ) : domain.last_error ? (
-                      <p className="mt-0.5 truncate text-xs text-destructive">
-                        {domain.last_error}
-                      </p>
-                    ) : null}
-                  </div>
-                  <DomainRowActions
-                    domain={domain}
-                    onOpen={onOpen}
-                    onRenew={onRenew}
-                    onDelete={onDelete}
-                    canManageCertificates={canManageCertificates}
-                  />
-                </li>
-              ))}
-            </ul>
-          </div>
-        </section>
-      ))}
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground/50" />
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }

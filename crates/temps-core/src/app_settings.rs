@@ -140,8 +140,10 @@ pub struct AgentSandboxSettings {
     #[serde(default)]
     pub api_key_encrypted: Option<String>,
 
-    /// Whether sandbox is enabled globally for all agents by default.
-    /// Individual agents can override this with their `sandbox_enabled` field.
+    /// Sandbox is always enabled — the executor refuses to run any agent
+    /// outside a sandboxed container. Field is retained so existing settings
+    /// rows still deserialize, but it is ignored at runtime.
+    #[serde(default = "default_sandbox_enabled")]
     pub enabled: bool,
     /// Runtime preset: "node", "bun", "python", "rust", "go", "full", or "custom"
     #[schema(example = "node")]
@@ -189,6 +191,10 @@ fn default_auth_type() -> String {
     "subscription".to_string()
 }
 
+fn default_sandbox_enabled() -> bool {
+    true
+}
+
 impl Default for AgentSandboxSettings {
     fn default() -> Self {
         Self {
@@ -196,7 +202,7 @@ impl Default for AgentSandboxSettings {
             providers: HashMap::new(),
             auth_type: "subscription".to_string(),
             api_key_encrypted: None,
-            enabled: false,
+            enabled: true,
             runtime: "node".to_string(),
             custom_image: String::new(),
             cpu_limit: 4.0,

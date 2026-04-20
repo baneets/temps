@@ -12,20 +12,19 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import {
   ArrowUpRight,
+  CheckCircle2,
   GitBranch,
   GitCommit,
   MoreHorizontal,
-  X,
-  RotateCcw,
   RefreshCw,
-  CheckCircle2,
+  RotateCcw,
+  X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo } from 'react'
-import { Link } from 'react-router-dom'
 import { TimeAgo } from '../utils/TimeAgo'
 import { DeploymentStatusBadge } from './DeploymentStatusBadge'
 
-interface DeploymentListItemProps {
+interface DeploymentCompactRowProps {
   deployment: DeploymentResponse
   onRedeploy?: () => void
   onCancel?: () => void
@@ -34,14 +33,14 @@ interface DeploymentListItemProps {
   onDeploymentUpdate?: (updatedDeployment: DeploymentResponse) => void
 }
 
-export default function DeploymentListItem({
+export default function DeploymentCompactRow({
   deployment: initialDeployment,
   onRedeploy,
   onCancel,
   onRollback,
   onPromote,
   onDeploymentUpdate,
-}: DeploymentListItemProps) {
+}: DeploymentCompactRowProps) {
   const { refetch, data: refreshedDeployment } = useQuery({
     ...getDeploymentOptions({
       path: {
@@ -55,23 +54,19 @@ export default function DeploymentListItem({
       initialDeployment.status !== 'stopped' &&
       initialDeployment.status !== 'cancelled',
   })
-  const deployment = useMemo(() => {
-    if (refreshedDeployment) {
-      return refreshedDeployment
-    }
-    return initialDeployment
-  }, [refreshedDeployment, initialDeployment])
+
+  const deployment = useMemo(
+    () => refreshedDeployment ?? initialDeployment,
+    [refreshedDeployment, initialDeployment],
+  )
 
   const pollDeployment = useCallback(async () => {
     const { data } = await refetch()
-    if (data && onDeploymentUpdate) {
-      onDeploymentUpdate(data)
-    }
+    if (data && onDeploymentUpdate) onDeploymentUpdate(data)
   }, [refetch, onDeploymentUpdate])
 
   useEffect(() => {
     let intervalId: ReturnType<typeof setInterval> | undefined
-
     if (
       deployment.status !== 'completed' &&
       deployment.status !== 'failed' &&
@@ -80,77 +75,73 @@ export default function DeploymentListItem({
     ) {
       intervalId = setInterval(pollDeployment, 2000)
     }
-
     return () => {
-      if (intervalId) {
-        clearInterval(intervalId)
-      }
+      if (intervalId) clearInterval(intervalId)
     }
   }, [deployment.status, pollDeployment])
 
   return (
-    <li className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 gap-4 sm:gap-2">
-      <div className="grid gap-1 w-full sm:w-auto">
-        <div className="flex flex-wrap items-center gap-2">
-          <Link to={`${deployment.id}`} className="font-medium hover:underline">
-            #{deployment.id}
-          </Link>
-          <Badge variant="secondary">{deployment.environment.name}</Badge>
-          <DeploymentStatusBadge deployment={deployment} />
-          {deployment.is_current && (
-            <Badge
-              variant="default"
-              className="bg-green-600 hover:bg-green-700 flex items-center gap-1"
-            >
-              <CheckCircle2 className="h-3 w-3" />
-              Current
-            </Badge>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-          <div className="flex items-center gap-2">
-            <GitBranch className="h-4 w-4" />
-            <span>{deployment.branch}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <GitCommit className="h-4 w-4" />
-            <span className="font-mono">
-              {deployment.commit_hash?.slice(0, 8)}
-            </span>
-          </div>
-          <span className="text-muted-foreground break-all">
-            {deployment.commit_message}
-          </span>
-        </div>
+    <li className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3">
+      {/* Primary line: id + status + env + current */}
+      <div className="flex min-w-0 items-center gap-2 sm:shrink-0">
+        <span className="font-medium text-sm">#{deployment.id}</span>
+        <DeploymentStatusBadge deployment={deployment} className="text-[10px] px-1.5 py-0 h-5" />
+        <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-5">
+          {deployment.environment.name}
+        </Badge>
+        {deployment.is_current && (
+          <Badge className="bg-green-600 hover:bg-green-700 flex items-center gap-0.5 text-[10px] px-1.5 py-0 h-5">
+            <CheckCircle2 className="h-2.5 w-2.5" />
+            Current
+          </Badge>
+        )}
       </div>
-      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full sm:w-auto">
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          {deployment.commit_author && (
-            <>
-              <Avatar className="h-6 w-6 shrink-0">
-                <AvatarImage
-                  src={deployment.commit_author || '/placeholder.svg'}
-                  alt={deployment.commit_author!}
-                />
-                <AvatarFallback>
-                  {deployment.commit_author?.slice(0, 1).toUpperCase()}
-                </AvatarFallback>
-              </Avatar>
-              <span className="text-sm text-muted-foreground truncate">
-                {deployment.commit_author}
-              </span>
-            </>
-          )}
-          <span className="text-sm text-muted-foreground">•</span>
-          <span className="text-sm text-muted-foreground whitespace-nowrap">
-            <TimeAgo date={deployment.created_at} />
+
+      {/* Meta line: commit info — takes remaining space, truncates */}
+      <div className="flex min-w-0 flex-1 items-center gap-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1 shrink-0">
+          <GitBranch className="h-3 w-3" />
+          <span className="truncate max-w-[100px]">{deployment.branch}</span>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <GitCommit className="h-3 w-3" />
+          <span className="font-mono">
+            {deployment.commit_hash?.slice(0, 7)}
           </span>
         </div>
-        <div className="hidden sm:block h-8 w-px bg-border mx-2"></div>
+        <span className="truncate min-w-0">
+          {deployment.commit_message}
+        </span>
+      </div>
+
+      {/* Right cluster: author + time + menu */}
+      <div className="flex items-center gap-2 sm:shrink-0">
+        {deployment.commit_author && (
+          <Avatar className="h-5 w-5 shrink-0">
+            <AvatarImage
+              src={deployment.commit_author || '/placeholder.svg'}
+              alt={deployment.commit_author!}
+            />
+            <AvatarFallback className="text-[9px]">
+              {deployment.commit_author?.slice(0, 1).toUpperCase()}
+            </AvatarFallback>
+          </Avatar>
+        )}
+        <span className="text-xs text-muted-foreground whitespace-nowrap">
+          <TimeAgo date={deployment.created_at} />
+        </span>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="ml-auto sm:ml-0">
-              <MoreHorizontal className="h-4 w-4" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 ml-auto sm:ml-0"
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+              }}
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" />
               <span className="sr-only">Open menu</span>
             </Button>
           </DropdownMenuTrigger>

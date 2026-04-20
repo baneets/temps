@@ -16,6 +16,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { usePageTitle } from '@/hooks/usePageTitle'
 
 interface CatalogEntry {
   id: string
@@ -42,6 +43,7 @@ async function fetchCatalog(): Promise<CatalogResponse> {
 // status; unconfigured ones get a "Configure" CTA. Keeping this list dense
 // because the user mostly just wants to see which provider is active.
 export function AgentSandboxProvidersList() {
+  usePageTitle('AI Providers')
   const { data, isPending, isError } = useQuery({
     queryKey: ['ai-provider-catalog'],
     queryFn: fetchCatalog,
@@ -121,7 +123,12 @@ export function AgentSandboxProvidersList() {
                     </p>
                   </div>
                 </div>
-                <Button asChild variant="outline" size="sm" className="shrink-0">
+                <Button
+                  asChild
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                >
                   <Link to={`/agent-sandbox/providers/${p.id}`}>
                     {p.credential_saved ? 'Manage' : 'Configure'}
                     <ArrowRight className="h-3.5 w-3.5 ml-1.5" />

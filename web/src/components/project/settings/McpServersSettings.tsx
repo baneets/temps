@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   Card,
   CardContent,
@@ -36,7 +37,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   EllipsisVertical,
   Loader2,
@@ -46,37 +47,39 @@ import {
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
-  type McpDefinition,
-  listMcpDefinitions,
-  createMcpDefinition,
-  updateMcpDefinition,
-  deleteMcpDefinition,
-} from '@/components/agents/api'
+  deleteMcpMutation,
+  listMcpsOptions,
+  listMcpsQueryKey,
+} from '@/api/client/@tanstack/react-query.gen'
+import { createMcp, updateMcp } from '@/api/client/sdk.gen'
+import type { McpDefinitionResponse as McpDefinition } from '@/api/client/types.gen'
 
 interface McpServersSettingsProps {
   project: ProjectResponse
 }
 
 export function McpServersSettings({ project }: McpServersSettingsProps) {
+  const queryClient = useQueryClient()
   const [mcpToDelete, setMcpToDelete] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingMcp, setEditingMcp] = useState<McpDefinition | null>(null)
 
+  const mcpListKey = listMcpsQueryKey({ path: { project_id: project.id } })
+
   const {
-    data: mcpServers,
+    data: mcpServersData,
     isLoading,
     error,
     refetch,
-  } = useQuery({
-    queryKey: ['mcp-servers', project.id],
-    queryFn: () => listMcpDefinitions(project.id),
-  })
+  } = useQuery(listMcpsOptions({ path: { project_id: project.id } }))
+
+  const mcpServers = mcpServersData?.items ?? []
 
   const deleteMutation = useMutation({
-    mutationFn: (slug: string) => deleteMcpDefinition(project.id, slug),
+    ...deleteMcpMutation(),
     onSuccess: () => {
       toast.success('MCP server deleted')
-      refetch()
+      queryClient.invalidateQueries({ queryKey: mcpListKey })
       setMcpToDelete(null)
     },
     onError: () => toast.error('Failed to delete MCP server'),
@@ -106,10 +109,11 @@ export function McpServersSettings({ project }: McpServersSettingsProps) {
             at runtime.
           </p>
         </div>
-        <Button onClick={openCreate} disabled={isLoading}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add MCP Server
-        </Button>
+        <CreateActionButton
+          onClick={openCreate}
+          disabled={isLoading}
+          label="Add MCP Server"
+        />
       </div>
 
       {error && (
@@ -132,7 +136,7 @@ export function McpServersSettings({ project }: McpServersSettingsProps) {
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
-      ) : !error && mcpServers && mcpServers.length > 0 ? (
+      ) : !error && mcpServers.length > 0 ? (
         <div className="space-y-3">
           {mcpServers.map((mcp) => {
             const command = mcp.config.command as string | undefined
@@ -235,7 +239,7 @@ export function McpServersSettings({ project }: McpServersSettingsProps) {
         projectId={project.id}
         mcp={editingMcp}
         onSuccess={() => {
-          refetch()
+          queryClient.invalidateQueries({ queryKey: mcpListKey })
           setDialogOpen(false)
         }}
       />
@@ -256,7 +260,10 @@ export function McpServersSettings({ project }: McpServersSettingsProps) {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (mcpToDelete) deleteMutation.mutate(mcpToDelete)
+                if (mcpToDelete)
+                  deleteMutation.mutate({
+                    path: { project_id: project.id, slug: mcpToDelete },
+                  })
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
@@ -354,18 +361,26 @@ function McpDialog({
     setIsPending(true)
     try {
       if (isEdit) {
-        await updateMcpDefinition(projectId, mcp!.slug, {
-          name: name.trim(),
-          description: description.trim() || undefined,
-          config,
+        await updateMcp({
+          path: { project_id: projectId, slug: mcp!.slug },
+          body: {
+            name: name.trim(),
+            description: description.trim() || undefined,
+            config,
+          },
+          throwOnError: true,
         })
         toast.success('MCP server updated')
       } else {
-        await createMcpDefinition(projectId, {
-          slug: slug.trim(),
-          name: name.trim(),
-          description: description.trim() || undefined,
-          config,
+        await createMcp({
+          path: { project_id: projectId },
+          body: {
+            slug: slug.trim(),
+            name: name.trim(),
+            description: description.trim() || undefined,
+            config,
+          },
+          throwOnError: true,
         })
         toast.success('MCP server created')
       }

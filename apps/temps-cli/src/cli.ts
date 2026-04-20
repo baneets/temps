@@ -54,6 +54,7 @@ import { registerMcpServersCommands } from './commands/mcp-servers/index.js'
 import { registerSecretsCommands } from './commands/secrets/index.js'
 import { registerSandboxCommands } from './commands/sandbox/index.js'
 import { registerWorkflowCommands } from './commands/workflow/index.js'
+import { registerRevenueCommands } from './commands/revenue/index.js'
 
 // Developer workflow commands
 import { registerInitCommand } from './commands/init/index.js'
@@ -153,6 +154,7 @@ export function createProgram(): Command {
   registerSecretsCommands(program)
   registerSandboxCommands(program)
   registerWorkflowCommands(program)
+  registerRevenueCommands(program)
 
   // Developer workflow commands
   registerInitCommand(program)

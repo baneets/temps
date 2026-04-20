@@ -3,6 +3,12 @@
  * generated OpenAPI client. Once `bun run openapi-ts` is re-run against a server
  * that exposes these endpoints, this file can be deleted and the generated SDK
  * used directly.
+ *
+ * TODO(sdk-regen): replace with generated SDK helpers for
+ *   - POST /backups/s3-sources/{id}/set-default
+ *   - POST /backups/s3-sources/{id}/test
+ *   - POST /backups/s3-sources/test
+ * once these endpoints are included in the OpenAPI spec / generated client.
  */
 
 export interface S3ConnectionTestResult {

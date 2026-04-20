@@ -245,17 +245,11 @@ export function registerSandboxCommands(program: Command): void {
     .action(showAction)
 
   sandbox
-    .command('stop <id>')
-    .alias('rm')
-    .description('Stop and destroy a sandbox (alias: destroy)')
+    .command('rm <id>')
+    .aliases(['stop', 'destroy'])
+    .description('Remove a sandbox permanently (aliases: stop, destroy)')
     .option('-f, --force', 'Skip confirmation prompt')
-    .action(stopAction)
-
-  sandbox
-    .command('destroy <id>')
-    .description('Alias for `stop` — stop and destroy a sandbox permanently')
-    .option('-f, --force', 'Skip confirmation prompt')
-    .action(stopAction)
+    .action(rmAction)
 
   sandbox
     .command('pause <id>')
@@ -653,12 +647,12 @@ async function showAction(id: string, options: { json?: boolean }): Promise<void
   newline()
 }
 
-async function stopAction(id: string, options: { force?: boolean }): Promise<void> {
+async function rmAction(id: string, options: { force?: boolean }): Promise<void> {
   const api = await auth()
 
   if (!options.force) {
     const confirmed = await promptConfirm({
-      message: `Stop and destroy sandbox ${id}?`,
+      message: `Remove sandbox ${id} permanently?`,
       default: false,
     })
     if (!confirmed) {
@@ -667,10 +661,10 @@ async function stopAction(id: string, options: { force?: boolean }): Promise<voi
     }
   }
 
-  await withSpinner('Stopping sandbox...', () =>
+  await withSpinner('Removing sandbox...', () =>
     apiRequest<void>(api, `/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
   )
-  success(`Sandbox ${colors.primary(id)} stopped`)
+  success(`Sandbox ${colors.primary(id)} removed`)
 }
 
 async function pauseAction(id: string): Promise<void> {

@@ -1,5 +1,6 @@
 'use client'
 
+import { listEmailDomains as listDomains2, listEmailProviders as listProviders2 } from '@/api/client'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -24,19 +25,19 @@ async function getEmailStatus(): Promise<{
 }> {
   try {
     const [providersRes, domainsRes] = await Promise.all([
-      fetch('/api/email-providers'),
-      fetch('/api/email-domains'),
+      listProviders2(),
+      listDomains2(),
     ])
 
-    const providers = providersRes.ok ? await providersRes.json() : []
-    const domains = domainsRes.ok ? await domainsRes.json() : []
+    const providers = providersRes.data ?? []
+    const domains = domainsRes.data ?? []
 
     return {
       hasProviders: providers.length > 0,
       hasDomains: domains.length > 0,
       verifiedDomains: domains
-        .filter((d: { status: string }) => d.status === 'verified')
-        .map((d: { domain: string }) => d.domain),
+        .filter((d) => d.status === 'verified')
+        .map((d) => d.domain),
     }
   } catch {
     return { hasProviders: false, hasDomains: false, verifiedDomains: [] }

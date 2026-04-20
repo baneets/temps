@@ -39,6 +39,14 @@ import { KbdBadge } from '@/components/ui/kbd-badge'
 import { ImportEnvDialog } from '@/components/ui/import-env-dialog'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
+import {
+  getResolvedEnvVars,
+  getResolvedEnvVarValue,
+  indexResolvedByKey,
+  type ResolvedEnvVar,
+} from '@/lib/resolved-env-vars'
+import { IntegrationBadge } from './IntegrationBadge'
+import { Link } from 'react-router-dom'
 
 interface EnvironmentVariableRowProps {
   variable: EnvironmentVariableResponse
@@ -47,6 +55,7 @@ interface EnvironmentVariableRowProps {
   isSelected: boolean
   onSelect: (id: number) => void
   showAllValues: boolean
+  resolved?: ResolvedEnvVar
 }
 
 function EnvironmentVariableRow({
@@ -56,7 +65,12 @@ function EnvironmentVariableRow({
   isSelected,
   onSelect,
   showAllValues,
+  resolved,
 }: EnvironmentVariableRowProps) {
+  const overridesService =
+    resolved?.source.type === 'manual'
+      ? (resolved.source.overrides_service ?? undefined)
+      : undefined
   const [isVisible, setIsVisible] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [editValue, setEditValue] = useState('')
@@ -176,15 +190,29 @@ function EnvironmentVariableRow({
 
   return (
     <>
-      <div className="py-4 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 flex-1">
+      <div className="py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+        <div className="flex items-start gap-3 flex-1 min-w-0">
           <Checkbox
             checked={isSelected}
             onCheckedChange={() => onSelect(variable.id)}
+            className="mt-1 sm:mt-0"
           />
-          <div className="space-y-1 flex-1">
-            <p className="font-medium">{variable.key}</p>
-            <div className="flex gap-2">
+          <div className="space-y-1 flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              {overridesService && (
+                <IntegrationBadge service={overridesService} overridden />
+              )}
+              <p className="font-medium break-all">{variable.key}</p>
+              {overridesService && (
+                <Link
+                  to={`/storage/${overridesService.service_id}`}
+                  className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide bg-muted text-muted-foreground border hover:bg-secondary hover:text-foreground"
+                >
+                  Overrides {overridesService.service_name}
+                </Link>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
               {variable.environments.map((env) => (
                 <span
                   key={env.name}
@@ -201,13 +229,11 @@ function EnvironmentVariableRow({
             </div>
           </div>
         </div>
-        <div className="flex gap-2">
-          <div className="flex items-center gap-2">
-            {isVisible ? (
-              <span className="font-mono text-sm">{dataValue}</span>
-            ) : (
-              <span className="font-mono text-sm">••••••••••••</span>
-            )}
+        <div className="flex flex-wrap items-center gap-2 pl-7 sm:pl-0">
+          <div className="flex items-center gap-2 min-w-0 w-full sm:w-auto">
+            <span className="font-mono text-sm truncate max-w-[180px] sm:max-w-[220px]">
+              {isVisible ? dataValue : '••••••••••••'}
+            </span>
             <Button variant="ghost" size="sm" onClick={toggleVisibility}>
               {isVisible ? (
                 <EyeOff className="h-4 w-4" />
@@ -350,6 +376,106 @@ function EnvironmentVariableRow({
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+interface IntegrationEnvVarRowProps {
+  projectId: number
+  resolved: ResolvedEnvVar
+  showAllValues: boolean
+}
+
+function IntegrationEnvVarRow({
+  projectId,
+  resolved,
+  showAllValues,
+}: IntegrationEnvVarRowProps) {
+  const [isVisible, setIsVisible] = useState(false)
+  const isIntegration = resolved.source.type === 'integration'
+
+  const shouldFetch = isIntegration && (isVisible || showAllValues)
+
+  const { data: revealedValue, refetch, isFetching } = useQuery({
+    queryKey: ['resolved-env-var-value', projectId, resolved.key],
+    queryFn: () => getResolvedEnvVarValue(projectId, resolved.key),
+    enabled: shouldFetch,
+    staleTime: 15_000,
+  })
+
+  useEffect(() => {
+    setIsVisible(showAllValues)
+  }, [showAllValues])
+
+  if (resolved.source.type !== 'integration') return null
+  const service = resolved.source.service
+
+  const toggleVisibility = () => {
+    setIsVisible((prev) => {
+      const next = !prev
+      if (next) refetch()
+      return next
+    })
+  }
+
+  const valueText = isVisible
+    ? isFetching && !revealedValue
+      ? 'Revealing…'
+      : (revealedValue ?? resolved.value_preview)
+    : '••••••••••••'
+
+  return (
+    <div className="py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <div className="flex items-start gap-3 flex-1 min-w-0">
+        <div className="hidden sm:block w-4 shrink-0" aria-hidden />
+        <div className="space-y-1 flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <IntegrationBadge service={service} />
+            <p className="font-medium break-all">{resolved.key}</p>
+            <span className="text-xs text-muted-foreground">
+              from{' '}
+              <Link
+                to={`/storage/${service.service_id}`}
+                className="underline-offset-2 hover:underline hover:text-foreground"
+              >
+                {service.service_name}
+              </Link>
+            </span>
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {resolved.environments.map((env) => (
+              <span
+                key={env.name}
+                className="inline-flex items-center rounded-full px-2 py-1 text-xs font-medium bg-secondary text-secondary-foreground"
+              >
+                {env.name}
+              </span>
+            ))}
+            {resolved.include_in_preview && (
+              <span className="inline-flex items-center rounded-full px-2 py-1 text-xs font-medium bg-blue-500/10 text-blue-700 dark:text-blue-400 border border-blue-500/20">
+                Preview
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="font-mono text-sm text-muted-foreground truncate max-w-[200px] sm:max-w-[240px]">
+          {valueText}
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={toggleVisibility}
+          aria-label={isVisible ? 'Hide value' : 'Reveal value'}
+        >
+          {isVisible ? (
+            <EyeOff className="h-4 w-4" />
+          ) : (
+            <Eye className="h-4 w-4" />
+          )}
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -658,6 +784,28 @@ export function EnvironmentVariablesSettings({
     }),
   })
 
+  const { data: resolvedEnvVars } = useQuery({
+    queryKey: ['resolved-env-vars', project.id],
+    queryFn: () => getResolvedEnvVars(project.id),
+    staleTime: 15_000,
+  })
+
+  const resolvedByKey = useMemo(
+    () => indexResolvedByKey(resolvedEnvVars),
+    [resolvedEnvVars],
+  )
+
+  const integrationOnlyResolved = useMemo(() => {
+    if (!resolvedEnvVars) return [] as ResolvedEnvVar[]
+    const manualKeys = new Set((envVariables ?? []).map((v) => v.key))
+    return resolvedEnvVars
+      .filter(
+        (entry) =>
+          entry.source.type === 'integration' && !manualKeys.has(entry.key),
+      )
+      .sort((a, b) => a.key.localeCompare(b.key))
+  }, [resolvedEnvVars, envVariables])
+
   const createMutation = useMutation({
     ...createEnvironmentVariableMutation(),
     meta: {
@@ -833,30 +981,33 @@ export function EnvironmentVariablesSettings({
     return <EnvironmentVariablesLoadingState />
   }
 
-  const hasVariables = (envVariables?.length ?? 0) > 0
+  const hasManualVariables = (envVariables?.length ?? 0) > 0
+  const hasIntegrationVariables = integrationOnlyResolved.length > 0
+  const hasVariables = hasManualVariables || hasIntegrationVariables
   const selectedCount = selectedVariables.size
   const allSelected =
-    selectedCount === (envVariables?.length ?? 0) && hasVariables
+    selectedCount === (envVariables?.length ?? 0) && hasManualVariables
 
   return (
     <div className="space-y-6">
       <div>
-        <div className="flex flex-row items-center justify-between mb-6">
+        <div className="flex flex-col gap-4 mb-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-1.5">
             <h2 className="text-2xl font-semibold tracking-tight">
               Environment Variables
             </h2>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-base/6 sm:text-sm text-muted-foreground">
               Manage your project&apos;s environment variables across different
               environments.
             </p>
           </div>
           {hasVariables && (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               {selectedCount > 0 && (
                 <Button
                   variant="destructive"
                   onClick={() => setIsBulkDeleteDialogOpen(true)}
+                  className="flex-1 sm:flex-initial"
                 >
                   Delete {selectedCount} Variable
                   {selectedCount !== 1 ? 's' : ''}
@@ -869,13 +1020,13 @@ export function EnvironmentVariablesSettings({
               >
                 {showAllValues ? (
                   <>
-                    <EyeOff className="h-4 w-4 mr-2" />
-                    Hide all
+                    <EyeOff className="h-4 w-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Hide all</span>
                   </>
                 ) : (
                   <>
-                    <Eye className="h-4 w-4 mr-2" />
-                    Show all
+                    <Eye className="h-4 w-4 sm:mr-2" />
+                    <span className="hidden sm:inline">Show all</span>
                   </>
                 )}
               </Button>
@@ -883,13 +1034,13 @@ export function EnvironmentVariablesSettings({
                 variant="outline"
                 onClick={() => setIsImportDialogOpen(true)}
               >
-                <Upload className="h-4 w-4 mr-2" />
-                Import .env
+                <Upload className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Import .env</span>
               </Button>
-              <Button onClick={() => setIsAddDialogOpen(true)}>
+              <Button onClick={() => setIsAddDialogOpen(true)} className="flex-1 sm:flex-initial">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Variable
-                <KbdBadge keys={['N']} className="ml-2" />
+                <KbdBadge keys={['N']} className="ml-2 hidden sm:inline-flex" />
               </Button>
             </div>
           )}
@@ -925,17 +1076,19 @@ export function EnvironmentVariablesSettings({
             </EmptyPlaceholder>
           ) : (
             <>
-              <div className="flex items-center gap-3 py-3 border-b">
-                <Checkbox
-                  checked={allSelected}
-                  onCheckedChange={handleSelectAll}
-                />
-                <span className="text-sm font-medium">
-                  {selectedCount > 0
-                    ? `${selectedCount} of ${envVariables?.length ?? 0} selected`
-                    : 'Select all'}
-                </span>
-              </div>
+              {hasManualVariables && (
+                <div className="flex items-center gap-3 py-3 border-b">
+                  <Checkbox
+                    checked={allSelected}
+                    onCheckedChange={handleSelectAll}
+                  />
+                  <span className="text-sm font-medium">
+                    {selectedCount > 0
+                      ? `${selectedCount} of ${envVariables?.length ?? 0} selected`
+                      : 'Select all'}
+                  </span>
+                </div>
+              )}
               <div className="divide-y divide-border">
                 {(envVariables ?? []).map((variable) => (
                   <EnvironmentVariableRow
@@ -945,6 +1098,15 @@ export function EnvironmentVariablesSettings({
                     refetchEnvVariables={() => refetch()}
                     isSelected={selectedVariables.has(variable.id)}
                     onSelect={handleSelectVariable}
+                    showAllValues={showAllValues}
+                    resolved={resolvedByKey.get(variable.key)}
+                  />
+                ))}
+                {integrationOnlyResolved.map((entry) => (
+                  <IntegrationEnvVarRow
+                    key={`integration-${entry.key}`}
+                    projectId={project.id}
+                    resolved={entry}
                     showAllValues={showAllValues}
                   />
                 ))}
@@ -992,10 +1154,10 @@ export function EnvironmentVariablesSettings({
                       .map((v) => (
                         <div
                           key={v.id}
-                          className="text-sm font-mono flex items-center justify-between"
+                          className="text-sm font-mono flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between"
                         >
-                          <span>{v.key}</span>
-                          <div className="flex gap-1">
+                          <span className="break-all">{v.key}</span>
+                          <div className="flex flex-wrap gap-1">
                             {v.environments.map((env) => (
                               <span
                                 key={env.name}

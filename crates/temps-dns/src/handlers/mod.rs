@@ -303,7 +303,7 @@ impl From<DnsError> for Problem {
     ),
     security(("bearer_auth" = []))
 )]
-async fn list_providers(
+async fn list_dns_providers(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<DnsAppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -354,7 +354,7 @@ async fn list_providers(
     ),
     security(("bearer_auth" = []))
 )]
-async fn create_provider(
+async fn create_dns_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<DnsAppState>>,
     Json(request): Json<CreateDnsProviderRequest>,
@@ -414,7 +414,7 @@ async fn create_provider(
     ),
     security(("bearer_auth" = []))
 )]
-async fn get_provider(
+async fn get_dns_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<DnsAppState>>,
     Path(id): Path<i32>,
@@ -514,7 +514,7 @@ async fn update_provider(
     ),
     security(("bearer_auth" = []))
 )]
-async fn delete_provider(
+async fn delete_dns_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<DnsAppState>>,
     Path(id): Path<i32>,
@@ -766,12 +766,15 @@ async fn verify_managed_domain(
 pub fn configure_routes() -> Router<Arc<DnsAppState>> {
     Router::new()
         // Provider management
-        .route("/dns-providers", get(list_providers).post(create_provider))
+        .route(
+            "/dns-providers",
+            get(list_dns_providers).post(create_dns_provider),
+        )
         .route(
             "/dns-providers/{id}",
-            get(get_provider)
+            get(get_dns_provider)
                 .put(update_provider)
-                .delete(delete_provider),
+                .delete(delete_dns_provider),
         )
         .route("/dns-providers/{id}/test", post(test_provider_connection))
         .route("/dns-providers/{id}/zones", get(list_provider_zones))
@@ -797,11 +800,11 @@ pub fn configure_routes() -> Router<Arc<DnsAppState>> {
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        list_providers,
-        create_provider,
-        get_provider,
+        list_dns_providers,
+        create_dns_provider,
+        get_dns_provider,
         update_provider,
-        delete_provider,
+        delete_dns_provider,
         test_provider_connection,
         list_provider_zones,
         add_managed_domain,

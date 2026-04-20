@@ -242,7 +242,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-async fn start_analysis(
+pub async fn start_analysis(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -318,7 +318,7 @@ async fn start_analysis(
     ),
     security(("bearer_auth" = []))
 )]
-async fn get_run(
+pub async fn get_run(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -344,7 +344,23 @@ async fn get_run(
 /// SSE endpoint: streams run log events in real-time.
 /// Polls every 500 ms. Keeps the connection open through "analyzed" and "fix_ready"
 /// waiting states; closes only on terminal statuses.
-async fn stream_events(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/projects/{project_id}/autofixer/runs/{run_id}/stream",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("run_id" = i32, Path, description = "Autofixer run ID"),
+    ),
+    responses(
+        (status = 200, description = "Server-Sent Events stream of autofixer run logs and status updates", content_type = "text/event-stream"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Run not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn stream_events(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -448,7 +464,7 @@ fn sse_keep_alive() -> KeepAlive {
     ),
     security(("bearer_auth" = []))
 )]
-async fn add_context(
+pub async fn add_context(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -491,7 +507,7 @@ async fn add_context(
     ),
     security(("bearer_auth" = []))
 )]
-async fn start_fix(
+pub async fn start_fix(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -564,7 +580,7 @@ async fn start_fix(
     ),
     security(("bearer_auth" = []))
 )]
-async fn create_pr(
+pub async fn create_pr(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -637,7 +653,7 @@ async fn create_pr(
     ),
     security(("bearer_auth" = []))
 )]
-async fn re_analyze(
+pub async fn re_analyze(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -689,7 +705,7 @@ async fn re_analyze(
     ),
     security(("bearer_auth" = []))
 )]
-async fn cancel(
+pub async fn cancel(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,

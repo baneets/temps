@@ -10,13 +10,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { CreateActionButton } from '@/components/ui/create-action-button'
+import { Card, CardContent } from '@/components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -37,17 +32,25 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { EllipsisVertical, Loader2, Plus, Server } from 'lucide-react'
+import {
+  ChevronRight,
+  EllipsisVertical,
+  Loader2,
+  Plus,
+  Server,
+} from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
-  type McpDefinition,
-  listGlobalMcpDefinitions,
-  createGlobalMcpDefinition,
-  updateGlobalMcpDefinition,
-  deleteGlobalMcpDefinition,
-} from '@/components/agents/api'
+  createGlobalMcp,
+  updateGlobalMcp,
+} from '@/api/client/sdk.gen'
+import {
+  deleteGlobalMcpMutation,
+  listGlobalMcpsOptions,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { McpDefinitionResponse as McpDefinition } from '@/api/client/types.gen'
 
 export function GlobalMcpServersSettings() {
   usePageTitle('MCP Servers')
@@ -58,17 +61,15 @@ export function GlobalMcpServersSettings() {
   const [editingMcp, setEditingMcp] = useState<McpDefinition | null>(null)
 
   const {
-    data: mcpServers,
+    data: mcpData,
     isLoading,
     error,
     refetch,
-  } = useQuery({
-    queryKey: ['global-mcp-servers'],
-    queryFn: () => listGlobalMcpDefinitions(),
-  })
+  } = useQuery(listGlobalMcpsOptions())
+  const mcpServers = mcpData?.items
 
   const deleteMutation = useMutation({
-    mutationFn: (slug: string) => deleteGlobalMcpDefinition(slug),
+    ...deleteGlobalMcpMutation(),
     onSuccess: () => {
       toast.success('MCP server deleted')
       refetch()
@@ -101,10 +102,11 @@ export function GlobalMcpServersSettings() {
             at workflow runtime.
           </p>
         </div>
-        <Button onClick={openCreate} disabled={isLoading}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add MCP Server
-        </Button>
+        <CreateActionButton
+          onClick={openCreate}
+          disabled={isLoading}
+          label="Add MCP Server"
+        />
       </div>
 
       {error && (
@@ -128,99 +130,12 @@ export function GlobalMcpServersSettings() {
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
       ) : !error && mcpServers && mcpServers.length > 0 ? (
-        <div className="space-y-3">
-          {mcpServers.map((mcp) => {
-            const command = mcp.config.command as string | undefined
-            const args = mcp.config.args as string[] | undefined
-            return (
-              <Card
-                key={mcp.id}
-                className="cursor-pointer hover:bg-muted/30 transition-colors"
-                onClick={() => navigate(`/settings/mcp-servers/${mcp.slug}`)}
-              >
-                <CardHeader className="pb-2">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-3 flex-1">
-                      <div className="mt-1">
-                        <Server className="h-5 w-5 text-muted-foreground" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <CardTitle className="text-base">
-                            {mcp.name}
-                          </CardTitle>
-                          <Badge
-                            variant="secondary"
-                            className="font-mono text-xs"
-                          >
-                            {mcp.slug}
-                          </Badge>
-                        </div>
-                        {mcp.description && (
-                          <CardDescription className="text-xs">
-                            {mcp.description}
-                          </CardDescription>
-                        )}
-                      </div>
-                    </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        asChild
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                        >
-                          <EllipsisVertical className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent
-                        align="end"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <DropdownMenuItem
-                          onClick={() =>
-                            navigate(`/settings/mcp-servers/${mcp.slug}`)
-                          }
-                        >
-                          View details
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => openEdit(mcp)}>
-                          Edit
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          className="text-destructive"
-                          onClick={() => setMcpToDelete(mcp.slug)}
-                        >
-                          Delete
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  {command && (
-                    <div className="text-xs text-muted-foreground mb-2">
-                      <span className="font-medium">Command:</span>{' '}
-                      <code className="bg-muted px-1 rounded">
-                        {command}
-                        {args ? ` ${args.join(' ')}` : ''}
-                      </code>
-                    </div>
-                  )}
-                  <div className="rounded-md border bg-muted/50 p-3">
-                    <pre className="text-xs text-muted-foreground whitespace-pre-wrap line-clamp-4 font-mono">
-                      {JSON.stringify(mcp.config, null, 2)}
-                    </pre>
-                  </div>
-                </CardContent>
-              </Card>
-            )
-          })}
-        </div>
+        <McpCompactRows
+          mcpServers={mcpServers}
+          onOpen={(slug) => navigate(`/mcp-servers/${slug}`)}
+          onEdit={openEdit}
+          onDelete={setMcpToDelete}
+        />
       ) : !error ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
@@ -267,7 +182,8 @@ export function GlobalMcpServersSettings() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (mcpToDelete) deleteMutation.mutate(mcpToDelete)
+                if (mcpToDelete)
+                  deleteMutation.mutate({ path: { slug: mcpToDelete } })
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
@@ -276,6 +192,122 @@ export function GlobalMcpServersSettings() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  )
+}
+
+// ── Shared row menu ──
+
+interface McpRowMenuProps {
+  onView: () => void
+  onEdit: () => void
+  onDelete: () => void
+}
+
+function McpRowMenu({ onView, onEdit, onDelete }: McpRowMenuProps) {
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-8 w-8">
+            <EllipsisVertical className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault()
+              onView()
+            }}
+          >
+            View details
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault()
+              onEdit()
+            }}
+          >
+            Edit
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive"
+            onSelect={(e) => {
+              e.preventDefault()
+              onDelete()
+            }}
+          >
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
+}
+
+// ── Variant: Compact rows ──
+
+interface McpListProps {
+  mcpServers: McpDefinition[]
+  onOpen: (slug: string) => void
+  onEdit: (mcp: McpDefinition) => void
+  onDelete: (slug: string) => void
+}
+
+function McpCompactRows({
+  mcpServers,
+  onOpen,
+  onEdit,
+  onDelete,
+}: McpListProps) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <ul role="list" className="divide-y">
+        {mcpServers.map((mcp) => (
+          <li
+            key={mcp.id}
+            role="button"
+            tabIndex={0}
+            onClick={() => onOpen(mcp.slug)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onOpen(mcp.slug)
+              }
+            }}
+            className="flex cursor-pointer items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors focus:outline-none focus:bg-muted/40"
+          >
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+              <Server className="size-4 text-muted-foreground" />
+            </div>
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="truncate text-sm font-medium">{mcp.name}</p>
+                  <Badge variant="secondary" className="font-mono text-xs">
+                    {mcp.slug}
+                  </Badge>
+                </div>
+                {mcp.description && (
+                  <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                    {mcp.description}
+                  </p>
+                )}
+              </div>
+            </div>
+            <McpRowMenu
+              onView={() => onOpen(mcp.slug)}
+              onEdit={() => onEdit(mcp)}
+              onDelete={() => onDelete(mcp.slug)}
+            />
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground/50" />
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -363,18 +395,25 @@ function GlobalMcpDialog({
     setIsPending(true)
     try {
       if (isEdit) {
-        await updateGlobalMcpDefinition(mcp!.slug, {
-          name: name.trim(),
-          description: description.trim() || undefined,
-          config,
+        await updateGlobalMcp({
+          path: { slug: mcp!.slug },
+          body: {
+            name: name.trim(),
+            description: description.trim() || undefined,
+            config,
+          },
+          throwOnError: true,
         })
         toast.success('MCP server updated')
       } else {
-        await createGlobalMcpDefinition({
-          slug: slug.trim(),
-          name: name.trim(),
-          description: description.trim() || undefined,
-          config,
+        await createGlobalMcp({
+          body: {
+            slug: slug.trim(),
+            name: name.trim(),
+            description: description.trim() || undefined,
+            config,
+          },
+          throwOnError: true,
         })
         toast.success('MCP server created')
       }

@@ -2,7 +2,7 @@ import { Button } from '@/components/ui/button'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
-import { startAnalysis } from '@/components/autofixer/api'
+import { startAnalysisMutation } from '@/api/client/@tanstack/react-query.gen'
 
 interface AutopilotTriggerButtonProps {
   projectId: number
@@ -21,7 +21,7 @@ export function AutopilotTriggerButton({
   const queryClient = useQueryClient()
 
   const trigger = useMutation({
-    mutationFn: () => startAnalysis(projectId, errorGroupId),
+    ...startAnalysisMutation(),
     onSuccess: () => {
       toast.success('Autofix triggered')
       queryClient.invalidateQueries({
@@ -39,7 +39,10 @@ export function AutopilotTriggerButton({
       size="icon"
       onClick={(e) => {
         e.stopPropagation()
-        trigger.mutate()
+        trigger.mutate({
+          path: { project_id: projectId },
+          body: { error_group_id: errorGroupId },
+        })
       }}
       disabled={trigger.isPending}
       title="Fix with Autofix"

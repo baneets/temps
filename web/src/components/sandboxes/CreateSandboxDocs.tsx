@@ -28,8 +28,8 @@ bunx @temps-sdk/cli sandbox list
 bunx @temps-sdk/cli sandbox show sbx_abc123
 bunx @temps-sdk/cli sandbox exec sbx_abc123 -- node --version
 
-# Stop & destroy when done (aliased as \`rm\`)
-bunx @temps-sdk/cli sandbox stop sbx_abc123`
+# Remove the sandbox when done (aliases: \`stop\`, \`destroy\`)
+bunx @temps-sdk/cli sandbox rm sbx_abc123`
 
 const REST_EXAMPLE = `# Create
 curl -X POST https://your-temps-instance.com/v1/sandbox \\

@@ -37,17 +37,21 @@ pub struct CustomToolDef {
     pub headers: Option<std::collections::HashMap<String, String>>,
 }
 
-/// Config file written to `/workspace/.temps/custom-tools.json` in the sandbox.
+/// Config file written to `/home/temps/.temps/custom-tools.json` in the sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
     pub tools: Vec<CustomToolDef>,
 }
 
 /// Path where the proxy script is installed in the sandbox.
-pub const PROXY_SCRIPT_PATH: &str = "/workspace/.temps/bin/mcp-proxy.mjs";
+///
+/// Lives under `/home/temps/` (the named home volume), NOT `/workspace`.
+/// `/workspace` is bind-mounted from the host repo — anything written there
+/// would land in the user's git working tree and potentially leak into PRs.
+pub const PROXY_SCRIPT_PATH: &str = "/home/temps/.temps/bin/mcp-proxy.mjs";
 
 /// Path where the tool definitions config is written in the sandbox.
-pub const PROXY_CONFIG_PATH: &str = "/workspace/.temps/custom-tools.json";
+pub const PROXY_CONFIG_PATH: &str = "/home/temps/.temps/custom-tools.json";
 
 /// Name used in Claude Code's settings.json mcpServers entry.
 pub const MCP_SERVER_NAME: &str = "temps-custom-tools";
@@ -59,7 +63,7 @@ pub const MCP_SERVER_NAME: &str = "temps-custom-tools";
 /// {
 ///   "temps-custom-tools": {
 ///     "command": "bun",
-///     "args": ["run", "/workspace/.temps/bin/mcp-proxy.mjs"],
+///     "args": ["run", "/home/temps/.temps/bin/mcp-proxy.mjs"],
 ///     "env": {}
 ///   }
 /// }
@@ -90,7 +94,7 @@ pub const PROXY_SCRIPT: &str = r#"#!/usr/bin/env bun
 import { readFileSync } from "fs";
 import { createInterface } from "readline";
 
-const CONFIG_PATH = "/workspace/.temps/custom-tools.json";
+const CONFIG_PATH = "/home/temps/.temps/custom-tools.json";
 
 let config;
 try {

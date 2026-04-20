@@ -28,8 +28,8 @@ export function LastDeployment({
 
   return (
     <Card>
-      <CardContent className="p-6">
-        <div className="flex flex-col md:flex-row gap-6 md:gap-4">
+      <CardContent className="p-4 sm:p-6">
+        <div className="flex flex-col gap-4 md:flex-row md:gap-4">
           <div className="w-full md:w-1/3">
             {!screenshotsEnabled ? (
               <div className="flex items-center justify-center">

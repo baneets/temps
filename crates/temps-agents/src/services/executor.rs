@@ -33,6 +33,71 @@ use crate::services::config_service::AgentConfigService;
 use crate::services::prompt_builder::PromptBuilder;
 use crate::services::run_service::{AgentRunService, UpdateRunFields};
 
+/// Parameters for [`AgentExecutor::prepare_sandbox_workspace`].
+///
+/// Kept as a struct (not positional args) because the setup function is the
+/// single unified entry point and the field list will grow over time — new
+/// features (e.g. per-run env overrides, experimental flags) should be added
+/// here so callers don't need to thread more positional args.
+pub struct PrepareWorkspaceParams<'a> {
+    pub run_id: i32,
+    pub project: &'a temps_entities::projects::Model,
+    /// The agent config driving this run, if any.
+    ///
+    /// - `Some(config)` for regular workflow runs (executes per-agent MCPs/skills,
+    ///   per-agent config repo overlay, per-agent `tools_config` custom tools).
+    /// - `None` for autofixer runs (no persisted `project_agents` row — we
+    ///   synthesize a minimal config so project-level overlays still apply).
+    pub agent_config: Option<&'a temps_entities::project_agents::Model>,
+    pub ai_provider: &'a str,
+    pub agent_slug: &'a str,
+    pub timeout_seconds: i32,
+    pub host_work_dir: PathBuf,
+    pub ephemeral_yaml: Option<&'a str>,
+}
+
+/// Build a minimal synthetic `project_agents::Model` for paths that don't have
+/// a persisted agent row (e.g. the autofixer). Only the fields that
+/// `inject_config_repos_and_secrets` and its callees read need to be set
+/// correctly — everything else uses type defaults.
+fn synthetic_agent_config(
+    project_id: i32,
+    ai_provider: &str,
+    slug: &str,
+) -> temps_entities::project_agents::Model {
+    temps_entities::project_agents::Model {
+        id: 0,
+        project_id,
+        slug: slug.to_string(),
+        name: slug.to_string(),
+        description: None,
+        source: "synthetic".to_string(),
+        enabled: true,
+        trigger_config: serde_json::json!({}),
+        prompt: None,
+        ai_provider: ai_provider.to_string(),
+        ai_model: None,
+        api_key_encrypted: None,
+        ai_provider_key_id: None,
+        max_turns: 10,
+        timeout_seconds: 600,
+        daily_budget_cents: 0,
+        cooldown_minutes: 0,
+        branch_prefix: String::new(),
+        deliverable: "pull_request".to_string(),
+        sandbox_enabled: None,
+        config_repo_url: None,
+        config_repo_branch: None,
+        mcp_servers_config: None,
+        skills_config: None,
+        tools_config: None,
+        webhook_id: None,
+        webhook_token: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 pub struct AgentExecutor {
     db: Arc<DatabaseConnection>,
     git_provider_manager: Arc<dyn GitProviderManagerTrait>,
@@ -236,6 +301,457 @@ impl AgentExecutor {
         }
     }
 
+    /// Prepare the sandbox workspace: create the container, seed credentials,
+    /// inject MCP/skills, install the memory script, and set up git credentials.
+    ///
+    /// This is the **single unified path** for workspace setup — both regular
+    /// workflow runs (`execute_run`) and autofixer runs go through here. Any
+    /// change to the AI agent environment (new env var, new config file, new
+    /// MCP server, new auth layout) belongs in this one function.
+    ///
+    /// The caller is responsible for:
+    ///   - Creating the `host_work_dir` on disk and cloning the project repo
+    ///     into it (this method expects the work dir to already contain the
+    ///     cloned repo).
+    ///   - Setting the run status to "cloning" before calling and to
+    ///     "analyzing" / next phase after.
+    pub async fn prepare_sandbox_workspace(
+        &self,
+        params: PrepareWorkspaceParams<'_>,
+    ) -> Result<crate::sandbox::SandboxHandle, AgentError> {
+        let PrepareWorkspaceParams {
+            run_id,
+            project,
+            agent_config,
+            ai_provider,
+            agent_slug,
+            timeout_seconds,
+            host_work_dir,
+            ephemeral_yaml,
+        } = params;
+
+        // Load global sandbox settings for image/runtime/limits/credentials.
+        let global_sandbox = settings::Entity::find_by_id(1)
+            .one(self.db.as_ref())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                s.data.get("agent_sandbox").cloned().and_then(|v| {
+                    serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
+                })
+            })
+            .unwrap_or_default();
+
+        let resolved_image = if global_sandbox.runtime == "custom" {
+            if global_sandbox.custom_image.is_empty() {
+                None
+            } else {
+                Some(global_sandbox.custom_image.clone())
+            }
+        } else {
+            Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime))
+        };
+
+        // Inject auth credentials into sandbox based on auth_type and provider.
+        // Use per-provider credentials from the `providers` map so each CLI
+        // gets its own key/token, not just the legacy Claude-only flat fields.
+        let mut sandbox_env = std::collections::HashMap::new();
+        // Stash decrypted credential + auth_type for file-based seeding after
+        // the sandbox container is created (ApiKey goes into env vars now;
+        // ConfigFile/OauthToken need the sandbox filesystem).
+        let mut deferred_credential: Option<(String, String)> = None; // (value, auth_type)
+        {
+            let provider_cfg = global_sandbox.provider_config(ai_provider);
+            if let Some(ref encrypted) = provider_cfg.credentials_encrypted {
+                if !encrypted.is_empty() {
+                    if let Ok(key) = self.encryption_service.decrypt_string(encrypted) {
+                        let provider_entry = crate::ai_cli::catalog::find_provider(ai_provider);
+                        let auth_type = if provider_cfg.auth_type.is_empty() {
+                            provider_entry
+                                .map(|p| p.default_flavor().id)
+                                .unwrap_or("api_key")
+                                .to_string()
+                        } else {
+                            provider_cfg.auth_type.clone()
+                        };
+                        let flavor = provider_entry.and_then(|p| p.flavor(&auth_type));
+
+                        match flavor.map(|f| f.format) {
+                            Some(crate::ai_cli::catalog::CredentialFormat::ApiKey) => {
+                                let env_var = flavor.unwrap().env_var;
+                                sandbox_env.insert(env_var.to_string(), key);
+                            }
+                            Some(crate::ai_cli::catalog::CredentialFormat::OauthToken) => {
+                                sandbox_env
+                                    .insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key.clone());
+                                deferred_credential = Some((key, auth_type));
+                            }
+                            Some(crate::ai_cli::catalog::CredentialFormat::ConfigFile) => {
+                                deferred_credential = Some((key, auth_type));
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "Unknown provider/auth_type {}/{} — falling back to env var",
+                                    ai_provider,
+                                    auth_type
+                                );
+                                sandbox_env.insert("ANTHROPIC_API_KEY".to_string(), key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Workflow memory + platform env vars
+        sandbox_env.insert("TEMPS_PROJECT_ID".to_string(), project.id.to_string());
+        sandbox_env.insert("TEMPS_WORKFLOW_SLUG".to_string(), agent_slug.to_string());
+        sandbox_env.insert(
+            "TEMPS_API_URL".to_string(),
+            std::env::var("TEMPS_INTERNAL_API_URL")
+                .unwrap_or_else(|_| "http://host.docker.internal:3000".to_string()),
+        );
+        sandbox_env.insert(
+            "PATH".to_string(),
+            "/home/temps/.temps/bin:/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .to_string(),
+        );
+
+        if let Some(token) = self.issue_run_token(project.id, run_id, agent_slug).await {
+            sandbox_env.insert("TEMPS_API_TOKEN".to_string(), token);
+        }
+
+        let connection_id = project.git_provider_connection_id;
+        let mut git_creds: Option<(String, String)> = None;
+        if let Some(conn_id) = connection_id {
+            match self
+                .git_provider_manager
+                .get_connection_access_token(conn_id)
+                .await
+            {
+                Ok((token, provider_type)) => match provider_type.as_str() {
+                    "github" | "gitlab" => {
+                        git_creds = Some((token, provider_type));
+                    }
+                    other => {
+                        tracing::debug!(
+                            "Run {}: git provider '{}' has no known credential layout; \
+                             skipping credential injection",
+                            run_id,
+                            other
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "Run {}: failed to fetch git provider token for connection {}: {}. \
+                         Agent will run without push/PR credentials.",
+                        run_id,
+                        conn_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Per-run overrides from the ephemeral YAML take precedence over globals.
+        let (yaml_cpu, yaml_mem): (Option<f64>, Option<u64>) = ephemeral_yaml
+            .and_then(|y| serde_yaml::from_str::<temps_core::WorkflowYamlConfig>(y).ok())
+            .map(|y| (y.cpu_limit, y.memory_limit_mb))
+            .unwrap_or((None, None));
+        let cpu_limit = yaml_cpu.unwrap_or(global_sandbox.cpu_limit);
+        let memory_limit_mb = yaml_mem.unwrap_or(global_sandbox.memory_limit_mb);
+
+        // Per-run named volume for `/workspace`. Retained so follow-up phases
+        // (autofixer fix → PR) or workspace sandboxes can re-mount it.
+        let workspace_volume = format!("temps-wfrun-{}", run_id);
+        if let Err(e) = self
+            .run_service
+            .update_status(
+                run_id,
+                UpdateRunFields {
+                    workspace_volume: Some(workspace_volume.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!("Run {}: failed to persist workspace_volume: {}", run_id, e);
+        }
+
+        let sandbox_config = SandboxCreateConfig {
+            run_id,
+            container_name_override: None,
+            host_work_dir: host_work_dir.clone(),
+            workspace_volume: Some(workspace_volume),
+            image: resolved_image,
+            cpu_limit: Some(cpu_limit),
+            memory_limit_mb: Some(memory_limit_mb),
+            pids_limit: None,
+            network_mode: Some(global_sandbox.network_mode.clone()),
+            env_vars: sandbox_env,
+            idle_timeout: Duration::from_secs(timeout_seconds as u64 + 60),
+        };
+        self.run_service
+            .append_log(
+                run_id,
+                "info",
+                &format!(
+                    "Creating sandbox: runtime={}, image={}, {} CPU, {}MB RAM, network={}",
+                    global_sandbox.runtime,
+                    crate::sandbox::docker::image_name_for_runtime(&global_sandbox.runtime),
+                    cpu_limit,
+                    memory_limit_mb,
+                    global_sandbox.network_mode,
+                ),
+                None,
+            )
+            .await?;
+
+        let sandbox_start = std::time::Instant::now();
+        let handle = self.sandbox_registry.get_or_create(sandbox_config).await?;
+
+        self.run_service
+            .append_log(
+                run_id,
+                "info",
+                &format!(
+                    "Sandbox ready in {:.1}s ({}) — container={}, id={}",
+                    sandbox_start.elapsed().as_secs_f64(),
+                    self.sandbox_registry.provider_name(),
+                    handle.sandbox_name,
+                    &handle.sandbox_id[..12.min(handle.sandbox_id.len())],
+                ),
+                None,
+            )
+            .await?;
+
+        // Write file-based credentials (ConfigFile / OauthToken).
+        if let Some((cred_value, auth_type)) = deferred_credential {
+            if let Some(provider_entry) = crate::ai_cli::catalog::find_provider(ai_provider) {
+                if let Some(flavor) = provider_entry.flavor(&auth_type) {
+                    let seed_path = flavor.seed_path;
+                    if let Some(idx) = seed_path.rfind('/') {
+                        let parent = &seed_path[..idx];
+                        let _ = self
+                            .sandbox_registry
+                            .exec(
+                                run_id,
+                                vec!["mkdir".into(), "-p".into(), parent.to_string()],
+                                std::collections::HashMap::new(),
+                                None,
+                            )
+                            .await;
+                    }
+
+                    let file_bytes = match flavor.format {
+                        crate::ai_cli::catalog::CredentialFormat::OauthToken => {
+                            let body = serde_json::json!({
+                                "claudeAiOauth": {
+                                    "accessToken": cred_value,
+                                    "expiresAt": chrono::Utc::now().timestamp_millis() + 365 * 24 * 3600 * 1000,
+                                    "scopes": [
+                                        "user:inference",
+                                        "user:mcp_servers",
+                                        "user:profile",
+                                        "user:sessions:claude_code"
+                                    ],
+                                    "subscriptionType": "max",
+                                    "rateLimitTier": "default_claude_max_20x"
+                                }
+                            });
+                            serde_json::to_vec_pretty(&body).unwrap_or_default()
+                        }
+                        crate::ai_cli::catalog::CredentialFormat::ConfigFile => {
+                            cred_value.into_bytes()
+                        }
+                        _ => Vec::new(),
+                    };
+
+                    if !file_bytes.is_empty() {
+                        if let Err(e) = self
+                            .sandbox_registry
+                            .write_file(run_id, seed_path, &file_bytes, 0o600)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to write credential file {} for run {}: {}",
+                                seed_path,
+                                run_id,
+                                e
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Seeded credential file {} for {} on run {}",
+                                seed_path,
+                                ai_provider,
+                                run_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Install the workflow memory script (best-effort).
+        if let Err(e) = self
+            .sandbox_registry
+            .exec(
+                run_id,
+                memory_install_command(),
+                std::collections::HashMap::new(),
+                None,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to install memory script for run {}: {}. \
+                 Memory writes from this run will not work.",
+                run_id,
+                e
+            );
+        } else {
+            tracing::debug!("Installed memory script for run {}", run_id);
+        }
+
+        // Git credential helper + gh/glab config.
+        if let Some((ref token, ref provider_name)) = git_creds {
+            let host = match provider_name.as_str() {
+                "github" => "github.com",
+                "gitlab" => "gitlab.com",
+                _ => "github.com",
+            };
+            let shell_quote = |v: &str| v.replace('\'', "'\\''");
+            let mut script = String::from("set -e\n");
+            script.push_str("mkdir -p /home/temps\n");
+            script.push_str("git config --global init.defaultBranch main\n");
+            script.push_str("git config --global pull.rebase false\n");
+            script.push_str(&format!(
+                "umask 077 && printf 'https://x-access-token:%s@%s\\n' '{}' '{}' > /home/temps/.git-credentials\n",
+                shell_quote(token),
+                host,
+            ));
+            script.push_str("git config --global credential.helper store\n");
+            script.push_str(&format!(
+                "git config --global url.'https://{host}/'.insteadOf 'git@{host}:'\n",
+                host = host,
+            ));
+
+            match provider_name.as_str() {
+                "github" => {
+                    script.push_str("mkdir -p /home/temps/.config/gh\n");
+                    script.push_str(&format!(
+                        "umask 077 && cat > /home/temps/.config/gh/hosts.yml <<'EOF'\n\
+                         github.com:\n\
+                         \x20\x20oauth_token: {}\n\
+                         \x20\x20user: x-access-token\n\
+                         \x20\x20git_protocol: https\n\
+                         EOF\n",
+                        shell_quote(token),
+                    ));
+                }
+                "gitlab" => {
+                    script.push_str("mkdir -p /home/temps/.config/glab-cli\n");
+                    script.push_str(&format!(
+                        "umask 077 && cat > /home/temps/.config/glab-cli/config.yml <<'EOF'\n\
+                         hosts:\n\
+                         \x20\x20gitlab.com:\n\
+                         \x20\x20\x20\x20token: {}\n\
+                         \x20\x20\x20\x20git_protocol: https\n\
+                         EOF\n",
+                        shell_quote(token),
+                    ));
+                }
+                _ => {}
+            }
+
+            script.push_str("chown -R temps:temps /home/temps/.git-credentials /home/temps/.gitconfig /home/temps/.config 2>/dev/null || true\n");
+
+            if let Err(e) = self
+                .sandbox_registry
+                .exec(
+                    run_id,
+                    vec!["sh".to_string(), "-c".to_string(), script],
+                    std::collections::HashMap::new(),
+                    None,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Run {}: failed to install git credential helper: {}",
+                    run_id,
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    "Run {}: installed git credentials for {} provider",
+                    run_id,
+                    provider_name
+                );
+                self.run_service
+                    .append_log(
+                        run_id,
+                        "info",
+                        &format!(
+                            "Injected {} credentials (git push + {} CLI auth, no env vars)",
+                            provider_name,
+                            if provider_name == "github" {
+                                "gh"
+                            } else {
+                                "glab"
+                            }
+                        ),
+                        None,
+                    )
+                    .await?;
+            }
+        }
+
+        // Inject config repos, secrets, MCP, and skills.
+        //
+        // The autofixer path has no `project_agents::Model` because it is not
+        // a persistent agent — we still want the global config repo overlay
+        // and the project-level secrets, so we synthesize a minimal config
+        // when `agent_config` is None.
+        let owned_synthetic;
+        let config_for_injection: &temps_entities::project_agents::Model = match agent_config {
+            Some(c) => c,
+            None => {
+                owned_synthetic = synthetic_agent_config(project.id, ai_provider, agent_slug);
+                &owned_synthetic
+            }
+        };
+        if let Err(e) = self
+            .inject_config_repos_and_secrets(
+                run_id,
+                config_for_injection,
+                project.id,
+                connection_id,
+            )
+            .await
+        {
+            tracing::warn!(
+                "Failed to inject config repos/secrets for run {}: {}. Continuing without them.",
+                run_id,
+                e
+            );
+            self.run_service
+                .append_log(
+                    run_id,
+                    "warning",
+                    &format!(
+                        "Config repo/secrets injection failed: {}. Agent will run without them.",
+                        e
+                    ),
+                    None,
+                )
+                .await?;
+        }
+
+        Ok(handle)
+    }
+
     /// Inject config repos and secrets into the sandbox.
     ///
     /// Overlay order: repo's own `.claude/` → global config repo → per-agent config repo.
@@ -327,6 +843,13 @@ impl AgentExecutor {
         }
 
         // ── Phase 3: Inject secrets ────────────────────────────────────────
+        //
+        // CRITICAL: nothing written here may land under `/workspace/`.
+        // `/workspace` is a bind mount of the cloned repo, so any file there
+        // shows up as a tracked addition in the PR branch. Previously an
+        // autofixer run leaked `.mcp/gsc-creds.json` and `.temps/secrets.env`
+        // into a PR diff. All secret material stays under `/home/temps/`
+        // (the private named volume).
         if !secrets.is_empty() {
             let mut env_count = 0;
             let mut file_count = 0;
@@ -340,8 +863,13 @@ impl AgentExecutor {
                     }
                     SecretType::File => {
                         if let Some(ref mount_path) = secret.mount_path {
+                            let safe_path =
+                                crate::services::sandbox_injector::sanitize_secret_mount_path(
+                                    mount_path,
+                                    &secret.name,
+                                );
                             self.sandbox_registry
-                                .write_file(run_id, mount_path, secret.value.as_bytes(), 0o600)
+                                .write_file(run_id, &safe_path, secret.value.as_bytes(), 0o600)
                                 .await?;
                             file_count += 1;
                         }
@@ -364,7 +892,7 @@ impl AgentExecutor {
                 self.sandbox_registry
                     .write_file(
                         run_id,
-                        "/workspace/.temps/secrets.env",
+                        "/home/temps/.temps/secrets.env",
                         env_content.as_bytes(),
                         0o600,
                     )
@@ -440,7 +968,8 @@ impl AgentExecutor {
             return Ok(());
         }
 
-        // Ensure .claude directory exists in sandbox
+        // Ensure the per-sandbox .claude directory exists under /home/temps
+        // (private named volume — never in the bind-mounted repo).
         let _ = self
             .sandbox_registry
             .exec(
@@ -448,7 +977,7 @@ impl AgentExecutor {
                 vec![
                     "mkdir".to_string(),
                     "-p".to_string(),
-                    "/workspace/.claude".to_string(),
+                    "/home/temps/.claude".to_string(),
                 ],
                 std::collections::HashMap::new(),
                 None,
@@ -464,7 +993,7 @@ impl AgentExecutor {
                     vec![
                         "mkdir".to_string(),
                         "-p".to_string(),
-                        "/workspace/.temps/bin".to_string(),
+                        "/home/temps/.temps/bin".to_string(),
                     ],
                     std::collections::HashMap::new(),
                     None,
@@ -897,9 +1426,12 @@ impl AgentExecutor {
             Self::resolve_secrets_in_dir(&claude_dir, secrets).await;
         }
 
-        // Upload the .claude/ directory into the sandbox
+        // Upload the .claude/ directory into the sandbox under the sandbox
+        // user's home — NEVER `/workspace/.claude`, because `/workspace` is
+        // bind-mounted from the cloned repo and anything there would land in
+        // the PR diff (including any secret values we just resolved above).
         self.sandbox_registry
-            .write_directory(run_id, &claude_dir, "/workspace/.claude")
+            .write_directory(run_id, &claude_dir, "/home/temps/.claude")
             .await?;
 
         self.run_service
@@ -1333,476 +1865,20 @@ impl AgentExecutor {
                 ),
             })?;
 
-        // Step 6b: Create sandbox if enabled for this agent
-        // Load global sandbox settings for resource limits
-        let global_sandbox = settings::Entity::find_by_id(1)
-            .one(self.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data.get("agent_sandbox").cloned().and_then(|v| {
-                    serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
-                })
-            })
-            .unwrap_or_default();
-
-        // Per-agent overrides global: None = use global, Some(true/false) = explicit
-        let use_sandbox = config.sandbox_enabled.unwrap_or(global_sandbox.enabled);
-        if use_sandbox {
-            // Always resolve the image name from current DB settings so changes
-            // take effect without server restart.
-            let resolved_image = if global_sandbox.runtime == "custom" {
-                if global_sandbox.custom_image.is_empty() {
-                    None
-                } else {
-                    Some(global_sandbox.custom_image.clone())
-                }
-            } else {
-                // For presets, compute the image name here instead of relying
-                // on the provider's startup-time config.
-                Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime))
-            };
-
-            // Inject auth credentials into sandbox based on auth_type and provider.
-            // Use per-provider credentials from the `providers` map so each CLI
-            // gets its own key/token, not just the legacy Claude-only flat fields.
-            let mut sandbox_env = std::collections::HashMap::new();
-            // Stash decrypted credential + auth_type for file-based seeding after
-            // the sandbox container is created (ApiKey goes into env vars now;
-            // ConfigFile/OauthToken need the sandbox filesystem).
-            let mut deferred_credential: Option<(String, String)> = None; // (value, auth_type)
-            {
-                let provider_cfg = global_sandbox.provider_config(&config.ai_provider);
-                if let Some(ref encrypted) = provider_cfg.credentials_encrypted {
-                    if !encrypted.is_empty() {
-                        if let Ok(key) = self.encryption_service.decrypt_string(encrypted) {
-                            let provider_entry =
-                                crate::ai_cli::catalog::find_provider(&config.ai_provider);
-                            let auth_type = if provider_cfg.auth_type.is_empty() {
-                                provider_entry
-                                    .map(|p| p.default_flavor().id)
-                                    .unwrap_or("api_key")
-                                    .to_string()
-                            } else {
-                                provider_cfg.auth_type.clone()
-                            };
-                            let flavor = provider_entry.and_then(|p| p.flavor(&auth_type));
-
-                            match flavor.map(|f| f.format) {
-                                Some(crate::ai_cli::catalog::CredentialFormat::ApiKey) => {
-                                    let env_var = flavor.unwrap().env_var;
-                                    sandbox_env.insert(env_var.to_string(), key);
-                                }
-                                Some(crate::ai_cli::catalog::CredentialFormat::OauthToken) => {
-                                    // Claude OAuth needs the env var AND the credential file
-                                    sandbox_env
-                                        .insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key.clone());
-                                    deferred_credential = Some((key, auth_type));
-                                }
-                                Some(crate::ai_cli::catalog::CredentialFormat::ConfigFile) => {
-                                    // ConfigFile (Codex auth.json, OpenCode auth.json) —
-                                    // written to the sandbox filesystem after creation
-                                    deferred_credential = Some((key, auth_type));
-                                }
-                                None => {
-                                    tracing::warn!(
-                                        "Unknown provider/auth_type {}/{} — falling back to env var",
-                                        config.ai_provider,
-                                        auth_type
-                                    );
-                                    sandbox_env.insert("ANTHROPIC_API_KEY".to_string(), key);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Inject workflow memory env vars so the `memory` script (installed
-            // below after the sandbox starts) knows how to call back to the
-            // Temps API. The script reads all four of these at runtime.
-            sandbox_env.insert("TEMPS_PROJECT_ID".to_string(), run.project_id.to_string());
-            sandbox_env.insert("TEMPS_WORKFLOW_SLUG".to_string(), config.slug.clone());
-            sandbox_env.insert(
-                "TEMPS_API_URL".to_string(),
-                std::env::var("TEMPS_INTERNAL_API_URL")
-                    .unwrap_or_else(|_| "http://host.docker.internal:3000".to_string()),
-            );
-            // Put the memory script dir on PATH so the AI can type
-            // `memory write "..."` instead of the full /workspace/.temps/bin/memory.
-            // Include the AI CLI install locations baked into the sandbox image
-            // (claude → .local/bin, codex → .bun/bin, opencode → .opencode/bin).
-            // Docker's explicit `Config.Env` replaces the image's `ENV PATH`, so
-            // we must re-list those dirs here or non-interactive execs can't
-            // find the CLIs.
-            sandbox_env.insert(
-                "PATH".to_string(),
-                "/workspace/.temps/bin:/home/temps/.local/bin:/home/temps/.bun/bin:/home/temps/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                    .to_string(),
-            );
-
-            // Mint a project-scoped deployment token for this run. Best-effort:
-            // if it fails, the script is still installed but memory writes will
-            // error at the curl level. The actual run still proceeds.
-            if let Some(token) = self
-                .issue_run_token(run.project_id, run_id, &config.slug)
-                .await
-            {
-                sandbox_env.insert("TEMPS_API_TOKEN".to_string(), token);
-            }
-
-            // Fetch the git provider token so `git push` and `gh`/`glab`
-            // can authenticate from inside the sandbox. We deliberately do
-            // NOT expose this as `GITHUB_TOKEN`/`GH_TOKEN` env vars: some
-            // AI CLIs (opencode's `github-copilot` provider, Codex, etc.)
-            // auto-pick those up as *AI chat* credentials and try to call
-            // api.githubcopilot.com with a plain PAT → 400 "Personal Access
-            // Tokens are not supported for this endpoint".
-            //
-            // Instead we install file-based auth after the sandbox boots:
-            //   - `~/.git-credentials` + `credential.helper store` for git
-            //   - `~/.config/gh/hosts.yml` for the `gh` CLI
-            //   - `~/.config/glab-cli/config.yml` for `glab`
-            // (see the `setup_git_credentials`-style exec block below).
-            let mut git_creds: Option<(String, String)> = None;
-            match self
-                .git_provider_manager
-                .get_connection_access_token(connection_id)
-                .await
-            {
-                Ok((token, provider_type)) => match provider_type.as_str() {
-                    "github" | "gitlab" => {
-                        git_creds = Some((token, provider_type));
-                    }
-                    other => {
-                        tracing::debug!(
-                            "Run {}: git provider '{}' has no known credential layout; \
-                             skipping credential injection",
-                            run_id,
-                            other
-                        );
-                    }
-                },
-                Err(e) => {
-                    // "if github is configured" — we silently skip when the
-                    // connection lookup fails. The run still proceeds; the
-                    // host-side PR path stays as the fallback.
-                    tracing::warn!(
-                        "Run {}: failed to fetch git provider token for connection {}: {}. \
-                         Agent will run without push/PR credentials.",
-                        run_id,
-                        connection_id,
-                        e
-                    );
-                }
-            }
-
-            // Per-run overrides from the ephemeral YAML take precedence over
-            // global defaults. Only ephemeral runs carry limits today
-            // (committed workflows read the global `AgentSandboxSettings`);
-            // parse the YAML once here to extract them.
-            let (yaml_cpu, yaml_mem): (Option<f64>, Option<u64>) = run
-                .ephemeral_yaml
-                .as_deref()
-                .and_then(|y| serde_yaml::from_str::<temps_core::WorkflowYamlConfig>(y).ok())
-                .map(|y| (y.cpu_limit, y.memory_limit_mb))
-                .unwrap_or((None, None));
-            let cpu_limit = yaml_cpu.unwrap_or(global_sandbox.cpu_limit);
-            let memory_limit_mb = yaml_mem.unwrap_or(global_sandbox.memory_limit_mb);
-
-            // Per-run named volume for `/workspace`. Retained after the run
-            // finishes so a follow-up workspace sandbox can mount the exact
-            // same filesystem (including `.git` and any commits the AI
-            // made). Cleanup belongs to the TTL sweeper, not this path.
-            let workspace_volume = format!("temps-wfrun-{}", run_id);
-            if let Err(e) = self
-                .run_service
-                .update_status(
-                    run_id,
-                    UpdateRunFields {
-                        workspace_volume: Some(workspace_volume.clone()),
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                tracing::warn!("Run {}: failed to persist workspace_volume: {}", run_id, e);
-            }
-
-            let sandbox_config = SandboxCreateConfig {
-                run_id,
-                container_name_override: None,
-                host_work_dir: work_dir.clone(),
-                workspace_volume: Some(workspace_volume),
-                image: resolved_image,
-                cpu_limit: Some(cpu_limit),
-                memory_limit_mb: Some(memory_limit_mb),
-                pids_limit: None,
-                network_mode: Some(global_sandbox.network_mode.clone()),
-                env_vars: sandbox_env,
-                idle_timeout: Duration::from_secs(config.timeout_seconds as u64 + 60),
-            };
-            self.run_service
-                .append_log(
-                    run_id,
-                    "info",
-                    &format!(
-                        "Creating sandbox: runtime={}, image={}, {} CPU, {}MB RAM, network={}",
-                        global_sandbox.runtime,
-                        crate::sandbox::docker::image_name_for_runtime(&global_sandbox.runtime),
-                        cpu_limit,
-                        memory_limit_mb,
-                        global_sandbox.network_mode,
-                    ),
-                    None,
-                )
-                .await?;
-
-            let sandbox_start = std::time::Instant::now();
-            let handle = self.sandbox_registry.get_or_create(sandbox_config).await?;
-
-            self.run_service
-                .append_log(
-                    run_id,
-                    "info",
-                    &format!(
-                        "Sandbox ready in {:.1}s ({}) — container={}, id={}",
-                        sandbox_start.elapsed().as_secs_f64(),
-                        self.sandbox_registry.provider_name(),
-                        handle.sandbox_name,
-                        &handle.sandbox_id[..12.min(handle.sandbox_id.len())],
-                    ),
-                    None,
-                )
-                .await?;
-
-            // Write file-based credentials (ConfigFile / OauthToken) into the
-            // running sandbox. These can't go in env vars — they need the filesystem.
-            if let Some((cred_value, auth_type)) = deferred_credential {
-                if let Some(provider_entry) =
-                    crate::ai_cli::catalog::find_provider(&config.ai_provider)
-                {
-                    if let Some(flavor) = provider_entry.flavor(&auth_type) {
-                        let seed_path = flavor.seed_path;
-                        // Ensure parent directory exists
-                        if let Some(idx) = seed_path.rfind('/') {
-                            let parent = &seed_path[..idx];
-                            let _ = self
-                                .sandbox_registry
-                                .exec(
-                                    run_id,
-                                    vec!["mkdir".into(), "-p".into(), parent.to_string()],
-                                    std::collections::HashMap::new(),
-                                    None,
-                                )
-                                .await;
-                        }
-
-                        let file_bytes = match flavor.format {
-                            crate::ai_cli::catalog::CredentialFormat::OauthToken => {
-                                // Claude OAuth envelope
-                                let body = serde_json::json!({
-                                    "claudeAiOauth": {
-                                        "accessToken": cred_value,
-                                        "expiresAt": chrono::Utc::now().timestamp_millis() + 365 * 24 * 3600 * 1000,
-                                        "scopes": [
-                                            "user:inference",
-                                            "user:mcp_servers",
-                                            "user:profile",
-                                            "user:sessions:claude_code"
-                                        ],
-                                        "subscriptionType": "max",
-                                        "rateLimitTier": "default_claude_max_20x"
-                                    }
-                                });
-                                serde_json::to_vec_pretty(&body).unwrap_or_default()
-                            }
-                            crate::ai_cli::catalog::CredentialFormat::ConfigFile => {
-                                // Codex auth.json / OpenCode auth.json — write verbatim
-                                cred_value.into_bytes()
-                            }
-                            _ => Vec::new(),
-                        };
-
-                        if !file_bytes.is_empty() {
-                            if let Err(e) = self
-                                .sandbox_registry
-                                .write_file(run_id, seed_path, &file_bytes, 0o600)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to write credential file {} for run {}: {}",
-                                    seed_path,
-                                    run_id,
-                                    e
-                                );
-                            } else {
-                                tracing::debug!(
-                                    "Seeded credential file {} for {} on run {}",
-                                    seed_path,
-                                    config.ai_provider,
-                                    run_id
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Install the workflow memory script. Best-effort: if it fails
-            // (e.g. jq not present in a custom image), we log a warning and
-            // continue — the run itself doesn't depend on memory.
-            if let Err(e) = self
-                .sandbox_registry
-                .exec(
-                    run_id,
-                    memory_install_command(),
-                    std::collections::HashMap::new(),
-                    None,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Failed to install memory script for run {}: {}. \
-                     Memory writes from this run will not work.",
-                    run_id,
-                    e
-                );
-            } else {
-                tracing::debug!("Installed memory script for run {}", run_id);
-            }
-
-            // Configure git credential storage + URL rewrite so `git push`
-            // from inside the sandbox authenticates against the project's
-            // HTTPS remote without the agent having to re-paste the token.
-            // We also write `gh` / `glab` CLI config files directly instead
-            // of setting env vars — this keeps the token invisible to AI
-            // CLIs that would otherwise mistake it for a chat credential.
-            if let Some((ref token, ref provider)) = git_creds {
-                let host = match provider.as_str() {
-                    "github" => "github.com",
-                    "gitlab" => "gitlab.com",
-                    _ => "github.com",
-                };
-                let shell_quote = |v: &str| v.replace('\'', "'\\''");
-                let mut script = String::from("set -e\n");
-                script.push_str("mkdir -p /home/temps\n");
-                script.push_str("git config --global init.defaultBranch main\n");
-                script.push_str("git config --global pull.rebase false\n");
-                // x-access-token is the conventional username for token auth
-                // on both GitHub and GitLab — the token is the password.
-                script.push_str(&format!(
-                    "umask 077 && printf 'https://x-access-token:%s@%s\\n' '{}' '{}' > /home/temps/.git-credentials\n",
-                    shell_quote(token),
-                    host,
-                ));
-                script.push_str("git config --global credential.helper store\n");
-                // Force HTTPS even if the AI tries to clone via SSH — we
-                // don't ship SSH keys into the sandbox.
-                script.push_str(&format!(
-                    "git config --global url.'https://{host}/'.insteadOf 'git@{host}:'\n",
-                    host = host,
-                ));
-
-                // Seed the `gh` / `glab` CLI config so the agent can run
-                // `gh pr create` without touching env vars. These files
-                // are only read by the respective CLIs, not by AI chat
-                // providers that scan for GITHUB_TOKEN.
-                match provider.as_str() {
-                    "github" => {
-                        script.push_str("mkdir -p /home/temps/.config/gh\n");
-                        script.push_str(&format!(
-                            "umask 077 && cat > /home/temps/.config/gh/hosts.yml <<'EOF'\n\
-                             github.com:\n\
-                             \x20\x20oauth_token: {}\n\
-                             \x20\x20user: x-access-token\n\
-                             \x20\x20git_protocol: https\n\
-                             EOF\n",
-                            shell_quote(token),
-                        ));
-                    }
-                    "gitlab" => {
-                        script.push_str("mkdir -p /home/temps/.config/glab-cli\n");
-                        script.push_str(&format!(
-                            "umask 077 && cat > /home/temps/.config/glab-cli/config.yml <<'EOF'\n\
-                             hosts:\n\
-                             \x20\x20gitlab.com:\n\
-                             \x20\x20\x20\x20token: {}\n\
-                             \x20\x20\x20\x20git_protocol: https\n\
-                             EOF\n",
-                            shell_quote(token),
-                        ));
-                    }
-                    _ => {}
-                }
-
-                script.push_str("chown -R temps:temps /home/temps/.git-credentials /home/temps/.gitconfig /home/temps/.config 2>/dev/null || true\n");
-
-                if let Err(e) = self
-                    .sandbox_registry
-                    .exec(
-                        run_id,
-                        vec!["sh".to_string(), "-c".to_string(), script],
-                        std::collections::HashMap::new(),
-                        None,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "Run {}: failed to install git credential helper: {}",
-                        run_id,
-                        e
-                    );
-                } else {
-                    tracing::debug!(
-                        "Run {}: installed git credentials for {} provider",
-                        run_id,
-                        provider
-                    );
-                    self.run_service
-                        .append_log(
-                            run_id,
-                            "info",
-                            &format!(
-                                "Injected {} credentials (git push + {} CLI auth, no env vars)",
-                                provider,
-                                if provider == "github" { "gh" } else { "glab" }
-                            ),
-                            None,
-                        )
-                        .await?;
-                }
-            }
-
-            // Step 6c: Inject config repos and secrets into the sandbox
-            if let Err(e) = self
-                .inject_config_repos_and_secrets(
-                    run_id,
-                    &config,
-                    run.project_id,
-                    project.git_provider_connection_id,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Failed to inject config repos/secrets for run {}: {}. Continuing without them.",
-                    run_id,
-                    e
-                );
-                self.run_service
-                    .append_log(
-                        run_id,
-                        "warning",
-                        &format!(
-                            "Config repo/secrets injection failed: {}. Agent will run without them.",
-                            e
-                        ),
-                        None,
-                    )
-                    .await?;
-            }
-        }
+        // Step 6b: Prepare the sandbox workspace — credentials, MCP, skills,
+        // git credentials, memory script. This is the single unified path
+        // shared with the autofixer; any env/file/config tweak belongs here.
+        self.prepare_sandbox_workspace(PrepareWorkspaceParams {
+            run_id,
+            project: &project,
+            agent_config: Some(&config),
+            ai_provider: &config.ai_provider,
+            agent_slug: &config.slug,
+            timeout_seconds: config.timeout_seconds,
+            host_work_dir: work_dir.clone(),
+            ephemeral_yaml: run.ephemeral_yaml.as_deref(),
+        })
+        .await?;
 
         // Step 7: Update status → "analyzing"
         self.run_service
@@ -2041,7 +2117,7 @@ impl AgentExecutor {
                 on_event: Some(on_event),
             };
             override_provider.run(ai_config).await?
-        } else if use_sandbox {
+        } else {
             // OpenCode lstats the first positional arg as a path — long
             // prompts exceed NAME_MAX (255). Write to a temp file so the
             // shell wrapper can `$(cat ...)` it instead.
@@ -2137,29 +2213,6 @@ impl AgentExecutor {
                 session_id: parsed.session_id,
                 is_max_turns_error: parsed.is_max_turns_error,
             }
-        } else {
-            // Direct path: run AI CLI on host (no sandbox)
-            let provider =
-                crate::ai_cli::create_provider(&config.ai_provider).ok_or_else(|| {
-                    AgentError::AiCliNotInstalled {
-                        provider: config.ai_provider.clone(),
-                    }
-                })?;
-            if !provider.check_installed().await {
-                return Err(AgentError::AiCliNotInstalled {
-                    provider: config.ai_provider.clone(),
-                });
-            }
-            let ai_config = AiRunConfig {
-                work_dir: work_dir.clone(),
-                prompt,
-                api_key: api_key.clone(),
-                max_turns: config.max_turns,
-                timeout: Duration::from_secs(config.timeout_seconds as u64),
-                model: config.ai_model.clone(),
-                on_event: Some(on_event),
-            };
-            provider.run(ai_config).await?
         };
 
         // Step 12b: Auto-continue if the CLI hit the max turns limit.
@@ -2213,7 +2266,7 @@ impl AgentExecutor {
                     on_event: Some(on_event),
                 };
                 override_provider.continue_conversation(ai_config).await?
-            } else if use_sandbox {
+            } else {
                 if config.ai_provider == "opencode" {
                     if let Err(e) = self
                         .sandbox_registry
@@ -2288,23 +2341,6 @@ impl AgentExecutor {
                     session_id: parsed.session_id,
                     is_max_turns_error: parsed.is_max_turns_error,
                 }
-            } else {
-                let provider =
-                    crate::ai_cli::create_provider(&config.ai_provider).ok_or_else(|| {
-                        AgentError::AiCliNotInstalled {
-                            provider: config.ai_provider.clone(),
-                        }
-                    })?;
-                let ai_config = AiRunConfig {
-                    work_dir: work_dir.clone(),
-                    prompt: continue_prompt,
-                    api_key: api_key.clone(),
-                    max_turns: config.max_turns,
-                    timeout: Duration::from_secs(config.timeout_seconds as u64),
-                    model: config.ai_model.clone(),
-                    on_event: Some(on_event),
-                };
-                provider.continue_conversation(ai_config).await?
             };
 
             // Merge: append new output, accumulate tokens, keep latest model/session

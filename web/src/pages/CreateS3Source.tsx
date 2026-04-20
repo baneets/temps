@@ -12,6 +12,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { testS3ConnectionPreview } from '@/lib/s3-sources'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation } from '@tanstack/react-query'
 import { ArrowLeft, PlugZap, Plus, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
@@ -29,6 +30,7 @@ interface NewS3Source {
 }
 
 export function CreateS3Source() {
+  usePageTitle('Create S3 Source')
   const navigate = useNavigate()
   const [formData, setFormData] = useState<Partial<NewS3Source>>({
     force_path_style: false,
@@ -41,7 +43,7 @@ export function CreateS3Source() {
     },
     onSuccess: () => {
       toast.success('S3 source created successfully')
-      navigate('/settings/backups')
+      navigate('/backups')
     },
   })
 
@@ -115,7 +117,7 @@ export function CreateS3Source() {
       <div className="mb-6">
         <div className="flex items-center gap-2 mb-2">
           <Link
-            to="/settings/backups"
+            to="/backups"
             className="flex items-center text-muted-foreground hover:text-foreground"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -259,7 +261,7 @@ export function CreateS3Source() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => navigate('/settings/backups')}
+                onClick={() => navigate('/backups')}
               >
                 Cancel
               </Button>

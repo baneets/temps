@@ -21,8 +21,8 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { useSettings } from '@/hooks/useSettings'
-import { listSecrets } from '@/components/agents/api'
+import { listSecretsOptions } from '@/api/client/@tanstack/react-query.gen'
+import { usePageTitle } from '@/hooks/usePageTitle'
 
 // ── Types from existing endpoints ───────────────────────────────────────────
 
@@ -82,13 +82,13 @@ function ToneIcon({ tone }: { tone: Tone }) {
 }
 
 export function AgentSandboxDashboard() {
-  const { data: settings } = useSettings()
-  const sandboxEnabled = settings?.agent_sandbox?.enabled ?? false
-
+  usePageTitle('AI Workflows')
   const { data: catalog, isPending: catalogPending } =
     useQuery<CatalogResponse>({
       queryKey: ['ai-provider-catalog'],
       queryFn: async () => {
+        // TODO(sdk-regen): migrate once /settings/ai-providers endpoint is
+        // added to the generated SDK.
         const r = await fetch('/api/settings/ai-providers')
         if (!r.ok) throw new Error('Failed to load AI provider catalog')
         return r.json()
@@ -100,6 +100,8 @@ export function AgentSandboxDashboard() {
     useQuery<SandboxStatus | null>({
       queryKey: ['sandbox-status'],
       queryFn: async () => {
+        // TODO(sdk-regen): migrate once /settings/sandbox-status endpoint is
+        // added to the generated SDK.
         const r = await fetch('/api/settings/sandbox-status')
         if (!r.ok) return null
         return r.json()
@@ -111,6 +113,8 @@ export function AgentSandboxDashboard() {
     useQuery<GatewayStatus | null>({
       queryKey: ['preview-gateway-status'],
       queryFn: async () => {
+        // TODO(sdk-regen): migrate once /preview-gateway/status endpoint is
+        // added to the generated SDK.
         const r = await fetch('/api/preview-gateway/status')
         if (!r.ok) return null
         return r.json()
@@ -118,10 +122,8 @@ export function AgentSandboxDashboard() {
       staleTime: 30 * 1000,
     })
 
-  const { data: secrets = [] } = useQuery({
-    queryKey: ['agent-secrets'],
-    queryFn: () => listSecrets(),
-  })
+  const { data: secretsData } = useQuery(listSecretsOptions())
+  const secrets = secretsData?.items ?? []
 
   // ── Derive status for each card ────────────────────────────────────────────
   // Provider: ok if active provider has a saved credential; bad if no provider
@@ -145,24 +147,19 @@ export function AgentSandboxDashboard() {
         ? `${activeProvider.name} active`
         : `${activeProvider?.name ?? 'Active provider'} needs credential`
 
-  // Sandbox: ok if Docker available (or sandbox disabled — running on host
-  // is a valid choice); warn if Docker unreachable but sandbox enabled.
+  // Sandbox is always on. ok if Docker is available; bad otherwise.
   const sandboxTone: Tone = sandboxPending
     ? 'pending'
-    : !sandboxEnabled
-      ? 'warn'
-      : sandboxStatus?.docker_available
-        ? 'ok'
-        : 'bad'
+    : sandboxStatus?.docker_available
+      ? 'ok'
+      : 'bad'
   const sandboxLabel = sandboxPending
     ? 'Checking…'
-    : !sandboxEnabled
-      ? 'Disabled — running on host'
-      : sandboxStatus?.docker_available
-        ? sandboxStatus.image_ready
-          ? `Ready (${sandboxStatus.image_name})`
-          : 'Ready — image builds on first run'
-        : 'Docker unavailable'
+    : sandboxStatus?.docker_available
+      ? sandboxStatus.image_ready
+        ? `Ready (${sandboxStatus.image_name})`
+        : 'Ready — image builds on first run'
+      : 'Docker unavailable'
 
   // Preview gateway: ok if running and no drift; warn if drift; bad if not
   // present or stopped.
@@ -255,11 +252,11 @@ export function AgentSandboxDashboard() {
         to: '/agent-sandbox/providers',
       }
     }
-    if (sandboxEnabled && sandboxStatus && !sandboxStatus.docker_available) {
+    if (sandboxStatus && !sandboxStatus.docker_available) {
       return {
         tone: 'bad' as Tone,
-        title: 'Sandbox enabled but Docker is unavailable',
-        body: 'Sessions will fail to start. Either install/start Docker or disable sandbox.',
+        title: 'Docker is unavailable',
+        body: 'Agents always run inside sandboxed containers. Install or start Docker to run sessions.',
         cta: 'Open sandbox settings',
         to: '/agent-sandbox/sandbox',
       }
@@ -360,8 +357,8 @@ export function AgentSandboxDashboard() {
             <div>
               <p className="font-medium">Sandbox</p>
               <p className="text-muted-foreground text-xs">
-                Where the agent runs. Enable for isolated Docker containers; disable
-                to run directly on the host.
+                Agents always run inside an isolated Docker container — never on
+                the host. Requires Docker to be available.
               </p>
             </div>
           </div>

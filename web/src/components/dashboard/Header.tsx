@@ -32,7 +32,7 @@ export function Header() {
   }
 
   const handleProvisionDomain = () => {
-    navigate('/settings/domains')
+    navigate('/domains/add')
   }
 
   const handleCreateApiKey = () => {
@@ -40,7 +40,7 @@ export function Header() {
   }
 
   const handleAddGitProvider = () => {
-    navigate('/settings/git-providers/add')
+    navigate('/git-providers/add')
   }
 
   return (

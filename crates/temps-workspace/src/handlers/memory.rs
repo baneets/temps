@@ -183,7 +183,23 @@ async fn resolve_agent_id(
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn list_memory(
+#[utoipa::path(
+    tag = "WorkspaceMemory",
+    get,
+    path = "/projects/{project_id}/workflows/{slug}/memory",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Workflow agent slug"),
+        ("limit" = Option<u64>, Query, description = "Maximum number of facts to return"),
+    ),
+    responses(
+        (status = 200, body = MemoryListResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Workflow not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_memory(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -204,7 +220,24 @@ async fn list_memory(
     }))
 }
 
-async fn search_memory(
+#[utoipa::path(
+    tag = "WorkspaceMemory",
+    get,
+    path = "/projects/{project_id}/workflows/{slug}/memory/search",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Workflow agent slug"),
+        ("q" = String, Query, description = "Search query"),
+        ("limit" = Option<u64>, Query, description = "Maximum number of facts to return"),
+    ),
+    responses(
+        (status = 200, body = MemoryListResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Workflow not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn search_memory(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -225,7 +258,24 @@ async fn search_memory(
     }))
 }
 
-async fn write_memory(
+#[utoipa::path(
+    tag = "WorkspaceMemory",
+    post,
+    path = "/projects/{project_id}/workflows/{slug}/memory",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Workflow agent slug"),
+    ),
+    request_body = WriteMemoryBody,
+    responses(
+        (status = 201, body = MemoryFactResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Workflow not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn write_memory(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -256,7 +306,24 @@ async fn write_memory(
     Ok((StatusCode::CREATED, Json(MemoryFactResponse::from(fact))))
 }
 
-async fn supersede_memory(
+#[utoipa::path(
+    tag = "WorkspaceMemory",
+    post,
+    path = "/projects/{project_id}/workflows/{slug}/memory/{fact_id}/supersede",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Workflow agent slug"),
+        ("fact_id" = i64, Path, description = "Fact ID to supersede"),
+    ),
+    request_body = SupersedeBody,
+    responses(
+        (status = 200, body = MemoryFactResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Fact or workflow not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn supersede_memory(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, slug, fact_id)): Path<(i32, String, i64)>,
@@ -288,7 +355,23 @@ async fn supersede_memory(
     Ok((StatusCode::OK, Json(MemoryFactResponse::from(new_fact))))
 }
 
-async fn drop_memory(
+#[utoipa::path(
+    tag = "WorkspaceMemory",
+    delete,
+    path = "/projects/{project_id}/workflows/{slug}/memory/{fact_id}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("slug" = String, Path, description = "Workflow agent slug"),
+        ("fact_id" = i64, Path, description = "Fact ID to delete"),
+    ),
+    responses(
+        (status = 204, description = "Fact deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Fact or workflow not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn drop_memory(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, slug, fact_id)): Path<(i32, String, i64)>,

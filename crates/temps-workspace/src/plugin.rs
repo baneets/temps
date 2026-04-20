@@ -279,6 +279,11 @@ impl TempsPlugin for WorkspacePlugin {
         })
     }
 
+    fn openapi_schema(&self) -> Option<utoipa::openapi::OpenApi> {
+        use utoipa::OpenApi;
+        Some(crate::handlers::WorkspaceApiDoc::openapi())
+    }
+
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         let db = context.require_service::<sea_orm::DatabaseConnection>();
         let workspace_service = context.require_service::<WorkspaceService>();

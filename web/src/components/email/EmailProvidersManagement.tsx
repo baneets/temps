@@ -1,5 +1,15 @@
 'use client'
 
+import {
+  createEmailProvider as createProvider2,
+  deleteEmailProvider as deleteProvider2,
+  listEmailProviders as listProviders2,
+  testProvider,
+  type CreateEmailProviderRequest,
+  type EmailProviderResponse,
+  type TestEmailRequest as SdkTestEmailRequest,
+  type TestEmailResponse as SdkTestEmailResponse,
+} from '@/api/client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -48,17 +58,10 @@ import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
-// Types for email providers (matching backend)
-interface EmailProvider {
-  id: number
-  name: string
-  provider_type: 'ses' | 'scaleway'
-  region: string
-  is_active: boolean
-  credentials: Record<string, string>
-  created_at: string
-  updated_at: string
-}
+// Types for email providers — alias over SDK response
+type EmailProvider = EmailProviderResponse
+type TestEmailResponse = SdkTestEmailResponse
+type TestEmailRequest = SdkTestEmailRequest
 
 // Form schema
 const createProviderSchema = z.object({
@@ -86,84 +89,63 @@ const createProviderSchema = z.object({
 
 type CreateProviderFormData = z.infer<typeof createProviderSchema>
 
-// API functions using fetch directly until we regenerate API client
-async function listEmailProviders(): Promise<EmailProvider[]> {
-  const response = await fetch('/api/email-providers')
-  if (!response.ok) {
-    throw new Error('Failed to fetch email providers')
+function problemMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'detail' in error) {
+    const detail = (error as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.length > 0) {
+      return detail
+    }
   }
-  return response.json()
+  return fallback
+}
+
+async function listEmailProviders(): Promise<EmailProvider[]> {
+  const response = await listProviders2()
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email providers'))
+  }
+  return response.data ?? []
 }
 
 async function createEmailProvider(data: CreateProviderFormData): Promise<EmailProvider> {
-  const body: Record<string, unknown> = {
+  const body: CreateEmailProviderRequest = {
     name: data.name,
     provider_type: data.provider_type,
     region: data.region,
   }
 
-  if (data.provider_type === 'ses') {
+  if (data.provider_type === 'ses' && data.access_key_id && data.secret_access_key) {
     body.ses_credentials = {
       access_key_id: data.access_key_id,
       secret_access_key: data.secret_access_key,
     }
-  } else if (data.provider_type === 'scaleway') {
+  } else if (data.provider_type === 'scaleway' && data.api_key && data.project_id) {
     body.scaleway_credentials = {
       api_key: data.api_key,
       project_id: data.project_id,
     }
   }
 
-  const response = await fetch('/api/email-providers', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to create email provider')
+  const response = await createProvider2({ body })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to create email provider'))
   }
-
-  return response.json()
+  return response.data
 }
 
 async function deleteEmailProvider(id: number): Promise<void> {
-  const response = await fetch(`/api/email-providers/${id}`, {
-    method: 'DELETE',
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to delete email provider')
+  const response = await deleteProvider2({ path: { id } })
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to delete email provider'))
   }
-}
-
-interface TestEmailResponse {
-  success: boolean
-  sent_to: string
-  provider_message_id: string | null
-  error: string | null
-}
-
-interface TestEmailRequest {
-  from: string
-  from_name?: string
 }
 
 async function testEmailProvider(id: number, request: TestEmailRequest): Promise<TestEmailResponse> {
-  const response = await fetch(`/api/email-providers/${id}/test`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(request),
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to send test email')
+  const response = await testProvider({ path: { id }, body: request })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to send test email'))
   }
-
-  return response.json()
+  return response.data
 }
 
 // Test email form schema

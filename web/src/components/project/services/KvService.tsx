@@ -86,12 +86,12 @@ export function KvService({ project: _project }: KvServiceProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-primary/10">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-2 rounded-lg bg-primary/10 shrink-0">
             <Database className="h-6 w-6 text-primary" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h1 className="text-xl font-semibold sm:text-2xl">KV Store</h1>
             <p className="text-muted-foreground text-sm">
               Serverless key-value store backed by Redis — no infrastructure to manage
@@ -100,7 +100,7 @@ export function KvService({ project: _project }: KvServiceProps) {
         </div>
         <Badge
           variant={isEnabled ? 'default' : 'secondary'}
-          className="h-7 px-3"
+          className="h-7 px-3 self-start sm:self-auto shrink-0"
         >
           {isEnabled ? (
             <>
@@ -167,7 +167,7 @@ export function KvService({ project: _project }: KvServiceProps) {
                     </div>
                   </div>
                   <Button variant="outline" asChild>
-                    <Link to="/settings/storage?tab=platform" className="gap-2">
+                    <Link to="/storage?tab=platform" className="gap-2">
                       <ExternalLink className="h-4 w-4" />
                       Manage in Storage Settings
                     </Link>
@@ -183,7 +183,7 @@ export function KvService({ project: _project }: KvServiceProps) {
                     </AlertDescription>
                   </Alert>
                   <Button asChild>
-                    <Link to="/settings/storage?tab=platform" className="gap-2">
+                    <Link to="/storage?tab=platform" className="gap-2">
                       <ExternalLink className="h-4 w-4" />
                       Enable in Storage Settings
                     </Link>

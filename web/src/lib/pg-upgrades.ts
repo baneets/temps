@@ -3,6 +3,15 @@
  * regeneration of the OpenAPI client. Once `bun run openapi-ts` is re-run
  * against a server that exposes these endpoints, this file can be deleted
  * and the generated SDK used directly.
+ *
+ * TODO(sdk-regen): replace with generated SDK helpers for
+ *   - GET  /external-services/{service_id}/upgrades
+ *   - GET  /external-services/{service_id}/upgrades/{upgrade_id}
+ *   - GET  /external-services/{service_id}/upgrades/{upgrade_id}/logs
+ *   - POST /external-services/{service_id}/upgrades
+ *   - POST /external-services/{service_id}/upgrades/{upgrade_id}/retry
+ *   - POST /external-services/{service_id}/upgrades/{upgrade_id}/cancel
+ * once these endpoints are included in the OpenAPI spec / generated client.
  */
 
 export interface PgUpgrade {

@@ -28,6 +28,7 @@ import {
   deactivateApiKey,
 } from '@/api/client'
 import { useApiKeyPermissions } from '@/components/api-keys/useApiKeyPermissions'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import {
   ArrowLeft,
   Shield,
@@ -81,6 +82,7 @@ function PermissionsDisplay({ permissions }: PermissionsDisplayProps) {
 }
 
 export default function ApiKeyDetail() {
+  usePageTitle('API Key Details')
   const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
   const queryClient = useQueryClient()
@@ -155,15 +157,15 @@ export default function ApiKeyDetail() {
   }
 
   return (
-    <div className="container max-w-4xl mx-auto py-6 space-y-6">
+    <div className="container max-w-4xl mx-auto px-4 py-6 space-y-6 sm:px-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate('/settings/keys')}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3 min-w-0 sm:items-center sm:gap-4">
+          <Button variant="ghost" size="icon" className="shrink-0" onClick={() => navigate('/settings/keys')}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <div>
-            <h1 className="text-3xl font-bold">{apiKey.name}</h1>
+          <div className="min-w-0">
+            <h1 className="text-2xl sm:text-3xl font-bold truncate">{apiKey.name}</h1>
             <p className="text-muted-foreground mt-1">
               API key details and permissions
             </p>
@@ -190,7 +192,7 @@ export default function ApiKeyDetail() {
       {/* Basic Information */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <CardTitle className="flex items-center gap-2">
                 <Key className="h-5 w-5" />
@@ -198,7 +200,7 @@ export default function ApiKeyDetail() {
               </CardTitle>
               <CardDescription>Overview of your API key</CardDescription>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {apiKey.is_active ? (
                 <Button
                   variant="outline"

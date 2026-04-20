@@ -5,13 +5,13 @@ import {
   Bot,
   CheckCircle2,
   Cpu,
-  Globe,
   Loader2,
   RefreshCw,
   Save,
   XCircle,
 } from 'lucide-react'
 
+import { usePageTitle } from '@/hooks/usePageTitle'
 import {
   Card,
   CardContent,
@@ -23,14 +23,6 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
 import { useSettings, useUpdateSettings } from '@/hooks/useSettings'
 
 interface SandboxStatus {
@@ -63,15 +55,14 @@ function getResourcePresetLabel(cpu: number, memory: number): string {
 }
 
 export function AgentSandboxSandboxPage() {
+  usePageTitle('Sandbox Configuration')
   const { data: settings, isLoading } = useSettings()
   const updateSettings = useUpdateSettings()
 
-  const [enabled, setEnabled] = useState(false)
   const [runtime, setRuntime] = useState('node')
   const [customImage, setCustomImage] = useState('')
   const [cpuLimit, setCpuLimit] = useState(4)
   const [memoryLimitMb, setMemoryLimitMb] = useState(8192)
-  const [networkMode, setNetworkMode] = useState('full')
   const [resourcePreset, setResourcePreset] = useState('Standard')
   const [globalConfigRepo, setGlobalConfigRepo] = useState('')
   const [globalConfigRepoBranch, setGlobalConfigRepoBranch] = useState('main')
@@ -86,6 +77,8 @@ export function AgentSandboxSandboxPage() {
   const fetchSandboxStatus = useCallback(async () => {
     setStatusLoading(true)
     try {
+      // TODO(sdk-regen): migrate once /settings/sandbox-status endpoint is
+      // added to the generated SDK.
       const r = await fetch('/api/settings/sandbox-status')
       if (r.ok) setSandboxStatus(await r.json())
     } catch {
@@ -99,12 +92,10 @@ export function AgentSandboxSandboxPage() {
     if (settings?.agent_sandbox) {
       const s = settings.agent_sandbox
       setDefaultProvider(s.default_provider || 'claude_cli')
-      setEnabled(s.enabled)
       setRuntime(s.runtime || 'node')
       setCustomImage(s.custom_image || '')
       setCpuLimit(s.cpu_limit)
       setMemoryLimitMb(s.memory_limit_mb)
-      setNetworkMode(s.network_mode || 'full')
       setResourcePreset(getResourcePresetLabel(s.cpu_limit, s.memory_limit_mb))
     }
     if (settings?.ai_config) {
@@ -121,6 +112,8 @@ export function AgentSandboxSandboxPage() {
     setRebuilding(true)
     setBuildLog([])
     try {
+      // TODO(sdk-regen): migrate once /settings/sandbox-rebuild (streaming SSE)
+      // endpoint is added to the generated SDK.
       const response = await fetch('/api/settings/sandbox-rebuild', { method: 'POST' })
       if (!response.ok || !response.body) {
         toast.error('Failed to start image rebuild')
@@ -181,15 +174,20 @@ export function AgentSandboxSandboxPage() {
       // save (it's also editable from the providers list).
       await updateSettings.mutateAsync({
         agent_sandbox: {
+          // Carry forward fields we don't edit on this page (providers map,
+          // legacy auth_type / api_key_encrypted) so a save here doesn't wipe
+          // per-provider credentials configured on /agent-sandbox/providers/:id.
+          ...(settings?.agent_sandbox ?? {}),
           default_provider: defaultProvider,
-          enabled,
+          enabled: true,
           runtime,
           custom_image: customImage,
           cpu_limit: cpuLimit,
           memory_limit_mb: memoryLimitMb,
-          network_mode: networkMode,
+          network_mode: settings?.agent_sandbox?.network_mode ?? 'full',
         },
         ai_config: {
+          ...(settings?.ai_config ?? {}),
           config_repo: globalConfigRepo,
           config_repo_branch: globalConfigRepoBranch,
         },
@@ -306,33 +304,14 @@ export function AgentSandboxSandboxPage() {
               ) : null}
             </div>
 
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="sandbox-enabled">Enable sandbox by default</Label>
-                <p className="text-sm text-muted-foreground">
-                  Workflows use sandbox unless individually overridden. Workflows
-                  with sandbox set to "off" in their config will still run on the host.
-                </p>
-              </div>
-              <Switch
-                id="sandbox-enabled"
-                checked={enabled}
-                onCheckedChange={(checked) => {
-                  setEnabled(checked)
-                  setIsDirty(true)
-                }}
-              />
-            </div>
-
-            {!enabled && (
-              <Alert>
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  Sandbox is disabled. Workflows run directly on the host with full
-                  system access. Enable sandbox for better security isolation.
-                </AlertDescription>
-              </Alert>
-            )}
+            <Alert>
+              <AlertTriangle className="h-4 w-4" />
+              <AlertDescription>
+                Agents always run in an isolated Docker container — there is no
+                host-execution mode. Docker must be available for any session
+                to start.
+              </AlertDescription>
+            </Alert>
           </CardContent>
         </Card>
 
@@ -462,58 +441,6 @@ export function AgentSandboxSandboxPage() {
                   />
                 </div>
               </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Globe className="h-4 w-4" />
-              Network Access
-            </CardTitle>
-            <CardDescription>
-              Controls whether sandbox containers can access the internet. Workflows
-              that use web search, MCP servers, or API calls need network access.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Select
-              value={networkMode}
-              onValueChange={(value) => {
-                setNetworkMode(value)
-                setIsDirty(true)
-              }}
-            >
-              <SelectTrigger className="w-full sm:w-[300px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="full">
-                  <span className="font-medium">Full access</span>
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    — unrestricted internet
-                  </span>
-                </SelectItem>
-                <SelectItem value="restricted">
-                  <span className="font-medium">Restricted</span>
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    — Temps network only
-                  </span>
-                </SelectItem>
-                <SelectItem value="none">
-                  <span className="font-medium">No network</span>
-                  <span className="text-muted-foreground ml-2 text-xs">
-                    — fully isolated
-                  </span>
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            {networkMode === 'none' && (
-              <p className="text-xs text-amber-500 mt-2">
-                Workflows won't be able to install packages, use web search, run MCP
-                servers, or call external APIs.
-              </p>
             )}
           </CardContent>
         </Card>

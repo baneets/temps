@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
-import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { usePageTitle } from '@/hooks/usePageTitle'
@@ -12,7 +11,7 @@ import { MetricCardSkeleton } from '@/components/skeletons/MetricCardSkeleton'
 import { ProjectCardSkeleton } from '@/components/skeletons/ProjectCardSkeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { KbdBadge } from '@/components/ui/kbd-badge'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   getGeneralStatsOptions,
   getProjectsOptions,
@@ -27,7 +26,6 @@ import {
   FolderPlus,
   GitBranch,
   Minus,
-  Plus,
   TrendingDown,
   TrendingUp,
   Upload,
@@ -106,7 +104,6 @@ export function Projects() {
   }, [setBreadcrumbs])
 
   // Keyboard shortcut: N to create new project
-  useKeyboardShortcut({ key: 'n', path: '/projects/new' })
 
   // Keyboard shortcuts: Ctrl+1 through Ctrl+9 to navigate to projects
   useEffect(() => {
@@ -195,11 +192,11 @@ export function Projects() {
   }
 
   return (
-    <div className="sm:p-8 space-y-6">
+    <div className="p-4 sm:p-8 space-y-6">
       <ExternalConnectivityAlert showInDashboard dismissible />
 
       {/* Metric cards (merged from former Dashboard page). */}
-      <div className="grid gap-6 md:grid-cols-4">
+      <div className="grid gap-3 grid-cols-2 sm:gap-4 md:grid-cols-4 md:gap-6">
         {generalStatsQuery.isLoading ? (
           <MetricCardSkeleton />
         ) : (
@@ -265,14 +262,14 @@ export function Projects() {
       </div>
 
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
           <p className="text-sm text-muted-foreground">
             Manage your projects and their settings
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button asChild variant="outline">
             <Link
               to="/projects/import-wizard"
@@ -282,13 +279,7 @@ export function Projects() {
               Import Project
             </Link>
           </Button>
-          <Button asChild>
-            <Link to="/projects/new" className="flex items-center gap-2">
-              <Plus className="h-4 w-4" />
-              New Project
-              <KbdBadge keys="N" />
-            </Link>
-          </Button>
+          <CreateActionButton to="/projects/new" label="New Project" />
         </div>
       </div>
 
@@ -342,12 +333,7 @@ export function Projects() {
                 Get started by creating or importing your first project
               </p>
               <div className="flex gap-3 mt-6">
-                <Button asChild>
-                  <Link to="/projects/new" className="flex items-center gap-2">
-                    <Plus className="h-4 w-4" />
-                    New Project
-                  </Link>
-                </Button>
+                <CreateActionButton to="/projects/new" label="New Project" />
                 <Button asChild variant="outline">
                   <Link
                     to="/projects/import-wizard"

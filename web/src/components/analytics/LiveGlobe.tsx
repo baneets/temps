@@ -1,6 +1,13 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getLiveVisitorsListOptions } from '@/api/client/@tanstack/react-query.gen'
+import {
+  getRecentActivity,
+  getEnvironments,
+  type ActivityEvent,
+  type EnvironmentResponse,
+  type RecentActivityResponse,
+} from '@/api/client'
 import type { ProjectResponse, VisitorInfo } from '@/api/client/types.gen'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,31 +41,6 @@ interface LiveGlobePageProps {
   project: ProjectResponse
 }
 
-interface ActivityEvent {
-  id: number
-  timestamp: string
-  event_type: string
-  event_name: string | null
-  page_path: string
-  page_title: string | null
-  visitor_id: number | null
-  browser: string | null
-  operating_system: string | null
-  device_type: string | null
-  referrer: string | null
-  city: string | null
-  country: string | null
-  country_code: string | null
-  latitude: number | null
-  longitude: number | null
-  is_crawler: boolean
-}
-
-interface RecentActivityResponse {
-  events: ActivityEvent[]
-  count: number
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────
 
 function countryCodeToFlag(countryCode: string | null | undefined): string {
@@ -83,7 +65,7 @@ function getTimeAgo(dateStr: string): string {
   return `${diffHours}h ago`
 }
 
-function getDeviceIcon(deviceType: string | null) {
+function getDeviceIcon(deviceType: string | null | undefined) {
   switch (deviceType?.toLowerCase()) {
     case 'mobile':
       return Smartphone
@@ -138,7 +120,7 @@ const EVENT_COLORS = [
   'text-teal-400',
 ]
 
-function getVisitorColor(visitorId: number | null): string {
+function getVisitorColor(visitorId: number | null | undefined): string {
   if (visitorId == null) return 'text-muted-foreground'
   return EVENT_COLORS[hashString(String(visitorId)) % EVENT_COLORS.length]
 }
@@ -276,22 +258,21 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
       },
     ],
     queryFn: async ({ signal }) => {
-      const params = new URLSearchParams({
-        project_id: String(project.id),
-        limit: '50',
-      })
-      if (selectedEnvironment != null) {
-        params.set('environment_id', String(selectedEnvironment))
-      }
-      if (sinceIdRef.current != null) {
-        params.set('since_id', String(sinceIdRef.current))
-      }
-      const res = await fetch(`/api/analytics/recent-activity?${params}`, {
+      const response = await getRecentActivity({
+        query: {
+          project_id: project.id,
+          limit: 50,
+          ...(selectedEnvironment != null
+            ? { environment_id: selectedEnvironment }
+            : {}),
+          ...(sinceIdRef.current != null
+            ? { since_id: sinceIdRef.current }
+            : {}),
+        },
         signal,
-        credentials: 'include',
+        throwOnError: true,
       })
-      if (!res.ok) throw new Error('Failed to fetch recent activity')
-      return res.json()
+      return response.data
     },
     refetchInterval: isPaused ? false : 3000,
   })
@@ -361,14 +342,13 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
   )
 
   // Environments query for the filter
-  const { data: environments } = useQuery({
+  const { data: environments } = useQuery<EnvironmentResponse[]>({
     queryKey: ['getEnvironments', project.id],
     queryFn: async () => {
-      const res = await fetch(`/api/projects/${project.id}/environments`, {
-        credentials: 'include',
+      const response = await getEnvironments({
+        path: { project_id: project.id },
       })
-      if (!res.ok) return []
-      return res.json()
+      return response.data ?? []
     },
   })
 
@@ -428,13 +408,11 @@ export function LiveGlobePage({ project }: LiveGlobePageProps) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All environments</SelectItem>
-                {environments.map(
-                  (env: { id: number; name: string }) => (
-                    <SelectItem key={env.id} value={env.id.toString()}>
-                      {env.name}
-                    </SelectItem>
-                  )
-                )}
+                {environments.map((env) => (
+                  <SelectItem key={env.id} value={env.id.toString()}>
+                    {env.name}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           )}

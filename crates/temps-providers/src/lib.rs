@@ -1,5 +1,6 @@
 //! providers services and utilities
 
+pub mod env_vars_provider_impl;
 pub mod externalsvc;
 pub mod parameter_strategies;
 pub mod postgres_lifecycle;
@@ -17,4 +18,5 @@ pub use query_service::QueryService;
 pub mod handlers;
 
 // Export plugin
+pub use env_vars_provider_impl::ExternalServicesEnvProvider;
 pub use plugin::ProvidersPlugin;

@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod config;
 pub mod deployment;
+pub mod env_vars_provider;
 pub mod error;
 pub mod error_builder;
 pub mod external_plugin;
@@ -37,6 +38,10 @@ pub use audit::*;
 pub use config::*;
 pub use constants::*;
 pub use deployment::*;
+pub use env_vars_provider::{
+    flatten_integration_env_vars, IntegrationEnvVar, IntegrationServiceInfo,
+    ProjectEnvVarsProvider, ProjectIntegrationEnvVars,
+};
 pub use error::*;
 pub use error_builder::*;
 pub use jobs::*;

@@ -28,9 +28,15 @@ use crate::services::CreateDomainRequest;
 /// Configure domain routes
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/email-domains", post(create_domain).get(list_domains))
+        .route(
+            "/email-domains",
+            post(create_email_domain).get(list_email_domains),
+        )
         .route("/email-domains/by-domain/{domain}", get(get_domain_by_name))
-        .route("/email-domains/{id}", get(get_domain).delete(delete_domain))
+        .route(
+            "/email-domains/{id}",
+            get(get_domain).delete(delete_email_domain),
+        )
         .route(
             "/email-domains/{id}/dns-records",
             get(get_domain_dns_records),
@@ -54,7 +60,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn create_domain(
+pub async fn create_email_domain(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     axum::Extension(metadata): axum::Extension<RequestMetadata>,
@@ -134,7 +140,7 @@ pub async fn create_domain(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn list_domains(
+pub async fn list_email_domains(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, Problem> {
@@ -438,7 +444,7 @@ pub async fn verify_domain(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn delete_domain(
+pub async fn delete_email_domain(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     axum::Extension(metadata): axum::Extension<RequestMetadata>,

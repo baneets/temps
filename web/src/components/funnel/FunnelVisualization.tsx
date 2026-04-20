@@ -51,7 +51,7 @@ function FunnelView({
   return (
     <div className="relative">
       {/* Header Metrics Bar */}
-      <div className="grid grid-cols-4 gap-4 mb-8 p-4 bg-muted/30 rounded-lg">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8 p-4 bg-muted/30 rounded-lg">
         <div className="text-center">
           <div className="flex items-center justify-center gap-2 text-muted-foreground mb-1">
             <Users className="h-4 w-4" />
@@ -205,7 +205,7 @@ function FunnelView({
 
                   {/* Additional stats in the card */}
                   {!isFirstStep && (
-                    <div className="mt-4 pt-4 border-t border-white/20 grid grid-cols-2 gap-4 text-sm">
+                    <div className="mt-4 pt-4 border-t border-white/20 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
                       <div>
                         <div className="text-xs opacity-75">
                           From Previous Step
@@ -231,7 +231,7 @@ function FunnelView({
 
       {/* Summary Stats */}
       <div className="mt-8 p-4 bg-muted/30 rounded-lg">
-        <div className="grid grid-cols-3 gap-4 text-center">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
           <div>
             <div className="text-sm text-muted-foreground mb-1">
               Total Drop-off

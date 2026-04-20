@@ -40,7 +40,6 @@ interface QuickstartStep {
 
 interface AiQuickstartProps {
   provider: string
-  sandboxEnabled: boolean
 }
 
 interface CatalogEntry {
@@ -56,7 +55,6 @@ interface CatalogResponse {
 
 export function AiQuickstart({
   provider,
-  sandboxEnabled,
 }: AiQuickstartProps) {
   const [collapsed, setCollapsed] = useState(false)
   const [sandboxStatus, setSandboxStatus] = useState<SandboxStatus | null>(null)
@@ -79,6 +77,8 @@ export function AiQuickstart({
 
   const fetchSandboxStatus = useCallback(async () => {
     try {
+      // TODO(sdk-regen): migrate once /settings/sandbox-status endpoint is
+      // added to the generated SDK.
       const response = await fetch('/api/settings/sandbox-status')
       if (response.ok) {
         setSandboxStatus(await response.json())
@@ -91,6 +91,8 @@ export function AiQuickstart({
 
   useEffect(() => {
     fetchSandboxStatus()
+    // TODO(sdk-regen): migrate once /settings/ai-providers endpoint is added
+    // to the generated SDK.
     fetch('/api/settings/ai-providers')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -115,20 +117,16 @@ export function AiQuickstart({
       icon: <Container className="h-4 w-4" />,
       description: !statusChecked
         ? 'Checking container environment...'
-        : !sandboxEnabled
-          ? 'Sandbox disabled — sessions run directly on host. Enable sandbox below for isolated containers with pre-installed tools.'
-          : !sandboxStatus?.docker_available
-            ? 'Docker is not available. The environment needs Docker to create isolated containers for agent sessions.'
-            : sandboxStatus?.image_ready
-              ? `Environment ready (${sandboxStatus.image_name}). Agents and workspaces will run in isolated containers.`
-              : 'Docker available. Container image will build automatically on first session.',
+        : !sandboxStatus?.docker_available
+          ? 'Docker is not available. Agents always run in isolated containers and require Docker.'
+          : sandboxStatus?.image_ready
+            ? `Environment ready (${sandboxStatus.image_name}). Agents and workspaces will run in isolated containers.`
+            : 'Docker available. Container image will build automatically on first session.',
       status: !statusChecked
         ? 'loading'
-        : !sandboxEnabled
+        : sandboxStatus?.docker_available
           ? 'complete'
-          : sandboxStatus?.docker_available
-            ? 'complete'
-            : 'error',
+          : 'error',
     },
     {
       id: 'credentials',
@@ -253,7 +251,7 @@ export function AiQuickstart({
           )}
 
           {/* Core concepts — collapsed by default */}
-          {!allComplete && <CoreConcepts providerName={providerName} sandboxEnabled={sandboxEnabled} />}
+          {!allComplete && <CoreConcepts providerName={providerName} />}
         </CardContent>
       )}
     </Card>
@@ -262,10 +260,8 @@ export function AiQuickstart({
 
 function CoreConcepts({
   providerName,
-  sandboxEnabled,
 }: {
   providerName: string
-  sandboxEnabled: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -301,9 +297,8 @@ function CoreConcepts({
               <div>
                 <p className="font-medium text-foreground">Environment</p>
                 <p>
-                  {sandboxEnabled
-                    ? 'An isolated Docker container with pre-installed tools, network access, and mounted repository.'
-                    : 'The host machine where agents run directly. Enable sandbox for isolated containers.'}
+                  An isolated Docker container with pre-installed tools,
+                  network access, and mounted repository.
                 </p>
               </div>
             </div>

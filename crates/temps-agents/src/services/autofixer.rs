@@ -8,14 +8,13 @@ use tokio::fs;
 use tokio::process::Command;
 
 use temps_core::{EncryptionService, JobQueue};
-use temps_entities::{error_events, error_groups, projects, settings};
+use temps_entities::{error_events, error_groups, projects};
 use temps_error_tracking::services::source_map_service::SourceMapService;
 use temps_git::services::git_provider_manager_trait::{GitProviderManagerTrait, PullRequest};
 
 use crate::ai_cli::OnEventCallback;
 use crate::error::AgentError;
-use crate::sandbox::SandboxCreateConfig;
-use crate::services::executor::build_claude_cmd;
+use crate::services::executor::{build_claude_cmd, AgentExecutor, PrepareWorkspaceParams};
 use crate::services::run_service::{AgentRunService, UpdateRunFields};
 use crate::services::sandbox_registry::SandboxRegistry;
 
@@ -34,9 +33,16 @@ pub struct AutofixerService {
     run_service: Arc<AgentRunService>,
     source_map_service: Arc<SourceMapService>,
     sandbox_registry: Arc<SandboxRegistry>,
+    /// Shared executor used for the unified sandbox workspace setup
+    /// (credentials, MCP, skills, git credentials, memory script).
+    /// Both regular workflow runs and autofixer runs go through
+    /// `AgentExecutor::prepare_sandbox_workspace`, so any change to the AI
+    /// agent environment applies uniformly.
+    executor: Arc<AgentExecutor>,
 }
 
 impl AutofixerService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<DatabaseConnection>,
         git_provider_manager: Arc<dyn GitProviderManagerTrait>,
@@ -45,6 +51,7 @@ impl AutofixerService {
         run_service: Arc<AgentRunService>,
         source_map_service: Arc<SourceMapService>,
         sandbox_registry: Arc<SandboxRegistry>,
+        executor: Arc<AgentExecutor>,
     ) -> Self {
         Self {
             db,
@@ -54,6 +61,7 @@ impl AutofixerService {
             run_service,
             source_map_service,
             sandbox_registry,
+            executor,
         }
     }
 
@@ -162,46 +170,27 @@ impl AutofixerService {
                 ),
             })?;
 
-        // Load global sandbox settings for resource limits and auth token
-        let global_sandbox = settings::Entity::find_by_id(1)
-            .one(self.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data.get("agent_sandbox").cloned().and_then(|v| {
-                    serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
-                })
+        // Prepare the sandbox workspace through the shared executor helper.
+        //
+        // This is the ONLY place autofixer sets up the AI environment — it
+        // uses the exact same code path as regular workflow runs so the
+        // Claude OAuth credential file, MCP servers, skills, memory script,
+        // and git credentials all get installed identically. Previously
+        // autofixer had its own ad-hoc setup that only wrote an env var and
+        // skipped everything else, which caused Claude to fail with
+        // "Not logged in".
+        self.executor
+            .prepare_sandbox_workspace(PrepareWorkspaceParams {
+                run_id,
+                project: &project,
+                agent_config: None,
+                ai_provider: "claude_cli",
+                agent_slug: "autofixer",
+                timeout_seconds: 600,
+                host_work_dir: work_dir.clone(),
+                ephemeral_yaml: None,
             })
-            .unwrap_or_default();
-
-        // Inject auth credentials into sandbox based on auth_type
-        let mut sandbox_env = std::collections::HashMap::new();
-        if let Some(ref encrypted_key) = global_sandbox.api_key_encrypted {
-            if let Ok(key) = self.encryption_service.decrypt_string(encrypted_key) {
-                if global_sandbox.auth_type == "subscription" {
-                    sandbox_env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key);
-                } else {
-                    sandbox_env.insert("ANTHROPIC_API_KEY".to_string(), key);
-                }
-            }
-        }
-
-        // Create sandbox for this run (persists across analysis → fix → PR phases)
-        let sandbox_config = SandboxCreateConfig {
-            run_id,
-            container_name_override: None,
-            host_work_dir: work_dir.clone(),
-            workspace_volume: None,
-            image: Some(format!("temps-sandbox-{}:latest", global_sandbox.runtime)),
-            cpu_limit: Some(global_sandbox.cpu_limit),
-            memory_limit_mb: Some(global_sandbox.memory_limit_mb),
-            pids_limit: None,
-            network_mode: Some(global_sandbox.network_mode.clone()),
-            env_vars: sandbox_env,
-            idle_timeout: Duration::from_secs(3600),
-        };
-        self.sandbox_registry.get_or_create(sandbox_config).await?;
+            .await?;
 
         // Update status → "analyzing"
         self.run_service

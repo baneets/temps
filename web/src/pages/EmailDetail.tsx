@@ -433,7 +433,7 @@ function EmailDetailContent({ email }: { email: EmailResponse }) {
           </CardHeader>
           <CardContent>
             <Tabs defaultValue={defaultTab} className="w-full">
-              <TabsList className="grid w-full grid-cols-4 mb-4">
+              <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4 mb-4 h-auto">
                 {hasHtml && (
                   <TabsTrigger value="preview" className="gap-2">
                     <Eye className="h-4 w-4" />

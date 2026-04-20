@@ -1,8 +1,20 @@
 'use client'
 
 import {
-  listProviders as listDnsProviders,
+  createEmailDomain as createEmailDomainSdk,
+  deleteEmailDomain as deleteEmailDomainSdk,
+  getDomain,
+  listDnsProviders,
+  listEmailDomains as listEmailDomainsSdk,
+  listEmailProviders as listEmailProvidersSdk,
+  setupDns,
+  verifyDomain,
+  type CreateEmailDomainRequest,
   type DnsProviderResponse,
+  type EmailDomainResponse,
+  type EmailDomainWithDnsResponse,
+  type EmailProviderResponse,
+  type SetupDnsResponse,
 } from '@/api/client'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -74,39 +86,12 @@ import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
-// Types
+// Types (aliases over SDK types for local readability)
 type DnsRecordStatus = 'unknown' | 'verified' | 'pending' | 'failed'
-
-interface DnsRecord {
-  record_type: string
-  name: string
-  value: string
-  priority?: number
-  status?: DnsRecordStatus
-}
-
-interface EmailDomain {
-  id: number
-  provider_id: number
-  domain: string
-  status: string
-  last_verified_at: string | null
-  verification_error: string | null
-  created_at: string
-  updated_at: string
-}
-
-interface EmailDomainWithDns {
-  domain: EmailDomain
-  dns_records: DnsRecord[]
-}
-
-interface EmailProvider {
-  id: number
-  name: string
-  provider_type: 'ses' | 'scaleway'
-  region: string
-}
+type EmailDomain = EmailDomainResponse
+type EmailDomainWithDns = EmailDomainWithDnsResponse
+type EmailProvider = EmailProviderResponse
+type DnsRecord = EmailDomainWithDnsResponse['dns_records'][number]
 
 // Form schema
 const createDomainSchema = z.object({
@@ -122,102 +107,82 @@ const createDomainSchema = z.object({
 
 type CreateDomainFormData = z.infer<typeof createDomainSchema>
 
-// API functions
-async function listEmailDomains(): Promise<EmailDomain[]> {
-  const response = await fetch('/api/email-domains')
-  if (!response.ok) {
-    throw new Error('Failed to fetch email domains')
+function problemMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'detail' in error) {
+    const detail = (error as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.length > 0) {
+      return detail
+    }
   }
-  return response.json()
+  return fallback
+}
+
+// API functions backed by the generated SDK
+async function listEmailDomains(): Promise<EmailDomain[]> {
+  const response = await listEmailDomainsSdk()
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email domains'))
+  }
+  return response.data ?? []
 }
 
 async function getEmailDomain(id: number): Promise<EmailDomainWithDns> {
-  const response = await fetch(`/api/email-domains/${id}`)
-  if (!response.ok) {
-    throw new Error('Failed to fetch email domain')
+  const response = await getDomain({ path: { id } })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email domain'))
   }
-  return response.json()
+  return response.data
 }
 
 async function createEmailDomain(
   data: CreateDomainFormData
 ): Promise<EmailDomainWithDns> {
-  const response = await fetch('/api/email-domains', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to create email domain')
+  const body: CreateEmailDomainRequest = {
+    provider_id: data.provider_id,
+    domain: data.domain,
   }
-
-  return response.json()
+  const response = await createEmailDomainSdk({ body })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to create email domain'))
+  }
+  return response.data
 }
 
 async function verifyEmailDomain(id: number): Promise<EmailDomainWithDns> {
-  const response = await fetch(`/api/email-domains/${id}/verify`, {
-    method: 'POST',
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to verify email domain')
+  const response = await verifyDomain({ path: { id } })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to verify email domain'))
   }
-
-  return response.json()
+  return response.data
 }
 
 async function deleteEmailDomain(id: number): Promise<void> {
-  const response = await fetch(`/api/email-domains/${id}`, {
-    method: 'DELETE',
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to delete email domain')
+  const response = await deleteEmailDomainSdk({ path: { id } })
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to delete email domain'))
   }
 }
 
 async function listEmailProviders(): Promise<EmailProvider[]> {
-  const response = await fetch('/api/email-providers')
-  if (!response.ok) {
-    throw new Error('Failed to fetch email providers')
+  const response = await listEmailProvidersSdk()
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email providers'))
   }
-  return response.json()
+  return response.data ?? []
 }
 
-// DNS setup types
-interface DnsRecordSetupResult {
-  record_type: string
-  name: string
-  success: boolean
-  automatic: boolean
-  message: string
-}
-
-interface SetupDnsResponse {
-  success: boolean
-  records_created: number
-  total_records: number
-  results: DnsRecordSetupResult[]
-  message: string
-}
-
-async function setupDnsRecords(domainId: number, dnsProviderId: number): Promise<SetupDnsResponse> {
-  const response = await fetch(`/api/email-domains/${domainId}/setup-dns`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dns_provider_id: dnsProviderId }),
+async function setupDnsRecords(
+  domainId: number,
+  dnsProviderId: number
+): Promise<SetupDnsResponse> {
+  const response = await setupDns({
+    path: { id: domainId },
+    body: { dns_provider_id: dnsProviderId },
   })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to setup DNS records')
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to setup DNS records'))
   }
-
-  return response.json()
+  return response.data
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -523,11 +488,14 @@ export function EmailDomainsManagement() {
   })
 
   // Query for DNS providers (from temps-dns crate)
-  const { data: dnsProviders } = useQuery({
+  const { data: dnsProviders } = useQuery<DnsProviderResponse[]>({
     queryKey: ['dns-providers'],
     queryFn: async () => {
       const response = await listDnsProviders()
-      return response.data as DnsProviderResponse[]
+      if (response.error) {
+        throw new Error(problemMessage(response.error, 'Failed to fetch DNS providers'))
+      }
+      return response.data ?? []
     },
   })
 

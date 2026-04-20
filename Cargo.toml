@@ -71,6 +71,7 @@ members = [
     "crates/temps-edge",
     "crates/temps-preview-gateway",
     "crates/temps-external-plugins",
+    "crates/temps-revenue",
     "examples/example-plugin",
     "examples/lighthouse-plugin",
     "examples/indexnow-plugin",

@@ -36,8 +36,10 @@ import {
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
+import { usePageTitle } from '@/hooks/usePageTitle'
 
 export default function ApiKeyCreate() {
+  usePageTitle('Create API Key')
   const navigate = useNavigate()
   const [step, setStep] = useState(1)
   const [keyName, setKeyName] = useState('')

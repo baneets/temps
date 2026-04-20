@@ -22,16 +22,33 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
-  createAgent,
-  listGlobalMcpDefinitions,
-  listGlobalSkillDefinitions,
-  listMcpDefinitions,
-  listSkillDefinitions,
-  updateAgent,
-  type Agent,
-  type CreateAgentRequest,
-  type UpdateAgentRequest,
-} from './api'
+  createAgentMutation,
+  listAgentsQueryKey,
+  listGlobalMcpsOptions,
+  listGlobalSkillsOptions,
+  listMcpsOptions,
+  listSkillsOptions,
+  updateAgentMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import type {
+  AgentConfigResponse,
+  UpsertAgentRequest,
+} from '@/api/client/types.gen'
+
+export interface TriggerConfig {
+  error?: { new_issue?: boolean; regression?: boolean }
+  deploy?: { production?: boolean; preview?: boolean }
+  monitoring?: { downtime?: boolean; latency_spike?: boolean }
+  schedule?: { cron?: string | null }
+  manual?: boolean
+  webhook?: boolean
+}
+
+export type Agent = Omit<AgentConfigResponse, 'trigger_config' | 'skills_config' | 'mcp_servers_config'> & {
+  trigger_config?: TriggerConfig | null
+  skills_config?: string[] | null
+  mcp_servers_config?: string[] | null
+}
 
 interface AgentSettingsDialogProps {
   open: boolean
@@ -62,7 +79,6 @@ export function AgentSettingsDialog({
   const [cooldownMinutes, setCooldownMinutes] = useState(agent?.cooldown_minutes ?? 30)
   const [branchPrefix, setBranchPrefix] = useState(agent?.branch_prefix ?? 'agents/')
   const [deliverable, setDeliverable] = useState(agent?.deliverable ?? 'pull_request')
-  const [sandboxEnabled, setSandboxEnabled] = useState<boolean | null>(agent?.sandbox_enabled ?? null)
   const [configRepoUrl, setConfigRepoUrl] = useState(agent?.config_repo_url ?? '')
   const [configRepoBranch, setConfigRepoBranch] = useState(agent?.config_repo_branch ?? '')
 
@@ -103,7 +119,6 @@ export function AgentSettingsDialog({
     setCooldownMinutes(agent?.cooldown_minutes ?? 30)
     setBranchPrefix(agent?.branch_prefix ?? 'agents/')
     setDeliverable(agent?.deliverable ?? 'pull_request')
-    setSandboxEnabled(agent?.sandbox_enabled ?? null)
     setConfigRepoUrl(agent?.config_repo_url ?? '')
     setConfigRepoBranch(agent?.config_repo_branch ?? '')
     setSelectedSkills(agent?.skills_config ?? [])
@@ -149,31 +164,31 @@ export function AgentSettingsDialog({
   }, [isEdit, providerCatalog?.default_provider])
 
   // Fetch available definitions: project-level + global
-  const { data: projectSkills = [] } = useQuery({
-    queryKey: ['skill-definitions', projectId],
-    queryFn: () => listSkillDefinitions(projectId),
+  const { data: projectSkillsData } = useQuery({
+    ...listSkillsOptions({ path: { project_id: projectId } }),
     enabled: open,
   })
-  const { data: globalSkills = [] } = useQuery({
-    queryKey: ['global-skills'],
-    queryFn: () => listGlobalSkillDefinitions(),
+  const { data: globalSkillsData } = useQuery({
+    ...listGlobalSkillsOptions(),
     enabled: open,
   })
+  const projectSkills = projectSkillsData?.items ?? []
+  const globalSkills = globalSkillsData?.items ?? []
   const availableSkills = [
     ...projectSkills,
     ...globalSkills.filter((g) => !projectSkills.some((p) => p.slug === g.slug)),
   ]
 
-  const { data: projectMcps = [] } = useQuery({
-    queryKey: ['mcp-definitions', projectId],
-    queryFn: () => listMcpDefinitions(projectId),
+  const { data: projectMcpsData } = useQuery({
+    ...listMcpsOptions({ path: { project_id: projectId } }),
     enabled: open,
   })
-  const { data: globalMcps = [] } = useQuery({
-    queryKey: ['global-mcp-servers'],
-    queryFn: () => listGlobalMcpDefinitions(),
+  const { data: globalMcpsData } = useQuery({
+    ...listGlobalMcpsOptions(),
     enabled: open,
   })
+  const projectMcps = projectMcpsData?.items ?? []
+  const globalMcps = globalMcpsData?.items ?? []
   const availableMcps = [
     ...projectMcps,
     ...globalMcps.filter((g) => !projectMcps.some((p) => p.slug === g.slug)),
@@ -192,10 +207,12 @@ export function AgentSettingsDialog({
   }
 
   const createMutation = useMutation({
-    mutationFn: (data: CreateAgentRequest) => createAgent(projectId, data),
+    ...createAgentMutation(),
     onSuccess: () => {
       toast.success('Workflow created')
-      queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
+      queryClient.invalidateQueries({
+        queryKey: listAgentsQueryKey({ path: { project_id: projectId } }),
+      })
       onOpenChange(false)
     },
     onError: (error: Error) => {
@@ -204,11 +221,12 @@ export function AgentSettingsDialog({
   })
 
   const updateMutation = useMutation({
-    mutationFn: (data: UpdateAgentRequest) =>
-      updateAgent(projectId, agent!.slug, data),
+    ...updateAgentMutation(),
     onSuccess: () => {
       toast.success('Workflow updated')
-      queryClient.invalidateQueries({ queryKey: ['agents', projectId] })
+      queryClient.invalidateQueries({
+        queryKey: listAgentsQueryKey({ path: { project_id: projectId } }),
+      })
       onOpenChange(false)
     },
     onError: (error: Error) => {
@@ -228,7 +246,8 @@ export function AgentSettingsDialog({
     }
 
     if (isEdit) {
-      updateMutation.mutate({
+      const body: UpsertAgentRequest = {
+        slug: agent!.slug,
         name,
         description: description || undefined,
         enabled,
@@ -242,11 +261,14 @@ export function AgentSettingsDialog({
         cooldown_minutes: cooldownMinutes,
         branch_prefix: branchPrefix,
         deliverable,
-        sandbox_enabled: sandboxEnabled ?? undefined,
         config_repo_url: configRepoUrl || null,
         config_repo_branch: configRepoBranch || null,
         mcp_servers_config: selectedMcps.length > 0 ? selectedMcps : null,
         skills_config: selectedSkills.length > 0 ? selectedSkills : null,
+      }
+      updateMutation.mutate({
+        path: { project_id: projectId, slug: agent!.slug },
+        body,
       })
     } else {
       if (!slug.trim()) {
@@ -257,7 +279,7 @@ export function AgentSettingsDialog({
         toast.error('Name is required')
         return
       }
-      createMutation.mutate({
+      const body: UpsertAgentRequest = {
         slug: slug.trim(),
         name: name.trim(),
         description: description || undefined,
@@ -272,11 +294,14 @@ export function AgentSettingsDialog({
         cooldown_minutes: cooldownMinutes,
         branch_prefix: branchPrefix,
         deliverable,
-        sandbox_enabled: sandboxEnabled ?? undefined,
         config_repo_url: configRepoUrl || undefined,
         config_repo_branch: configRepoBranch || undefined,
         mcp_servers_config: selectedMcps.length > 0 ? selectedMcps : undefined,
         skills_config: selectedSkills.length > 0 ? selectedSkills : undefined,
+      }
+      createMutation.mutate({
+        path: { project_id: projectId },
+        body,
       })
     }
   }
@@ -520,36 +545,6 @@ export function AgentSettingsDialog({
                 onChange={(e) => setBranchPrefix(e.target.value)}
                 placeholder="agents/"
               />
-            </div>
-          </div>
-
-          {/* Sandbox */}
-          <div className="space-y-3">
-            <h3 className="text-sm font-medium">Sandbox</h3>
-            <div className="space-y-1.5">
-              <Label htmlFor="sandbox-mode" className="text-sm font-normal">
-                Isolation mode
-              </Label>
-              <Select
-                value={sandboxEnabled === null ? 'default' : sandboxEnabled ? 'on' : 'off'}
-                onValueChange={(value) => {
-                  setSandboxEnabled(
-                    value === 'default' ? null : value === 'on'
-                  )
-                }}
-              >
-                <SelectTrigger id="sandbox-mode" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="default">Use global setting</SelectItem>
-                  <SelectItem value="on">Always sandbox</SelectItem>
-                  <SelectItem value="off">Always host</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                "Use global setting" follows the sandbox default from Settings.
-              </p>
             </div>
           </div>
 

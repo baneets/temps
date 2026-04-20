@@ -20,9 +20,9 @@ use utoipa::OpenApi;
 
 use super::types::{
     AddEnvironmentDomainRequest, CreateEnvironmentRequest, CreateEnvironmentVariableRequest,
-    EnvironmentDomainResponse, EnvironmentInfo, EnvironmentResponse, EnvironmentVariableResponse,
-    EnvironmentVariableValueResponse, GetEnvironmentVariablesQuery,
-    UpdateEnvironmentSettingsRequest,
+    EnvVarIntegrationInfo, EnvironmentDomainResponse, EnvironmentInfo, EnvironmentResponse,
+    EnvironmentVariableResponse, EnvironmentVariableValueResponse, GetEnvironmentVariablesQuery,
+    ResolvedEnvVarResponse, ResolvedEnvVarSource, UpdateEnvironmentSettingsRequest,
 };
 use temps_core::problemdetails::Problem;
 
@@ -388,6 +388,257 @@ pub async fn get_environment_variables(
         .collect();
 
     Ok(Json(response))
+}
+
+/// Resolved env vars for a project (manual + integration-sourced, merged).
+///
+/// Returns the effective set of environment variables a deployment would see,
+/// combining manually-defined vars with those contributed by linked external
+/// services (Postgres, Redis, S3, etc.). Each entry is tagged with its source
+/// so the UI can render an integration icon, and manual entries that shadow an
+/// integration key carry a reference to the integration they override.
+///
+/// Values are always returned as a masked preview. Use the per-key reveal
+/// endpoint for plaintext (audit-logged).
+#[utoipa::path(
+    get,
+    path = "/projects/{project_id}/env-vars/resolved",
+    tag = "Projects",
+    responses(
+        (status = 200, description = "Resolved environment variables", body = Vec<ResolvedEnvVarResponse>),
+        (status = 404, description = "Project not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID or slug"),
+        ("environment_id" = Option<i32>, Query, description = "Optional environment ID to filter manual vars by")
+    )
+)]
+pub async fn get_resolved_environment_variables(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<i32>,
+    Query(params): Query<GetEnvironmentVariablesQuery>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EnvironmentsRead);
+
+    // Manual vars (already includes environment memberships).
+    let manual = state
+        .env_var_service
+        .get_environment_variables(project_id, params.environment_id)
+        .await?;
+
+    // Every environment on the project — used to surface integration vars
+    // against the whole environment set since integrations are not scoped.
+    let all_envs = state
+        .environment_service
+        .get_environments(project_id)
+        .await?;
+    let env_infos: Vec<EnvironmentInfo> = all_envs
+        .into_iter()
+        .map(|e| EnvironmentInfo {
+            id: e.id,
+            name: e.name,
+            main_url: e.subdomain,
+            current_deployment_id: e.current_deployment_id,
+        })
+        .collect();
+
+    // Integration vars, if the provider is wired up. Missing provider = manual
+    // only (keeps the handler useful in test harnesses that skip the providers
+    // plugin).
+    let integrations = match state.integration_env_provider.as_ref() {
+        Some(provider) => provider
+            .get_project_integration_env_vars(project_id)
+            .await
+            .map_err(|e| {
+                error!("Failed to load integration env vars: {}", e);
+                temps_core::error_builder::internal_server_error()
+                    .detail(format!("Failed to load integration env vars: {}", e))
+                    .build()
+            })?,
+        None => Vec::new(),
+    };
+
+    // Flatten integrations into a lookup keyed by env var name. Last writer
+    // wins on collisions between two integrations — rare in practice (Postgres
+    // + Redis don't share keys) but worth a log line when it happens.
+    let mut integration_by_key: std::collections::HashMap<String, EnvVarIntegrationInfo> =
+        std::collections::HashMap::new();
+    for svc in &integrations {
+        let info = EnvVarIntegrationInfo {
+            service_id: svc.service.service_id,
+            service_name: svc.service.service_name.clone(),
+            service_type: svc.service.service_type.clone(),
+            service_slug: svc.service.service_slug.clone(),
+        };
+        for var in &svc.variables {
+            if let Some(prev) = integration_by_key.insert(var.key.clone(), info.clone()) {
+                info!(
+                    project_id,
+                    key = %var.key,
+                    previous_service_id = prev.service_id,
+                    new_service_id = info.service_id,
+                    "resolved_env_vars: two integrations produced the same key; later one wins"
+                );
+            }
+        }
+    }
+
+    let mut manual_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut response: Vec<ResolvedEnvVarResponse> = Vec::new();
+
+    // Manual vars first — preserves the original ordering (updated_at desc).
+    for v in manual {
+        let overrides_service = integration_by_key.get(&v.key).cloned();
+        manual_keys.insert(v.key.clone());
+        response.push(ResolvedEnvVarResponse {
+            key: v.key,
+            value_preview: "***".to_string(),
+            source: ResolvedEnvVarSource::Manual {
+                var_id: v.id,
+                overrides_service,
+            },
+            environments: v
+                .environments
+                .into_iter()
+                .map(|env| EnvironmentInfo {
+                    id: env.id,
+                    name: env.name,
+                    main_url: env.main_url,
+                    current_deployment_id: env.current_deployment_id,
+                })
+                .collect(),
+            include_in_preview: v.include_in_preview,
+        });
+    }
+
+    // Integration vars that are not shadowed by a manual entry.
+    for svc in integrations {
+        let info = EnvVarIntegrationInfo {
+            service_id: svc.service.service_id,
+            service_name: svc.service.service_name,
+            service_type: svc.service.service_type,
+            service_slug: svc.service.service_slug,
+        };
+        for var in svc.variables {
+            if manual_keys.contains(&var.key) {
+                continue;
+            }
+            response.push(ResolvedEnvVarResponse {
+                key: var.key,
+                value_preview: "***".to_string(),
+                source: ResolvedEnvVarSource::Integration {
+                    service: info.clone(),
+                },
+                environments: env_infos.clone(),
+                include_in_preview: true,
+            });
+        }
+    }
+
+    Ok(Json(response))
+}
+
+/// Reveal the plaintext value of a resolved environment variable.
+///
+/// Mirrors `GET /projects/{id}/env-vars/{key}/value` but handles keys sourced
+/// from linked integrations (which are not stored in the `env_vars` table).
+/// Resolution order mirrors the merged view:
+///
+/// 1. Manual env var with this key (already audit-logged via the existing reveal
+///    endpoint flow) — this endpoint defers to the manual store when the key
+///    exists there, so callers can use a single endpoint regardless of source.
+/// 2. Integration env var supplied by a linked external service.
+///
+/// Returns 404 when neither a manual var nor an integration produces the key.
+#[utoipa::path(
+    get,
+    path = "/projects/{project_id}/env-vars/resolved/{key}/value",
+    tag = "Projects",
+    responses(
+        (status = 200, description = "Resolved environment variable value", body = EnvironmentVariableValueResponse),
+        (status = 404, description = "Project, key, or integration not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID or slug"),
+        ("key" = String, Path, description = "Environment variable key"),
+        ("environment_id" = Option<i32>, Query, description = "Optional environment ID (manual vars only)")
+    )
+)]
+pub async fn get_resolved_environment_variable_value(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, key)): Path<(i32, String)>,
+    Query(params): Query<GetEnvironmentVariablesQuery>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, EnvironmentsRead);
+
+    info!(
+        user_id = auth.user_id(),
+        project_id = project_id,
+        env_var_key = %key,
+        environment_id = ?params.environment_id,
+        "env_var.reveal_resolved"
+    );
+
+    // Prefer a manual value when one exists — same audit surface as the
+    // per-key reveal endpoint, and manual values shadow integration values.
+    match state
+        .env_var_service
+        .get_environment_variable_value(project_id, &key, params.environment_id)
+        .await
+    {
+        Ok(value) => return Ok(Json(EnvironmentVariableValueResponse { value })),
+        Err(crate::services::env_var_service::EnvVarError::NotFound(_)) => {
+            // Fall through to integration lookup.
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    // No manual entry — look the key up in the integration provider.
+    let provider = state.integration_env_provider.as_ref().ok_or_else(|| {
+        temps_core::error_builder::not_found()
+            .title("Environment variable not found")
+            .detail(format!(
+                "Environment variable '{}' not found for project {}",
+                key, project_id
+            ))
+            .build()
+    })?;
+
+    let services = provider
+        .get_project_integration_env_vars(project_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to load integration env vars: {}", e);
+            temps_core::error_builder::internal_server_error()
+                .detail(format!("Failed to load integration env vars: {}", e))
+                .build()
+        })?;
+
+    // Walk services in order; later services win on collisions (matches the
+    // list endpoint).
+    let mut resolved_value: Option<String> = None;
+    for svc in &services {
+        for var in &svc.variables {
+            if var.key == key {
+                resolved_value = Some(var.value.clone());
+            }
+        }
+    }
+
+    match resolved_value {
+        Some(value) => Ok(Json(EnvironmentVariableValueResponse { value })),
+        None => Err(temps_core::error_builder::not_found()
+            .title("Environment variable not found")
+            .detail(format!(
+                "Environment variable '{}' not found for project {}",
+                key, project_id
+            ))
+            .build()),
+    }
 }
 
 /// Create a new environment variable
@@ -1185,6 +1436,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             get(get_environment_variables),
         )
         .route(
+            "/projects/{project_id}/env-vars/resolved",
+            get(get_resolved_environment_variables),
+        )
+        .route(
             "/projects/{project_id}/env-vars",
             post(create_environment_variable),
         )
@@ -1199,6 +1454,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route(
             "/projects/{project_id}/env-vars/{key}/value",
             get(get_environment_variable_value),
+        )
+        .route(
+            "/projects/{project_id}/env-vars/resolved/{key}/value",
+            get(get_resolved_environment_variable_value),
         )
 }
 
@@ -1216,10 +1475,12 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         add_environment_domain,
         delete_environment_domain,
         get_environment_variables,
+        get_resolved_environment_variables,
         create_environment_variable,
         update_environment_variable,
         delete_environment_variable,
         get_environment_variable_value,
+        get_resolved_environment_variable_value,
     ),
     components(
         schemas(
@@ -1233,6 +1494,9 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             EnvironmentVariableValueResponse,
             GetEnvironmentVariablesQuery,
             EnvironmentInfo,
+            ResolvedEnvVarResponse,
+            ResolvedEnvVarSource,
+            EnvVarIntegrationInfo,
         )
     ),
     tags(

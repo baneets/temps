@@ -27,6 +27,6 @@ mod tests {
         let cmd = install_command();
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
-        assert!(cmd[2].contains("/workspace/.temps/bin/memory"));
+        assert!(cmd[2].contains("/home/temps/.temps/bin/memory"));
     }
 }

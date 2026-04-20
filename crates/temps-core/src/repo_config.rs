@@ -219,7 +219,9 @@ pub struct AgentYamlConfig {
     pub skills: Option<Vec<String>>,
     /// Private config repo containing `.claude/` directory (skills, MCP servers, settings).
     /// Format: "owner/repo" (e.g. "myorg/claude-config"). Cloned at runtime and
-    /// overlaid into the sandbox's `/workspace/.claude/` directory.
+    /// overlaid into the sandbox's `/home/temps/.claude/` directory (kept out
+    /// of the bind-mounted `/workspace` repo to avoid leaking resolved secrets
+    /// into PR diffs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_repo: Option<String>,
     /// Branch of the config repo to use (default: "main").

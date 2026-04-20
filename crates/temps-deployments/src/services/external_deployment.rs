@@ -58,9 +58,13 @@ pub struct DeployExternalImageRequest {
     pub environment_variables: Option<HashMap<String, String>>,
 }
 
-/// Response for external image operations
+/// Response for in-memory external image operations (legacy push flow).
+///
+/// Renamed to avoid shadowing the richer database-backed `ExternalImageResponse`
+/// in `handlers/remote_deployments.rs`. The two types serve different routes
+/// (`/images` ephemeral push vs `/external-images` registered images).
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct ExternalImageResponse {
+pub struct PushedExternalImageResponse {
     pub id: String,
     pub image_ref: String,
     pub digest: Option<String>,
@@ -69,7 +73,7 @@ pub struct ExternalImageResponse {
     pub pushed_at: UtcDateTime,
 }
 
-impl From<ExternalImage> for ExternalImageResponse {
+impl From<ExternalImage> for PushedExternalImageResponse {
     fn from(image: ExternalImage) -> Self {
         Self {
             id: image.id,

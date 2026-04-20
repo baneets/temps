@@ -106,6 +106,12 @@ pub mod status_monitors;
 pub mod webhook_deliveries;
 pub mod webhooks;
 
+// Revenue tracking entities
+pub mod revenue_customers_state;
+pub mod revenue_events;
+pub mod revenue_integrations;
+pub mod revenue_subscriptions_state;
+
 // Vulnerability scanner entities
 pub mod vulnerabilities;
 pub mod vulnerability_scans;

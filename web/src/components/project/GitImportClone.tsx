@@ -24,8 +24,22 @@ import { ProjectConfigurator } from '@/components/project/ProjectConfigurator'
 import { RepositoryList } from '@/components/repositories/RepositoryList'
 import { TemplateList, TemplateConfigurator } from '@/components/templates'
 import { ManualProjectConfigurator } from '@/components/project/ManualProjectConfigurator'
-import type { RepositoryResponse, TemplateResponse } from '@/api/client/types.gen'
-import { GitBranch, ChevronLeft, ChevronRight, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container, FolderGit2, ArrowRight } from 'lucide-react'
+import type {
+  RepositoryResponse,
+  TemplateResponse,
+} from '@/api/client/types.gen'
+import {
+  GitBranch,
+  ChevronLeft,
+  ChevronRight,
+  Link as LinkIcon,
+  Loader2,
+  Gitlab,
+  LayoutTemplate,
+  Container,
+  FolderGit2,
+  ArrowRight,
+} from 'lucide-react'
 import Github from '@/icons/Github'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
@@ -99,16 +113,21 @@ export function GitImportClone({
   mode = 'navigation',
   onProjectCreated,
 }: GitImportCloneProps) {
-  const [selectedSource, setSelectedSource] = useState<ProjectSource | null>(null)
+  const [selectedSource, setSelectedSource] = useState<ProjectSource | null>(
+    null
+  )
   const [selectedConnection, setSelectedConnection] = useState<
     string | undefined
   >()
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
-  const [selectedTemplate, setSelectedTemplate] = useState<TemplateResponse | null>(null)
+  const [selectedTemplate, setSelectedTemplate] =
+    useState<TemplateResponse | null>(null)
   const [gitUrl, setGitUrl] = useState('')
   const [useGitUrl, setUseGitUrl] = useState(false)
-  const [parsedPublicRepo, setParsedPublicRepo] = useState<ParsedGitUrl | null>(null)
+  const [parsedPublicRepo, setParsedPublicRepo] = useState<ParsedGitUrl | null>(
+    null
+  )
   const [isValidatingUrl, setIsValidatingUrl] = useState(false)
   const navigate = useNavigate()
   const [isInitialLoad, setIsInitialLoad] = useState(true)
@@ -148,7 +167,12 @@ export function GitImportClone({
         connection_id: Number(selectedConnection),
       },
     }),
-    enabled: !useGitUrl && !!selectedRepository && !!selectedConnection && !!owner && !!repo,
+    enabled:
+      !useGitUrl &&
+      !!selectedRepository &&
+      !!selectedConnection &&
+      !!owner &&
+      !!repo,
   })
 
   // Query for branches from public repository
@@ -193,7 +217,7 @@ export function GitImportClone({
 
   // Transform public preset data to match ProjectPresetResponse format (camelCase)
   const presetData = useGitUrl
-    ? publicPresetData?.presets?.map(p => ({
+    ? publicPresetData?.presets?.map((p) => ({
         preset: p.preset,
         presetLabel: p.preset_label,
         exposedPort: p.exposed_port,
@@ -323,11 +347,19 @@ export function GitImportClone({
                   ),
                   preset_config:
                     data.preset === 'dockerfile' && data.dockerfilePath
-                      ? { preset: 'dockerfile', dockerfilePath: data.dockerfilePath }
+                      ? {
+                          preset: 'dockerfile',
+                          dockerfilePath: data.dockerfilePath,
+                        }
                       : data.preset === 'docker-compose'
-                        ? { preset: 'docker-compose', composePath: (data as any).composePath || 'docker-compose.yml' }
+                        ? {
+                            preset: 'docker-compose',
+                            composePath:
+                              (data as any).composePath || 'docker-compose.yml',
+                          }
                         : undefined,
-                  exposed_port: data.preset === 'docker-compose' ? undefined : data.port,
+                  exposed_port:
+                    data.preset === 'docker-compose' ? undefined : data.port,
                 },
               })
             } catch (error) {
@@ -349,7 +381,9 @@ export function GitImportClone({
     // Parse the git URL
     const parsed = parseGitUrl(gitUrl)
     if (!parsed) {
-      toast.error('Invalid git URL. Please use a GitHub or GitLab repository URL.')
+      toast.error(
+        'Invalid git URL. Please use a GitHub or GitLab repository URL.'
+      )
       return
     }
 
@@ -459,7 +493,9 @@ export function GitImportClone({
           <Card className="flex-1">
             <CardHeader className="flex items-center gap-2 pb-3">
               <GitBranch className="h-5 w-5 text-foreground" />
-              <CardTitle className="text-xl font-bold">Create New Project</CardTitle>
+              <CardTitle className="text-xl font-bold">
+                Create New Project
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground mb-6">
@@ -480,30 +516,37 @@ export function GitImportClone({
                         </div>
                         <div>
                           <p className="font-semibold">{s.title}</p>
-                          <p className="text-xs text-muted-foreground">{s.tagline}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {s.tagline}
+                          </p>
                         </div>
                       </div>
                       <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
                         {s.detail}
                       </p>
-                      {s.key === 'browse' && connections && connections.connections.length > 0 && (
-                        <div className="flex items-center gap-2 pl-[52px] flex-wrap">
-                          {connections.connections.map((conn) => (
-                            <div
-                              key={conn.id}
-                              className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
-                            >
-                              <Github className="h-3 w-3" />
-                              <span>{conn.account_name}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {s.key === 'browse' && (!connections || connections.connections.length === 0) && (
-                        <p className="text-xs text-amber-500 pl-[52px]">
-                          No Git connections yet — you can add one after selecting this option.
-                        </p>
-                      )}
+                      {s.key === 'browse' &&
+                        connections &&
+                        connections.connections.length > 0 && (
+                          <div className="flex items-center gap-2 pl-[52px] flex-wrap">
+                            {connections.connections.map((conn) => (
+                              <div
+                                key={conn.id}
+                                className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
+                              >
+                                <Github className="h-3 w-3" />
+                                <span>{conn.account_name}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      {s.key === 'browse' &&
+                        (!connections ||
+                          connections.connections.length === 0) && (
+                          <p className="text-xs text-amber-500 pl-[52px]">
+                            No Git connections yet — you can add one after
+                            selecting this option.
+                          </p>
+                        )}
                     </button>
                   )
                 })}
@@ -513,10 +556,16 @@ export function GitImportClone({
         </div>
 
         {/* ── Option 2 — Bento (hero + 3 tiles) ───────────────────── */}
-        <div data-uidotsh-option="Bento (hero + 3 tiles)" className="contents" hidden>
+        <div
+          data-uidotsh-option="Bento (hero + 3 tiles)"
+          className="contents"
+          hidden
+        >
           <div className="flex-1 space-y-6">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">Create a new project</h1>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                Create a new project
+              </h1>
               <p className="mt-1 text-sm text-muted-foreground">
                 Pick the source you want to deploy from.
               </p>
@@ -533,14 +582,20 @@ export function GitImportClone({
                   </div>
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      <h2 className="text-lg font-semibold">Import Repository</h2>
-                      <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
+                      <h2 className="text-lg font-semibold">
+                        Import Repository
+                      </h2>
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] uppercase tracking-wide"
+                      >
                         Recommended
                       </Badge>
                     </div>
                     <p className="text-sm text-muted-foreground leading-relaxed max-w-md">
-                      Connect a GitHub or GitLab account, pick a repo, and we'll auto-detect the
-                      framework, set up webhooks, and deploy on every push.
+                      Connect a GitHub or GitLab account, pick a repo, and we'll
+                      auto-detect the framework, set up webhooks, and deploy on
+                      every push.
                     </p>
                   </div>
                 </div>
@@ -555,11 +610,14 @@ export function GitImportClone({
                         <span className="font-medium">{conn.account_name}</span>
                       </div>
                     ))}
-                    <span className="text-xs text-muted-foreground">connected</span>
+                    <span className="text-xs text-muted-foreground">
+                      connected
+                    </span>
                   </div>
                 ) : (
                   <span className="text-xs text-amber-500">
-                    No Git connections yet — you'll connect one in the next step.
+                    No Git connections yet — you'll connect one in the next
+                    step.
                   </span>
                 )}
                 <ArrowRight className="absolute right-6 top-6 h-4 w-4 text-muted-foreground/40 transition-all group-hover:text-foreground group-hover:translate-x-0.5" />
@@ -581,7 +639,9 @@ export function GitImportClone({
                       </div>
                       <div className="space-y-0.5">
                         <p className="font-semibold">{s.title}</p>
-                        <p className="text-xs text-muted-foreground">{s.tagline}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {s.tagline}
+                        </p>
                       </div>
                       <ArrowRight className="absolute right-4 top-4 h-4 w-4 text-muted-foreground/40 transition-all group-hover:text-foreground group-hover:translate-x-0.5" />
                     </button>
@@ -592,10 +652,16 @@ export function GitImportClone({
         </div>
 
         {/* ── Option 3 — Sidebar tabs + live form ─────────────────── */}
-        <div data-uidotsh-option="Sidebar tabs + live form" className="contents" hidden>
+        <div
+          data-uidotsh-option="Sidebar tabs + live form"
+          className="contents"
+          hidden
+        >
           <div className="flex-1 space-y-5">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">Create a new project</h1>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                Create a new project
+              </h1>
               <p className="mt-1 text-sm text-muted-foreground">
                 Pick a source on the left to get started.
               </p>
@@ -613,10 +679,14 @@ export function GitImportClone({
                       <Icon className="h-4 w-4 mt-0.5 text-muted-foreground group-hover:text-foreground shrink-0" />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-2">
-                          <p className="text-sm font-medium truncate">{s.title}</p>
+                          <p className="text-sm font-medium truncate">
+                            {s.title}
+                          </p>
                           <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 group-hover:text-muted-foreground shrink-0" />
                         </div>
-                        <p className="text-xs text-muted-foreground line-clamp-1">{s.tagline}</p>
+                        <p className="text-xs text-muted-foreground line-clamp-1">
+                          {s.tagline}
+                        </p>
                       </div>
                     </button>
                   )
@@ -633,10 +703,16 @@ export function GitImportClone({
         </div>
 
         {/* ── Option 4 — Compact list rows ────────────────────────── */}
-        <div data-uidotsh-option="Compact list rows" className="contents" hidden>
+        <div
+          data-uidotsh-option="Compact list rows"
+          className="contents"
+          hidden
+        >
           <div className="flex-1 space-y-5">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">Create a new project</h1>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                Create a new project
+              </h1>
               <p className="mt-1 text-sm text-muted-foreground">
                 Pick how you want to deploy.
               </p>
@@ -655,21 +731,25 @@ export function GitImportClone({
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="font-medium text-sm">{s.title}</p>
-                      <p className="text-xs text-muted-foreground line-clamp-1">{s.detail}</p>
+                      <p className="text-xs text-muted-foreground line-clamp-1">
+                        {s.detail}
+                      </p>
                     </div>
-                    {s.key === 'browse' && connections && connections.connections.length > 0 && (
-                      <div className="hidden md:flex items-center gap-2 shrink-0">
-                        {connections.connections.slice(0, 2).map((conn) => (
-                          <div
-                            key={conn.id}
-                            className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
-                          >
-                            <Github className="h-3 w-3" />
-                            <span>{conn.account_name}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    {s.key === 'browse' &&
+                      connections &&
+                      connections.connections.length > 0 && (
+                        <div className="hidden md:flex items-center gap-2 shrink-0">
+                          {connections.connections.slice(0, 2).map((conn) => (
+                            <div
+                              key={conn.id}
+                              className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
+                            >
+                              <Github className="h-3 w-3" />
+                              <span>{conn.account_name}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-foreground group-hover:translate-x-0.5 transition-all shrink-0" />
                   </button>
                 )
@@ -822,27 +902,31 @@ export function GitImportClone({
             </Button>
 
             {/* Show parsed URL preview */}
-            {gitUrl && !isValidatingUrl && (() => {
-              const parsed = parseGitUrl(gitUrl)
-              if (parsed) {
-                return (
-                  <div className="p-3 bg-muted/50 rounded-md text-sm">
-                    <div className="flex items-center gap-2">
-                      {parsed.provider === 'github' ? (
-                        <Github className="h-4 w-4" />
-                      ) : (
-                        <Gitlab className="h-4 w-4" />
-                      )}
-                      <span className="font-medium">{parsed.owner}/{parsed.repo}</span>
-                      <Badge variant="secondary" className="text-xs">
-                        {parsed.provider}
-                      </Badge>
+            {gitUrl &&
+              !isValidatingUrl &&
+              (() => {
+                const parsed = parseGitUrl(gitUrl)
+                if (parsed) {
+                  return (
+                    <div className="p-3 bg-muted/50 rounded-md text-sm">
+                      <div className="flex items-center gap-2">
+                        {parsed.provider === 'github' ? (
+                          <Github className="h-4 w-4" />
+                        ) : (
+                          <Gitlab className="h-4 w-4" />
+                        )}
+                        <span className="font-medium">
+                          {parsed.owner}/{parsed.repo}
+                        </span>
+                        <Badge variant="secondary" className="text-xs">
+                          {parsed.provider}
+                        </Badge>
+                      </div>
                     </div>
-                  </div>
-                )
-              }
-              return null
-            })()}
+                  )
+                }
+                return null
+              })()}
           </div>
         )}
 

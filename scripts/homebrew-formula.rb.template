@@ -23,7 +23,14 @@ class Temps < Formula
   end
 
   on_linux do
-    if Hardware::CPU.intel?
+    if Hardware::CPU.arm?
+      url "https://github.com/gotempsh/temps/releases/download/v{{VERSION}}/temps-linux-arm64.tar.gz"
+      sha256 "{{SHA256_LINUX_ARM64}}"
+
+      def install
+        bin.install "temps"
+      end
+    else
       url "https://github.com/gotempsh/temps/releases/download/v{{VERSION}}/temps-linux-amd64.tar.gz"
       sha256 "{{SHA256_LINUX_AMD64}}"
 

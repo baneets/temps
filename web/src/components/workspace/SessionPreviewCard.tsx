@@ -22,15 +22,15 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 
 import {
-  getSandboxStats,
-  regeneratePreviewPassword,
-  restartSandbox,
-  refreshSandbox,
-  startSandbox,
-  stopSandbox,
-  updateSession,
-  type WorkspaceSession,
-} from './api'
+  workspaceRefreshSandboxMutation,
+  workspaceRegeneratePreviewPasswordMutation,
+  workspaceRestartSandboxMutation,
+  workspaceSandboxStatsOptions,
+  workspaceStartSandboxMutation,
+  workspaceStopSandboxMutation,
+  workspaceUpdateSessionMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { WorkspaceSessionResponse as WorkspaceSession } from '@/api/client/types.gen'
 
 const SERVER_DEFAULT_IDLE_MINUTES = 120
 const DEFAULT_CPU = 2
@@ -83,9 +83,10 @@ export function SessionPreviewCard({
     queryClient.invalidateQueries({
       queryKey: ['workspace', projectId, 'session', session.id],
     })
+  const sessionPath = { project_id: projectId, session_id: session.id }
 
   const regenerate = useMutation({
-    mutationFn: () => regeneratePreviewPassword(projectId, session.id),
+    ...workspaceRegeneratePreviewPasswordMutation(),
     onSuccess: (updated) => {
       if (updated.preview_password) {
         setRevealedPassword(updated.preview_password)
@@ -97,7 +98,7 @@ export function SessionPreviewCard({
   })
 
   const stop = useMutation({
-    mutationFn: () => stopSandbox(projectId, session.id),
+    ...workspaceStopSandboxMutation(),
     onSuccess: () => {
       toast.success('Sandbox stopped')
       invalidate()
@@ -106,7 +107,7 @@ export function SessionPreviewCard({
   })
 
   const start = useMutation({
-    mutationFn: () => startSandbox(projectId, session.id),
+    ...workspaceStartSandboxMutation(),
     onSuccess: () => {
       toast.success('Sandbox started')
       invalidate()
@@ -115,7 +116,7 @@ export function SessionPreviewCard({
   })
 
   const restart = useMutation({
-    mutationFn: () => restartSandbox(projectId, session.id),
+    ...workspaceRestartSandboxMutation(),
     onSuccess: () => {
       toast.success('Sandbox restarted')
       invalidate()
@@ -140,14 +141,18 @@ export function SessionPreviewCard({
   }, [session.idle_timeout_minutes])
 
   const saveIdle = useMutation({
-    mutationFn: (minutes: number | null) =>
-      updateSession(projectId, session.id, { idle_timeout_minutes: minutes }),
+    ...workspaceUpdateSessionMutation(),
     onSuccess: () => {
       toast.success('Idle timeout updated')
       invalidate()
     },
     onError: (e: Error) => toast.error(e.message),
   })
+  const submitIdle = (minutes: number | null) =>
+    saveIdle.mutate({
+      path: { project_id: projectId, session_id: session.id },
+      body: { idle_timeout_minutes: minutes },
+    })
 
   // Live sandbox stats give us the *actually applied* CPU and memory limits
   // (from cgroups) — useful when the DB columns are null because the session
@@ -156,8 +161,9 @@ export function SessionPreviewCard({
   const sandboxAttached = !!session.sandbox_container_id
   const sessionClosed = session.status === 'closed'
   const effectiveLimits = useQuery({
-    queryKey: ['workspace', projectId, 'sessions', session.id, 'sandbox-stats'],
-    queryFn: () => getSandboxStats(projectId, session.id),
+    ...workspaceSandboxStatsOptions({
+      path: { project_id: projectId, session_id: session.id },
+    }),
     enabled: sandboxAttached && !sessionClosed,
     staleTime: 30_000,
     retry: false,
@@ -205,20 +211,25 @@ export function SessionPreviewCard({
   ])
 
   const saveResources = useMutation({
-    mutationFn: (body: {
-      cpu_limit: number | null
-      memory_limit_mb: number | null
-      pids_limit: number | null
-    }) => updateSession(projectId, session.id, body),
+    ...workspaceUpdateSessionMutation(),
     onSuccess: () => {
       toast.success('Resource limits updated. Restart sandbox to apply.')
       invalidate()
     },
     onError: (e: Error) => toast.error(e.message),
   })
+  const submitResources = (body: {
+    cpu_limit: number | null
+    memory_limit_mb: number | null
+    pids_limit: number | null
+  }) =>
+    saveResources.mutate({
+      path: { project_id: projectId, session_id: session.id },
+      body,
+    })
 
   const refresh = useMutation({
-    mutationFn: () => refreshSandbox(projectId, session.id),
+    ...workspaceRefreshSandboxMutation(),
     onSuccess: () => {
       toast.success('Sandbox refreshed (skill, env, token reloaded)')
       invalidate()
@@ -283,7 +294,7 @@ export function SessionPreviewCard({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => stop.mutate()}
+            onClick={() => stop.mutate({ path: sessionPath })}
             disabled={!sandboxAttached || sessionClosed || lifecycleBusy}
             title="Stop the sandbox container"
           >
@@ -297,7 +308,7 @@ export function SessionPreviewCard({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => start.mutate()}
+            onClick={() => start.mutate({ path: sessionPath })}
             disabled={!sandboxAttached || sessionClosed || lifecycleBusy}
             title="Start the sandbox container"
           >
@@ -311,7 +322,7 @@ export function SessionPreviewCard({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => restart.mutate()}
+            onClick={() => restart.mutate({ path: sessionPath })}
             disabled={!sandboxAttached || sessionClosed || lifecycleBusy}
             title="Restart the sandbox container in place"
           >
@@ -325,7 +336,7 @@ export function SessionPreviewCard({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => refresh.mutate()}
+            onClick={() => refresh.mutate({ path: sessionPath })}
             disabled={!sandboxAttached || sessionClosed || lifecycleBusy}
             title="Reload skill, env vars, and re-issue the deployment token without restarting the container"
           >
@@ -408,7 +419,7 @@ export function SessionPreviewCard({
             onClick={() => {
               const trimmed = idleInput.trim()
               if (trimmed === '') {
-                saveIdle.mutate(null)
+                submitIdle(null)
                 return
               }
               const n = Number(trimmed)
@@ -418,7 +429,7 @@ export function SessionPreviewCard({
                 )
                 return
               }
-              saveIdle.mutate(Math.floor(n))
+              submitIdle(Math.floor(n))
             }}
           >
             {saveIdle.isPending && (
@@ -433,7 +444,7 @@ export function SessionPreviewCard({
               disabled={sessionClosed || saveIdle.isPending}
               onClick={() => {
                 setIdleInput('')
-                saveIdle.mutate(null)
+                submitIdle(null)
               }}
               title="Clear override and fall back to server default"
             >
@@ -527,7 +538,7 @@ export function SessionPreviewCard({
               if (mem === 'err') return
               const pids = parse(pidsInput, 64, 8192, 'PIDs')
               if (pids === 'err') return
-              saveResources.mutate({
+              submitResources({
                 cpu_limit: cpu,
                 memory_limit_mb: mem == null ? null : Math.floor(mem),
                 pids_limit: pids == null ? null : Math.floor(pids),
@@ -550,7 +561,7 @@ export function SessionPreviewCard({
                 setCpuInput('')
                 setMemInput('')
                 setPidsInput('')
-                saveResources.mutate({
+                submitResources({
                   cpu_limit: null,
                   memory_limit_mb: null,
                   pids_limit: null,
@@ -577,7 +588,7 @@ export function SessionPreviewCard({
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => regenerate.mutate()}
+            onClick={() => regenerate.mutate({ path: sessionPath })}
             disabled={regenerate.isPending || sessionClosed}
           >
             {regenerate.isPending ? (

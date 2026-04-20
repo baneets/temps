@@ -602,15 +602,6 @@ export function GitProviderFlow({
       {/* Step 1: Select Provider */}
       {currentStep === 'provider' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Choose Git Provider
-            </h2>
-            <p className="text-sm sm:text-base text-muted-foreground">
-              Select the platform where your repositories are hosted
-            </p>
-          </div>
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Card
               className={cn(
@@ -796,10 +787,7 @@ export function GitProviderFlow({
       {/* Step 2: Authentication Method */}
       {currentStep === 'method' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Authentication Method
-            </h2>
+          <div className="text-center px-2">
             <p className="text-sm sm:text-base text-muted-foreground">
               Choose how to authenticate with {domain}
             </p>
@@ -1261,10 +1249,7 @@ export function GitProviderFlow({
       {/* Step 2b: GitLab Authentication Method */}
       {currentStep === 'configure-gitlab-method' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Authentication Method
-            </h2>
+          <div className="text-center px-2">
             <p className="text-sm sm:text-base text-muted-foreground">
               Choose how to authenticate with GitLab
             </p>
@@ -1531,10 +1516,7 @@ export function GitProviderFlow({
       {/* Step 3: Configure GitHub PAT */}
       {currentStep === 'configure-pat' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Configure Personal Access Token
-            </h2>
+          <div className="text-center px-2">
             <p className="text-sm sm:text-base text-muted-foreground">
               Enter your GitHub personal access token to continue
             </p>
@@ -1637,10 +1619,7 @@ export function GitProviderFlow({
       {/* Step 3b: Configure GitLab PAT */}
       {currentStep === 'configure-gitlab-pat' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Configure GitLab Access
-            </h2>
+          <div className="text-center px-2">
             <p className="text-sm sm:text-base text-muted-foreground">
               Enter your GitLab instance URL and personal access token
             </p>
@@ -1765,10 +1744,7 @@ export function GitProviderFlow({
       {/* Step 3c: Configure GitLab App - Show setup instructions */}
       {currentStep === 'configure-gitlab-app' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Create GitLab Application
-            </h2>
+          <div className="text-center px-2">
             <p className="text-sm sm:text-base text-muted-foreground">
               Follow the instructions below to create your GitLab application
             </p>
@@ -1927,10 +1903,7 @@ export function GitProviderFlow({
       {/* Step 3d: Enter GitLab App Credentials */}
       {currentStep === 'configure-gitlab-app-credentials' && (
         <>
-          <div className="text-center space-y-2 px-2">
-            <h2 className="text-xl sm:text-2xl font-bold">
-              Enter Application Credentials
-            </h2>
+          <div className="text-center px-2">
             <p className="text-sm sm:text-base text-muted-foreground">
               Enter the Client ID and Client Secret from your GitLab application
             </p>

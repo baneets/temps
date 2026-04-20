@@ -1,12 +1,11 @@
 import { ProjectResponse } from '@/api/client'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
-import { Button, buttonVariants } from '@/components/ui/button'
+import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { useDashboardHealth } from '@/hooks/useDashboardHealth'
-import { Menu, Github, ExternalLink, Users } from 'lucide-react'
+import { Github, ExternalLink, Users } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useMobileSidebar } from './ProjectDetailSidebar'
 
 const healthDotColors: Record<string, string> = {
   operational: 'bg-emerald-500',
@@ -35,7 +34,6 @@ export function ProjectDetailHeader({
   lastDeploymentUrl,
   isLoadingLastDeployment = false,
 }: ProjectDetailHeaderProps) {
-  const { setIsOpen } = useMobileSidebar()
   const navigate = useNavigate()
   const healthQuery = useDashboardHealth([project.id])
   const health = healthQuery.data?.projects?.[String(project.id)]
@@ -48,15 +46,6 @@ export function ProjectDetailHeader({
 
   return (
     <header className="flex h-12 sm:h-16 shrink-0 items-center gap-2 border-b px-3 sm:px-4">
-      <Button
-        variant="outline"
-        size="icon"
-        className="md:hidden flex-shrink-0"
-        onClick={() => setIsOpen(true)}
-        aria-label="Open navigation menu"
-      >
-        <Menu className="h-5 w-5" />
-      </Button>
       <div className="flex flex-1 items-center justify-between gap-4 min-w-0">
         <div className="flex items-center gap-4">
           <Avatar className="size-8">

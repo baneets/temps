@@ -8,6 +8,7 @@ use temps_core::plugin::{
 use utoipa::openapi::OpenApi;
 use utoipa::OpenApi as OpenApiTrait;
 
+use crate::env_vars_provider_impl::ExternalServicesEnvProvider;
 use crate::handlers::{handlers, types::AppState};
 use crate::services::ExternalServiceManager;
 
@@ -48,7 +49,15 @@ impl TempsPlugin for ProvidersPlugin {
                 encryption_service.clone(),
                 docker,
             ));
-            context.register_service(external_service_manager);
+            context.register_service(external_service_manager.clone());
+
+            // Register the cross-crate ProjectEnvVarsProvider so the environments
+            // plugin can assemble the resolved (manual + integration) env-var view
+            // without depending on this crate.
+            let env_vars_provider: Arc<dyn temps_core::ProjectEnvVarsProvider> = Arc::new(
+                ExternalServicesEnvProvider::new(external_service_manager, db.clone()),
+            );
+            context.register_service(env_vars_provider);
 
             tracing::debug!("Providers plugin services registered successfully");
             Ok(())

@@ -412,7 +412,12 @@ impl EnvVarService {
             .filter(env_vars::Column::Key.eq(key))
             .one(self.db.as_ref())
             .await?
-            .ok_or_else(|| EnvVarError::Other("Environment variable not found".to_string()))?;
+            .ok_or_else(|| {
+                EnvVarError::NotFound(format!(
+                    "Environment variable '{}' not found in project {}",
+                    key, project_id
+                ))
+            })?;
 
         self.decrypt_value(var.id, &var.key, &var.value, var.is_encrypted)
     }

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -46,19 +47,22 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import {
-  execCommand,
-  extendTimeout,
-  getJob,
-  getSandbox,
+  execMutation,
+  extendTimeoutMutation,
+  getSandboxOptions,
+  listJobsOptions,
+  pauseSandboxMutation,
+  restartSandboxMutation,
+  resumeSandboxMutation,
+  stopSandboxMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import { jobStatus } from '@/api/client/sdk.gen'
+import type { ExecResponse } from '@/api/client/types.gen'
+import {
   jobLogsUrl,
-  listJobs,
-  pauseSandbox,
-  restartSandbox,
-  resumeSandbox,
-  stopSandbox,
-  type ExecResponse,
+  toSandboxView,
   type JobSummary,
-} from '@/components/sandboxes/api'
+} from '@/components/sandboxes/helpers'
 import { SandboxPreviewPasswordCard } from '@/components/sandboxes/SandboxPreviewPasswordCard'
 
 function statusVariant(
@@ -189,6 +193,7 @@ function useNow(enabled: boolean) {
 }
 
 export default function SandboxDetail() {
+  usePageTitle('Sandbox')
   const { sandboxId = '' } = useParams<{ sandboxId: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -201,19 +206,20 @@ export default function SandboxDetail() {
   const [customPort, setCustomPort] = useState('')
   const cmdInputRef = useRef<HTMLInputElement | null>(null)
 
+  const sandboxQuery = getSandboxOptions({ path: { id: sandboxId } })
   const {
-    data: sandbox,
+    data: sandboxResp,
     isLoading,
     isError,
     error,
     refetch,
     isFetching,
   } = useQuery({
-    queryKey: ['sandbox', sandboxId],
-    queryFn: () => getSandbox(sandboxId),
+    ...sandboxQuery,
     enabled: sandboxId.length > 0,
     refetchInterval: 10_000,
   })
+  const sandbox = sandboxResp ? toSandboxView(sandboxResp.sandbox) : undefined
 
   const now = useNow(!!sandbox && sandbox.status !== 'destroyed')
 
@@ -223,12 +229,13 @@ export default function SandboxDetail() {
   // memory — restarting the control plane clears them, which matches the
   // ephemeral Command contract the SDK expects.
   const jobsEnabled = !!sandbox && sandbox.status !== 'destroyed'
-  const { data: jobs = [] } = useQuery<JobSummary[]>({
-    queryKey: ['sandbox', sandboxId, 'jobs'],
-    queryFn: () => listJobs(sandboxId),
+  const jobsQuery = listJobsOptions({ path: { id: sandboxId } })
+  const { data: jobsResp } = useQuery({
+    ...jobsQuery,
     enabled: jobsEnabled,
     refetchInterval: jobsEnabled ? 3_000 : false,
   })
+  const jobs: JobSummary[] = jobsResp?.items ?? []
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['sandbox', sandboxId] })
@@ -236,7 +243,7 @@ export default function SandboxDetail() {
   }
 
   const deleteMutation = useMutation({
-    mutationFn: () => stopSandbox(sandboxId),
+    ...stopSandboxMutation(),
     meta: { errorTitle: 'Failed to delete sandbox' },
     onSuccess: () => {
       invalidate()
@@ -246,8 +253,8 @@ export default function SandboxDetail() {
     },
   })
 
-  const pauseMutation = useMutation({
-    mutationFn: () => pauseSandbox(sandboxId),
+  const pauseMutationHook = useMutation({
+    ...pauseSandboxMutation(),
     meta: { errorTitle: 'Failed to stop sandbox' },
     onSuccess: () => {
       invalidate()
@@ -255,8 +262,8 @@ export default function SandboxDetail() {
     },
   })
 
-  const resumeMutation = useMutation({
-    mutationFn: () => resumeSandbox(sandboxId),
+  const resumeMutationHook = useMutation({
+    ...resumeSandboxMutation(),
     meta: { errorTitle: 'Failed to resume sandbox' },
     onSuccess: () => {
       invalidate()
@@ -264,8 +271,8 @@ export default function SandboxDetail() {
     },
   })
 
-  const restartMutation = useMutation({
-    mutationFn: () => restartSandbox(sandboxId),
+  const restartMutationHook = useMutation({
+    ...restartSandboxMutation(),
     meta: { errorTitle: 'Failed to restart sandbox' },
     onSuccess: () => {
       invalidate()
@@ -273,11 +280,12 @@ export default function SandboxDetail() {
     },
   })
 
-  const extendMutation = useMutation({
-    mutationFn: (secs: number) => extendTimeout(sandboxId, secs),
+  const extendMutationHook = useMutation({
+    ...extendTimeoutMutation(),
     meta: { errorTitle: 'Failed to extend timeout' },
-    onSuccess: (_data, secs) => {
+    onSuccess: (_data, vars) => {
       invalidate()
+      const secs = vars.body?.extra_secs ?? 0
       toast.success(
         `Timeout extended by ${secs >= 3600 ? `${secs / 3600}h` : `${secs / 60}m`}`,
       )
@@ -287,20 +295,8 @@ export default function SandboxDetail() {
   // `shell: true` wraps the raw string as ["sh","-c", raw] so operators like
   // `||`, `|`, and globs behave. Without it we argv-split and exec directly,
   // which is what most user-typed commands want.
-  const execMutation = useMutation({
-    mutationFn: async (args?: { cmd?: string; shell?: boolean }) => {
-      const raw = args?.cmd ?? cmdInput
-      const cmd = args?.shell ? ['sh', '-c', raw] : parseCommand(raw)
-      if (cmd.length === 0) throw new Error('Command cannot be empty')
-      const started = performance.now()
-      setExecStartedCmd(raw)
-      const result = await execCommand(sandboxId, {
-        cmd,
-        cwd: cwdInput.trim() || undefined,
-      })
-      setExecDuration(Math.round(performance.now() - started))
-      return result
-    },
+  const execMutationHook = useMutation({
+    ...execMutation(),
     meta: { errorTitle: 'Command failed' },
     onSuccess: (result) => {
       setExecResult(result)
@@ -311,6 +307,24 @@ export default function SandboxDetail() {
       setExecResult({ exit_code: -1, stdout: '', stderr: err.message })
     },
   })
+
+  const runExec = (args?: { cmd?: string; shell?: boolean }) => {
+    const raw = args?.cmd ?? cmdInput
+    const cmd = args?.shell ? ['sh', '-c', raw] : parseCommand(raw)
+    if (cmd.length === 0) return
+    const started = performance.now()
+    setExecStartedCmd(raw)
+    execMutationHook.mutate(
+      {
+        path: { id: sandboxId },
+        body: { cmd, cwd: cwdInput.trim() || undefined },
+      },
+      {
+        onSettled: () =>
+          setExecDuration(Math.round(performance.now() - started)),
+      },
+    )
+  }
 
   // Open a port in a new tab. `target=_blank` + `noopener` per usual
   // rel safety. We defensively validate the port so a stray click on
@@ -478,8 +492,10 @@ export default function SandboxDetail() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => pauseMutation.mutate()}
-              disabled={pauseMutation.isPending}
+              onClick={() =>
+                pauseMutationHook.mutate({ path: { id: sandboxId } })
+              }
+              disabled={pauseMutationHook.isPending}
             >
               <Square className="mr-1 h-4 w-4" />
               Stop
@@ -489,8 +505,10 @@ export default function SandboxDetail() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => resumeMutation.mutate()}
-              disabled={resumeMutation.isPending}
+              onClick={() =>
+                resumeMutationHook.mutate({ path: { id: sandboxId } })
+              }
+              disabled={resumeMutationHook.isPending}
             >
               <Play className="mr-1 h-4 w-4" />
               Resume
@@ -500,8 +518,10 @@ export default function SandboxDetail() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => restartMutation.mutate()}
-              disabled={restartMutation.isPending}
+              onClick={() =>
+                restartMutationHook.mutate({ path: { id: sandboxId } })
+              }
+              disabled={restartMutationHook.isPending}
               title="Restart"
             >
               <RotateCw className="h-4 w-4" />
@@ -570,24 +590,39 @@ export default function SandboxDetail() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => extendMutation.mutate(900)}
-                  disabled={extendMutation.isPending}
+                  onClick={() =>
+                    extendMutationHook.mutate({
+                      path: { id: sandboxId },
+                      body: { extra_secs: 900 },
+                    })
+                  }
+                  disabled={extendMutationHook.isPending}
                 >
                   +15m
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => extendMutation.mutate(3600)}
-                  disabled={extendMutation.isPending}
+                  onClick={() =>
+                    extendMutationHook.mutate({
+                      path: { id: sandboxId },
+                      body: { extra_secs: 3600 },
+                    })
+                  }
+                  disabled={extendMutationHook.isPending}
                 >
                   +1h
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => extendMutation.mutate(14400)}
-                  disabled={extendMutation.isPending}
+                  onClick={() =>
+                    extendMutationHook.mutate({
+                      path: { id: sandboxId },
+                      body: { extra_secs: 14400 },
+                    })
+                  }
+                  disabled={extendMutationHook.isPending}
                 >
                   +4h
                 </Button>
@@ -621,10 +656,10 @@ export default function SandboxDetail() {
                 variant="outline"
                 size="sm"
                 className="h-7 text-xs font-mono"
-                disabled={!running || execMutation.isPending}
+                disabled={!running || execMutationHook.isPending}
                 onClick={() => {
                   setCmdInput(p.cmd)
-                  execMutation.mutate({ cmd: p.cmd, shell: p.shell })
+                  runExec({ cmd: p.cmd, shell: p.shell })
                 }}
                 title={p.hint}
               >
@@ -646,11 +681,11 @@ export default function SandboxDetail() {
                 onKeyDown={(e) => {
                   if (
                     e.key === 'Enter' &&
-                    !execMutation.isPending &&
+                    !execMutationHook.isPending &&
                     cmdInput.trim().length > 0 &&
                     running
                   ) {
-                    execMutation.mutate(undefined)
+                    runExec()
                   }
                 }}
                 className="border-0 bg-transparent shadow-none focus-visible:ring-0 px-0 font-mono text-sm h-9"
@@ -665,15 +700,15 @@ export default function SandboxDetail() {
                 title="Working directory (optional)"
               />
               <Button
-                onClick={() => execMutation.mutate(undefined)}
+                onClick={() => runExec()}
                 disabled={
-                  execMutation.isPending ||
+                  execMutationHook.isPending ||
                   cmdInput.trim().length === 0 ||
                   !running
                 }
                 className="gap-1"
               >
-                {execMutation.isPending ? (
+                {execMutationHook.isPending ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Running…
@@ -800,7 +835,7 @@ export default function SandboxDetail() {
       {Boolean(sandbox.preview_url_template) && (
         <SandboxPreviewPasswordCard
           sandboxId={sandbox.id}
-          hint={sandbox.preview_password_hint}
+          hint={sandbox.preview_password_hint ?? undefined}
           disabled={destroyed}
         />
       )}
@@ -819,7 +854,9 @@ export default function SandboxDetail() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => deleteMutation.mutate()}
+              onClick={() =>
+                deleteMutation.mutate({ path: { id: sandboxId } })
+              }
               disabled={deleteMutation.isPending}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
@@ -934,9 +971,15 @@ function JobLogsPanel({
 
   useEffect(() => {
     let cancelled = false
-    getJob(sandboxId, job.id)
-      .then((s) => {
-        if (!cancelled) setHistory({ stdout: s.stdout, stderr: s.stderr })
+    jobStatus({ path: { id: sandboxId, job_id: job.id } })
+      .then((res) => {
+        if (cancelled) return
+        const s = res.data
+        if (!s) {
+          setError('No job data')
+          return
+        }
+        setHistory({ stdout: s.stdout, stderr: s.stderr })
       })
       .catch((e: Error) => {
         if (!cancelled) setError(e.message)

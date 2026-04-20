@@ -11,13 +11,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { CreateActionButton } from '@/components/ui/create-action-button'
+import { Card, CardContent } from '@/components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -36,7 +31,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   EllipsisVertical,
   FileCode,
@@ -47,37 +42,39 @@ import {
 import { useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import {
-  type SkillDefinition,
-  listSkillDefinitions,
-  createSkillDefinition,
-  updateSkillDefinition,
-  deleteSkillDefinition,
-} from '@/components/agents/api'
+  deleteSkillMutation,
+  listSkillsOptions,
+  listSkillsQueryKey,
+} from '@/api/client/@tanstack/react-query.gen'
+import { createSkill, updateSkill } from '@/api/client/sdk.gen'
+import type { SkillDefinitionResponse as SkillDefinition } from '@/api/client/types.gen'
 
 interface SkillsSettingsProps {
   project: ProjectResponse
 }
 
 export function SkillsSettings({ project }: SkillsSettingsProps) {
+  const queryClient = useQueryClient()
   const [skillToDelete, setSkillToDelete] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingSkill, setEditingSkill] = useState<SkillDefinition | null>(null)
 
+  const skillsListKey = listSkillsQueryKey({ path: { project_id: project.id } })
+
   const {
-    data: skills,
+    data: skillsData,
     isLoading,
     error,
     refetch,
-  } = useQuery({
-    queryKey: ['skills', project.id],
-    queryFn: () => listSkillDefinitions(project.id),
-  })
+  } = useQuery(listSkillsOptions({ path: { project_id: project.id } }))
+
+  const skills = skillsData?.items ?? []
 
   const deleteMutation = useMutation({
-    mutationFn: (slug: string) => deleteSkillDefinition(project.id, slug),
+    ...deleteSkillMutation(),
     onSuccess: () => {
       toast.success('Skill deleted')
-      refetch()
+      queryClient.invalidateQueries({ queryKey: skillsListKey })
       setSkillToDelete(null)
     },
     onError: () => toast.error('Failed to delete skill'),
@@ -107,10 +104,11 @@ export function SkillsSettings({ project }: SkillsSettingsProps) {
             files in the sandbox.
           </p>
         </div>
-        <Button onClick={openCreate} disabled={isLoading}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add Skill
-        </Button>
+        <CreateActionButton
+          onClick={openCreate}
+          disabled={isLoading}
+          label="Add Skill"
+        />
       </div>
 
       {error && (
@@ -133,62 +131,57 @@ export function SkillsSettings({ project }: SkillsSettingsProps) {
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
-      ) : !error && skills && skills.length > 0 ? (
-        <div className="space-y-3">
-          {skills.map((skill) => (
-            <Card key={skill.id}>
-              <CardHeader className="pb-2">
-                <div className="flex items-start justify-between">
-                  <div className="flex items-start gap-3 flex-1">
-                    <div className="mt-1">
-                      <Wand2 className="h-5 w-5 text-muted-foreground" />
+      ) : !error && skills.length > 0 ? (
+        <div className="overflow-hidden rounded-lg border">
+          <ul role="list" className="divide-y">
+            {skills.map((skill) => (
+              <li
+                key={skill.id}
+                onClick={() => openEdit(skill)}
+                className="flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/40"
+              >
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <Wand2 className="size-4 text-muted-foreground" />
+                </div>
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate text-sm font-medium">
+                        {skill.name}
+                      </p>
+                      <Badge variant="secondary" className="font-mono text-xs">
+                        {skill.slug}
+                      </Badge>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <CardTitle className="text-base">
-                          {skill.name}
-                        </CardTitle>
-                        <Badge variant="secondary" className="font-mono text-xs">
-                          {skill.slug}
-                        </Badge>
-                      </div>
-                      {skill.description && (
-                        <CardDescription className="text-xs">
-                          {skill.description}
-                        </CardDescription>
-                      )}
-                    </div>
+                    {skill.description && (
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                        {skill.description}
+                      </p>
+                    )}
                   </div>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <EllipsisVertical className="h-4 w-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onClick={() => openEdit(skill)}>
-                        Edit
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        className="text-destructive"
-                        onClick={() => setSkillToDelete(skill.slug)}
-                      >
-                        Delete
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
                 </div>
-              </CardHeader>
-              <CardContent>
-                <div className="rounded-md border bg-muted/50 p-3">
-                  <pre className="text-xs text-muted-foreground whitespace-pre-wrap line-clamp-4 font-mono">
-                    {skill.content}
-                  </pre>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0">
+                      <EllipsisVertical className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenuItem onClick={() => openEdit(skill)}>
+                      Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive"
+                      onClick={() => setSkillToDelete(skill.slug)}
+                    >
+                      Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : !error ? (
         <Card>
@@ -214,7 +207,7 @@ export function SkillsSettings({ project }: SkillsSettingsProps) {
         projectId={project.id}
         skill={editingSkill}
         onSuccess={() => {
-          refetch()
+          queryClient.invalidateQueries({ queryKey: skillsListKey })
           setDialogOpen(false)
         }}
       />
@@ -235,7 +228,10 @@ export function SkillsSettings({ project }: SkillsSettingsProps) {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (skillToDelete) deleteMutation.mutate(skillToDelete)
+                if (skillToDelete)
+                  deleteMutation.mutate({
+                    path: { project_id: project.id, slug: skillToDelete },
+                  })
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
@@ -308,18 +304,26 @@ function SkillDialog({
     setIsPending(true)
     try {
       if (isEdit) {
-        await updateSkillDefinition(projectId, skill!.slug, {
-          name: name.trim(),
-          description: description.trim() || undefined,
-          content: content,
+        await updateSkill({
+          path: { project_id: projectId, slug: skill!.slug },
+          body: {
+            name: name.trim(),
+            description: description.trim() || undefined,
+            content: content,
+          },
+          throwOnError: true,
         })
         toast.success('Skill updated')
       } else {
-        await createSkillDefinition(projectId, {
-          slug: slug.trim(),
-          name: name.trim(),
-          description: description.trim() || undefined,
-          content: content,
+        await createSkill({
+          path: { project_id: projectId },
+          body: {
+            slug: slug.trim(),
+            name: name.trim(),
+            description: description.trim() || undefined,
+            content: content,
+          },
+          throwOnError: true,
         })
         toast.success('Skill created')
       }

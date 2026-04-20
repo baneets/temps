@@ -1,16 +1,16 @@
 import {
   getLastDeploymentOptions,
   getProjectBySlugOptions,
-  getActiveVisitors2Options,
+  getActiveVisitorsOptions,
   getRepositoryByNameOptions,
   updateProjectSettingsMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import NotFound from '@/components/global/NotFound'
 import { ProjectAnalytics } from '@/components/project/ProjectAnalytics'
 import { ProjectDeployments } from '@/components/project/ProjectDeployments'
-import { MobileSidebarProvider } from '@/components/project/ProjectDetailSidebar'
 import { ProjectDetailHeader } from '@/components/project/ProjectDetailHeader'
 import { ProjectOverview } from '@/components/project/ProjectOverview'
+import { ProjectRevenue } from '@/components/project/ProjectRevenue'
 import { ProjectRuntime } from '@/components/project/ProjectRuntime'
 import { ProjectServices } from '@/components/project/ProjectServices'
 import { ProjectSettings } from '@/components/project/ProjectSettings'
@@ -40,7 +40,7 @@ import RequestLogs from './RequestLogs'
 import Traces from './Traces'
 import { ProjectAgentActivity } from './AiGateway'
 import { AutofixerPage } from '@/components/autofixer/AutofixerPage'
-import { AutofixerPanel } from '@/components/autofixer/AutofixerPanel'
+import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
 import { AgentDetailPage } from '@/components/agents/AgentDetailPage'
 import { AutopilotPage } from '@/components/agents/AutopilotPage'
 import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
@@ -113,7 +113,7 @@ export function ProjectDetail() {
 
   // Fetch active visitors count
   const { data: activeVisitorsCount } = useQuery({
-    ...getActiveVisitors2Options({
+    ...getActiveVisitorsOptions({
       path: {
         project_id: project?.id || 0,
       },
@@ -196,7 +196,7 @@ export function ProjectDetail() {
 
   if (error) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <ErrorAlert
           title="Failed to load project"
           description={
@@ -279,10 +279,9 @@ export function ProjectDetail() {
   }
 
   return (
-    <MobileSidebarProvider>
-      <div className="flex h-full w-full overflow-hidden">
+    <div className="flex h-full w-full overflow-hidden">
         <Confetti active={showConfetti} duration={4000} particleCount={100} />
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden min-w-0">
           <ProjectDetailHeader
             project={project}
             activeVisitorsCount={activeVisitorsCount}
@@ -295,7 +294,7 @@ export function ProjectDetail() {
             lastDeploymentUrl={lastDeployment?.url}
             isLoadingLastDeployment={isLoadingLastDeployment}
           />
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
             {/* Attack Mode Banner */}
             {(project as any).attack_mode && (
               <Alert className="mb-4 border-primary bg-primary/10">
@@ -393,6 +392,10 @@ export function ProjectDetail() {
                 element={<ProjectAgentActivity projectId={project.id} />}
               />
               <Route
+                path="revenue"
+                element={<ProjectRevenue project={project} />}
+              />
+              <Route
                 path="workspace"
                 element={<WorkspacePage project={project} />}
               />
@@ -442,7 +445,7 @@ export function ProjectDetail() {
               />
               <Route
                 path="errors/:errorGroupId/autofix"
-                element={<AutofixerPanel project={project} />}
+                element={<AutofixRedirect project={project} />}
               />
               <Route
                 path="errors/:errorGroupId/event/:eventId"
@@ -465,6 +468,5 @@ export function ProjectDetail() {
           </div>
         </div>
       </div>
-    </MobileSidebarProvider>
   )
 }

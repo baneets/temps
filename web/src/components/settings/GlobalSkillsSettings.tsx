@@ -10,13 +10,8 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { CreateActionButton } from '@/components/ui/create-action-button'
+import { Card, CardContent } from '@/components/ui/card'
 import {
   Dialog,
   DialogContent,
@@ -43,19 +38,20 @@ import {
   FileCode,
   Loader2,
   Plus,
-  Search,
   Wand2,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
-  type SkillDefinition,
-  listGlobalSkillDefinitions,
-  createGlobalSkillDefinition,
-  updateGlobalSkillDefinition,
-  deleteGlobalSkillDefinition,
-} from '@/components/agents/api'
+  createGlobalSkill,
+  updateGlobalSkill,
+} from '@/api/client/sdk.gen'
+import {
+  deleteGlobalSkillMutation,
+  listGlobalSkillsOptions,
+} from '@/api/client/@tanstack/react-query.gen'
+import type { SkillDefinitionResponse as SkillDefinition } from '@/api/client/types.gen'
 
 export function GlobalSkillsSettings() {
   usePageTitle('Skills')
@@ -66,17 +62,15 @@ export function GlobalSkillsSettings() {
   const [editingSkill, setEditingSkill] = useState<SkillDefinition | null>(null)
 
   const {
-    data: skills,
+    data: skillsData,
     isLoading,
     error,
     refetch,
-  } = useQuery({
-    queryKey: ['global-skills'],
-    queryFn: () => listGlobalSkillDefinitions(),
-  })
+  } = useQuery(listGlobalSkillsOptions())
+  const skills = skillsData?.items
 
   const deleteMutation = useMutation({
-    mutationFn: (slug: string) => deleteGlobalSkillDefinition(slug),
+    ...deleteGlobalSkillMutation(),
     onSuccess: () => {
       toast.success('Skill deleted')
       refetch()
@@ -109,10 +103,11 @@ export function GlobalSkillsSettings() {
             files in workflow sandboxes.
           </p>
         </div>
-        <Button onClick={openCreate} disabled={isLoading}>
-          <Plus className="h-4 w-4 mr-2" />
-          Add Skill
-        </Button>
+        <CreateActionButton
+          onClick={openCreate}
+          disabled={isLoading}
+          label="Add Skill"
+        />
       </div>
 
       {error && (
@@ -136,89 +131,12 @@ export function GlobalSkillsSettings() {
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
       ) : !error && skills && skills.length > 0 ? (
-        <div data-uidotsh-pick="Skills layout" className="contents">
-          <div data-uidotsh-option="Cards stack (current)" className="contents">
-            <div className="space-y-3">
-              {skills.map((skill) => (
-                <Card
-                  key={skill.id}
-                  className="cursor-pointer hover:bg-muted/30 transition-colors"
-                  onClick={() => navigate(`/settings/skills/${skill.slug}`)}
-                >
-                  <CardHeader className="pb-2">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-3 flex-1">
-                        <div className="mt-1">
-                          <Wand2 className="h-5 w-5 text-muted-foreground" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <CardTitle className="text-base">
-                              {skill.name}
-                            </CardTitle>
-                            <Badge
-                              variant="secondary"
-                              className="font-mono text-xs"
-                            >
-                              {skill.slug}
-                            </Badge>
-                          </div>
-                          {skill.description && (
-                            <CardDescription className="text-xs">
-                              {skill.description}
-                            </CardDescription>
-                          )}
-                        </div>
-                      </div>
-                      <SkillRowMenu
-                        skill={skill}
-                        onView={() =>
-                          navigate(`/settings/skills/${skill.slug}`)
-                        }
-                        onEdit={() => openEdit(skill)}
-                        onDelete={() => setSkillToDelete(skill.slug)}
-                      />
-                    </div>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="rounded-md border bg-muted/50 p-3">
-                      <pre className="text-xs text-muted-foreground whitespace-pre-wrap line-clamp-4 font-mono">
-                        {skill.content}
-                      </pre>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-
-          <div data-uidotsh-option="Compact rows" className="contents" hidden>
-            <SkillsCompactRows
-              skills={skills}
-              onOpen={(slug) => navigate(`/settings/skills/${slug}`)}
-              onEdit={openEdit}
-              onDelete={setSkillToDelete}
-            />
-          </div>
-
-          <div data-uidotsh-option="Grid tiles" className="contents" hidden>
-            <SkillsGridTiles
-              skills={skills}
-              onOpen={(slug) => navigate(`/settings/skills/${slug}`)}
-              onEdit={openEdit}
-              onDelete={setSkillToDelete}
-            />
-          </div>
-
-          <div data-uidotsh-option="Master / detail" className="contents" hidden>
-            <SkillsMasterDetail
-              skills={skills}
-              onOpen={(slug) => navigate(`/settings/skills/${slug}`)}
-              onEdit={openEdit}
-              onDelete={setSkillToDelete}
-            />
-          </div>
-        </div>
+        <SkillsCompactRows
+          skills={skills}
+          onOpen={(slug) => navigate(`/skills/${slug}`)}
+          onEdit={openEdit}
+          onDelete={setSkillToDelete}
+        />
       ) : !error ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
@@ -262,7 +180,8 @@ export function GlobalSkillsSettings() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={() => {
-                if (skillToDelete) deleteMutation.mutate(skillToDelete)
+                if (skillToDelete)
+                  deleteMutation.mutate({ path: { slug: skillToDelete } })
               }}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
@@ -286,21 +205,46 @@ interface SkillRowMenuProps {
 
 function SkillRowMenu({ onView, onEdit, onDelete }: SkillRowMenuProps) {
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-        <Button variant="ghost" size="icon" className="h-8 w-8">
-          <EllipsisVertical className="h-4 w-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
-        <DropdownMenuItem onClick={onView}>View details</DropdownMenuItem>
-        <DropdownMenuItem onClick={onEdit}>Edit</DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem className="text-destructive" onClick={onDelete}>
-          Delete
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <div
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-8 w-8">
+            <EllipsisVertical className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault()
+              onView()
+            }}
+          >
+            View details
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={(e) => {
+              e.preventDefault()
+              onEdit()
+            }}
+          >
+            Edit
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive"
+            onSelect={(e) => {
+              e.preventDefault()
+              onDelete()
+            }}
+          >
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
   )
 }
 
@@ -325,8 +269,16 @@ function SkillsCompactRows({
         {skills.map((skill) => (
           <li
             key={skill.id}
+            role="button"
+            tabIndex={0}
             onClick={() => onOpen(skill.slug)}
-            className="flex cursor-pointer items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onOpen(skill.slug)
+              }
+            }}
+            className="flex cursor-pointer items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors focus:outline-none focus:bg-muted/40"
           >
             <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
               <Wand2 className="size-4 text-muted-foreground" />
@@ -356,187 +308,6 @@ function SkillsCompactRows({
           </li>
         ))}
       </ul>
-    </div>
-  )
-}
-
-// ── Variant: Grid tiles ──
-
-function SkillsGridTiles({
-  skills,
-  onOpen,
-  onEdit,
-  onDelete,
-}: SkillsListProps) {
-  return (
-    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-      {skills.map((skill) => (
-        <Card
-          key={skill.id}
-          onClick={() => onOpen(skill.slug)}
-          className="group cursor-pointer transition-colors hover:bg-muted/30"
-        >
-          <CardHeader className="pb-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex size-9 items-center justify-center rounded-md bg-muted">
-                <Wand2 className="size-4 text-muted-foreground" />
-              </div>
-              <SkillRowMenu
-                skill={skill}
-                onView={() => onOpen(skill.slug)}
-                onEdit={() => onEdit(skill)}
-                onDelete={() => onDelete(skill.slug)}
-              />
-            </div>
-            <div className="mt-3 space-y-1">
-              <CardTitle className="truncate text-base">{skill.name}</CardTitle>
-              <Badge variant="secondary" className="font-mono text-xs">
-                {skill.slug}
-              </Badge>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {skill.description ? (
-              <p className="line-clamp-3 text-xs text-muted-foreground">
-                {skill.description}
-              </p>
-            ) : (
-              <p className="text-xs italic text-muted-foreground/60">
-                No description
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      ))}
-    </div>
-  )
-}
-
-// ── Variant: Master / detail ──
-
-function SkillsMasterDetail({
-  skills,
-  onOpen,
-  onEdit,
-  onDelete,
-}: SkillsListProps) {
-  const [selectedSlug, setSelectedSlug] = useState<string | null>(
-    skills[0]?.slug ?? null
-  )
-  const [query, setQuery] = useState('')
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return skills
-    return skills.filter(
-      (s) =>
-        s.name.toLowerCase().includes(q) ||
-        s.slug.toLowerCase().includes(q) ||
-        (s.description ?? '').toLowerCase().includes(q)
-    )
-  }, [skills, query])
-
-  const selected =
-    skills.find((s) => s.slug === selectedSlug) ?? filtered[0] ?? skills[0]
-
-  return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
-      <div className="overflow-hidden rounded-lg border">
-        <div className="border-b p-2">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter skills"
-              className="h-8 pl-8 text-sm"
-            />
-          </div>
-        </div>
-        <ul
-          role="list"
-          className="max-h-[480px] divide-y overflow-y-auto"
-        >
-          {filtered.map((skill) => {
-            const isActive = selected?.slug === skill.slug
-            return (
-              <li
-                key={skill.id}
-                onClick={() => setSelectedSlug(skill.slug)}
-                className={`cursor-pointer px-3 py-2.5 transition-colors ${
-                  isActive ? 'bg-muted' : 'hover:bg-muted/40'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <Wand2 className="size-3.5 shrink-0 text-muted-foreground" />
-                  <p className="truncate text-sm font-medium">{skill.name}</p>
-                </div>
-                <p className="mt-0.5 truncate pl-5 font-mono text-xs text-muted-foreground">
-                  {skill.slug}
-                </p>
-              </li>
-            )
-          })}
-          {filtered.length === 0 && (
-            <li className="px-3 py-6 text-center text-xs text-muted-foreground">
-              No skills match "{query}"
-            </li>
-          )}
-        </ul>
-      </div>
-
-      {selected ? (
-        <Card>
-          <CardHeader>
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <CardTitle className="truncate text-base">
-                    {selected.name}
-                  </CardTitle>
-                  <Badge variant="secondary" className="font-mono text-xs">
-                    {selected.slug}
-                  </Badge>
-                </div>
-                {selected.description && (
-                  <CardDescription className="mt-1 text-xs">
-                    {selected.description}
-                  </CardDescription>
-                )}
-              </div>
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onOpen(selected.slug)}
-                >
-                  Open
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => onEdit(selected)}
-                >
-                  Edit
-                </Button>
-                <SkillRowMenu
-                  skill={selected}
-                  onView={() => onOpen(selected.slug)}
-                  onEdit={() => onEdit(selected)}
-                  onDelete={() => onDelete(selected.slug)}
-                />
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="rounded-md border bg-muted/50 p-3">
-              <pre className="max-h-[420px] overflow-y-auto whitespace-pre-wrap font-mono text-xs text-muted-foreground">
-                {selected.content}
-              </pre>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
     </div>
   )
 }
@@ -598,18 +369,25 @@ function GlobalSkillDialog({
     setIsPending(true)
     try {
       if (isEdit) {
-        await updateGlobalSkillDefinition(skill!.slug, {
-          name: name.trim(),
-          description: description.trim() || undefined,
-          content: content,
+        await updateGlobalSkill({
+          path: { slug: skill!.slug },
+          body: {
+            name: name.trim(),
+            description: description.trim() || undefined,
+            content: content,
+          },
+          throwOnError: true,
         })
         toast.success('Skill updated')
       } else {
-        await createGlobalSkillDefinition({
-          slug: slug.trim(),
-          name: name.trim(),
-          description: description.trim() || undefined,
-          content: content,
+        await createGlobalSkill({
+          body: {
+            slug: slug.trim(),
+            name: name.trim(),
+            description: description.trim() || undefined,
+            content: content,
+          },
+          throwOnError: true,
         })
         toast.success('Skill created')
       }

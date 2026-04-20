@@ -90,6 +90,9 @@ mod m20260416_000004_add_ephemeral_fields_to_agent_runs;
 mod m20260417_000001_create_restore_runs;
 mod m20260417_000002_add_prompt_text_to_agent_runs;
 mod m20260417_000003_add_workspace_volume_to_agent_runs;
+mod m20260420_000001_create_revenue_tables;
+mod m20260420_000002_create_revenue_mrr_aggregate;
+mod m20260420_000003_add_integration_config;
 
 pub struct Migrator;
 
@@ -187,6 +190,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260417_000001_create_restore_runs::Migration),
             Box::new(m20260417_000002_add_prompt_text_to_agent_runs::Migration),
             Box::new(m20260417_000003_add_workspace_volume_to_agent_runs::Migration),
+            Box::new(m20260420_000001_create_revenue_tables::Migration),
+            Box::new(m20260420_000002_create_revenue_mrr_aggregate::Migration),
+            Box::new(m20260420_000003_add_integration_config::Migration),
         ]
     }
 }

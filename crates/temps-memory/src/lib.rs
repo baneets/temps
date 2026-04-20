@@ -183,11 +183,16 @@ pub trait WorkflowMemoryProvider: Send + Sync {
 // ── Bash memory script (installed into sandboxes) ───────────────────────────
 
 /// Path inside the sandbox where the memory script is installed.
-pub const MEMORY_SCRIPT_PATH: &str = "/workspace/.temps/bin/memory";
+///
+/// Lives under `/home/temps/` (the named home volume), NOT `/workspace`.
+/// `/workspace` is bind-mounted from the host repo — anything written there
+/// shows up as a tracked file in the user's working tree and can leak into
+/// PRs. `/home/temps` is private to the sandbox.
+pub const MEMORY_SCRIPT_PATH: &str = "/home/temps/.temps/bin/memory";
 
 /// Directory that must be on `$PATH` inside the sandbox so the AI can
 /// type `memory write "..."` without the full path.
-pub const MEMORY_SCRIPT_DIR: &str = "/workspace/.temps/bin";
+pub const MEMORY_SCRIPT_DIR: &str = "/home/temps/.temps/bin";
 
 /// Bash memory client shipped into every workflow sandbox. Reads scope
 /// from env vars at runtime, so the same binary works for any workflow.
@@ -397,8 +402,8 @@ mod tests {
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
         let body = &cmd[2];
-        assert!(body.contains("mkdir -p /workspace/.temps/bin"));
-        assert!(body.contains("chmod +x /workspace/.temps/bin/memory"));
+        assert!(body.contains("mkdir -p /home/temps/.temps/bin"));
+        assert!(body.contains("chmod +x /home/temps/.temps/bin/memory"));
         assert!(body.contains(MEMORY_SCRIPT));
     }
 

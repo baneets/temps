@@ -55,6 +55,7 @@ use temps_projects::ProjectsPlugin;
 use temps_providers::ProvidersPlugin;
 use temps_proxy::ProxyPlugin;
 use temps_queue::QueuePlugin;
+use temps_revenue::RevenuePlugin;
 use temps_sandbox::plugin::SandboxPlugin;
 use temps_screenshots::ScreenshotsPlugin;
 use temps_static_files::StaticFilesPlugin;
@@ -870,6 +871,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering BackupPlugin");
     let backup_plugin = Box::new(BackupPlugin::new());
     plugin_manager.register_plugin(backup_plugin);
+
+    // 11a. RevenuePlugin - per-project revenue tracking via inbound webhooks
+    // (depends on database + encryption service only — no outbound API calls)
+    debug!("Registering RevenuePlugin");
+    let revenue_plugin = Box::new(RevenuePlugin::new());
+    plugin_manager.register_plugin(revenue_plugin);
 
     // AI Gateway Plugin - provides AI provider key management and OpenAI-compatible API
     debug!("Registering AiGatewayPlugin");

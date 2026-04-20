@@ -38,23 +38,27 @@ here, it isn't standard. Prefer editing this file over inventing a one-off.
 
 ## 2. Typography
 
-The app uses a **monospace-first** type system (`Noto Sans Mono` via
-`--font-sans`). Do not introduce additional font families without updating
-this doc and `globals.css`.
+The app uses a **Geist-based** type system — `Geist` for UI/body (via
+`--font-sans`) and `Geist Mono` for code, IDs, and anything requiring
+monospace (via `--font-mono`). This matches Vercel's product surfaces for a
+professional, modern dashboard feel. Do not introduce additional font
+families without updating this doc and `globals.css`.
 
 | Role             | Classes                                                      | Notes                              |
 | ---------------- | ------------------------------------------------------------ | ---------------------------------- |
 | Page title (H1)  | `text-2xl font-semibold tracking-tight`                      | One per page, in the page header   |
 | Section (H2)     | `text-base font-semibold tracking-tight`                     | Above a group of cards/lists       |
 | Card title       | `font-semibold leading-none`                                 | Inside shadcn `CardTitle`          |
-| Body             | `text-sm` (default in cards/forms), `text-base` (prose only) |                                    |
+| Body             | `text-sm` (default in cards/forms), `text-base` (prose only) | Geist sans — never `font-mono`     |
 | Muted / meta     | `text-xs text-muted-foreground`                              | Timestamps, helper text, captions  |
 | Label (uppercase)| `text-xs font-medium uppercase tracking-wide text-muted-foreground` | Metric card titles, table headers |
 | Metric value     | `text-2xl font-semibold tracking-tight tabular-nums`         | KPIs                               |
-| Code / IDs       | `font-mono text-xs`                                          | Commit hashes, IDs, paths          |
+| Code / IDs       | `font-mono text-xs`                                          | Commit hashes, IDs, paths, tokens — **only** place `font-mono` is allowed |
 
 **Rules**
 - Never use `font-bold` — prefer `font-semibold` for emphasis.
+- Never apply `font-mono` to body copy, labels, titles, or buttons. Reserve
+  it for code fragments, IDs, hashes, file paths, and CLI output.
 - Never hardcode colors on text — use `text-foreground`, `text-muted-foreground`,
   or semantic tokens (`text-destructive`, `text-emerald-600 dark:text-emerald-400`).
 - Truncate long strings with `truncate` on a `min-w-0` parent.
@@ -310,6 +314,15 @@ patterns only:
   sub-items as a flat list. Back returns to the previous view without
   changing the page route.
 
+**Drill-down items must have icons.** Every sub-item in a drill-down
+view renders a leading lucide icon (`h-4 w-4`) next to its label —
+matching the flat-list nav pattern. Icon-less text lists (e.g.
+"Analytics / Visitors / Pages / Funnels / Session Replays / Uptime /
+Metrics / Request Logs / Traces / Speed") are visually ambiguous and
+force users to read every label to scan. Pick an icon that reflects
+the destination's purpose; reuse the same icon the destination page
+uses in its header when one exists.
+
 **Do not** expand sub-items inline with a chevron / accordion. Inline
 accordions create double-scroll, hide context from the rest of the
 nav, and don't scale past a couple of items. If a section has enough
@@ -408,6 +421,7 @@ The route-driven swap between workspace, settings, and project nav in
 | Cards inside cards                                    | Flatten or use a section heading              |
 | Custom shadows or radii                               | §5 tokens                                     |
 | Collapsible / accordion sidebar items                 | Drill-down sub-view (§6.12)                   |
+| Icon-less labels in drill-down sidebar sub-views      | Every sub-item gets a lucide icon (§6.12)     |
 
 ---
 

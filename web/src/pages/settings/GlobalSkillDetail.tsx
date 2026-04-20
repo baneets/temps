@@ -30,10 +30,11 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
-  deleteGlobalSkillDefinition,
-  listGlobalSkillDefinitions,
-  updateGlobalSkillDefinition,
-} from '@/components/agents/api'
+  deleteGlobalSkillMutation,
+  listGlobalSkillsOptions,
+  listGlobalSkillsQueryKey,
+  updateGlobalSkillMutation,
+} from '@/api/client/@tanstack/react-query.gen'
 
 function formatDate(iso: string): string {
   try {
@@ -50,16 +51,13 @@ export function GlobalSkillDetail() {
   usePageTitle(`Skill: ${slug ?? ''}`)
 
   const {
-    data: skills,
+    data: skillsData,
     isLoading,
     error,
     refetch,
-  } = useQuery({
-    queryKey: ['global-skills'],
-    queryFn: () => listGlobalSkillDefinitions(),
-  })
+  } = useQuery(listGlobalSkillsOptions())
 
-  const skill = skills?.find((s) => s.slug === slug)
+  const skill = skillsData?.items.find((s) => s.slug === slug)
 
   const [isEditing, setIsEditing] = useState(false)
   const [name, setName] = useState('')
@@ -76,26 +74,21 @@ export function GlobalSkillDetail() {
   }, [skill])
 
   const updateMutation = useMutation({
-    mutationFn: () =>
-      updateGlobalSkillDefinition(slug!, {
-        name: name.trim(),
-        description: description.trim() || undefined,
-        content,
-      }),
+    ...updateGlobalSkillMutation(),
     onSuccess: () => {
       toast.success('Skill updated')
-      queryClient.invalidateQueries({ queryKey: ['global-skills'] })
+      queryClient.invalidateQueries({ queryKey: listGlobalSkillsQueryKey() })
       setIsEditing(false)
     },
     onError: () => toast.error('Failed to update skill'),
   })
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteGlobalSkillDefinition(slug!),
+    ...deleteGlobalSkillMutation(),
     onSuccess: () => {
       toast.success('Skill deleted')
-      queryClient.invalidateQueries({ queryKey: ['global-skills'] })
-      navigate('/settings/skills')
+      queryClient.invalidateQueries({ queryKey: listGlobalSkillsQueryKey() })
+      navigate('/skills')
     },
     onError: () => toast.error('Failed to delete skill'),
   })
@@ -112,7 +105,7 @@ export function GlobalSkillDetail() {
     return (
       <div>
         <Link
-          to="/settings/skills"
+          to="/skills"
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-4"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -145,13 +138,20 @@ export function GlobalSkillDetail() {
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim() || !content.trim()) return
-    updateMutation.mutate()
+    updateMutation.mutate({
+      path: { slug: slug! },
+      body: {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        content,
+      },
+    })
   }
 
   return (
     <div>
       <Link
-        to="/settings/skills"
+        to="/skills"
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-4"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -330,7 +330,7 @@ export function GlobalSkillDetail() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => deleteMutation.mutate()}
+              onClick={() => deleteMutation.mutate({ path: { slug: slug! } })}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete

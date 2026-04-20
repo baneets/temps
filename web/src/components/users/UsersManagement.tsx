@@ -21,14 +21,13 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { KbdBadge } from '@/components/ui/kbd-badge'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog'
 import {
   DropdownMenu,
@@ -75,7 +74,7 @@ import { z } from 'zod'
 
 const createUserSchema = z.object({
   name: z.string().min(3, 'Name must be at least 3 characters'),
-  email: z.string().email('Invalid email address'),
+  email: z.email('Invalid email address'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
   role: z.string().min(1, 'Please select a role'),
 })
@@ -266,14 +265,12 @@ export function UsersManagement({
             Manage user access and roles
           </p>
         </div>
+        <CreateActionButton
+          onClick={() => setIsCreateDialogOpen(true)}
+          label="Add User"
+          icon={<UserPlus className="h-4 w-4" />}
+        />
         <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-          <DialogTrigger asChild>
-            <Button>
-              <UserPlus className="mr-2 h-4 w-4" />
-              Add User
-              <KbdBadge keys={['N']} className="ml-2" />
-            </Button>
-          </DialogTrigger>
           <DialogContent className="sm:max-w-[425px]">
             <DialogHeader>
               <DialogTitle>Create New User</DialogTitle>

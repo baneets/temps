@@ -34,15 +34,13 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
-  Activity,
+  ArrowUpRight,
   CheckCircle2,
   AlertTriangle,
   XCircle,
   HelpCircle,
-  TrendingUp,
-  TrendingDown,
-  Minus,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 
 // ── Chart configs ────────────────────────────────────────────────────
@@ -130,40 +128,32 @@ function getStatusConfig(status: string) {
       return {
         icon: CheckCircle2,
         color: 'text-green-600',
-        bg: 'bg-green-500/10',
-        border: 'border-green-500/20',
         label: 'Healthy',
       }
     case 'degraded':
       return {
         icon: AlertTriangle,
         color: 'text-yellow-600',
-        bg: 'bg-yellow-500/10',
-        border: 'border-yellow-500/20',
         label: 'Degraded',
       }
     case 'down':
       return {
         icon: XCircle,
         color: 'text-red-600',
-        bg: 'bg-red-500/10',
-        border: 'border-red-500/20',
         label: 'Down',
       }
     default:
       return {
         icon: HelpCircle,
         color: 'text-muted-foreground',
-        bg: 'bg-muted/50',
-        border: 'border-muted',
         label: 'Unknown',
       }
   }
 }
 
-// ── Project Health Card ─────────────────────────────────────────────
+// ── Project Health Row ──────────────────────────────────────────────
 
-function ProjectHealthCard({
+function ProjectHealthRow({
   project,
   health,
 }: {
@@ -179,109 +169,56 @@ function ProjectHealthCard({
   const status = health?.status ?? 'unknown'
   const config = getStatusConfig(status)
   const StatusIcon = config.icon
+  const hasTraffic = health && health.status !== 'unknown'
 
   return (
-    <Card className={cn('transition-colors', config.border)}>
-      <CardContent className="p-4">
-        <div className="flex items-start justify-between mb-3">
-          <div className="min-w-0">
-            <p className="font-medium text-sm truncate">{project.name}</p>
-            {project.preset && (
-              <p className="text-xs text-muted-foreground">{project.preset}</p>
-            )}
-          </div>
-          <div
+    <Link
+      to={`/projects/${project.slug}/logs`}
+      className="group flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/50"
+    >
+      <StatusIcon className={cn('size-4 shrink-0', config.color)} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{project.name}</p>
+        {project.preset && (
+          <p className="truncate text-xs text-muted-foreground">
+            {project.preset}
+          </p>
+        )}
+      </div>
+      {hasTraffic ? (
+        <div className="flex shrink-0 items-center gap-4 text-xs tabular-nums">
+          <span>
+            <span className="font-semibold">
+              {health.total_requests.toLocaleString()}
+            </span>{' '}
+            <span className="text-muted-foreground">req</span>
+          </span>
+          <span
             className={cn(
-              'flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium',
-              config.bg,
-              config.color
+              'font-semibold',
+              health.error_rate > 5
+                ? 'text-red-600'
+                : health.error_rate > 1
+                  ? 'text-yellow-600'
+                  : ''
             )}
           >
-            <StatusIcon className="h-3 w-3" />
-            {config.label}
-          </div>
+            {health.error_rate.toFixed(1)}%
+          </span>
+          <span>
+            <span className="font-semibold">
+              {health.avg_response_time_ms.toFixed(0)}
+            </span>
+            <span className="text-muted-foreground">ms</span>
+          </span>
         </div>
-
-        {health && health.status !== 'unknown' ? (
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <p className="text-xs text-muted-foreground">Requests</p>
-              <p className="text-sm font-semibold tabular-nums">
-                {health.total_requests.toLocaleString()}
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Error Rate</p>
-              <p
-                className={cn(
-                  'text-sm font-semibold tabular-nums',
-                  health.error_rate > 5
-                    ? 'text-red-600'
-                    : health.error_rate > 1
-                      ? 'text-yellow-600'
-                      : ''
-                )}
-              >
-                {health.error_rate.toFixed(1)}%
-              </p>
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground">Avg Response</p>
-              <p className="text-sm font-semibold tabular-nums">
-                {health.avg_response_time_ms.toFixed(0)}ms
-              </p>
-            </div>
-          </div>
-        ) : (
-          <p className="text-xs text-muted-foreground">No traffic data</p>
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-// ── Summary Stat Card ───────────────────────────────────────────────
-
-function SummaryStatCard({
-  label,
-  value,
-  subValue,
-  trend,
-}: {
-  label: string
-  value: string
-  subValue?: string
-  trend?: 'up' | 'down' | 'neutral'
-}) {
-  const TrendIcon =
-    trend === 'up'
-      ? TrendingUp
-      : trend === 'down'
-        ? TrendingDown
-        : Minus
-
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <p className="text-xs text-muted-foreground mb-1">{label}</p>
-        <div className="flex items-baseline gap-2">
-          <p className="text-2xl font-bold tabular-nums">{value}</p>
-          {trend && (
-            <TrendIcon
-              className={cn(
-                'h-4 w-4',
-                trend === 'up' && 'text-red-500',
-                trend === 'down' && 'text-green-500',
-                trend === 'neutral' && 'text-muted-foreground'
-              )}
-            />
-          )}
-        </div>
-        {subValue && (
-          <p className="text-xs text-muted-foreground mt-0.5">{subValue}</p>
-        )}
-      </CardContent>
-    </Card>
+      ) : (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          No traffic
+        </span>
+      )}
+      <ArrowUpRight className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+    </Link>
   )
 }
 
@@ -348,12 +285,12 @@ function TrendCharts({
     return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
-          <CardContent className="flex items-center justify-center h-[300px] text-sm text-muted-foreground">
+          <CardContent className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
             No request data for this period
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="flex items-center justify-center h-[300px] text-sm text-muted-foreground">
+          <CardContent className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
             No response time data for this period
           </CardContent>
         </Card>
@@ -370,14 +307,14 @@ function TrendCharts({
             <CardTitle className="text-base">Requests & Errors</CardTitle>
             <div className="flex items-center gap-3 text-sm">
               <span>
-                <span className="font-semibold">
+                <span className="font-semibold tabular-nums">
                   {totals.requests.toLocaleString()}
                 </span>{' '}
                 <span className="text-muted-foreground">total</span>
               </span>
               {totals.errors > 0 && (
                 <span>
-                  <span className="font-semibold text-destructive">
+                  <span className="font-semibold text-destructive tabular-nums">
                     {totals.errors.toLocaleString()}
                   </span>{' '}
                   <span className="text-muted-foreground">errors</span>
@@ -445,7 +382,7 @@ function TrendCharts({
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">Response Time</CardTitle>
             <span className="text-sm">
-              <span className="font-semibold">
+              <span className="font-semibold tabular-nums">
                 {totals.avgResponse.toFixed(0)}
               </span>{' '}
               <span className="text-muted-foreground">ms avg</span>
@@ -520,19 +457,12 @@ export function ResourceMonitoring() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>('all')
   const [hideBots, setHideBots] = useState<boolean>(true)
 
-  // For preset ranges (1h/6h/24h), "now" should tick forward with the
-  // refetch interval so the window stays live. We snap it to the nearest
-  // 30s so identical ticks produce stable query keys instead of a new
-  // one every render.
   const now = useMemo(
     () => {
       const d = new Date()
       d.setSeconds(Math.floor(d.getSeconds() / 30) * 30, 0)
       return d
     },
-    // Re-evaluate whenever the user switches preset/custom and whenever
-    // react-query refetches (30s interval). A ref to timeRange is enough
-    // — we intentionally do not depend on a ticking clock here.
     [timeRange]
   )
 
@@ -546,12 +476,8 @@ export function ResourceMonitoring() {
   })
 
   const projects = projectsData?.projects ?? []
-  const projectIds = useMemo(
-    () => projects.map((p) => p.id),
-    [projects]
-  )
+  const projectIds = useMemo(() => projects.map((p) => p.id), [projects])
 
-  // Fetch health summary for all projects, over the selected window
   const { data: healthData } = useQuery({
     ...getProjectsHealthOptions({
       query: {
@@ -567,74 +493,33 @@ export function ResourceMonitoring() {
 
   const healthMap = healthData?.projects ?? {}
 
-  // Compute overall summary stats
-  const summary = useMemo(() => {
-    const healthEntries = Object.values(healthMap)
-    if (healthEntries.length === 0) {
-      return {
-        totalRequests: 0,
-        totalErrors: 0,
-        avgResponseTime: 0,
-        errorRate: 0,
-        healthyCount: 0,
-        degradedCount: 0,
-        downCount: 0,
-      }
-    }
-
-    const totalRequests = healthEntries.reduce(
-      (sum, h) => sum + h.total_requests,
-      0
-    )
-    const totalErrors = healthEntries.reduce(
-      (sum, h) => sum + h.total_errors,
-      0
-    )
-    const errorRate =
-      totalRequests > 0 ? (totalErrors / totalRequests) * 100 : 0
-    const withTime = healthEntries.filter((h) => h.avg_response_time_ms > 0)
-    const avgResponseTime =
-      withTime.length > 0
-        ? withTime.reduce((sum, h) => sum + h.avg_response_time_ms, 0) /
-          withTime.length
-        : 0
-
-    return {
-      totalRequests,
-      totalErrors,
-      avgResponseTime,
-      errorRate,
-      healthyCount: healthEntries.filter((h) => h.status === 'healthy').length,
-      degradedCount: healthEntries.filter((h) => h.status === 'degraded')
-        .length,
-      downCount: healthEntries.filter((h) => h.status === 'down').length,
-    }
-  }, [healthMap])
-
-  // Determine overall status for trend indicator
-  const errorTrend: 'up' | 'down' | 'neutral' =
-    summary.errorRate > 5
-      ? 'up'
-      : summary.errorRate > 0
-        ? 'neutral'
-        : 'down'
+  const visibleProjects = useMemo(
+    () =>
+      projects.filter(
+        (p) =>
+          selectedProjectId === 'all' ||
+          p.id.toString() === selectedProjectId
+      ),
+    [projects, selectedProjectId]
+  )
 
   return (
     <div className="space-y-6">
-      {/* Header + Controls */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h3 className="text-lg font-medium">Health Overview</h3>
-          <p className="text-sm text-muted-foreground">
-            Is everything working? At a glance.
-          </p>
-        </div>
+      {/* Filter bar */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <p className="text-sm text-muted-foreground">
+          Showing {range.label}
+          {selectedProjectId !== 'all' && (
+            <> · 1 project</>
+          )}
+          {hideBots && <> · bots hidden</>}
+        </p>
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={selectedProjectId}
             onValueChange={setSelectedProjectId}
           >
-            <SelectTrigger className="w-[180px]">
+            <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs">
               <SelectValue placeholder="All projects" />
             </SelectTrigger>
             <SelectContent>
@@ -651,7 +536,6 @@ export function ResourceMonitoring() {
             size="sm"
             className="h-8 px-3 text-xs"
             onClick={() => setHideBots((v) => !v)}
-            title={hideBots ? 'Bots are hidden' : 'Bots are included'}
           >
             {hideBots ? 'Hide bots' : 'Show bots'}
           </Button>
@@ -681,7 +565,7 @@ export function ResourceMonitoring() {
               date={customRange}
               onDateChange={setCustomRange}
               showTime
-              className="w-[300px]"
+              className="w-full sm:w-[300px]"
             />
           )}
         </div>
@@ -689,81 +573,28 @@ export function ResourceMonitoring() {
 
       {projectsLoading ? (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Skeleton className="h-[90px] w-full" />
-            <Skeleton className="h-[90px] w-full" />
-            <Skeleton className="h-[90px] w-full" />
-            <Skeleton className="h-[90px] w-full" />
-          </div>
+          <Skeleton className="h-[160px] w-full" />
           <Skeleton className="h-[300px] w-full" />
         </div>
       ) : projects.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-16">
-            <Activity className="h-10 w-10 text-muted-foreground mb-4" />
-            <p className="text-sm text-muted-foreground">
-              No projects found. Create a project to start monitoring.
-            </p>
-          </CardContent>
-        </Card>
+        <p className="rounded-md border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+          No projects found. Create a project to start monitoring.
+        </p>
       ) : (
         <div className="space-y-6">
-          {/* ── Summary Stats ── */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <SummaryStatCard
-              label="Total Requests"
-              value={summary.totalRequests.toLocaleString()}
-              subValue={range.label}
-            />
-            <SummaryStatCard
-              label="Error Rate"
-              value={`${summary.errorRate.toFixed(1)}%`}
-              subValue={`${summary.totalErrors.toLocaleString()} errors`}
-              trend={errorTrend}
-            />
-            <SummaryStatCard
-              label="Avg Response Time"
-              value={`${summary.avgResponseTime.toFixed(0)}ms`}
-              trend={
-                summary.avgResponseTime > 500
-                  ? 'up'
-                  : summary.avgResponseTime > 0
-                    ? 'neutral'
-                    : 'down'
-              }
-            />
-            <SummaryStatCard
-              label="Projects Status"
-              value={`${summary.healthyCount}/${projects.length}`}
-              subValue={
-                summary.downCount > 0
-                  ? `${summary.downCount} down`
-                  : summary.degradedCount > 0
-                    ? `${summary.degradedCount} degraded`
-                    : 'all healthy'
-              }
-            />
-          </div>
-
-          {/* ── Project Health Cards ── */}
-          <div>
-            <h4 className="text-sm font-medium mb-3">Project Status</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {projects
-                .filter(
-                  (p) =>
-                    selectedProjectId === 'all' ||
-                    p.id.toString() === selectedProjectId
-                )
-                .map((project) => (
-                  <ProjectHealthCard
-                    key={project.id}
+          {/* ── Project Health Rows ── */}
+          <Card>
+            <ul role="list" className="divide-y divide-gray-950/5">
+              {visibleProjects.map((project) => (
+                <li key={project.id}>
+                  <ProjectHealthRow
                     project={project}
                     health={healthMap[project.id.toString()]}
                   />
-                ))}
-            </div>
-          </div>
+                </li>
+              ))}
+            </ul>
+          </Card>
 
           {/* ── Trend Charts ── */}
           <TrendCharts

@@ -10,7 +10,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Cpu, MemoryStick } from 'lucide-react'
 
-import { getSandboxStats, type SandboxStats } from './api'
+import { workspaceSandboxStatsOptions } from '@/api/client/@tanstack/react-query.gen'
 
 interface Props {
   projectId: number
@@ -53,9 +53,10 @@ export function SandboxStatsBadge({ projectId, sessionId, enabled }: Props) {
     return () => document.removeEventListener('visibilitychange', onVis)
   }, [])
 
-  const query = useQuery<SandboxStats>({
-    queryKey: ['sandbox-stats', projectId, sessionId],
-    queryFn: () => getSandboxStats(projectId, sessionId),
+  const query = useQuery({
+    ...workspaceSandboxStatsOptions({
+      path: { project_id: projectId, session_id: sessionId },
+    }),
     enabled: enabled && visible,
     refetchInterval: enabled && visible ? 3000 : false,
     // Stats are inherently stale — don't keep the cache around long.

@@ -146,7 +146,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-async fn workflow_dry_run(
+pub async fn workflow_dry_run(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -309,13 +309,8 @@ async fn workflow_dry_run(
 
     let run_resp = AgentRunResponse::from_with_agent(
         run,
-        // No `project_agents` row — the dashboard derives display name from
-        // `ephemeral_yaml`. Pass the workflow name through so list views
-        // don't show "(unknown agent)".
         Some(format!("ephemeral-{}", workflow_name)),
         Some(workflow_name),
-        // Ephemeral runs always sandbox (forced in `synthesize_ephemeral_config`).
-        true,
     );
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))

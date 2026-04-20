@@ -52,8 +52,9 @@ pub struct Model {
     pub skills_config: Option<serde_json::Value>,
     /// JSON array of MCP server slugs to inject into the sandbox at session
     /// start. Resolved from `project_mcp_definitions` (falls back to global).
-    /// Deep-merged into `/workspace/.claude/settings.json` and
-    /// `/home/temps/.claude.json`.
+    /// Deep-merged into `/home/temps/.claude.json` (user-level config, kept
+    /// out of the bind-mounted `/workspace` repo to avoid leaking resolved
+    /// secrets into PR diffs).
     #[sea_orm(column_type = "JsonBinary")]
     pub mcp_servers_config: Option<serde_json::Value>,
     /// Argon2 hash of the per-session preview password. Enforced by the

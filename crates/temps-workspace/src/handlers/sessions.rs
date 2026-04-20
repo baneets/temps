@@ -178,9 +178,10 @@ pub struct StartSessionRequest {
     /// `/home/temps/.claude/skills/<slug>/` at session start.
     pub skills: Option<Vec<String>>,
     /// Slugs of MCP server definitions to inject into the sandbox. Deep-merged
-    /// into `/workspace/.claude/settings.json` and `/home/temps/.claude.json`
-    /// at session start. Resolved from `project_mcp_definitions` (falls back
-    /// to global).
+    /// into `/home/temps/.claude.json` (user-level config, kept out of the
+    /// bind-mounted repo to avoid leaking resolved secrets into PR diffs) at
+    /// session start. Resolved from `project_mcp_definitions` (falls back to
+    /// global).
     pub mcp_servers: Option<Vec<String>>,
     /// CPU limit in vCPU cores (e.g. 2.0). `None` → server default applies.
     pub cpu_limit: Option<f32>,
@@ -227,14 +228,14 @@ pub struct SendMessageBody {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct PaginationParams {
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct WorkspacePaginationParams {
     pub page: Option<u64>,
     pub page_size: Option<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct SessionResponse {
+pub struct WorkspaceSessionResponse {
     pub id: i32,
     /// Opaque external identifier (`wss_<16hex>`). Used in preview URLs
     /// so sessions can't be enumerated by walking numeric ids.
@@ -283,7 +284,7 @@ pub struct SessionResponse {
     pub mcp_servers: Vec<String>,
 }
 
-impl SessionResponse {
+impl WorkspaceSessionResponse {
     pub fn from_model(s: workspace_sessions::Model, parts: &PreviewUrlParts) -> Self {
         let id = s.id;
         let preview_urls = build_preview_urls(&s.public_id, parts);
@@ -333,8 +334,12 @@ impl SessionResponse {
     }
 }
 
+// Type alias so existing call sites inside this module compile unchanged.
+#[allow(dead_code)]
+type SessionResponse = WorkspaceSessionResponse;
+
 #[derive(Debug, Serialize, ToSchema)]
-pub struct MessageResponse {
+pub struct WorkspaceMessageResponse {
     pub id: i64,
     pub session_id: i32,
     pub role: String,
@@ -343,7 +348,7 @@ pub struct MessageResponse {
     pub created_at: String,
 }
 
-impl From<workspace_messages::Model> for MessageResponse {
+impl From<workspace_messages::Model> for WorkspaceMessageResponse {
     fn from(m: workspace_messages::Model) -> Self {
         Self {
             id: m.id,
@@ -356,19 +361,29 @@ impl From<workspace_messages::Model> for MessageResponse {
     }
 }
 
+// Type alias so existing call sites inside this module compile unchanged.
+#[allow(dead_code)]
+type MessageResponse = WorkspaceMessageResponse;
+
 #[derive(Debug, Serialize, ToSchema)]
-pub struct SessionWithMessagesResponse {
-    pub session: SessionResponse,
-    pub messages: Vec<MessageResponse>,
+pub struct WorkspaceSessionWithMessagesResponse {
+    pub session: WorkspaceSessionResponse,
+    pub messages: Vec<WorkspaceMessageResponse>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct SessionListResponse {
-    pub sessions: Vec<SessionResponse>,
+pub struct WorkspaceSessionListResponse {
+    pub sessions: Vec<WorkspaceSessionResponse>,
     pub total: u64,
     pub page: u64,
     pub page_size: u64,
 }
+
+// Type aliases so existing call sites inside this module compile unchanged.
+#[allow(dead_code)]
+type SessionWithMessagesResponse = WorkspaceSessionWithMessagesResponse;
+#[allow(dead_code)]
+type SessionListResponse = WorkspaceSessionListResponse;
 
 // ── Routes ──────────────────────────────────────────────────────────────────
 
@@ -376,73 +391,73 @@ pub fn routes() -> Router<Arc<WorkspaceAppState>> {
     Router::new()
         .route(
             "/projects/{project_id}/workspace/sessions",
-            get(list_sessions).post(start_session),
+            get(workspace_list_sessions).post(workspace_start_session),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}",
-            get(get_session)
-                .patch(update_session)
-                .delete(delete_session),
+            get(workspace_get_session)
+                .patch(workspace_update_session)
+                .delete(workspace_delete_session),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/messages",
-            post(send_message),
+            post(workspace_send_message),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/cancel",
-            post(cancel_run),
+            post(workspace_cancel_run),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/stream",
-            get(stream_messages),
+            get(workspace_stream_messages),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/close",
-            post(close_session),
+            post(workspace_close_session),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/reopen",
-            post(reopen_session),
+            post(workspace_reopen_session),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/preview-password/regenerate",
-            post(regenerate_preview_password),
+            post(workspace_regenerate_preview_password),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/stop",
-            post(stop_sandbox),
+            post(workspace_stop_sandbox),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/start",
-            post(start_sandbox),
+            post(workspace_start_sandbox),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/restart",
-            post(restart_sandbox),
+            post(workspace_restart_sandbox),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/refresh",
-            post(refresh_sandbox),
+            post(workspace_refresh_sandbox),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/stats",
-            get(sandbox_stats),
+            get(workspace_sandbox_stats),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/terminal",
-            get(session_terminal_ws),
+            get(workspace_terminal_ws),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/terminal/paste-image",
-            post(session_terminal_paste_image),
+            post(workspace_terminal_paste_image),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/terminal/tabs",
-            get(list_terminal_tabs),
+            get(workspace_list_terminal_tabs),
         )
         .route(
             "/projects/{project_id}/workspace/sessions/{session_id}/terminal/tabs/{tab_id}",
-            axum::routing::delete(delete_terminal_tab),
+            axum::routing::delete(workspace_delete_terminal_tab),
         )
 }
 
@@ -462,21 +477,46 @@ pub fn routes() -> Router<Arc<WorkspaceAppState>> {
 // and no 33% base64-in-JSON inflation once we later move to a streaming body.
 // This collapses the paste latency from ~hundreds of ms to one syscall.
 #[derive(Debug, Deserialize, ToSchema)]
-struct PasteImageRequest {
+pub struct WorkspacePasteImageRequest {
     /// base64-encoded image bytes (no data: prefix)
-    data: String,
+    pub data: String,
     /// MIME type, used to pick the file extension. Defaults to "image/png".
     #[serde(default)]
-    mime: Option<String>,
+    pub mime: Option<String>,
 }
+
+// Type alias so the handler body compiles unchanged.
+type PasteImageRequest = WorkspacePasteImageRequest;
 
 #[derive(Debug, Serialize, ToSchema)]
-struct PasteImageResponse {
+pub struct WorkspacePasteImageResponse {
     /// Path inside the sandbox where the image was written.
-    path: String,
+    pub path: String,
 }
 
-async fn session_terminal_paste_image(
+// Type alias so the handler body compiles unchanged.
+type PasteImageResponse = WorkspacePasteImageResponse;
+
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/terminal/paste-image",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    request_body = WorkspacePasteImageRequest,
+    responses(
+        (status = 200, body = WorkspacePasteImageResponse),
+        (status = 400, description = "Invalid image data"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+        (status = 409, description = "No sandbox container"),
+        (status = 413, description = "Image too large"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_terminal_paste_image(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, session_id)): Path<(i32, i32)>,
@@ -623,23 +663,45 @@ async fn session_terminal_paste_image(
 // closes.
 
 #[derive(Debug, Serialize, ToSchema)]
-struct TerminalTab {
+pub struct WorkspaceTerminalTab {
     /// `claude` or `shell` — drives which command runs in a fresh tab.
-    kind: String,
+    pub kind: String,
     /// Stable id chosen by the client. Combined with `kind` to form the tmux
     /// session name.
-    id: String,
+    pub id: String,
     /// Number of tmux clients currently attached to this session. 0 means
     /// the tab is alive but no browser is viewing it.
-    attached_clients: u32,
+    pub attached_clients: u32,
 }
+
+// Type alias so the handler body compiles unchanged.
+type TerminalTab = WorkspaceTerminalTab;
 
 #[derive(Debug, Serialize, ToSchema)]
-struct TerminalTabsResponse {
-    tabs: Vec<TerminalTab>,
+pub struct WorkspaceTerminalTabsResponse {
+    pub tabs: Vec<WorkspaceTerminalTab>,
 }
 
-async fn list_terminal_tabs(
+// Type alias so the handler body compiles unchanged.
+type TerminalTabsResponse = WorkspaceTerminalTabsResponse;
+
+#[utoipa::path(
+    tag = "Workspace",
+    get,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/terminal/tabs",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 200, body = WorkspaceTerminalTabsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+        (status = 503, description = "Docker not available"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_list_terminal_tabs(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, session_id)): Path<(i32, i32)>,
@@ -693,7 +755,24 @@ async fn list_terminal_tabs(
     Ok((StatusCode::OK, Json(TerminalTabsResponse { tabs })))
 }
 
-async fn delete_terminal_tab(
+#[utoipa::path(
+    tag = "Workspace",
+    delete,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/terminal/tabs/{tab_id}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+        ("tab_id" = String, Path, description = "Tab id in {kind}-{id} format, e.g. shell-abc"),
+    ),
+    responses(
+        (status = 204, description = "Tab deleted"),
+        (status = 400, description = "Invalid tab id"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_delete_terminal_tab(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, session_id, tab_id)): Path<(i32, i32, String)>,
@@ -867,7 +946,7 @@ struct TerminalControl {
 /// `tab` is a stable identifier so reopening the same tab re-attaches to the
 /// same tmux session inside the container — `temps-{kind}-{tab}`.
 #[derive(Deserialize, Default)]
-struct TerminalQuery {
+pub struct TerminalQuery {
     #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
@@ -950,7 +1029,11 @@ impl AuditOperation for WorkspaceTerminalDetachAudit {
     }
 }
 
-async fn session_terminal_ws(
+// WebSocket upgrade — excluded from utoipa (utoipa cannot represent WS upgrades
+// and hey-api cannot generate a typed client for WS endpoints). The route is
+// still wired up in `routes()` above; it is just not included in the OpenAPI
+// schema or the `WorkspaceApiDoc::paths(...)` list.
+pub async fn workspace_terminal_ws(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Extension(metadata): Extension<RequestMetadata>,
@@ -1941,7 +2024,23 @@ async fn handle_session_terminal(
     }
 }
 
-async fn refresh_sandbox(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/refresh",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Sandbox refresh triggered"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+        (status = 503, description = "No sandbox available"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_refresh_sandbox(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -1968,7 +2067,7 @@ async fn refresh_sandbox(
 /// fractional cores the container is currently consuming (e.g. 0.42 =
 /// 42% of one core = 21% of a 2-core limit).
 #[derive(Debug, Serialize, ToSchema)]
-struct SandboxStatsResponse {
+pub struct WorkspaceSandboxStatsResponse {
     container_id: String,
     /// CPU cores currently consumed (0.0 → cpu_limit_cores).
     cpu_used_cores: f64,
@@ -1985,7 +2084,24 @@ struct SandboxStatsResponse {
     memory_percent: f64,
 }
 
-async fn sandbox_stats(
+#[utoipa::path(
+    tag = "Workspace",
+    get,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/stats",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 200, body = WorkspaceSandboxStatsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+        (status = 409, description = "No sandbox container"),
+        (status = 503, description = "Docker not available"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_sandbox_stats(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, session_id)): Path<(i32, i32)>,
@@ -2117,7 +2233,7 @@ async fn sandbox_stats(
         0.0
     };
 
-    Ok(axum::Json(SandboxStatsResponse {
+    Ok(axum::Json(WorkspaceSandboxStatsResponse {
         container_id,
         cpu_used_cores,
         cpu_limit_cores,
@@ -2128,7 +2244,22 @@ async fn sandbox_stats(
     }))
 }
 
-async fn stop_sandbox(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/stop",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Sandbox stopped"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_stop_sandbox(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2143,7 +2274,22 @@ async fn stop_sandbox(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn start_sandbox(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/start",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Sandbox started"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_start_sandbox(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2158,7 +2304,22 @@ async fn start_sandbox(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn restart_sandbox(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/sandbox/restart",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Sandbox restarted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_restart_sandbox(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2178,7 +2339,23 @@ async fn restart_sandbox(
 
 // ── Handlers ────────────────────────────────────────────────────────────────
 
-async fn start_session(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+    ),
+    request_body = StartSessionRequest,
+    responses(
+        (status = 201, body = WorkspaceSessionResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Project not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_start_session(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path(project_id): Path<i32>,
@@ -2437,7 +2614,22 @@ async fn preview_url_parts(state: &WorkspaceAppState) -> PreviewUrlParts {
     }
 }
 
-async fn regenerate_preview_password(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/preview-password/regenerate",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 200, body = WorkspaceSessionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_regenerate_preview_password(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2460,11 +2652,26 @@ async fn regenerate_preview_password(
     Ok((StatusCode::OK, Json(resp)))
 }
 
-async fn list_sessions(
+#[utoipa::path(
+    tag = "Workspace",
+    get,
+    path = "/projects/{project_id}/workspace/sessions",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("page" = Option<u64>, Query, description = "Page number (default 1)"),
+        ("page_size" = Option<u64>, Query, description = "Page size (default 20)"),
+    ),
+    responses(
+        (status = 200, body = WorkspaceSessionListResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_list_sessions(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path(project_id): Path<i32>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<WorkspacePaginationParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, ProjectsRead);
 
@@ -2488,7 +2695,22 @@ async fn list_sessions(
     }))
 }
 
-async fn get_session(
+#[utoipa::path(
+    tag = "Workspace",
+    get,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 200, body = WorkspaceSessionWithMessagesResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_get_session(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2511,7 +2733,24 @@ async fn get_session(
     }))
 }
 
-async fn send_message(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/messages",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    request_body = SendMessageBody,
+    responses(
+        (status = 201, body = WorkspaceMessageResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_send_message(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2573,7 +2812,22 @@ async fn send_message(
 ///      pass before invoking --continue.
 ///   4. Writes terminal `system` + `assistant` messages so the UI spinner
 ///      clears immediately.
-async fn cancel_run(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/cancel",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Run cancelled"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_cancel_run(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2619,7 +2873,23 @@ pub struct StreamParams {
     pub after_id: Option<i64>,
 }
 
-async fn stream_messages(
+#[utoipa::path(
+    tag = "Workspace",
+    get,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/stream",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+        ("after_id" = Option<i64>, Query, description = "Return messages with id > after_id"),
+    ),
+    responses(
+        (status = 200, description = "SSE stream of workspace messages", content_type = "text/event-stream", body = String),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_stream_messages(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2686,7 +2956,24 @@ async fn stream_messages(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
-async fn update_session(
+#[utoipa::path(
+    tag = "Workspace",
+    patch,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    request_body = UpdateSessionBody,
+    responses(
+        (status = 200, body = WorkspaceSessionResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_update_session(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, session_id)): Path<(i32, i32)>,
@@ -2831,7 +3118,22 @@ async fn update_session(
     Ok(Json(SessionResponse::from_model(updated, &preview_parts)))
 }
 
-async fn close_session(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/close",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Session closed"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_close_session(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,
@@ -2864,7 +3166,22 @@ async fn close_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn delete_session(
+#[utoipa::path(
+    tag = "Workspace",
+    delete,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 204, description = "Session deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_delete_session(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((project_id, session_id)): Path<(i32, i32)>,
@@ -2917,7 +3234,22 @@ async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn reopen_session(
+#[utoipa::path(
+    tag = "Workspace",
+    post,
+    path = "/projects/{project_id}/workspace/sessions/{session_id}/reopen",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("session_id" = i32, Path, description = "Session ID"),
+    ),
+    responses(
+        (status = 200, body = WorkspaceSessionResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Session not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn workspace_reopen_session(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<WorkspaceAppState>>,
     Path((_project_id, session_id)): Path<(i32, i32)>,

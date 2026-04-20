@@ -34,9 +34,10 @@ pub struct CreateSessionRequest {
     /// Resolved from `project_skill_definitions` (falls back to global).
     pub skills: Option<Vec<String>>,
     /// Slugs of MCP server definitions to inject into the sandbox at session
-    /// start. Deep-merged into `/workspace/.claude/settings.json` and
-    /// `/home/temps/.claude.json`. Resolved from `project_mcp_definitions`
-    /// (falls back to global).
+    /// start. Deep-merged into `/home/temps/.claude.json` (user-level config,
+    /// kept out of the bind-mounted repo to avoid leaking resolved secrets
+    /// into PR diffs). Resolved from `project_mcp_definitions` (falls back
+    /// to global).
     pub mcp_servers: Option<Vec<String>>,
     /// CPU limit in vCPU cores (e.g. 2.0). `None` → server default applies.
     pub cpu_limit: Option<f32>,

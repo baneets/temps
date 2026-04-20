@@ -41,16 +41,27 @@ export interface DiskSpaceAlertSettings {
   monitor_path: string | null
 }
 
+/// Per-provider config as returned by GET /api/settings. The `credentials_encrypted`
+/// blob is never sent over the wire — the server replaces it with a boolean
+/// `credential_saved` so we never ship ciphertext to the browser. On PUT the
+/// server preserves stored credentials when the incoming provider entry
+/// doesn't include a fresh one.
+export interface ProviderConfigMasked {
+  auth_type: string
+  credential_saved: boolean
+  default_model: string | null
+  extra: unknown
+}
+
 export interface AgentSandboxSettings {
   default_provider: string
+  providers?: Record<string, ProviderConfigMasked>
+  /// True if a legacy top-level credential is stored. The ciphertext itself
+  /// is never returned.
+  api_key_saved?: boolean
   /// @deprecated Per-provider auth lives in `providers[id].auth_type` now.
-  /// Kept optional for backward compatibility with old settings rows.
   auth_type?: string
-  /// @deprecated Per-provider credentials live in
-  /// `providers[id].credentials_encrypted` now.
-  api_key_encrypted?: string | null
   /// @deprecated Per-provider model lives in `providers[id].default_model` now.
-  /// Read from old settings payloads but never written from the UI.
   default_model?: string
   enabled: boolean
   runtime: string
@@ -58,6 +69,18 @@ export interface AgentSandboxSettings {
   cpu_limit: number
   memory_limit_mb: number
   network_mode: string
+}
+
+export interface PreviewGatewaySettings {
+  image: string
+  host_port: number
+  auto_upgrade: boolean
+  shared_secret_set: boolean
+}
+
+export interface MultiNodeSettings {
+  has_join_token: boolean
+  private_address: string | null
 }
 
 export interface AiConfigSettings {
@@ -77,6 +100,9 @@ export interface PlatformSettings extends AppSettings {
   disk_space_alert: DiskSpaceAlertSettings
   agent_sandbox: AgentSandboxSettings
   ai_config: AiConfigSettings
+  preview_gateway: PreviewGatewaySettings
+  multi_node: MultiNodeSettings
+  insecure_tls: boolean
   attack_mode?: boolean
 }
 

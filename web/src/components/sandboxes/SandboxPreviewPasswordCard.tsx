@@ -9,9 +9,9 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Input } from '@/components/ui/input'
 
 import {
-  clearSandboxPreviewPassword,
-  setSandboxPreviewPassword,
-} from './api'
+  clearPreviewPasswordMutation,
+  setPreviewPasswordMutation,
+} from '@/api/client/@tanstack/react-query.gen'
 
 // Matches the backend's `preview_password::MIN_PASSWORD_LEN`. If that
 // constant changes, bump this in lockstep — the server is the source of
@@ -78,8 +78,7 @@ export function SandboxPreviewPasswordCard({
   }
 
   const setMutation = useMutation({
-    mutationFn: (password: string) =>
-      setSandboxPreviewPassword(sandboxId, password),
+    ...setPreviewPasswordMutation(),
     meta: { errorTitle: 'Failed to set preview password' },
     onSuccess: (resp) => {
       invalidate()
@@ -93,7 +92,7 @@ export function SandboxPreviewPasswordCard({
   })
 
   const clearMutation = useMutation({
-    mutationFn: () => clearSandboxPreviewPassword(sandboxId),
+    ...clearPreviewPasswordMutation(),
     meta: { errorTitle: 'Failed to clear preview password' },
     onSuccess: () => {
       invalidate()
@@ -112,7 +111,10 @@ export function SandboxPreviewPasswordCard({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!canSubmit) return
-    setMutation.mutate(trimmed)
+    setMutation.mutate({
+      path: { id: sandboxId },
+      body: { password: trimmed },
+    })
   }
 
   const handleGenerate = () => {
@@ -137,7 +139,7 @@ export function SandboxPreviewPasswordCard({
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => clearMutation.mutate()}
+              onClick={() => clearMutation.mutate({ path: { id: sandboxId } })}
               disabled={clearMutation.isPending}
               className="text-destructive hover:text-destructive h-7"
               title="Remove password protection"

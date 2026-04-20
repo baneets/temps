@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { GitProviderFlow } from '@/components/git-providers/GitProviderFlow'
 import { ArrowLeft } from 'lucide-react'
@@ -57,18 +56,11 @@ export function AddGitProvider() {
         {/* Feedback Alert */}
         <FeedbackAlert feedback={feedback} onDismiss={clearFeedback} />
 
-        <Card className="w-full">
-          <CardHeader className="px-4 sm:px-6">
-            <CardTitle>Select and Connect Provider</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 sm:px-6">
-            <GitProviderFlow
-              onSuccess={handleSuccess}
-              onCancel={handleCancel}
-              mode="settings"
-            />
-          </CardContent>
-        </Card>
+        <GitProviderFlow
+          onSuccess={handleSuccess}
+          onCancel={handleCancel}
+          mode="settings"
+        />
       </div>
     </div>
   )

@@ -18,7 +18,6 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
-  Calendar,
   Loader2,
   Pencil,
   Save,
@@ -30,18 +29,11 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
-  deleteGlobalMcpDefinition,
-  listGlobalMcpDefinitions,
-  updateGlobalMcpDefinition,
-} from '@/components/agents/api'
-
-function formatDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString()
-  } catch {
-    return iso
-  }
-}
+  deleteGlobalMcpMutation,
+  listGlobalMcpsOptions,
+  listGlobalMcpsQueryKey,
+  updateGlobalMcpMutation,
+} from '@/api/client/@tanstack/react-query.gen'
 
 export function GlobalMcpServerDetail() {
   const { slug } = useParams<{ slug: string }>()
@@ -50,16 +42,13 @@ export function GlobalMcpServerDetail() {
   usePageTitle(`MCP Server: ${slug ?? ''}`)
 
   const {
-    data: mcpServers,
+    data: mcpData,
     isLoading,
     error,
     refetch,
-  } = useQuery({
-    queryKey: ['global-mcp-servers'],
-    queryFn: () => listGlobalMcpDefinitions(),
-  })
+  } = useQuery(listGlobalMcpsOptions())
 
-  const mcp = mcpServers?.find((m) => m.slug === slug)
+  const mcp = mcpData?.items.find((m) => m.slug === slug)
 
   const [isEditing, setIsEditing] = useState(false)
   const [name, setName] = useState('')
@@ -88,28 +77,21 @@ export function GlobalMcpServerDetail() {
   }
 
   const updateMutation = useMutation({
-    mutationFn: () => {
-      const config = JSON.parse(configText)
-      return updateGlobalMcpDefinition(slug!, {
-        name: name.trim(),
-        description: description.trim() || undefined,
-        config,
-      })
-    },
+    ...updateGlobalMcpMutation(),
     onSuccess: () => {
       toast.success('MCP server updated')
-      queryClient.invalidateQueries({ queryKey: ['global-mcp-servers'] })
+      queryClient.invalidateQueries({ queryKey: listGlobalMcpsQueryKey() })
       setIsEditing(false)
     },
     onError: () => toast.error('Failed to update MCP server'),
   })
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteGlobalMcpDefinition(slug!),
+    ...deleteGlobalMcpMutation(),
     onSuccess: () => {
       toast.success('MCP server deleted')
-      queryClient.invalidateQueries({ queryKey: ['global-mcp-servers'] })
-      navigate('/settings/mcp-servers')
+      queryClient.invalidateQueries({ queryKey: listGlobalMcpsQueryKey() })
+      navigate('/mcp-servers')
     },
     onError: () => toast.error('Failed to delete MCP server'),
   })
@@ -138,7 +120,7 @@ export function GlobalMcpServerDetail() {
     return (
       <div>
         <Link
-          to="/settings/mcp-servers"
+          to="/mcp-servers"
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-4"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -179,13 +161,21 @@ export function GlobalMcpServerDetail() {
       setConfigError('Invalid JSON — please fix before saving')
       return
     }
-    updateMutation.mutate()
+    const config = JSON.parse(configText)
+    updateMutation.mutate({
+      path: { slug: slug! },
+      body: {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        config,
+      },
+    })
   }
 
   return (
     <div>
       <Link
-        to="/settings/mcp-servers"
+        to="/mcp-servers"
         className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-4"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -202,6 +192,11 @@ export function GlobalMcpServerDetail() {
               <h1 className="text-xl font-semibold truncate">{mcp.name}</h1>
               <Badge variant="secondary" className="font-mono text-xs">
                 {mcp.slug}
+              </Badge>
+              <Badge variant="outline" className="text-xs">
+                {mcp.project_id === null
+                  ? 'Global'
+                  : `Project ${mcp.project_id}`}
               </Badge>
             </div>
             {mcp.description && (
@@ -255,8 +250,8 @@ export function GlobalMcpServerDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card className="lg:col-span-2">
+      <div>
+        <Card>
           <CardHeader>
             <CardTitle className="text-base">
               {isEditing ? 'Edit MCP Server' : 'Configuration'}
@@ -351,41 +346,6 @@ export function GlobalMcpServerDetail() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Details</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1">
-                Slug
-              </div>
-              <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">
-                {mcp.slug}
-              </code>
-            </div>
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1">
-                Scope
-              </div>
-              <Badge variant="outline" className="text-xs">
-                {mcp.project_id === null ? 'Global' : `Project ${mcp.project_id}`}
-              </Badge>
-            </div>
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
-                <Calendar className="h-3 w-3" /> Created
-              </div>
-              <div className="text-xs">{formatDate(mcp.created_at)}</div>
-            </div>
-            <div>
-              <div className="text-xs font-medium text-muted-foreground mb-1 flex items-center gap-1">
-                <Calendar className="h-3 w-3" /> Updated
-              </div>
-              <div className="text-xs">{formatDate(mcp.updated_at)}</div>
-            </div>
-          </CardContent>
-        </Card>
       </div>
 
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
@@ -400,7 +360,7 @@ export function GlobalMcpServerDetail() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => deleteMutation.mutate()}
+              onClick={() => deleteMutation.mutate({ path: { slug: slug! } })}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete

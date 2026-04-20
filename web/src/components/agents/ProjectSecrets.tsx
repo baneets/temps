@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   Card,
   CardContent,
@@ -31,31 +32,34 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Loader2, Plus, Trash2 } from 'lucide-react'
+import { KeyRound, Loader2, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import {
-  createSecret,
-  deleteSecret,
-  listSecrets,
-  type CreateSecretRequest,
-  type AgentSecret,
-} from './api'
+  deleteSecretMutation,
+  listSecretsOptions,
+  listSecretsQueryKey,
+  upsertSecretMutation,
+} from '@/api/client/@tanstack/react-query.gen'
+import type {
+  SecretResponse as AgentSecret,
+  UpsertSecretRequest as CreateSecretRequest,
+} from '@/api/client/types.gen'
 
 export function AgentSecrets() {
   const queryClient = useQueryClient()
   const [dialogOpen, setDialogOpen] = useState(false)
 
-  const { data: secrets = [], isLoading } = useQuery({
-    queryKey: ['agent-secrets'],
-    queryFn: () => listSecrets(),
+  const { data: secretsData, isLoading } = useQuery({
+    ...listSecretsOptions(),
   })
+  const secrets = secretsData?.items ?? []
 
   const createMutation = useMutation({
-    mutationFn: (data: CreateSecretRequest) => createSecret(data),
+    ...upsertSecretMutation(),
     onSuccess: () => {
       toast.success('Secret saved')
-      queryClient.invalidateQueries({ queryKey: ['agent-secrets'] })
+      queryClient.invalidateQueries({ queryKey: listSecretsQueryKey() })
       setDialogOpen(false)
     },
     onError: (error: Error) => {
@@ -64,10 +68,10 @@ export function AgentSecrets() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (name: string) => deleteSecret(name),
+    ...deleteSecretMutation(),
     onSuccess: () => {
       toast.success('Secret deleted')
-      queryClient.invalidateQueries({ queryKey: ['agent-secrets'] })
+      queryClient.invalidateQueries({ queryKey: listSecretsQueryKey() })
     },
     onError: (error: Error) => {
       toast.error(error.message || 'Failed to delete secret')
@@ -88,10 +92,11 @@ export function AgentSecrets() {
               Reference in config with <code className="bg-muted px-1 rounded text-xs">{'${TEMPS_SECRET:name}'}</code>.
             </CardDescription>
           </div>
-          <Button size="sm" onClick={() => setDialogOpen(true)}>
-            <Plus className="h-3.5 w-3.5 mr-1" />
-            Add Secret
-          </Button>
+          <CreateActionButton
+            size="sm"
+            onClick={() => setDialogOpen(true)}
+            label="Add Secret"
+          />
         </div>
       </CardHeader>
       <CardContent>
@@ -140,7 +145,9 @@ export function AgentSecrets() {
                         variant="ghost"
                         size="icon"
                         className="h-7 w-7"
-                        onClick={() => deleteMutation.mutate(secret.name)}
+                        onClick={() =>
+                          deleteMutation.mutate({ path: { name: secret.name } })
+                        }
                         disabled={deleteMutation.isPending}
                       >
                         <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -157,7 +164,7 @@ export function AgentSecrets() {
       <CreateSecretDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
-        onSubmit={(data) => createMutation.mutate(data)}
+        onSubmit={(data) => createMutation.mutate({ body: data })}
         isPending={createMutation.isPending}
       />
     </Card>

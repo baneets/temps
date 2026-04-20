@@ -7,20 +7,21 @@ import { ImportServiceButton } from '@/components/storage/ImportServiceButton'
 import { PlatformServices } from '@/components/storage/PlatformServices'
 import EmptyStateStorage from '@/components/storage/EmptyStateStorage'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
+import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Database, HardDrive, Pencil, RefreshCcw } from 'lucide-react'
+import {
+  ChevronRight,
+  Database,
+  HardDrive,
+  Pencil,
+  RefreshCcw,
+} from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { TimeAgo } from '@/components/utils/TimeAgo'
@@ -50,7 +51,7 @@ export function Storage() {
   })
 
   useEffect(() => {
-    setBreadcrumbs([{ label: 'Storage', href: '/settings/storage' }])
+    setBreadcrumbs([{ label: 'Storage', href: '/storage' }])
   }, [setBreadcrumbs])
 
   // Keyboard shortcut: N to open the create service dropdown
@@ -126,63 +127,15 @@ export function Storage() {
           </div>
         </div>
 
-        <div className="grid gap-4">
-          {services.map((service) => (
-            <Card
-              key={service.id}
-              className="transition-colors hover:bg-muted/50"
-            >
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div
-                    className="flex-1 cursor-pointer space-y-1"
-                    onClick={() => navigate(`/settings/storage/${service.id}`)}
-                  >
-                    <CardTitle className="flex items-center gap-2">
-                      <ServiceLogo service={service.service_type} />
-                      {service.name}
-                    </CardTitle>
-                    <CardDescription className="flex items-center gap-2">
-                      <span>{service.service_type}</span>
-                      <span>•</span>
-                      <span>
-                        Created <TimeAgo date={service.created_at} />
-                      </span>
-                    </CardDescription>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setSelectedService(service)
-                        setIsEditDialogOpen(true)
-                      }}
-                      className="h-8 w-8"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <DeleteServiceButton
-                      serviceId={service.id}
-                      serviceName={service.name}
-                      onSuccess={() => refetch()}
-                    />
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent
-                onClick={() => navigate(`/settings/storage/${service.id}`)}
-                className="cursor-pointer"
-              >
-                <div className="flex items-center text-sm text-muted-foreground">
-                  View details
-                  <ArrowRight className="ml-1 h-4 w-4" />
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
+        <ServicesDividerList
+          services={services}
+          onOpen={(id) => navigate(`/storage/${id}`)}
+          onEdit={(service) => {
+            setSelectedService(service)
+            setIsEditDialogOpen(true)
+          }}
+          onDeleteSuccess={() => refetch()}
+        />
       </>
     )
   }
@@ -233,6 +186,120 @@ export function Storage() {
           />
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Shared variant helpers ──
+
+interface ServicesVariantProps {
+  services: ExternalServiceInfo[]
+  onOpen: (id: number) => void
+  onEdit: (service: ExternalServiceInfo) => void
+  onDeleteSuccess: () => void
+}
+
+function ServiceStatusDot({ status }: { status: string }) {
+  const tone =
+    status === 'running' || status === 'active' || status === 'ready'
+      ? 'bg-success'
+      : status === 'error' || status === 'failed'
+        ? 'bg-destructive'
+        : status === 'pending' || status === 'initializing'
+          ? 'bg-warning'
+          : 'bg-muted-foreground/40'
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={cn('size-1.5 rounded-full', tone)} />
+      <span className="text-xs capitalize text-muted-foreground">
+        {status || 'unknown'}
+      </span>
+    </span>
+  )
+}
+
+function ServiceActions({
+  service,
+  onEdit,
+  onDeleteSuccess,
+}: {
+  service: ExternalServiceInfo
+  onEdit: (service: ExternalServiceInfo) => void
+  onDeleteSuccess: () => void
+}) {
+  return (
+    <div
+      className="flex items-center gap-1"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() => onEdit(service)}
+        className="size-8"
+      >
+        <Pencil className="size-3.5" />
+      </Button>
+      <DeleteServiceButton
+        serviceId={service.id}
+        serviceName={service.name}
+        onSuccess={onDeleteSuccess}
+      />
+    </div>
+  )
+}
+
+// ── Variant: Divider list (Vercel-style) ──
+
+function ServicesDividerList({
+  services,
+  onOpen,
+  onEdit,
+  onDeleteSuccess,
+}: ServicesVariantProps) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <ul role="list" className="divide-y">
+        {services.map((service) => (
+          <li
+            key={service.id}
+            onClick={() => onOpen(service.id)}
+            className="group flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/40"
+          >
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
+              <ServiceLogo service={service.service_type} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <p className="truncate text-sm font-medium">{service.name}</p>
+                <span className="rounded border bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {service.service_type}
+                </span>
+                {service.topology === 'cluster' && (
+                  <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    Cluster
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                <ServiceStatusDot status={service.status} />
+                {service.version && (
+                  <span className="font-mono">v{service.version}</span>
+                )}
+                <span>
+                  Created <TimeAgo date={service.created_at} />
+                </span>
+              </div>
+            </div>
+            <ServiceActions
+              service={service}
+              onEdit={onEdit}
+              onDeleteSuccess={onDeleteSuccess}
+            />
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

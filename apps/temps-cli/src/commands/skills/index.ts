@@ -117,9 +117,11 @@ async function uploadSkillMultipart(
   form.append('name', fields.name)
   if (fields.description) form.append('description', fields.description)
   form.append('content', fields.content)
+  const archiveBuffer = new ArrayBuffer(fields.archive.byteLength)
+  new Uint8Array(archiveBuffer).set(fields.archive)
   form.append(
     'archive',
-    new Blob([fields.archive], { type: 'application/gzip' }),
+    new Blob([archiveBuffer], { type: 'application/gzip' }),
     `${fields.slug}.tar.gz`,
   )
 

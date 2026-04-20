@@ -65,7 +65,8 @@ pub struct AgentRunResponse {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub created_at: String,
-    /// Whether this run executed inside a sandbox.
+    /// Legacy field — all runs now execute in a sandbox. Kept for
+    /// backwards-compatible JSON shape; always `true`.
     pub sandbox_enabled: bool,
     /// User-provided context for this run (e.g. webhook payload, manual instructions).
     pub user_context: Option<String>,
@@ -75,23 +76,19 @@ pub struct AgentRunResponse {
     /// YAML prompt, with error-group fields interpolated). Captured once per
     /// run. `None` for pre-migration rows.
     pub prompt_text: Option<String>,
+    /// Autofixer phase: "analyzing", "analyzed", "fixing", "fix_ready", "no_fix",
+    /// "pr_created", or NULL for non-autofixer runs.
+    pub phase: Option<String>,
 }
 
 impl AgentRunResponse {
-    /// Build from a run model, enriched with the agent's slug, name, and
-    /// whether the run executed in a sandbox.
-    ///
-    /// This is the only public constructor on purpose. A `From<agent_runs::Model>`
-    /// impl existed historically but always defaulted `sandbox_enabled: false`
-    /// and left `agent_slug` / `agent_name` as `None`, which silently produced
-    /// incomplete responses for any caller using plain `.into()`. Callers MUST
-    /// resolve these three fields explicitly; see `resolve_sandbox_for_run`
-    /// below for the standard lookup pattern.
+    /// Build from a run model, enriched with the agent's slug and name.
+    /// `sandbox_enabled` is always emitted as `true` — every run now
+    /// executes inside a Docker sandbox.
     pub fn from_with_agent(
         model: agent_runs::Model,
         agent_slug: Option<String>,
         agent_name: Option<String>,
-        sandbox_enabled: bool,
     ) -> Self {
         Self {
             id: model.id,
@@ -123,44 +120,13 @@ impl AgentRunResponse {
             started_at: model.started_at.map(|t| t.to_rfc3339()),
             completed_at: model.completed_at.map(|t| t.to_rfc3339()),
             created_at: model.created_at.to_rfc3339(),
-            sandbox_enabled,
+            sandbox_enabled: true,
             user_context: model.user_context,
             ai_session_id: model.ai_session_id,
             prompt_text: model.prompt_text,
+            phase: model.phase,
         }
     }
-}
-
-/// Resolve the effective `sandbox_enabled` flag for a run, falling back from
-/// the agent's explicit setting to the global `agent_sandbox.enabled` default.
-/// Also returns the matching agent (if any) so callers can read its slug/name.
-async fn resolve_sandbox_for_run<'a>(
-    app_state: &Arc<AppState>,
-    project_id: i32,
-    run: &agent_runs::Model,
-    agents: &'a [temps_entities::project_agents::Model],
-) -> (Option<&'a temps_entities::project_agents::Model>, bool) {
-    use sea_orm::EntityTrait;
-    let _ = project_id;
-
-    let global_sandbox_enabled = temps_entities::settings::Entity::find_by_id(1)
-        .one(app_state.db.as_ref())
-        .await
-        .ok()
-        .flatten()
-        .and_then(|s| {
-            s.data
-                .get("agent_sandbox")
-                .and_then(|v| v.get("enabled"))
-                .and_then(|v| v.as_bool())
-        })
-        .unwrap_or(false);
-
-    let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
-    let sandbox = agent
-        .and_then(|a| a.sandbox_enabled)
-        .unwrap_or(global_sandbox_enabled);
-    (agent, sandbox)
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -271,7 +237,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     ),
     security(("bearer_auth" = []))
 )]
-async fn list_all_runs(
+pub async fn list_all_runs(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
@@ -295,35 +261,14 @@ async fn list_all_runs(
         .await
         .map_err(Problem::from)?;
 
-    // Resolve sandbox status against global setting
-    let global_sandbox_enabled = {
-        use sea_orm::EntityTrait;
-        temps_entities::settings::Entity::find_by_id(1)
-            .one(app_state.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data
-                    .get("agent_sandbox")
-                    .and_then(|v| v.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false)
-    };
-
     let items = runs
         .into_iter()
         .map(|run| {
             let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
-            let sandbox = agent
-                .and_then(|a| a.sandbox_enabled)
-                .unwrap_or(global_sandbox_enabled);
             AgentRunResponse::from_with_agent(
                 run,
                 agent.map(|a| a.slug.clone()),
                 agent.map(|a| a.name.clone()),
-                sandbox,
             )
         })
         .collect();
@@ -353,7 +298,7 @@ async fn list_all_runs(
     ),
     security(("bearer_auth" = []))
 )]
-async fn latest_run_for_source(
+pub async fn latest_run_for_source(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path(project_id): Path<i32>,
@@ -382,32 +327,12 @@ async fn latest_run_for_source(
         .await
         .map_err(Problem::from)?;
 
-    let global_sandbox_enabled = {
-        use sea_orm::EntityTrait;
-        temps_entities::settings::Entity::find_by_id(1)
-            .one(app_state.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data
-                    .get("agent_sandbox")
-                    .and_then(|v| v.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false)
-    };
-
     let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
-    let sandbox = agent
-        .and_then(|a| a.sandbox_enabled)
-        .unwrap_or(global_sandbox_enabled);
 
     let response = AgentRunResponse::from_with_agent(
         run,
         agent.map(|a| a.slug.clone()),
         agent.map(|a| a.name.clone()),
-        sandbox,
     );
 
     Ok(Json(
@@ -434,7 +359,7 @@ async fn latest_run_for_source(
     ),
     security(("bearer_auth" = []))
 )]
-async fn list_agent_runs(
+pub async fn list_agent_runs(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((project_id, slug)): Path<(i32, String)>,
@@ -463,24 +388,6 @@ async fn list_agent_runs(
         .await
         .map_err(Problem::from)?;
 
-    // Resolve sandbox against global setting
-    let global_sandbox_enabled = {
-        use sea_orm::EntityTrait;
-        temps_entities::settings::Entity::find_by_id(1)
-            .one(app_state.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data
-                    .get("agent_sandbox")
-                    .and_then(|v| v.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false)
-    };
-    let sandbox = agent.sandbox_enabled.unwrap_or(global_sandbox_enabled);
-
     let items = runs
         .into_iter()
         .map(|run| {
@@ -488,7 +395,6 @@ async fn list_agent_runs(
                 run,
                 Some(agent.slug.clone()),
                 Some(agent.name.clone()),
-                sandbox,
             )
         })
         .collect();
@@ -518,7 +424,7 @@ async fn list_agent_runs(
     ),
     security(("bearer_auth" = []))
 )]
-async fn get_run_with_logs(
+pub async fn get_run_with_logs(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -542,32 +448,10 @@ async fn get_run_with_logs(
         None => None,
     };
 
-    // Resolve sandbox status against global setting (same logic as executor)
-    let global_sandbox_enabled = {
-        use sea_orm::EntityTrait;
-        temps_entities::settings::Entity::find_by_id(1)
-            .one(app_state.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data
-                    .get("agent_sandbox")
-                    .and_then(|v| v.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false)
-    };
-    let resolved_sandbox = agent
-        .as_ref()
-        .and_then(|a| a.sandbox_enabled)
-        .unwrap_or(global_sandbox_enabled);
-
     let run_resp = AgentRunResponse::from_with_agent(
         run_with_logs.run,
         agent.as_ref().map(|a| a.slug.clone()),
         agent.as_ref().map(|a| a.name.clone()),
-        resolved_sandbox,
     );
 
     Ok(Json(AgentRunWithLogsResponse {
@@ -583,7 +467,23 @@ async fn get_run_with_logs(
 /// SSE endpoint for real-time streaming of run events.
 /// Polls the agent_run_logs table every 500ms for new entries and streams them.
 /// Closes when the run reaches a terminal status.
-async fn stream_run_events(
+#[utoipa::path(
+    tag = "Agents",
+    get,
+    path = "/projects/{project_id}/agents/runs/{run_id}/stream",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("run_id" = i32, Path, description = "Agent run ID"),
+    ),
+    responses(
+        (status = 200, description = "Server-Sent Events stream of run log events and terminal status", content_type = "text/event-stream"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Run not found"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn stream_run_events(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -655,7 +555,25 @@ fn sse_keep_alive() -> KeepAlive {
         .text("heartbeat")
 }
 
-async fn cancel_run(
+#[utoipa::path(
+    tag = "Agents",
+    post,
+    path = "/projects/{project_id}/agents/runs/{run_id}/cancel",
+    params(
+        ("project_id" = i32, Path, description = "Project ID"),
+        ("run_id" = i32, Path, description = "Agent run ID to cancel"),
+    ),
+    responses(
+        (status = 200, description = "Run cancelled", body = AgentRunResponse),
+        (status = 400, description = "Run is already in a terminal state"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Insufficient permissions"),
+        (status = 404, description = "Run not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn cancel_run(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((project_id, run_id)): Path<(i32, i32)>,
@@ -673,13 +591,12 @@ async fn cancel_run(
         .list_agents(project_id)
         .await
         .map_err(Problem::from)?;
-    let (agent, sandbox) = resolve_sandbox_for_run(&app_state, project_id, &run, &agents).await;
+    let agent = agents.iter().find(|a| Some(a.id) == run.config_id);
 
     Ok(Json(AgentRunResponse::from_with_agent(
         run,
         agent.map(|a| a.slug.clone()),
         agent.map(|a| a.name.clone()),
-        sandbox,
     )))
 }
 
@@ -703,7 +620,7 @@ async fn cancel_run(
     ),
     security(("bearer_auth" = []))
 )]
-async fn retry_run(
+pub async fn retry_run(
     RequireAuth(auth): RequireAuth,
     State(app_state): State<Arc<AppState>>,
     Path((_project_id, run_id)): Path<(i32, i32)>,
@@ -784,28 +701,7 @@ async fn retry_run(
         executor.execute_run(new_run_id).await;
     });
 
-    // Resolve sandbox
-    let global_sandbox_enabled = {
-        use sea_orm::EntityTrait;
-        temps_entities::settings::Entity::find_by_id(1)
-            .one(app_state.db.as_ref())
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| {
-                s.data
-                    .get("agent_sandbox")
-                    .and_then(|v| v.get("enabled"))
-                    .and_then(|v| v.as_bool())
-            })
-            .unwrap_or(false)
-    };
-    let run_resp = AgentRunResponse::from_with_agent(
-        new_run,
-        Some(agent.slug),
-        Some(agent.name),
-        agent.sandbox_enabled.unwrap_or(global_sandbox_enabled),
-    );
+    let run_resp = AgentRunResponse::from_with_agent(new_run, Some(agent.slug), Some(agent.name));
 
     Ok((StatusCode::ACCEPTED, Json(run_resp)))
 }
