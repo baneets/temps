@@ -69,6 +69,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { useForm } from 'react-hook-form'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
@@ -109,6 +110,7 @@ export function UsersManagement({
     useState<RouteUserWithRoles | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const form = useForm<CreateUserFormData>({
     resolver: zodResolver(createUserSchema),
@@ -548,7 +550,16 @@ export function UsersManagement({
             {users.map((user) => (
               <div
                 key={user.user.id}
-                className="flex items-center justify-between p-4"
+                role="button"
+                tabIndex={0}
+                onClick={() => navigate(`/settings/users/${user.user.id}`)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    navigate(`/settings/users/${user.user.id}`)
+                  }
+                }}
+                className="flex cursor-pointer items-center justify-between p-4 transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-4">
@@ -588,7 +599,7 @@ export function UsersManagement({
                     </div>
                   </div>
                 </div>
-                <div className="ml-4">
+                <div className="ml-4" onClick={(e) => e.stopPropagation()}>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon">

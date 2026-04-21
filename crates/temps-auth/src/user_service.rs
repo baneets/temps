@@ -94,9 +94,10 @@ pub struct ServiceUser {
     pub email: String,
     pub image: String,
     pub mfa_enabled: bool,
+    pub email_verified: bool,
     pub deleted_at: Option<UtcDateTime>,
-    // pub created_at: UtcDateTime,
-    // pub updated_at: UtcDateTime,
+    pub created_at: UtcDateTime,
+    pub updated_at: UtcDateTime,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -124,7 +125,10 @@ impl From<temps_entities::users::Model> for ServiceUser {
                 urlencoding::encode(&db_user.name)
             ),
             mfa_enabled: db_user.mfa_enabled,
+            email_verified: db_user.email_verified,
             deleted_at: db_user.deleted_at,
+            created_at: db_user.created_at,
+            updated_at: db_user.updated_at,
         }
     }
 }

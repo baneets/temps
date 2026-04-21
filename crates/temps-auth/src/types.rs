@@ -71,6 +71,11 @@ pub struct RouteUser {
     pub email: String,
     pub image: String,
     pub mfa_enabled: bool,
+    pub email_verified: bool,
+    #[schema(format = "int64", example = "1683900000000")]
+    pub created_at: i64,
+    #[schema(format = "int64", example = "1683900000000")]
+    pub updated_at: i64,
     pub deleted_at: Option<i64>,
 }
 
@@ -152,6 +157,9 @@ impl From<temps_entities::users::Model> for RouteUser {
                 urlencoding::encode(&db_user.name)
             ),
             mfa_enabled: db_user.mfa_enabled,
+            email_verified: db_user.email_verified,
+            created_at: db_user.created_at.timestamp_millis(),
+            updated_at: db_user.updated_at.timestamp_millis(),
             deleted_at: db_user.deleted_at.map(|d| d.timestamp_millis()),
         }
     }
@@ -177,6 +185,9 @@ impl From<crate::user_service::ServiceUser> for RouteUser {
             email: service_user.email,
             image: service_user.image,
             mfa_enabled: service_user.mfa_enabled,
+            email_verified: service_user.email_verified,
+            created_at: service_user.created_at.timestamp_millis(),
+            updated_at: service_user.updated_at.timestamp_millis(),
             deleted_at: service_user.deleted_at.map(|d| d.timestamp_millis()),
         }
     }

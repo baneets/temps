@@ -67,6 +67,9 @@ const MajorUpgradeDetail = lazy(() =>
 const Users = lazy(() =>
   import('./pages/Users').then((m) => ({ default: m.Users }))
 )
+const UserDetail = lazy(() =>
+  import('./pages/UserDetail').then((m) => ({ default: m.UserDetail }))
+)
 const CustomRoutes = lazy(() =>
   import('./pages/Routes').then((m) => ({ default: m.Routes }))
 )
@@ -335,6 +338,7 @@ const FullAppRoutes = () => {
                   <Route index element={<Settings />} />
                   <Route path="notifications" element={<Notifications />} />
                   <Route path="users" element={<Users />} />
+                  <Route path="users/:userId" element={<UserDetail />} />
                   <Route path="keys" element={<ApiKeys />} />
                   <Route path="keys/new" element={<ApiKeyCreate />} />
                   <Route path="keys/:id" element={<ApiKeyDetail />} />

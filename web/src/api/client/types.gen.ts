@@ -9149,12 +9149,15 @@ export type RouteRole = {
 };
 
 export type RouteUser = {
+    created_at: number;
     deleted_at?: number | null;
     email: string;
+    email_verified: boolean;
     id: number;
     image: string;
     mfa_enabled: boolean;
     name: string;
+    updated_at: number;
     username: string;
 };
 
