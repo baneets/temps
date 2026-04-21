@@ -327,7 +327,7 @@ impl DigestService {
         }
 
         // Sort projects by visitors (most active first)
-        project_stats.sort_by(|a, b| b.visitors.cmp(&a.visitors));
+        project_stats.sort_by_key(|p| std::cmp::Reverse(p.visitors));
 
         Ok(project_stats)
     }
