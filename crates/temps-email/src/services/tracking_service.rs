@@ -361,16 +361,28 @@ impl TrackingService {
             total_sent: i64,
             emails_with_opens: i64,
             emails_with_clicks: i64,
+            emails_with_bounces: i64,
+            emails_with_complaints: i64,
         }
 
-        // Count unique emails that were opened/clicked at least once — not total events.
+        // Count unique emails per engagement type — not total events.
+        // Opens/clicks come from the emails table counters; bounces/complaints
+        // come from email_events (no aggregate column on emails for those).
         let sql = r#"
             SELECT
-                COUNT(*) FILTER (WHERE status = 'sent') AS total_sent,
-                COUNT(*) FILTER (WHERE open_count > 0) AS emails_with_opens,
-                COUNT(*) FILTER (WHERE click_count > 0) AS emails_with_clicks
-            FROM emails
-            WHERE track_opens = true OR track_clicks = true
+                (SELECT COUNT(*) FROM emails
+                    WHERE status = 'sent'
+                      AND (track_opens = true OR track_clicks = true)) AS total_sent,
+                (SELECT COUNT(*) FROM emails
+                    WHERE open_count > 0
+                      AND (track_opens = true OR track_clicks = true)) AS emails_with_opens,
+                (SELECT COUNT(*) FROM emails
+                    WHERE click_count > 0
+                      AND (track_opens = true OR track_clicks = true)) AS emails_with_clicks,
+                (SELECT COUNT(DISTINCT email_id) FROM email_events
+                    WHERE event_type = 'bounce') AS emails_with_bounces,
+                (SELECT COUNT(DISTINCT email_id) FROM email_events
+                    WHERE event_type = 'complaint') AS emails_with_complaints
         "#;
 
         let row = StatsRow::find_by_statement(Statement::from_string(
@@ -383,29 +395,28 @@ impl TrackingService {
             total_sent: 0,
             emails_with_opens: 0,
             emails_with_clicks: 0,
+            emails_with_bounces: 0,
+            emails_with_complaints: 0,
         });
 
         let delivered = row.total_sent;
-        let open_rate = if delivered > 0 {
-            Some(row.emails_with_opens as f64 / delivered as f64 * 100.0)
-        } else {
-            None
-        };
-        let click_rate = if delivered > 0 {
-            Some(row.emails_with_clicks as f64 / delivered as f64 * 100.0)
-        } else {
-            None
+        let rate = |numerator: i64| -> Option<f64> {
+            if delivered > 0 {
+                Some(numerator as f64 / delivered as f64 * 100.0)
+            } else {
+                None
+            }
         };
 
         Ok(GlobalTrackingStats {
             delivered: delivered as u64,
             opened: row.emails_with_opens as u64,
             clicked: row.emails_with_clicks as u64,
-            bounced: 0,
-            complained: 0,
-            open_rate,
-            click_rate,
-            bounce_rate: Some(0.0),
+            bounced: row.emails_with_bounces as u64,
+            complained: row.emails_with_complaints as u64,
+            open_rate: rate(row.emails_with_opens),
+            click_rate: rate(row.emails_with_clicks),
+            bounce_rate: rate(row.emails_with_bounces),
         })
     }
 

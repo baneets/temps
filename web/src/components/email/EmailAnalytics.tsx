@@ -110,7 +110,7 @@ function RateCard({
   icon: React.ComponentType<{ className?: string }>
   color: string
 }) {
-  const percentage = rate != null ? Math.round(rate * 100) : null
+  const percentage = rate != null ? Math.round(rate) : null
 
   return (
     <Card>
