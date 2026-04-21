@@ -83,7 +83,7 @@ function ServiceRow({
         }
       }}
       className={cn(
-        'group flex items-center gap-4 rounded-md px-3 py-3 -mx-3',
+        'group flex items-center gap-4 px-3 py-3',
         'cursor-pointer transition-colors',
         'hover:bg-muted/60 focus-visible:bg-muted/60 focus-visible:outline-none',
       )}
@@ -315,9 +315,9 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
       <div className="flex-1 overflow-auto">
         <div className="space-y-6 p-4 md:p-6">
           {header}
-          <ul role="list" className="divide-y divide-gray-950/5 dark:divide-white/10">
+          <ul role="list" className="divide-y divide-border rounded-lg border border-border">
             {[...Array(4)].map((_, i) => (
-              <li key={i} className="flex items-center gap-4 py-3">
+              <li key={i} className="flex items-center gap-4 px-3 py-3">
                 <div className="size-8 shrink-0 animate-pulse rounded-md bg-muted" />
                 <div className="flex-1 space-y-2">
                   <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
@@ -363,7 +363,7 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
                 {linkedServices.length}
               </span>
             </div>
-            <ul role="list" className="divide-y divide-gray-950/5 dark:divide-white/10">
+            <ul role="list" className="divide-y divide-border rounded-lg border border-border overflow-hidden">
               {linkedServices.map((service) => (
                 <ServiceRow
                   key={service.id}
@@ -386,7 +386,7 @@ export function ProjectStorage({ project }: { project: ProjectResponse }) {
                 {availableServices.length}
               </span>
             </div>
-            <ul role="list" className="divide-y divide-gray-950/5 dark:divide-white/10">
+            <ul role="list" className="divide-y divide-border rounded-lg border border-border overflow-hidden">
               {availableServices.map((service) => (
                 <ServiceRow
                   key={service.id}

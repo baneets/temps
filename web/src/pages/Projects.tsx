@@ -9,13 +9,13 @@ import { ProjectCard } from '@/components/dashboard/ProjectCard'
 import { ImprovedOnboardingDashboard } from '@/components/onboarding/ImprovedOnboardingDashboard'
 import { MetricCardSkeleton } from '@/components/skeletons/MetricCardSkeleton'
 import { ProjectCardSkeleton } from '@/components/skeletons/ProjectCardSkeleton'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   getGeneralStatsOptions,
   getProjectsOptions,
   listGitProvidersOptions,
+  revenueMetricsGlobalMrrOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { useQuery } from '@tanstack/react-query'
 import { subDays } from 'date-fns'
@@ -183,6 +183,42 @@ export function Projects() {
     statsData?.page_views_trend_percentage
   )
 
+  const globalMrrQuery = useQuery({
+    ...revenueMetricsGlobalMrrOptions(),
+    enabled: hasProjects,
+  })
+
+  const formattedMrr = useMemo(() => {
+    const minor = globalMrrQuery.data?.current_mrr_minor
+    if (minor == null) return null
+    return new Intl.NumberFormat(undefined, {
+      style: 'currency',
+      currency: (globalMrrQuery.data?.currency ?? 'usd').toUpperCase(),
+      maximumFractionDigits: 0,
+    }).format(minor / 100)
+  }, [globalMrrQuery.data])
+
+  const mrrTrend = formatTrendChange(globalMrrQuery.data?.change_percentage)
+  const mrrIsNewlyActive =
+    mrrTrend == null &&
+    (globalMrrQuery.data?.current_mrr_minor ?? 0) > 0 &&
+    (globalMrrQuery.data?.previous_mrr_minor ?? 0) === 0
+  const mrrChangeLabel = mrrTrend?.change
+    ?? (mrrIsNewlyActive ? '+100% vs yesterday' : 'No change vs yesterday')
+  const mrrChangeDisplay =
+    mrrTrend?.changeDisplay
+    ?? (mrrIsNewlyActive
+      ? {
+          icon: <TrendingUp className="mr-1 h-3 w-3" />,
+          className:
+            'text-xs text-emerald-600 dark:text-emerald-400 flex items-center mt-1',
+          isPositive: true,
+        }
+      : {
+          icon: <Minus className="mr-1 h-3 w-3" />,
+          className: 'text-xs text-muted-foreground flex items-center mt-1',
+        })
+
   if (!isLoading && !hasProjects) {
     return (
       <div className="sm:p-8">
@@ -242,23 +278,25 @@ export function Projects() {
           />
         )}
 
-        <div className="relative">
-          {generalStatsQuery.isLoading ? (
-            <MetricCardSkeleton />
-          ) : (
+        {globalMrrQuery.isLoading ? (
+          <MetricCardSkeleton />
+        ) : (
+          <Link
+            to="/revenue"
+            className="block rounded-xl outline-none ring-offset-background transition-transform hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
             <MetricCard
-              title="Revenue"
-              value="$0"
-              change=""
+              title="MRR"
+              value={
+                globalMrrQuery.error || formattedMrr == null ? '—' : formattedMrr
+              }
+              change={mrrChangeLabel}
+              changeDisplay={mrrChangeDisplay}
               icon={<DollarSign className="h-5 w-5" />}
+              error={!!globalMrrQuery.error}
             />
-          )}
-          <div className="absolute inset-0 bg-background/80 rounded-lg flex items-center justify-center">
-            <Badge variant="secondary" className="text-xs">
-              Coming Soon
-            </Badge>
-          </div>
-        </div>
+          </Link>
+        )}
       </div>
 
       {/* Header */}

@@ -1,13 +1,17 @@
-import { getEnvironmentOptions } from '@/api/client/@tanstack/react-query.gen'
+import {
+  getEnvironmentOptions,
+  listContainersOptions,
+} from '@/api/client/@tanstack/react-query.gen'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
-import { ContainerManagement } from '@/components/containers/ContainerManagement'
+import { ContainerList } from '@/components/containers/ContainerList'
+import { ContainerActionDialog } from '@/components/containers/ContainerActionDialog'
 import { EnvironmentSettingsContent } from '@/components/environments/EnvironmentSettingsContent'
 import { EnvironmentHeaderBar } from '@/components/environments/EnvironmentHeaderBar'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { EnvironmentResponse, ProjectResponse } from '@/api/client'
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 
 interface EnvironmentDashboardProps {
   project: ProjectResponse
@@ -104,31 +108,6 @@ export function EnvironmentDashboard({
 
   const isStatic = project?.preset === 'custom'
 
-  const containersContent = isStatic ? (
-    <div className="flex flex-col items-center justify-center h-96 text-center">
-      <p className="text-muted-foreground">
-        This static site does not have running containers to manage.
-      </p>
-    </div>
-  ) : (
-    <ContainerManagement
-      project={project}
-      environmentId={environmentId.toString()}
-    />
-  )
-
-  const settingsContent = (
-    <EnvironmentSettingsContent
-      environment={environment}
-      project={project}
-      environmentId={environmentId.toString()}
-      onDelete={onDelete}
-    />
-  )
-
-  const content =
-    activeView === 'settings' ? settingsContent : containersContent
-
   return (
     <div className="flex flex-col h-full bg-white dark:bg-neutral-950">
       <EnvironmentHeaderBar
@@ -136,16 +115,76 @@ export function EnvironmentDashboard({
         project={project}
         activeView={activeView}
         onViewChange={handleViewChange}
-        isStatic={isStatic}
         environments={environments}
         onEnvironmentChange={onEnvironmentChange}
         onCreateEnvironment={onCreateEnvironment}
       />
       <div className="flex-1 overflow-auto">
         <div className="w-full px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-          {content}
+          {activeView === 'settings' ? (
+            <EnvironmentSettingsContent
+              environment={environment}
+              project={project}
+              environmentId={environmentId.toString()}
+              onDelete={onDelete}
+            />
+          ) : isStatic ? (
+            <div className="flex flex-col items-center justify-center h-72 rounded-lg border border-neutral-950/10 bg-neutral-50 p-6 text-center dark:border-white/10 dark:bg-white/5">
+              <p className="text-sm font-semibold text-neutral-900 dark:text-white">
+                Static site
+              </p>
+              <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+                This project does not have running containers to manage.
+              </p>
+            </div>
+          ) : (
+            <ContainerPanel
+              project={project}
+              environmentId={environmentId.toString()}
+            />
+          )}
         </div>
       </div>
     </div>
+  )
+}
+
+interface ContainerPanelProps {
+  project: ProjectResponse
+  environmentId: string
+}
+
+function ContainerPanel({ project, environmentId }: ContainerPanelProps) {
+  const queryClient = useQueryClient()
+  const [action, setAction] = useState<{
+    containerId: string
+    type: 'start' | 'stop' | 'restart'
+  } | null>(null)
+
+  return (
+    <>
+      <ContainerList
+        project={project}
+        environmentId={environmentId}
+        onAction={(containerId, type) => setAction({ containerId, type })}
+      />
+      <ContainerActionDialog
+        projectId={project.id.toString()}
+        environmentId={environmentId}
+        action={action?.type ?? null}
+        containerId={action?.containerId ?? null}
+        onClose={() => setAction(null)}
+        onSuccess={() => {
+          queryClient.invalidateQueries({
+            queryKey: listContainersOptions({
+              path: {
+                project_id: project.id,
+                environment_id: parseInt(environmentId),
+              },
+            }).queryKey,
+          })
+        }}
+      />
+    </>
   )
 }

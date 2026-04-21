@@ -1,7 +1,6 @@
 import { getContainerDetailOptions } from '@/api/client/@tanstack/react-query.gen'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
-import { ContainerMetrics } from './ContainerMetrics'
 import { ContainerLogs } from './ContainerLogs'
 import { ContainerConfiguration } from './ContainerConfiguration'
 
@@ -9,7 +8,7 @@ interface ContainerDetailProps {
   projectId: string
   environmentId: string
   containerId: string
-  tab: 'overview' | 'logs' | 'configuration'
+  tab: 'logs' | 'configuration'
 }
 
 export function ContainerDetail({
@@ -45,22 +44,12 @@ export function ContainerDetail({
     )
   }
 
-  if (tab === 'logs') {
-    return (
-      <ContainerLogs
-        projectId={projectId}
-        environmentId={environmentId}
-        containerId={containerId}
-      />
-    )
-  }
-
   if (tab === 'configuration') {
     return <ContainerConfiguration container={container} />
   }
 
   return (
-    <ContainerMetrics
+    <ContainerLogs
       projectId={projectId}
       environmentId={environmentId}
       containerId={containerId}

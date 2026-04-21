@@ -60,39 +60,11 @@ mod m20260401_000001_add_tracked_html_body_to_emails;
 mod m20260401_000001_autopilot_to_agents;
 mod m20260401_000002_add_autofixer_columns;
 mod m20260401_000002_add_missing_email_events_columns;
-mod m20260403_000001_add_sandbox_enabled;
-mod m20260404_000001_make_sandbox_enabled_nullable;
-mod m20260406_000001_create_workspace_tables;
-mod m20260406_000002_create_workflow_memory;
-mod m20260406_000004_add_workspace_preview_password;
-mod m20260406_000005_add_workspace_base_branch;
-mod m20260407_000001_add_workspace_idle_timeout;
-mod m20260407_000002_add_workspace_session_title;
-mod m20260407_000003_add_workspace_resource_limits;
-mod m20260408_000001_add_agent_skills_and_mcp;
-mod m20260408_000002_make_secrets_global;
-mod m20260409_000001_add_agent_mcp_and_skills;
-mod m20260409_000002_add_webhook_token;
-mod m20260409_000003_add_ai_session_id;
-mod m20260410_000001_create_skill_and_mcp_definitions;
-mod m20260411_000001_allow_global_skill_and_mcp_definitions;
-mod m20260411_000002_add_skill_archive_column;
-mod m20260412_000001_add_workspace_skills_and_mcp;
-mod m20260413_000001_add_ai_provider_to_agent_runs;
-mod m20260413_000002_add_ai_model_to_project_agents;
-mod m20260414_000001_create_sandboxes;
-mod m20260415_000001_add_memory_embeddings_and_expiry;
-mod m20260415_000002_add_workspace_session_public_id;
-mod m20260416_000001_add_sandbox_preview_password;
-mod m20260416_000002_add_s3_source_default;
-mod m20260416_000003_create_postgres_major_upgrades;
-mod m20260416_000004_add_ephemeral_fields_to_agent_runs;
-mod m20260417_000001_create_restore_runs;
-mod m20260417_000002_add_prompt_text_to_agent_runs;
-mod m20260417_000003_add_workspace_volume_to_agent_runs;
-mod m20260420_000001_create_revenue_tables;
-mod m20260420_000002_create_revenue_mrr_aggregate;
-mod m20260420_000003_add_integration_config;
+// Squashes 34 migrations from m20260403 through m20260420 into one.
+// Production (b8d6519) still has the original migrations in seaql_migrations;
+// this replaces them on fresh setups. On local DBs already past b8d6519,
+// insert this migration name into seaql_migrations manually to mark it done.
+mod m20260421_000001_squash_apr_post_v006;
 
 pub struct Migrator;
 
@@ -160,39 +132,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260401_000001_autopilot_to_agents::Migration),
             Box::new(m20260401_000002_add_autofixer_columns::Migration),
             Box::new(m20260401_000002_add_missing_email_events_columns::Migration),
-            Box::new(m20260403_000001_add_sandbox_enabled::Migration),
-            Box::new(m20260404_000001_make_sandbox_enabled_nullable::Migration),
-            Box::new(m20260406_000001_create_workspace_tables::Migration),
-            Box::new(m20260406_000002_create_workflow_memory::Migration),
-            Box::new(m20260406_000004_add_workspace_preview_password::Migration),
-            Box::new(m20260406_000005_add_workspace_base_branch::Migration),
-            Box::new(m20260407_000001_add_workspace_idle_timeout::Migration),
-            Box::new(m20260407_000002_add_workspace_session_title::Migration),
-            Box::new(m20260407_000003_add_workspace_resource_limits::Migration),
-            Box::new(m20260408_000001_add_agent_skills_and_mcp::Migration),
-            Box::new(m20260408_000002_make_secrets_global::Migration),
-            Box::new(m20260409_000001_add_agent_mcp_and_skills::Migration),
-            Box::new(m20260409_000002_add_webhook_token::Migration),
-            Box::new(m20260409_000003_add_ai_session_id::Migration),
-            Box::new(m20260410_000001_create_skill_and_mcp_definitions::Migration),
-            Box::new(m20260411_000001_allow_global_skill_and_mcp_definitions::Migration),
-            Box::new(m20260411_000002_add_skill_archive_column::Migration),
-            Box::new(m20260412_000001_add_workspace_skills_and_mcp::Migration),
-            Box::new(m20260413_000001_add_ai_provider_to_agent_runs::Migration),
-            Box::new(m20260413_000002_add_ai_model_to_project_agents::Migration),
-            Box::new(m20260414_000001_create_sandboxes::Migration),
-            Box::new(m20260415_000001_add_memory_embeddings_and_expiry::Migration),
-            Box::new(m20260415_000002_add_workspace_session_public_id::Migration),
-            Box::new(m20260416_000001_add_sandbox_preview_password::Migration),
-            Box::new(m20260416_000002_add_s3_source_default::Migration),
-            Box::new(m20260416_000003_create_postgres_major_upgrades::Migration),
-            Box::new(m20260416_000004_add_ephemeral_fields_to_agent_runs::Migration),
-            Box::new(m20260417_000001_create_restore_runs::Migration),
-            Box::new(m20260417_000002_add_prompt_text_to_agent_runs::Migration),
-            Box::new(m20260417_000003_add_workspace_volume_to_agent_runs::Migration),
-            Box::new(m20260420_000001_create_revenue_tables::Migration),
-            Box::new(m20260420_000002_create_revenue_mrr_aggregate::Migration),
-            Box::new(m20260420_000003_add_integration_config::Migration),
+            Box::new(m20260421_000001_squash_apr_post_v006::Migration),
         ]
     }
 }

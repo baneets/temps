@@ -323,6 +323,11 @@ export type AgentRunResponse = {
     estimated_cost_cents: number;
     files_changed: number;
     id: number;
+    /**
+     * Autofixer phase: "analyzing", "analyzed", "fixing", "fix_ready", "no_fix",
+     * "pr_created", or NULL for non-autofixer runs.
+     */
+    phase?: string | null;
     pr_number?: number | null;
     pr_url?: string | null;
     preview_url?: string | null;
@@ -355,11 +360,6 @@ export type AgentRunResponse = {
      * User-provided context for this run (e.g. webhook payload, manual instructions).
      */
     user_context?: string | null;
-    /**
-     * Autofixer phase: "analyzing", "analyzed", "fixing", "fix_ready", "no_fix",
-     * "pr_created", or null for non-autofixer runs.
-     */
-    phase?: string | null;
 };
 
 export type AgentRunWithLogsResponse = {
@@ -5103,6 +5103,44 @@ export type GlobalEventStatsResponse = {
     delivered: number;
     open_rate?: number | null;
     opened: number;
+};
+
+export type GlobalMrrResponse = {
+    /**
+     * Percentage change vs 24h ago. Null when previous MRR is zero
+     * (no baseline to compare against).
+     */
+    change_percentage?: number | null;
+    currency: string;
+    current_mrr_minor: number;
+    /**
+     * MRR 24h before now, reconstructed from the event log.
+     */
+    previous_mrr_minor: number;
+};
+
+export type GlobalRecentEventResponse = {
+    amount_minor?: number | null;
+    currency?: string | null;
+    customer_ref?: string | null;
+    event_type: string;
+    id: number;
+    mrr_minor?: number | null;
+    occurred_at: string;
+    project_id: number;
+    project_name: string;
+};
+
+export type GlobalRevenueSummaryResponse = {
+    active_customers: number;
+    active_subscriptions: number;
+    currency: string;
+    current_mrr_minor: number;
+    paid_all_time_minor: number;
+    paid_last_30d_minor: number;
+    refunded_all_time_minor: number;
+    refunded_last_30d_minor: number;
+    transactions_last_30d: number;
 };
 
 export type GroupedPageMetric = {
@@ -10421,9 +10459,10 @@ export type StartSessionRequest = {
     cpu_limit?: number | null;
     /**
      * Slugs of MCP server definitions to inject into the sandbox. Deep-merged
-     * into `/workspace/.claude/settings.json` and `/home/temps/.claude.json`
-     * at session start. Resolved from `project_mcp_definitions` (falls back
-     * to global).
+     * into `/home/temps/.claude.json` (user-level config, kept out of the
+     * bind-mounted repo to avoid leaking resolved secrets into PR diffs) at
+     * session start. Resolved from `project_mcp_definitions` (falls back to
+     * global).
      */
     mcp_servers?: Array<string> | null;
     /**
@@ -33969,6 +34008,71 @@ export type GetTagsByRepositoryIdResponses = {
 };
 
 export type GetTagsByRepositoryIdResponse = GetTagsByRepositoryIdResponses[keyof GetTagsByRepositoryIdResponses];
+
+export type RevenueGlobalEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Filter to a single project
+         */
+        project_id?: number;
+        /**
+         * Lower bound (inclusive), ISO-8601
+         */
+        from?: string;
+        /**
+         * Upper bound (inclusive), ISO-8601
+         */
+        to?: string;
+        /**
+         * Comma-separated event types (e.g. `invoice.paid,charge.succeeded`)
+         */
+        event_types?: string;
+        /**
+         * Max rows, default 100, max 500
+         */
+        limit?: number;
+    };
+    url: '/revenue/events';
+};
+
+export type RevenueGlobalEventsResponses = {
+    200: Array<GlobalRecentEventResponse>;
+};
+
+export type RevenueGlobalEventsResponse = RevenueGlobalEventsResponses[keyof RevenueGlobalEventsResponses];
+
+export type RevenueMetricsGlobalMrrData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/revenue/metrics/global-mrr';
+};
+
+export type RevenueMetricsGlobalMrrResponses = {
+    200: GlobalMrrResponse;
+};
+
+export type RevenueMetricsGlobalMrrResponse = RevenueMetricsGlobalMrrResponses[keyof RevenueMetricsGlobalMrrResponses];
+
+export type RevenueMetricsGlobalSummaryData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * ISO-4217 currency code, default USD
+         */
+        currency?: string;
+    };
+    url: '/revenue/metrics/global-summary';
+};
+
+export type RevenueMetricsGlobalSummaryResponses = {
+    200: GlobalRevenueSummaryResponse;
+};
+
+export type RevenueMetricsGlobalSummaryResponse = RevenueMetricsGlobalSummaryResponses[keyof RevenueMetricsGlobalSummaryResponses];
 
 export type RevenueListProvidersData = {
     body?: never;

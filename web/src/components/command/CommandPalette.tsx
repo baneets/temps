@@ -499,10 +499,10 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['blob', 's3', 'files', 'storage', 'uploads', 'objects'],
   },
   {
-    title: 'AI Gateway',
+    title: 'AI Traces',
     url: 'ai-gateway',
-    icon: Sparkles,
-    keywords: ['ai', 'gateway', 'llm', 'openai', 'anthropic', 'models'],
+    icon: Bot,
+    keywords: ['ai', 'traces', 'observability', 'llm', 'openai', 'anthropic', 'models', 'gateway', 'otel', 'gen_ai'],
   },
   {
     title: 'Agents',

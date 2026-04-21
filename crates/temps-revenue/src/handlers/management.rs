@@ -29,7 +29,7 @@ use crate::handlers::audit::{
     RevenueIntegrationTokenRotatedAudit,
 };
 use crate::providers::{LemonSqueezyConfig, MeteredMode, ProviderConfig, StripeConfig};
-use crate::service::analytics::{AnalyticsError, Bucket};
+use crate::service::analytics::{AnalyticsError, Bucket, GlobalEventsFilter};
 use crate::service::{
     CreateIntegrationInput, ImportOutcome, ImportRowError, IntegrationView,
     RevenueAnalyticsService, RevenueImportService, RevenueIntegrationService,
@@ -69,9 +69,12 @@ impl ManagementState {
         revenue_update_config,
         revenue_list_providers,
         revenue_metrics_summary,
+        revenue_metrics_global_mrr,
+        revenue_metrics_global_summary,
         revenue_metrics_mrr,
         revenue_metrics_customers,
         revenue_recent_events,
+        revenue_global_events,
         revenue_import_subscriptions_csv,
         revenue_import_invoices_csv,
     ),
@@ -82,9 +85,12 @@ impl ManagementState {
         UpdateConfigBody,
         ProviderDescriptor,
         MetricsSummaryResponse,
+        GlobalMrrResponse,
+        GlobalRevenueSummaryResponse,
         MrrBucketResponse,
         CustomerMovementResponse,
         RecentEventResponse,
+        GlobalRecentEventResponse,
         ImportOutcomeResponse,
         ImportRowErrorResponse,
         ProviderConfig,
@@ -181,6 +187,30 @@ pub struct MetricsSummaryResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct GlobalMrrResponse {
+    pub currency: String,
+    pub current_mrr_minor: i64,
+    /// MRR 24h before now, reconstructed from the event log.
+    pub previous_mrr_minor: i64,
+    /// Percentage change vs 24h ago. Null when previous MRR is zero
+    /// (no baseline to compare against).
+    pub change_percentage: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlobalRevenueSummaryResponse {
+    pub currency: String,
+    pub current_mrr_minor: i64,
+    pub paid_last_30d_minor: i64,
+    pub refunded_last_30d_minor: i64,
+    pub paid_all_time_minor: i64,
+    pub refunded_all_time_minor: i64,
+    pub active_subscriptions: i64,
+    pub active_customers: i64,
+    pub transactions_last_30d: i64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MrrBucketResponse {
     pub bucket: DateTime<Utc>,
     pub mrr_minor: i64,
@@ -198,6 +228,19 @@ pub struct CustomerMovementResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RecentEventResponse {
+    pub occurred_at: DateTime<Utc>,
+    pub event_type: String,
+    pub customer_ref: Option<String>,
+    pub amount_minor: Option<i64>,
+    pub currency: Option<String>,
+    pub mrr_minor: Option<i64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlobalRecentEventResponse {
+    pub id: i64,
+    pub project_id: i32,
+    pub project_name: String,
     pub occurred_at: DateTime<Utc>,
     pub event_type: String,
     pub customer_ref: Option<String>,
@@ -270,6 +313,16 @@ pub struct SummaryQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct RecentEventsQuery {
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GlobalEventsQuery {
+    pub project_id: Option<i32>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    /// Comma-separated list of event types (e.g. `invoice.paid,mrr.realized`).
+    pub event_types: Option<String>,
     pub limit: Option<u64>,
 }
 
@@ -696,6 +749,89 @@ async fn revenue_metrics_summary(
     }))
 }
 
+/// Org-wide MRR total, summed across every project in the install.
+/// Powers the single-number MRR card on the main dashboard.
+#[utoipa::path(
+    get,
+    path = "/revenue/metrics/global-mrr",
+    operation_id = "revenue_metrics_global_mrr",
+    responses((status = 200, body = GlobalMrrResponse)),
+    tag = "Revenue",
+    security(("bearer_auth" = []))
+)]
+async fn revenue_metrics_global_mrr(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<ManagementState>>,
+    Query(q): Query<SummaryQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    let currency = q.currency.as_deref().unwrap_or("usd").to_lowercase();
+    let current_mrr_minor = state
+        .analytics
+        .global_mrr(&currency)
+        .await
+        .map_err(analytics_error_to_problem)?;
+    let yesterday = Utc::now() - chrono::Duration::days(1);
+    let previous_mrr_minor = state
+        .analytics
+        .global_mrr_at(&currency, yesterday)
+        .await
+        .map_err(analytics_error_to_problem)?;
+
+    let change_percentage = if previous_mrr_minor > 0 {
+        let delta = current_mrr_minor - previous_mrr_minor;
+        Some((delta as f64 / previous_mrr_minor as f64) * 100.0)
+    } else {
+        None
+    };
+
+    Ok(Json(GlobalMrrResponse {
+        currency,
+        current_mrr_minor,
+        previous_mrr_minor,
+        change_percentage,
+    }))
+}
+
+/// Org-wide revenue summary: MRR, paid cash (30d + all-time), refunds,
+/// active subscriptions/customers, and transaction count. Powers the
+/// header on the Revenue transactions page.
+#[utoipa::path(
+    get,
+    path = "/revenue/metrics/global-summary",
+    operation_id = "revenue_metrics_global_summary",
+    responses((status = 200, body = GlobalRevenueSummaryResponse)),
+    params(
+        ("currency" = Option<String>, Query, description = "ISO-4217 currency code, default USD"),
+    ),
+    tag = "Revenue",
+    security(("bearer_auth" = []))
+)]
+async fn revenue_metrics_global_summary(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<ManagementState>>,
+    Query(q): Query<SummaryQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    let currency = q.currency.as_deref().unwrap_or("usd").to_lowercase();
+    let summary = state
+        .analytics
+        .global_summary(&currency)
+        .await
+        .map_err(analytics_error_to_problem)?;
+    Ok(Json(GlobalRevenueSummaryResponse {
+        currency: summary.currency,
+        current_mrr_minor: summary.current_mrr_minor,
+        paid_last_30d_minor: summary.paid_last_30d_minor,
+        refunded_last_30d_minor: summary.refunded_last_30d_minor,
+        paid_all_time_minor: summary.paid_all_time_minor,
+        refunded_all_time_minor: summary.refunded_all_time_minor,
+        active_subscriptions: summary.active_subscriptions,
+        active_customers: summary.active_customers,
+        transactions_last_30d: summary.transactions_last_30d,
+    }))
+}
+
 /// Bucketed MRR timeseries for the revenue chart.
 #[utoipa::path(
     get,
@@ -797,6 +933,65 @@ async fn revenue_recent_events(
     let out: Vec<RecentEventResponse> = rows
         .into_iter()
         .map(|r| RecentEventResponse {
+            occurred_at: r.occurred_at,
+            event_type: r.event_type,
+            customer_ref: r.customer_ref,
+            amount_minor: r.amount_minor,
+            currency: r.currency,
+            mrr_minor: r.mrr_minor,
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+/// Org-wide revenue events across every project. Powers the revenue
+/// transactions page. Supports filtering by project, date range, and
+/// event type.
+#[utoipa::path(
+    get,
+    path = "/revenue/events",
+    operation_id = "revenue_global_events",
+    responses((status = 200, body = Vec<GlobalRecentEventResponse>)),
+    params(
+        ("project_id" = Option<i32>, Query, description = "Filter to a single project"),
+        ("from" = Option<String>, Query, description = "Lower bound (inclusive), ISO-8601"),
+        ("to" = Option<String>, Query, description = "Upper bound (inclusive), ISO-8601"),
+        ("event_types" = Option<String>, Query, description = "Comma-separated event types (e.g. `invoice.paid,charge.succeeded`)"),
+        ("limit" = Option<i64>, Query, description = "Max rows, default 100, max 500"),
+    ),
+    tag = "Revenue",
+    security(("bearer_auth" = []))
+)]
+async fn revenue_global_events(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<ManagementState>>,
+    Query(q): Query<GlobalEventsQuery>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    let event_types = q.event_types.as_deref().map(|s| {
+        s.split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let filter = GlobalEventsFilter {
+        project_id: q.project_id,
+        from: q.from,
+        to: q.to,
+        event_types,
+        limit: q.limit.unwrap_or(100),
+    };
+    let rows = state
+        .analytics
+        .global_recent_events(filter)
+        .await
+        .map_err(analytics_error_to_problem)?;
+    let out: Vec<GlobalRecentEventResponse> = rows
+        .into_iter()
+        .map(|r| GlobalRecentEventResponse {
+            id: r.id,
+            project_id: r.project_id,
+            project_name: r.project_name,
             occurred_at: r.occurred_at,
             event_type: r.event_type,
             customer_ref: r.customer_ref,
@@ -1010,6 +1205,15 @@ pub fn configure_management_routes() -> Router<Arc<ManagementState>> {
             "/projects/{project_id}/revenue/integrations/{integration_id}/config",
             post(revenue_update_config),
         )
+        .route(
+            "/revenue/metrics/global-mrr",
+            get(revenue_metrics_global_mrr),
+        )
+        .route(
+            "/revenue/metrics/global-summary",
+            get(revenue_metrics_global_summary),
+        )
+        .route("/revenue/events", get(revenue_global_events))
         .route(
             "/projects/{project_id}/revenue/metrics/summary",
             get(revenue_metrics_summary),

@@ -73,6 +73,11 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
     '1h' | '24h' | '7d' | '30d'
   >('24h')
   const [isDsnConfigOpen, setIsDsnConfigOpen] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<
+    'unresolved' | 'resolved' | 'all'
+  >('unresolved')
+  const [page, setPage] = useState(1)
+  const pageSize = 25
 
   // Get tab from URL or default to 'errors'
   const selectedTab =
@@ -139,12 +144,19 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
   // Determine if we have errors
   const hasErrors = hasErrorGroupsData?.has_error_groups || false
 
+  // Reset to page 1 whenever filters change
+  useEffect(() => {
+    setPage(1)
+  }, [statusFilter, selectedTimeRange])
+
   // Fetch error groups for the project (only if we have errors)
   const { data: errorGroupsResponse, isLoading: isLoadingGroups } = useQuery({
     ...listErrorGroupsOptions({
       path: { project_id: project.id },
       query: {
-        page_size: 50,
+        page,
+        page_size: pageSize,
+        status: statusFilter === 'all' ? null : statusFilter,
         start_date: timeRange.startTime,
         end_date: timeRange.endTime,
       },
@@ -554,7 +566,27 @@ After setup, trigger a test error and check the Temps error tracking dashboard t
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="errors" className="mt-5">
+        <TabsContent value="errors" className="mt-5 space-y-3">
+          {hasErrors && (
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  { key: 'unresolved', label: 'Unresolved' },
+                  { key: 'resolved', label: 'Resolved' },
+                  { key: 'all', label: 'All' },
+                ] as const
+              ).map((f) => (
+                <Button
+                  key={f.key}
+                  variant={statusFilter === f.key ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setStatusFilter(f.key)}
+                >
+                  {f.label}
+                </Button>
+              ))}
+            </div>
+          )}
           {hasErrors ? (
             isLoadingGroups ? (
               <div className="space-y-3">
@@ -564,14 +596,70 @@ After setup, trigger a test error and check the Temps error tracking dashboard t
               </div>
             ) : errorGroupsResponse?.pagination?.total_count &&
               errorGroupsResponse.pagination.total_count > 0 ? (
-              <div className="rounded-md border border-border/60 bg-card px-3">
-                {errorGroupsResponse.data?.map((group, idx) => renderErrorRow(group, idx))}
-              </div>
+              <>
+                <div className="rounded-md border border-border/60 bg-card px-3">
+                  {errorGroupsResponse.data?.map((group, idx) => renderErrorRow(group, idx))}
+                </div>
+                {errorGroupsResponse.pagination.total_pages > 1 && (
+                  <div className="flex items-center justify-between pt-1">
+                    <p className="text-xs text-muted-foreground tabular-nums">
+                      <span className="hidden sm:inline">
+                        Showing{' '}
+                        {(errorGroupsResponse.pagination.page - 1) *
+                          errorGroupsResponse.pagination.page_size +
+                          1}
+                        –
+                        {Math.min(
+                          errorGroupsResponse.pagination.page *
+                            errorGroupsResponse.pagination.page_size,
+                          errorGroupsResponse.pagination.total_count
+                        )}{' '}
+                        of {errorGroupsResponse.pagination.total_count}
+                      </span>
+                      <span className="sm:hidden">
+                        {errorGroupsResponse.pagination.page} /{' '}
+                        {errorGroupsResponse.pagination.total_pages}
+                      </span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        disabled={errorGroupsResponse.pagination.page <= 1}
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPage((p) => p + 1)}
+                        disabled={
+                          errorGroupsResponse.pagination.page >=
+                          errorGroupsResponse.pagination.total_pages
+                        }
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
             ) : (
               <EmptyState
                 icon={AlertTriangle}
-                title="No errors in this period"
-                description={`No error groups found in the ${timeRangeLabel(selectedTimeRange)}.`}
+                title={
+                  statusFilter === 'unresolved'
+                    ? 'No unresolved errors'
+                    : statusFilter === 'resolved'
+                      ? 'No resolved errors'
+                      : 'No errors in this period'
+                }
+                description={
+                  statusFilter === 'unresolved'
+                    ? `Nothing needs attention in the ${timeRangeLabel(selectedTimeRange)}.`
+                    : `No ${statusFilter === 'all' ? '' : statusFilter + ' '}error groups found in the ${timeRangeLabel(selectedTimeRange)}.`
+                }
               />
             )
           ) : (

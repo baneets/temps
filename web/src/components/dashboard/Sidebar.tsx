@@ -315,9 +315,10 @@ export default function AppSidebar() {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <div
+            <Link
+              to="/"
               className={cn(
-                'flex items-center gap-2',
+                'flex items-center gap-2 rounded-md transition-colors hover:bg-sidebar-accent/40',
                 compact && 'justify-center'
               )}
             >
@@ -341,7 +342,7 @@ export default function AppSidebar() {
                   </span>
                 </div>
               )}
-            </div>
+            </Link>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
@@ -587,6 +588,23 @@ interface ProjectNavItem {
 const projectBaseNav: ProjectNavItem[] = [
   { title: 'Overview', url: 'project', icon: Home },
   { title: 'Deployments', url: 'deployments', icon: GitBranch },
+  { title: 'Workspace', url: 'workspace', icon: Sparkles },
+  { title: 'Databases', url: 'storage', icon: Database },
+  { title: 'Environments', url: 'environments', icon: Layers },
+  { title: 'Logs', url: 'runtime', icon: ScrollText },
+  {
+    title: 'Observability',
+    url: 'monitors',
+    icon: Eye,
+    subItems: [
+      { title: 'Uptime', url: 'monitors', icon: Activity },
+      { title: 'Metrics', url: 'monitoring', icon: Gauge },
+      { title: 'Traces', url: 'traces', icon: Network },
+      { title: 'AI Traces', url: 'ai-gateway?tab=activity', icon: Bot },
+      { title: 'Request Logs', url: 'request-logs', icon: Rss },
+    ],
+  },
+  { title: 'Error Tracking', url: 'errors', icon: ShieldAlert },
   {
     title: 'Analytics',
     url: 'analytics',
@@ -601,25 +619,8 @@ const projectBaseNav: ProjectNavItem[] = [
       { title: 'Speed', url: 'speed', icon: Zap },
     ],
   },
-  {
-    title: 'Observability',
-    url: 'monitors',
-    icon: Eye,
-    subItems: [
-      { title: 'Uptime', url: 'monitors', icon: Activity },
-      { title: 'Metrics', url: 'monitoring', icon: Gauge },
-      { title: 'Traces', url: 'traces', icon: Network },
-      { title: 'Request Logs', url: 'request-logs', icon: Rss },
-    ],
-  },
-  { title: 'Error Tracking', url: 'errors', icon: ShieldAlert },
-  { title: 'Logs', url: 'runtime', icon: ScrollText },
-  { title: 'AI Gateway', url: 'ai-gateway', icon: Bot },
+  { title: 'AI Workflows', url: 'agents', icon: Sparkles },
   { title: 'Revenue', url: 'revenue', icon: CreditCard },
-  { title: 'Workspace', url: 'workspace', icon: Sparkles },
-  { title: 'Workflows', url: 'agents', icon: Bot },
-  { title: 'Databases', url: 'storage', icon: Database },
-  { title: 'Environments', url: 'environments', icon: Layers },
   {
     title: 'Settings',
     url: 'settings',
@@ -651,6 +652,8 @@ function ProjectNav({
   })
   const { projectNavEntries } = usePluginsContext()
   const location = useLocation()
+  const { isMinimal, isMobile } = useSidebar()
+  const compact = isMinimal && !isMobile
   const items = useMemo<ProjectNavItem[]>(() => {
     const settingsIdx = projectBaseNav.length - 1
     const pluginItems: ProjectNavItem[] = projectNavEntries.map((e) => ({
@@ -696,9 +699,10 @@ function ProjectNav({
   }
 
   const isActive = (url: string) => {
-    if (url === 'project') return activeRoute === '' || activeRoute === 'project'
-    if (url === 'environments') return activeRoute.startsWith('environments')
-    return activeRoute === url
+    const pathOnly = url.split('?')[0]
+    if (pathOnly === 'project') return activeRoute === '' || activeRoute === 'project'
+    if (pathOnly === 'environments') return activeRoute.startsWith('environments')
+    return activeRoute === pathOnly
   }
   const isParentActive = (item: ProjectNavItem) =>
     !!item.subItems?.some((s) => isActive(s.url))
@@ -719,15 +723,16 @@ function ProjectNav({
                   <SidebarMenuItem key={sub.url}>
                     <SidebarMenuButton
                       asChild
+                      tooltip={compact ? sub.title : undefined}
                       className={cn(
-                        'justify-start',
+                        compact ? 'justify-center' : 'justify-start',
                         active &&
                         'bg-sidebar-accent text-sidebar-accent-foreground'
                       )}
                     >
                       <Link to={`/projects/${project.slug}/${sub.url}`}>
                         <sub.icon />
-                        <span>{sub.title}</span>
+                        {!compact && <span>{sub.title}</span>}
                       </Link>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
@@ -756,43 +761,54 @@ function ProjectNav({
                   <SidebarMenuButton
                     asChild
                     onClick={() => setDrilledTo(item.title)}
+                    tooltip={compact ? item.title : undefined}
                     className={cn(
-                      'justify-start',
+                      compact ? 'justify-center' : 'justify-start',
                       active &&
                       'bg-sidebar-accent text-sidebar-accent-foreground'
                     )}
                   >
                     <Link to={`/projects/${project.slug}/${item.url}`}>
                       <item.icon />
-                      <span className="flex-1 text-left">{item.title}</span>
-                      <ChevronRight className="size-4 text-muted-foreground" />
+                      {!compact && (
+                        <>
+                          <span className="flex-1 text-left">{item.title}</span>
+                          <ChevronRight className="size-4 text-muted-foreground" />
+                        </>
+                      )}
                     </Link>
                   </SidebarMenuButton>
                 ) : hasSub ? (
                   <SidebarMenuButton
                     onClick={() => setDrilledTo(item.title)}
+                    tooltip={compact ? item.title : undefined}
                     className={cn(
-                      'justify-start',
+                      compact ? 'justify-center' : 'justify-start',
                       active &&
                       'bg-sidebar-accent text-sidebar-accent-foreground'
                     )}
                   >
                     <item.icon />
-                    <span className="flex-1 text-left">{item.title}</span>
-                    <ChevronRight className="size-4 text-muted-foreground" />
+                    {!compact && (
+                      <>
+                        <span className="flex-1 text-left">{item.title}</span>
+                        <ChevronRight className="size-4 text-muted-foreground" />
+                      </>
+                    )}
                   </SidebarMenuButton>
                 ) : (
                   <SidebarMenuButton
                     asChild
+                    tooltip={compact ? item.title : undefined}
                     className={cn(
-                      'justify-start',
+                      compact ? 'justify-center' : 'justify-start',
                       active &&
                       'bg-sidebar-accent text-sidebar-accent-foreground'
                     )}
                   >
                     <Link to={`/projects/${project.slug}/${item.url}`}>
                       <item.icon />
-                      <span>{item.title}</span>
+                      {!compact && <span>{item.title}</span>}
                     </Link>
                   </SidebarMenuButton>
                 )}

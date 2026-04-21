@@ -21,7 +21,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
-  Box,
   Check,
   ChevronsUpDown,
   Clock,
@@ -42,7 +41,6 @@ interface EnvironmentHeaderBarProps {
   project: ProjectResponse
   activeView: string
   onViewChange: (view: string) => void
-  isStatic: boolean
   environments?: EnvironmentResponse[]
   onEnvironmentChange?: (id: number) => void
   onCreateEnvironment?: () => void
@@ -53,7 +51,6 @@ export function EnvironmentHeaderBar({
   project,
   activeView,
   onViewChange,
-  isStatic,
   environments,
   onEnvironmentChange,
   onCreateEnvironment,
@@ -122,10 +119,7 @@ export function EnvironmentHeaderBar({
     enabled: !!environment.current_deployment_id,
   })
 
-  const navItems = [
-    { view: 'containers', title: 'Containers', icon: Box, visible: !isStatic },
-    { view: 'settings', title: 'Settings', icon: Settings, visible: true },
-  ].filter((item) => item.visible)
+  const inSettings = activeView === 'settings'
 
   const statusTone = isSleeping
     ? 'bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/30'
@@ -135,10 +129,10 @@ export function EnvironmentHeaderBar({
   const canSwitchEnvs = !!environments && environments.length > 0
 
   return (
-    <div className="sticky top-0 z-10 border-b bg-white/95 backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/95">
+    <div className="sticky top-0 z-10 bg-white/95 backdrop-blur dark:bg-neutral-950/95">
       <div className="w-full px-4 sm:px-6 lg:px-8">
         {/* Primary row */}
-        <div className="flex flex-col gap-4 pt-5 pb-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex flex-col gap-4 py-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2.5">
               {canSwitchEnvs && hasMultipleEnvs ? (
@@ -262,101 +256,92 @@ export function EnvironmentHeaderBar({
           </div>
 
           <div className="flex items-center gap-2">
-            {isOnDemand &&
-              (isSleeping ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={wakeMutation.isPending}
-                  onClick={() =>
-                    wakeMutation.mutate({
-                      path: {
-                        project_id: environment.project_id,
-                        env_id: environment.id,
-                      },
-                    })
-                  }
-                >
-                  {wakeMutation.isPending ? (
-                    <Loader2 className="mr-1.5 size-4 animate-spin" />
+            {inSettings ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => onViewChange('containers')}
+              >
+                Done
+              </Button>
+            ) : (
+              <>
+                {isOnDemand &&
+                  (isSleeping ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={wakeMutation.isPending}
+                      onClick={() =>
+                        wakeMutation.mutate({
+                          path: {
+                            project_id: environment.project_id,
+                            env_id: environment.id,
+                          },
+                        })
+                      }
+                    >
+                      {wakeMutation.isPending ? (
+                        <Loader2 className="mr-1.5 size-4 animate-spin" />
+                      ) : (
+                        <Play className="mr-1.5 size-4" />
+                      )}
+                      Wake up
+                    </Button>
                   ) : (
-                    <Play className="mr-1.5 size-4" />
-                  )}
-                  Wake up
-                </Button>
-              ) : (
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={sleepMutation.isPending}
+                            onClick={() =>
+                              sleepMutation.mutate({
+                                path: {
+                                  project_id: environment.project_id,
+                                  env_id: environment.id,
+                                },
+                              })
+                            }
+                          >
+                            {sleepMutation.isPending ? (
+                              <Loader2 className="mr-1.5 size-4 animate-spin" />
+                            ) : (
+                              <Moon className="mr-1.5 size-4" />
+                            )}
+                            Sleep now
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Put this environment to sleep
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  ))}
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
                         type="button"
                         variant="outline"
-                        size="sm"
-                        disabled={sleepMutation.isPending}
-                        onClick={() =>
-                          sleepMutation.mutate({
-                            path: {
-                              project_id: environment.project_id,
-                              env_id: environment.id,
-                            },
-                          })
-                        }
+                        size="icon"
+                        className="size-9"
+                        aria-label="Environment settings"
+                        onClick={() => onViewChange('settings')}
                       >
-                        {sleepMutation.isPending ? (
-                          <Loader2 className="mr-1.5 size-4 animate-spin" />
-                        ) : (
-                          <Moon className="mr-1.5 size-4" />
-                        )}
-                        Sleep now
+                        <Settings className="size-4" aria-hidden="true" />
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent>
-                      Put this environment to sleep
-                    </TooltipContent>
+                    <TooltipContent>Environment settings</TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
-              ))}
-            {onCreateEnvironment && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={onCreateEnvironment}
-              >
-                <Plus className="mr-1.5 size-4" aria-hidden="true" />
-                <span className="hidden sm:inline">New environment</span>
-                <span className="sm:hidden">New</span>
-              </Button>
+              </>
             )}
           </div>
         </div>
-
-        {/* Segmented nav */}
-        <nav
-          className="-mb-px flex gap-6 overflow-x-auto"
-          aria-label="Environment sections"
-        >
-          {navItems.map((item) => {
-            const Icon = item.icon
-            const active = activeView === item.view
-            return (
-              <button
-                type="button"
-                key={item.view}
-                onClick={() => onViewChange(item.view)}
-                className={`inline-flex items-center gap-2 whitespace-nowrap border-b-2 px-1 py-3 text-sm font-medium transition-colors ${
-                  active
-                    ? 'border-neutral-900 text-neutral-900 dark:border-white dark:text-white'
-                    : 'border-transparent text-neutral-500 hover:border-neutral-300 hover:text-neutral-800 dark:text-neutral-400 dark:hover:border-neutral-600 dark:hover:text-neutral-200'
-                }`}
-                aria-current={active ? 'page' : undefined}
-              >
-                <Icon className="size-4" aria-hidden="true" />
-                {item.title}
-              </button>
-            )
-          })}
-        </nav>
       </div>
     </div>
   )

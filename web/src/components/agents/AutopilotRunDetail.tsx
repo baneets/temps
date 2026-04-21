@@ -51,7 +51,7 @@ import {
 } from '@/api/client/sdk.gen'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
-import { GitBranch, Send, Sparkles } from 'lucide-react'
+import { ChevronDown, ChevronUp, GitBranch, MessageSquare, Send, Sparkles } from 'lucide-react'
 
 const proseClasses = 'prose prose-sm dark:prose-invert max-w-none prose-pre:bg-black/30 prose-pre:text-muted-foreground prose-pre:text-xs prose-pre:border-0 prose-code:before:content-none prose-code:after:content-none prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1.5 prose-ul:list-disc prose-ul:pl-5 prose-ol:my-1.5 prose-ol:list-decimal prose-ol:pl-5 prose-li:my-0.5 prose-li:marker:text-foreground/60 prose-hr:my-3 prose-hr:border-border prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1'
 
@@ -867,6 +867,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
   const [isStartingFix, setIsStartingFix] = useState(false)
   const [isCreatingPr, setIsCreatingPr] = useState(false)
   const [isStartingOver, setIsStartingOver] = useState(false)
+  const [showFeedback, setShowFeedback] = useState(false)
 
   const runQueryOptions = getRunWithLogsOptions({
     path: { project_id: project.id, run_id: Number(runId) },
@@ -1239,7 +1240,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
           <CardContent className="p-4 flex items-center justify-between gap-4 flex-wrap">
             <div className="text-sm min-w-0">
               {phase === 'analyzed' &&
-                'Analysis complete. Send feedback below to refine, or generate a fix.'}
+                'Analysis complete. Generate a fix, or open feedback to refine.'}
               {phase === 'fix_ready' &&
                 'Fix is ready. Review the changes, then create a pull request.'}
               {(phase === 'completed' || phase === 'pr_created') && run.pr_url && (
@@ -1285,6 +1286,22 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
                   Start Over
                 </Button>
               )}
+              {(phase === 'analyzing' || phase === 'analyzed') && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowFeedback((v) => !v)}
+                  aria-expanded={showFeedback}
+                >
+                  <MessageSquare className="h-4 w-4 mr-2" />
+                  Feedback
+                  {showFeedback ? (
+                    <ChevronUp className="h-4 w-4 ml-2" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4 ml-2" />
+                  )}
+                </Button>
+              )}
               {phase === 'analyzed' && (
                 <Button
                   onClick={onStartFix}
@@ -1318,7 +1335,7 @@ export function AutopilotRunDetail({ project }: AutopilotRunDetailProps) {
         </Card>
       )}
 
-      {(phase === 'analyzing' || phase === 'analyzed') && (
+      {(phase === 'analyzing' || phase === 'analyzed') && showFeedback && (
         <div className="flex gap-2 items-end">
           <textarea
             placeholder={

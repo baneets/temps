@@ -37,6 +37,9 @@ const Account = lazy(() =>
 const Projects = lazy(() =>
   import('./pages/Projects').then((m) => ({ default: m.Projects }))
 )
+const Revenue = lazy(() =>
+  import('./pages/Revenue').then((m) => ({ default: m.Revenue }))
+)
 const Sandboxes = lazy(() => import('./pages/Sandboxes'))
 const SandboxDetail = lazy(() => import('./pages/SandboxDetail'))
 const Storage = lazy(() =>
@@ -310,6 +313,7 @@ const FullAppRoutes = () => {
                 <Route path="/dashboard" element={<Navigate to="/projects" replace />} />
                 <Route path="/account" element={<Account />} />
                 <Route path="/projects" element={<Projects />} />
+                <Route path="/revenue" element={<Revenue />} />
                 <Route path="/sandboxes" element={<Sandboxes />} />
                 <Route path="/sandboxes/:sandboxId" element={<SandboxDetail />} />
                 <Route path="/monitoring" element={<Monitoring />}>

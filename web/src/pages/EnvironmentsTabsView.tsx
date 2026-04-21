@@ -5,9 +5,13 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
+import { Route, Routes } from 'react-router-dom'
 import { EnvironmentDashboard } from './EnvironmentDashboard'
+import { ContainerDetailPage } from './ContainerDetailPage'
 import { ProjectResponse } from '@/api/client'
 import { CreateEnvironmentDialog } from '@/components/project/settings/environments/CreateEnvironmentDialog'
+import { Button } from '@/components/ui/button'
+import { Plus } from 'lucide-react'
 import { toast } from 'sonner'
 
 export function EnvironmentsTabsView({
@@ -72,22 +76,26 @@ export function EnvironmentsTabsView({
                 Manage and monitor your environments
               </p>
             </div>
-            <CreateEnvironmentDialog
-              open={isCreateDialogOpen}
-              onOpenChange={setIsCreateDialogOpen}
-              project={project}
-              onSubmit={async (values) => {
-                await createEnv.mutateAsync({
-                  path: { project_id: project.id || 0 },
-                  body: values,
-                })
-              }}
-            />
+            <Button onClick={() => setIsCreateDialogOpen(true)}>
+              <Plus className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Add Environment</span>
+            </Button>
           </div>
         </div>
         <div className="flex-1 flex items-center justify-center">
           <p className="text-muted-foreground">No environments found</p>
         </div>
+        <CreateEnvironmentDialog
+          open={isCreateDialogOpen}
+          onOpenChange={setIsCreateDialogOpen}
+          project={project}
+          onSubmit={async (values) => {
+            await createEnv.mutateAsync({
+              path: { project_id: project.id || 0 },
+              body: values,
+            })
+          }}
+        />
       </div>
     )
   }
@@ -102,15 +110,26 @@ export function EnvironmentsTabsView({
 
   return (
     <div className="flex flex-col h-full">
-      <EnvironmentDashboard
-        key={activeEnvId}
-        project={project}
-        environmentId={activeEnvId}
-        environments={environments}
-        onEnvironmentChange={(id) => setSelectedEnvId(id)}
-        onCreateEnvironment={() => setIsCreateDialogOpen(true)}
-        onDelete={() => handleDelete(activeEnvId)}
-      />
+      <Routes>
+        <Route
+          path="containers/:containerId"
+          element={<ContainerDetailPage project={project} />}
+        />
+        <Route
+          path="*"
+          element={
+            <EnvironmentDashboard
+              key={activeEnvId}
+              project={project}
+              environmentId={activeEnvId}
+              environments={environments}
+              onEnvironmentChange={(id) => setSelectedEnvId(id)}
+              onCreateEnvironment={() => setIsCreateDialogOpen(true)}
+              onDelete={() => handleDelete(activeEnvId)}
+            />
+          }
+        />
+      </Routes>
       <CreateEnvironmentDialog
         open={isCreateDialogOpen}
         onOpenChange={setIsCreateDialogOpen}

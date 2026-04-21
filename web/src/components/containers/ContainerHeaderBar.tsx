@@ -9,11 +9,14 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
-  Activity,
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronsUpDown,
+  Cpu,
   ExternalLink,
   FileText,
+  HardDrive,
   Loader2,
   Play,
   RotateCw,
@@ -22,20 +25,26 @@ import {
   Square,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
+import { useContainerMetricsStream } from './useContainerMetricsStream'
 
 type ContainerStatus = string
+type ContainerTab = 'logs' | 'configuration'
 
 interface ContainerHeaderBarProps {
+  projectId: string
+  environmentId: string
   containers: ContainerInfoResponse[]
   selectedContainer: ContainerInfoResponse | null
   onSelect: (id: string) => void
-  tab: 'overview' | 'logs' | 'configuration'
-  onTabChange: (tab: 'overview' | 'logs' | 'configuration') => void
+  tab: ContainerTab
+  onTabChange: (tab: ContainerTab) => void
   onAction: (action: 'start' | 'stop' | 'restart') => void
   actionInFlight?: 'start' | 'stop' | 'restart' | null
 }
 
 export function ContainerHeaderBar({
+  projectId,
+  environmentId,
   containers,
   selectedContainer,
   onSelect,
@@ -62,12 +71,18 @@ export function ContainerHeaderBar({
 
   const isRunning = selectedContainer?.status === 'running'
 
+  const { metrics } = useContainerMetricsStream(
+    projectId,
+    environmentId,
+    selectedContainer?.container_id ?? '',
+    isRunning
+  )
+
   const navItems: {
-    id: 'overview' | 'logs' | 'configuration'
+    id: ContainerTab
     title: string
-    icon: typeof Activity
+    icon: typeof FileText
   }[] = [
-    { id: 'overview', title: 'Overview', icon: Activity },
     { id: 'logs', title: 'Logs', icon: FileText },
     { id: 'configuration', title: 'Configuration', icon: Settings2 },
   ]
@@ -106,6 +121,29 @@ export function ContainerHeaderBar({
               )}
               {selectedContainer?.created_at && (
                 <UptimeInline createdAt={selectedContainer.created_at} />
+              )}
+              {isRunning && metrics && (
+                <>
+                  <div className="inline-flex items-center gap-1.5 tabular-nums">
+                    <Cpu className="size-3.5" aria-hidden="true" />
+                    <span>CPU {metrics.cpu_percent.toFixed(1)}%</span>
+                  </div>
+                  <div className="inline-flex items-center gap-1.5 tabular-nums">
+                    <HardDrive className="size-3.5" aria-hidden="true" />
+                    <span>
+                      Mem {formatBytes(metrics.memory_bytes)}
+                      {(metrics.memory_limit_bytes ?? 0) > 0 &&
+                        metrics.memory_percent != null &&
+                        ` / ${metrics.memory_percent.toFixed(0)}%`}
+                    </span>
+                  </div>
+                  <div className="inline-flex items-center gap-1.5 tabular-nums">
+                    <ArrowDown className="size-3.5" aria-hidden="true" />
+                    <span>{formatBytes(metrics.network_rx_rate)}/s</span>
+                    <ArrowUp className="size-3.5 ml-1" aria-hidden="true" />
+                    <span>{formatBytes(metrics.network_tx_rate)}/s</span>
+                  </div>
+                </>
               )}
               {selectedContainer?.service_url && (
                 <a
@@ -383,4 +421,12 @@ function formatUptime(createdAt: string): string {
   if (h < 24) return `${h}h ${m % 60}m`
   const d = Math.floor(h / 24)
   return `${d}d ${h % 24}h`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(0)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }

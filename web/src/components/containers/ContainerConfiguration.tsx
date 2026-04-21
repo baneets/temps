@@ -86,7 +86,7 @@ export function ContainerConfiguration({
                   </div>
                   {value && (
                     <CopyButton
-                      text={value}
+                      value={value}
                       className="shrink-0 opacity-0 transition group-hover:opacity-100 focus:opacity-100"
                     />
                   )}

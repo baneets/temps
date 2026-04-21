@@ -2246,7 +2246,6 @@ const VALID_TABS = ['keys', 'usage', 'activity', 'settings'] as const
 type TabValue = (typeof VALID_TABS)[number]
 
 export function AiGatewayPage() {
-  usePageTitle('AI Gateway')
   const queryClient = useQueryClient()
   const { data: settings } = useSettings()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -2256,6 +2255,8 @@ export function AiGatewayPage() {
   const setActiveTab = (tab: string) => {
     setSearchParams({ tab }, { replace: true })
   }
+
+  usePageTitle(activeTab === 'activity' ? 'AI Traces' : 'AI Gateway')
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
@@ -2447,9 +2448,13 @@ console.log(response.choices[0].message.content);`,
       {/* Page Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-bold">AI Gateway</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold">
+            {activeTab === 'activity' ? 'AI Traces' : 'AI Gateway'}
+          </h1>
           <p className="text-muted-foreground mt-1 sm:mt-2 text-sm">
-            Unified API for multiple AI providers with a single endpoint
+            {activeTab === 'activity'
+              ? 'OpenTelemetry traces from your AI workloads (gen_ai.* spans)'
+              : 'Unified API for multiple AI providers with a single endpoint'}
           </p>
         </div>
         <Button onClick={() => setDialogOpen(true)} className="w-full sm:w-auto">
