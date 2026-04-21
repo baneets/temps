@@ -225,7 +225,7 @@ export function DnsProviders() {
                       key={provider.id}
                       className="group relative p-4 border rounded-lg transition-colors hover:bg-muted/50 cursor-pointer"
                       onClick={() =>
-                        navigate(`/settings/dns-providers/${provider.id}`)
+                        navigate(`/dns-providers/${provider.id}`)
                       }
                     >
                       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
@@ -309,7 +309,7 @@ export function DnsProviders() {
                               <DropdownMenuItem
                                 onClick={() =>
                                   navigate(
-                                    `/settings/dns-providers/${provider.id}`
+                                    `/dns-providers/${provider.id}`
                                   )
                                 }
                               >

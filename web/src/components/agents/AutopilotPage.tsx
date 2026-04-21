@@ -403,14 +403,14 @@ export function AutopilotPage({ project }: AutopilotPageProps) {
                 <p className="text-xs text-muted-foreground">
                   Workflows need an AI CLI (Claude Code, Codex, or OpenCode) to run.
                   Add credentials once in{' '}
-                  <Link to="/settings/agent-sandbox" className="underline font-medium">
+                  <Link to="/agent-sandbox" className="underline font-medium">
                     Settings &gt; AI Workflows
                   </Link>
                   .
                 </p>
                 {!hasCredential && (
                   <Button size="sm" variant="outline" asChild>
-                    <Link to="/settings/agent-sandbox">Configure AI provider</Link>
+                    <Link to="/agent-sandbox">Configure AI provider</Link>
                   </Button>
                 )}
               </div>
@@ -505,7 +505,7 @@ prompt: |
               </p>
               <p className="text-sm opacity-90">
                 Add credentials in{' '}
-                <Link to="/settings/agent-sandbox" className="underline font-medium">Settings &gt; AI Workflows</Link>
+                <Link to="/agent-sandbox" className="underline font-medium">Settings &gt; AI Workflows</Link>
               </p>
             </div>
           </AlertDescription>

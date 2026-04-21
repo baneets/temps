@@ -359,17 +359,14 @@ impl TrackingService {
         #[derive(FromQueryResult)]
         struct StatsRow {
             total_sent: i64,
-            total_opens: i64,
-            total_clicks: i64,
             emails_with_opens: i64,
             emails_with_clicks: i64,
         }
 
+        // Count unique emails that were opened/clicked at least once — not total events.
         let sql = r#"
             SELECT
                 COUNT(*) FILTER (WHERE status = 'sent') AS total_sent,
-                COALESCE(SUM(open_count), 0) AS total_opens,
-                COALESCE(SUM(click_count), 0) AS total_clicks,
                 COUNT(*) FILTER (WHERE open_count > 0) AS emails_with_opens,
                 COUNT(*) FILTER (WHERE click_count > 0) AS emails_with_clicks
             FROM emails
@@ -384,8 +381,6 @@ impl TrackingService {
         .await?
         .unwrap_or(StatsRow {
             total_sent: 0,
-            total_opens: 0,
-            total_clicks: 0,
             emails_with_opens: 0,
             emails_with_clicks: 0,
         });
@@ -404,8 +399,8 @@ impl TrackingService {
 
         Ok(GlobalTrackingStats {
             delivered: delivered as u64,
-            opened: row.total_opens as u64,
-            clicked: row.total_clicks as u64,
+            opened: row.emails_with_opens as u64,
+            clicked: row.emails_with_clicks as u64,
             bounced: 0,
             complained: 0,
             open_rate,

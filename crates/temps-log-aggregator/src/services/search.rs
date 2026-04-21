@@ -224,7 +224,7 @@ impl LogSearchService {
         }
 
         // Sort by timestamp ascending (oldest first, like a terminal)
-        all_matches.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        all_matches.sort_by_key(|a| a.timestamp);
 
         let has_more = all_matches.len() > page_size as usize;
         all_matches.truncate(page_size as usize);

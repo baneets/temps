@@ -345,7 +345,7 @@ export function Projects() {
               <div className="flex gap-3 mt-6">
                 <Button asChild>
                   <Link
-                    to="/settings/git-providers/add"
+                    to="/git-providers/add"
                     className="flex items-center gap-2"
                   >
                     <GitBranch className="h-4 w-4" />
@@ -353,7 +353,7 @@ export function Projects() {
                   </Link>
                 </Button>
                 <Button asChild variant="outline">
-                  <Link to="/settings/git-providers" className="flex items-center gap-2">
+                  <Link to="/git-providers" className="flex items-center gap-2">
                     View Providers
                   </Link>
                 </Button>

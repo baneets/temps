@@ -153,7 +153,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/settings/ai-providers",
+    path = "/settings/ai-providers",
     responses(
         (status = 200, body = ProviderCatalogResponse),
         (status = 401, description = "Unauthorized"),
@@ -227,7 +227,7 @@ pub async fn list_ai_providers(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/settings/ai-providers/{provider_id}/credential",
+    path = "/settings/ai-providers/{provider_id}/credential",
     params(("provider_id" = String, Path, description = "AI provider ID")),
     request_body = SaveCredentialRequest,
     responses(
@@ -357,7 +357,7 @@ pub async fn save_ai_provider_credential(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/settings/ai-providers/{provider_id}/activate",
+    path = "/settings/ai-providers/{provider_id}/activate",
     params(("provider_id" = String, Path, description = "AI provider ID")),
     responses(
         (status = 200, body = ActivateProviderResponse),
@@ -445,7 +445,7 @@ pub async fn activate_ai_provider(
 #[utoipa::path(
     tag = "Agents",
     patch,
-    path = "/api/settings/ai-providers/{provider_id}",
+    path = "/settings/ai-providers/{provider_id}",
     params(("provider_id" = String, Path, description = "AI provider ID")),
     request_body = UpdateProviderRequest,
     responses(

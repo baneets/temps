@@ -248,7 +248,7 @@ async fn log_audit(app_state: &AppState, audit: DefinitionAudit) {
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/projects/{project_id}/skills",
+    path = "/projects/{project_id}/skills",
     params(("project_id" = i32, Path, description = "Project ID")),
     responses(
         (status = 200, body = ListSkillsResponse),
@@ -282,7 +282,7 @@ pub async fn list_skills(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/projects/{project_id}/skills/{slug}",
+    path = "/projects/{project_id}/skills/{slug}",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "Skill slug"),
@@ -313,7 +313,7 @@ pub async fn get_skill(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/projects/{project_id}/skills",
+    path = "/projects/{project_id}/skills",
     params(("project_id" = i32, Path, description = "Project ID")),
     request_body = CreateSkillRequest,
     responses(
@@ -369,7 +369,7 @@ pub async fn create_skill(
 #[utoipa::path(
     tag = "Agents",
     put,
-    path = "/api/projects/{project_id}/skills/{slug}",
+    path = "/projects/{project_id}/skills/{slug}",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "Skill slug"),
@@ -426,7 +426,7 @@ pub async fn update_skill(
 #[utoipa::path(
     tag = "Agents",
     delete,
-    path = "/api/projects/{project_id}/skills/{slug}",
+    path = "/projects/{project_id}/skills/{slug}",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "Skill slug"),
@@ -474,7 +474,7 @@ pub async fn delete_skill(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/projects/{project_id}/mcp-servers",
+    path = "/projects/{project_id}/mcp-servers",
     params(("project_id" = i32, Path, description = "Project ID")),
     responses(
         (status = 200, body = ListMcpsResponse),
@@ -505,7 +505,7 @@ pub async fn list_mcps(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/projects/{project_id}/mcp-servers/{slug}",
+    path = "/projects/{project_id}/mcp-servers/{slug}",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "MCP server slug"),
@@ -536,7 +536,7 @@ pub async fn get_mcp(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/projects/{project_id}/mcp-servers",
+    path = "/projects/{project_id}/mcp-servers",
     params(("project_id" = i32, Path, description = "Project ID")),
     request_body = CreateMcpRequest,
     responses(
@@ -588,7 +588,7 @@ pub async fn create_mcp(
 #[utoipa::path(
     tag = "Agents",
     put,
-    path = "/api/projects/{project_id}/mcp-servers/{slug}",
+    path = "/projects/{project_id}/mcp-servers/{slug}",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "MCP server slug"),
@@ -644,7 +644,7 @@ pub async fn update_mcp(
 #[utoipa::path(
     tag = "Agents",
     delete,
-    path = "/api/projects/{project_id}/mcp-servers/{slug}",
+    path = "/projects/{project_id}/mcp-servers/{slug}",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "MCP server slug"),
@@ -692,7 +692,7 @@ pub async fn delete_mcp(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/settings/skills",
+    path = "/settings/skills",
     responses(
         (status = 200, body = ListSkillsResponse),
         (status = 401, description = "Unauthorized"),
@@ -724,7 +724,7 @@ pub async fn list_global_skills(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/settings/skills/{slug}",
+    path = "/settings/skills/{slug}",
     params(("slug" = String, Path, description = "Skill slug")),
     responses(
         (status = 200, body = SkillDefinitionResponse),
@@ -752,7 +752,7 @@ pub async fn get_global_skill(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/settings/skills",
+    path = "/settings/skills",
     request_body = CreateSkillRequest,
     responses(
         (status = 201, body = SkillDefinitionResponse),
@@ -803,7 +803,7 @@ pub async fn create_global_skill(
 #[utoipa::path(
     tag = "Agents",
     put,
-    path = "/api/settings/skills/{slug}",
+    path = "/settings/skills/{slug}",
     params(("slug" = String, Path, description = "Skill slug")),
     request_body = UpdateSkillRequest,
     responses(
@@ -856,7 +856,7 @@ pub async fn update_global_skill(
 #[utoipa::path(
     tag = "Agents",
     delete,
-    path = "/api/settings/skills/{slug}",
+    path = "/settings/skills/{slug}",
     params(("slug" = String, Path, description = "Skill slug")),
     responses(
         (status = 204, description = "Skill deleted"),
@@ -901,7 +901,7 @@ pub async fn delete_global_skill(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/settings/mcp-servers",
+    path = "/settings/mcp-servers",
     responses(
         (status = 200, body = ListMcpsResponse),
         (status = 401, description = "Unauthorized"),
@@ -930,7 +930,7 @@ pub async fn list_global_mcps(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/settings/mcp-servers/{slug}",
+    path = "/settings/mcp-servers/{slug}",
     params(("slug" = String, Path, description = "MCP server slug")),
     responses(
         (status = 200, body = McpDefinitionResponse),
@@ -958,7 +958,7 @@ pub async fn get_global_mcp(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/settings/mcp-servers",
+    path = "/settings/mcp-servers",
     request_body = CreateMcpRequest,
     responses(
         (status = 201, body = McpDefinitionResponse),
@@ -1005,7 +1005,7 @@ pub async fn create_global_mcp(
 #[utoipa::path(
     tag = "Agents",
     put,
-    path = "/api/settings/mcp-servers/{slug}",
+    path = "/settings/mcp-servers/{slug}",
     params(("slug" = String, Path, description = "MCP server slug")),
     request_body = UpdateMcpRequest,
     responses(
@@ -1057,7 +1057,7 @@ pub async fn update_global_mcp(
 #[utoipa::path(
     tag = "Agents",
     delete,
-    path = "/api/settings/mcp-servers/{slug}",
+    path = "/settings/mcp-servers/{slug}",
     params(("slug" = String, Path, description = "MCP server slug")),
     responses(
         (status = 204, description = "MCP server deleted"),
@@ -1185,7 +1185,7 @@ async fn parse_skill_multipart(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/projects/{project_id}/skills/upload",
+    path = "/projects/{project_id}/skills/upload",
     params(("project_id" = i32, Path, description = "Project ID")),
     request_body(content_type = "multipart/form-data", content = String),
     responses(
@@ -1234,7 +1234,7 @@ pub async fn upload_skill(
 #[utoipa::path(
     tag = "Agents",
     post,
-    path = "/api/settings/skills/upload",
+    path = "/settings/skills/upload",
     request_body(content_type = "multipart/form-data", content = String),
     responses(
         (status = 201, body = SkillDefinitionResponse),
@@ -1281,7 +1281,7 @@ pub async fn upload_global_skill(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/projects/{project_id}/skills/{slug}/archive",
+    path = "/projects/{project_id}/skills/{slug}/archive",
     params(
         ("project_id" = i32, Path, description = "Project ID"),
         ("slug" = String, Path, description = "Skill slug"),
@@ -1332,7 +1332,7 @@ pub async fn download_skill_archive(
 #[utoipa::path(
     tag = "Agents",
     get,
-    path = "/api/settings/skills/{slug}/archive",
+    path = "/settings/skills/{slug}/archive",
     params(("slug" = String, Path, description = "Skill slug")),
     responses(
         (status = 200, description = "Skill archive tar.gz", content_type = "application/gzip"),

@@ -142,7 +142,7 @@ const settingsNavItems: NavigationItem[] = [
   // Infrastructure
   {
     title: 'Domains',
-    url: '/settings/domains',
+    url: '/domains',
     icon: Globe,
     keywords: ['dns', 'urls', 'websites', 'custom domain'],
   },
@@ -154,19 +154,19 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Email',
-    url: '/settings/email',
+    url: '/email',
     icon: Mail,
     keywords: ['email', 'mail', 'smtp', 'transactional', 'send'],
   },
   {
     title: 'AI Gateway',
-    url: '/settings/ai-gateway',
+    url: '/ai-gateway',
     icon: Sparkles,
     keywords: ['ai', 'llm', 'openai', 'anthropic', 'gateway', 'models', 'providers', 'chat', 'gpt', 'claude'],
   },
   {
     title: 'AI Workflows',
-    url: '/settings/agent-sandbox',
+    url: '/agent-sandbox',
     icon: Bot,
     keywords: ['ai', 'workflows', 'agents', 'sandbox', 'automation', 'autopilot'],
   },
@@ -184,13 +184,13 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Git Providers',
-    url: '/settings/git-providers',
+    url: '/git-providers',
     icon: GitBranch,
     keywords: ['github', 'gitlab', 'version control', 'repositories'],
   },
   {
     title: 'DNS Providers',
-    url: '/settings/dns-providers',
+    url: '/dns-providers',
     icon: Cloud,
     keywords: [
       'dns',
@@ -204,7 +204,7 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Add DNS Provider',
-    url: '/settings/dns-providers/add',
+    url: '/dns-providers/add',
     icon: Cloud,
     keywords: [
       'dns',
@@ -231,7 +231,7 @@ const settingsNavItems: NavigationItem[] = [
   },
   {
     title: 'Backups',
-    url: '/settings/backups',
+    url: '/backups',
     icon: DatabaseBackup,
     keywords: ['restore', 'backup', 'recovery', 's3'],
   },

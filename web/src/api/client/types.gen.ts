@@ -15288,879 +15288,6 @@ export type DeactivateApiKeyResponses = {
 
 export type DeactivateApiKeyResponse = DeactivateApiKeyResponses[keyof DeactivateApiKeyResponses];
 
-export type GetPreviewGatewayLogsData = {
-    body?: never;
-    path?: never;
-    query?: {
-        /**
-         * Lines to tail (default 200, max 2000)
-         */
-        tail?: number;
-    };
-    url: '/api/preview-gateway/logs';
-};
-
-export type GetPreviewGatewayLogsResponses = {
-    200: LogsResponse;
-};
-
-export type GetPreviewGatewayLogsResponse = GetPreviewGatewayLogsResponses[keyof GetPreviewGatewayLogsResponses];
-
-export type RestartPreviewGatewayData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/preview-gateway/restart';
-};
-
-export type RestartPreviewGatewayResponses = {
-    /**
-     * Gateway restarted
-     */
-    204: void;
-};
-
-export type RestartPreviewGatewayResponse = RestartPreviewGatewayResponses[keyof RestartPreviewGatewayResponses];
-
-export type GetPreviewGatewaySettingsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/preview-gateway/settings';
-};
-
-export type GetPreviewGatewaySettingsResponses = {
-    200: PreviewGatewaySettingsResponse;
-};
-
-export type GetPreviewGatewaySettingsResponse = GetPreviewGatewaySettingsResponses[keyof GetPreviewGatewaySettingsResponses];
-
-export type PatchPreviewGatewaySettingsData = {
-    body: PatchSettingsRequest;
-    path?: never;
-    query?: never;
-    url: '/api/preview-gateway/settings';
-};
-
-export type PatchPreviewGatewaySettingsResponses = {
-    200: PreviewGatewaySettingsResponse;
-};
-
-export type PatchPreviewGatewaySettingsResponse = PatchPreviewGatewaySettingsResponses[keyof PatchPreviewGatewaySettingsResponses];
-
-export type GetPreviewGatewayStatusData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/preview-gateway/status';
-};
-
-export type GetPreviewGatewayStatusResponses = {
-    200: GatewayStatus;
-};
-
-export type GetPreviewGatewayStatusResponse = GetPreviewGatewayStatusResponses[keyof GetPreviewGatewayStatusResponses];
-
-export type UpgradePreviewGatewayData = {
-    body: UpgradeRequest;
-    path?: never;
-    query?: never;
-    url: '/api/preview-gateway/upgrade';
-};
-
-export type UpgradePreviewGatewayResponses = {
-    /**
-     * Gateway upgraded
-     */
-    204: void;
-};
-
-export type UpgradePreviewGatewayResponse = UpgradePreviewGatewayResponses[keyof UpgradePreviewGatewayResponses];
-
-export type ListMcpsData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/mcp-servers';
-};
-
-export type ListMcpsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type ListMcpsResponses = {
-    200: ListMcpsResponse;
-};
-
-export type ListMcpsResponse2 = ListMcpsResponses[keyof ListMcpsResponses];
-
-export type CreateMcpData = {
-    body: CreateMcpRequest;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/mcp-servers';
-};
-
-export type CreateMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type CreateMcpResponses = {
-    201: McpDefinitionResponse;
-};
-
-export type CreateMcpResponse = CreateMcpResponses[keyof CreateMcpResponses];
-
-export type DeleteMcpData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * MCP server slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/mcp-servers/{slug}';
-};
-
-export type DeleteMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * MCP server not found
-     */
-    404: unknown;
-};
-
-export type DeleteMcpResponses = {
-    /**
-     * MCP server deleted
-     */
-    204: void;
-};
-
-export type DeleteMcpResponse = DeleteMcpResponses[keyof DeleteMcpResponses];
-
-export type GetMcpData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * MCP server slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/mcp-servers/{slug}';
-};
-
-export type GetMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * MCP server not found
-     */
-    404: unknown;
-};
-
-export type GetMcpResponses = {
-    200: McpDefinitionResponse;
-};
-
-export type GetMcpResponse = GetMcpResponses[keyof GetMcpResponses];
-
-export type UpdateMcpData = {
-    body: UpdateMcpRequest;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * MCP server slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/mcp-servers/{slug}';
-};
-
-export type UpdateMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * MCP server not found
-     */
-    404: unknown;
-};
-
-export type UpdateMcpResponses = {
-    200: McpDefinitionResponse;
-};
-
-export type UpdateMcpResponse = UpdateMcpResponses[keyof UpdateMcpResponses];
-
-export type ListSkillsData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills';
-};
-
-export type ListSkillsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type ListSkillsResponses = {
-    200: ListSkillsResponse;
-};
-
-export type ListSkillsResponse2 = ListSkillsResponses[keyof ListSkillsResponses];
-
-export type CreateSkillData = {
-    body: CreateSkillRequest;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills';
-};
-
-export type CreateSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type CreateSkillResponses = {
-    201: SkillDefinitionResponse;
-};
-
-export type CreateSkillResponse = CreateSkillResponses[keyof CreateSkillResponses];
-
-export type UploadSkillData = {
-    body: string;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills/upload';
-};
-
-export type UploadSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type UploadSkillResponses = {
-    201: SkillDefinitionResponse;
-};
-
-export type UploadSkillResponse = UploadSkillResponses[keyof UploadSkillResponses];
-
-export type DeleteSkillData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills/{slug}';
-};
-
-export type DeleteSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found
-     */
-    404: unknown;
-};
-
-export type DeleteSkillResponses = {
-    /**
-     * Skill deleted
-     */
-    204: void;
-};
-
-export type DeleteSkillResponse = DeleteSkillResponses[keyof DeleteSkillResponses];
-
-export type GetSkillData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills/{slug}';
-};
-
-export type GetSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found
-     */
-    404: unknown;
-};
-
-export type GetSkillResponses = {
-    200: SkillDefinitionResponse;
-};
-
-export type GetSkillResponse = GetSkillResponses[keyof GetSkillResponses];
-
-export type UpdateSkillData = {
-    body: UpdateSkillRequest;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills/{slug}';
-};
-
-export type UpdateSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found
-     */
-    404: unknown;
-};
-
-export type UpdateSkillResponses = {
-    200: SkillDefinitionResponse;
-};
-
-export type UpdateSkillResponse = UpdateSkillResponses[keyof UpdateSkillResponses];
-
-export type DownloadSkillArchiveData = {
-    body?: never;
-    path: {
-        /**
-         * Project ID
-         */
-        project_id: number;
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/projects/{project_id}/skills/{slug}/archive';
-};
-
-export type DownloadSkillArchiveErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found or has no archive
-     */
-    404: unknown;
-};
-
-export type DownloadSkillArchiveResponses = {
-    /**
-     * Skill archive tar.gz
-     */
-    200: Blob | File;
-};
-
-export type DownloadSkillArchiveResponse = DownloadSkillArchiveResponses[keyof DownloadSkillArchiveResponses];
-
-export type ListAiProvidersData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/settings/ai-providers';
-};
-
-export type ListAiProvidersErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type ListAiProvidersResponses = {
-    200: ProviderCatalogResponse;
-};
-
-export type ListAiProvidersResponse = ListAiProvidersResponses[keyof ListAiProvidersResponses];
-
-export type UpdateAiProviderData = {
-    body: UpdateProviderRequest;
-    path: {
-        /**
-         * AI provider ID
-         */
-        provider_id: string;
-    };
-    query?: never;
-    url: '/api/settings/ai-providers/{provider_id}';
-};
-
-export type UpdateAiProviderErrors = {
-    /**
-     * Unknown provider
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type UpdateAiProviderResponses = {
-    200: UpdateProviderResponse;
-};
-
-export type UpdateAiProviderResponse = UpdateAiProviderResponses[keyof UpdateAiProviderResponses];
-
-export type ActivateAiProviderData = {
-    body?: never;
-    path: {
-        /**
-         * AI provider ID
-         */
-        provider_id: string;
-    };
-    query?: never;
-    url: '/api/settings/ai-providers/{provider_id}/activate';
-};
-
-export type ActivateAiProviderErrors = {
-    /**
-     * Provider not configured
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type ActivateAiProviderResponses = {
-    200: ActivateProviderResponse;
-};
-
-export type ActivateAiProviderResponse = ActivateAiProviderResponses[keyof ActivateAiProviderResponses];
-
-export type SaveAiProviderCredentialData = {
-    body: SaveCredentialRequest;
-    path: {
-        /**
-         * AI provider ID
-         */
-        provider_id: string;
-    };
-    query?: never;
-    url: '/api/settings/ai-providers/{provider_id}/credential';
-};
-
-export type SaveAiProviderCredentialErrors = {
-    /**
-     * Validation error
-     */
-    400: unknown;
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type SaveAiProviderCredentialResponses = {
-    200: SaveCredentialResponse;
-};
-
-export type SaveAiProviderCredentialResponse = SaveAiProviderCredentialResponses[keyof SaveAiProviderCredentialResponses];
-
-export type ListGlobalMcpsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/settings/mcp-servers';
-};
-
-export type ListGlobalMcpsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type ListGlobalMcpsResponses = {
-    200: ListMcpsResponse;
-};
-
-export type ListGlobalMcpsResponse = ListGlobalMcpsResponses[keyof ListGlobalMcpsResponses];
-
-export type CreateGlobalMcpData = {
-    body: CreateMcpRequest;
-    path?: never;
-    query?: never;
-    url: '/api/settings/mcp-servers';
-};
-
-export type CreateGlobalMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type CreateGlobalMcpResponses = {
-    201: McpDefinitionResponse;
-};
-
-export type CreateGlobalMcpResponse = CreateGlobalMcpResponses[keyof CreateGlobalMcpResponses];
-
-export type DeleteGlobalMcpData = {
-    body?: never;
-    path: {
-        /**
-         * MCP server slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/mcp-servers/{slug}';
-};
-
-export type DeleteGlobalMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * MCP server not found
-     */
-    404: unknown;
-};
-
-export type DeleteGlobalMcpResponses = {
-    /**
-     * MCP server deleted
-     */
-    204: void;
-};
-
-export type DeleteGlobalMcpResponse = DeleteGlobalMcpResponses[keyof DeleteGlobalMcpResponses];
-
-export type GetGlobalMcpData = {
-    body?: never;
-    path: {
-        /**
-         * MCP server slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/mcp-servers/{slug}';
-};
-
-export type GetGlobalMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * MCP server not found
-     */
-    404: unknown;
-};
-
-export type GetGlobalMcpResponses = {
-    200: McpDefinitionResponse;
-};
-
-export type GetGlobalMcpResponse = GetGlobalMcpResponses[keyof GetGlobalMcpResponses];
-
-export type UpdateGlobalMcpData = {
-    body: UpdateMcpRequest;
-    path: {
-        /**
-         * MCP server slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/mcp-servers/{slug}';
-};
-
-export type UpdateGlobalMcpErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * MCP server not found
-     */
-    404: unknown;
-};
-
-export type UpdateGlobalMcpResponses = {
-    200: McpDefinitionResponse;
-};
-
-export type UpdateGlobalMcpResponse = UpdateGlobalMcpResponses[keyof UpdateGlobalMcpResponses];
-
-export type ListGlobalSkillsData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/settings/skills';
-};
-
-export type ListGlobalSkillsErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type ListGlobalSkillsResponses = {
-    200: ListSkillsResponse;
-};
-
-export type ListGlobalSkillsResponse = ListGlobalSkillsResponses[keyof ListGlobalSkillsResponses];
-
-export type CreateGlobalSkillData = {
-    body: CreateSkillRequest;
-    path?: never;
-    query?: never;
-    url: '/api/settings/skills';
-};
-
-export type CreateGlobalSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type CreateGlobalSkillResponses = {
-    201: SkillDefinitionResponse;
-};
-
-export type CreateGlobalSkillResponse = CreateGlobalSkillResponses[keyof CreateGlobalSkillResponses];
-
-export type UploadGlobalSkillData = {
-    body: string;
-    path?: never;
-    query?: never;
-    url: '/api/settings/skills/upload';
-};
-
-export type UploadGlobalSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-};
-
-export type UploadGlobalSkillResponses = {
-    201: SkillDefinitionResponse;
-};
-
-export type UploadGlobalSkillResponse = UploadGlobalSkillResponses[keyof UploadGlobalSkillResponses];
-
-export type DeleteGlobalSkillData = {
-    body?: never;
-    path: {
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/skills/{slug}';
-};
-
-export type DeleteGlobalSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found
-     */
-    404: unknown;
-};
-
-export type DeleteGlobalSkillResponses = {
-    /**
-     * Skill deleted
-     */
-    204: void;
-};
-
-export type DeleteGlobalSkillResponse = DeleteGlobalSkillResponses[keyof DeleteGlobalSkillResponses];
-
-export type GetGlobalSkillData = {
-    body?: never;
-    path: {
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/skills/{slug}';
-};
-
-export type GetGlobalSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found
-     */
-    404: unknown;
-};
-
-export type GetGlobalSkillResponses = {
-    200: SkillDefinitionResponse;
-};
-
-export type GetGlobalSkillResponse = GetGlobalSkillResponses[keyof GetGlobalSkillResponses];
-
-export type UpdateGlobalSkillData = {
-    body: UpdateSkillRequest;
-    path: {
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/skills/{slug}';
-};
-
-export type UpdateGlobalSkillErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found
-     */
-    404: unknown;
-};
-
-export type UpdateGlobalSkillResponses = {
-    200: SkillDefinitionResponse;
-};
-
-export type UpdateGlobalSkillResponse = UpdateGlobalSkillResponses[keyof UpdateGlobalSkillResponses];
-
-export type DownloadGlobalSkillArchiveData = {
-    body?: never;
-    path: {
-        /**
-         * Skill slug
-         */
-        slug: string;
-    };
-    query?: never;
-    url: '/api/settings/skills/{slug}/archive';
-};
-
-export type DownloadGlobalSkillArchiveErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Skill not found or has no archive
-     */
-    404: unknown;
-};
-
-export type DownloadGlobalSkillArchiveResponses = {
-    /**
-     * Skill archive tar.gz
-     */
-    200: Blob | File;
-};
-
-export type DownloadGlobalSkillArchiveResponse = DownloadGlobalSkillArchiveResponses[keyof DownloadGlobalSkillArchiveResponses];
-
 export type EmailStatusData = {
     body?: never;
     path?: never;
@@ -25229,6 +24356,95 @@ export type GeneratePresetDockerfileResponses = {
 
 export type GeneratePresetDockerfileResponse = GeneratePresetDockerfileResponses[keyof GeneratePresetDockerfileResponses];
 
+export type GetPreviewGatewayLogsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Lines to tail (default 200, max 2000)
+         */
+        tail?: number;
+    };
+    url: '/preview-gateway/logs';
+};
+
+export type GetPreviewGatewayLogsResponses = {
+    200: LogsResponse;
+};
+
+export type GetPreviewGatewayLogsResponse = GetPreviewGatewayLogsResponses[keyof GetPreviewGatewayLogsResponses];
+
+export type RestartPreviewGatewayData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/preview-gateway/restart';
+};
+
+export type RestartPreviewGatewayResponses = {
+    /**
+     * Gateway restarted
+     */
+    204: void;
+};
+
+export type RestartPreviewGatewayResponse = RestartPreviewGatewayResponses[keyof RestartPreviewGatewayResponses];
+
+export type GetPreviewGatewaySettingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/preview-gateway/settings';
+};
+
+export type GetPreviewGatewaySettingsResponses = {
+    200: PreviewGatewaySettingsResponse;
+};
+
+export type GetPreviewGatewaySettingsResponse = GetPreviewGatewaySettingsResponses[keyof GetPreviewGatewaySettingsResponses];
+
+export type PatchPreviewGatewaySettingsData = {
+    body: PatchSettingsRequest;
+    path?: never;
+    query?: never;
+    url: '/preview-gateway/settings';
+};
+
+export type PatchPreviewGatewaySettingsResponses = {
+    200: PreviewGatewaySettingsResponse;
+};
+
+export type PatchPreviewGatewaySettingsResponse = PatchPreviewGatewaySettingsResponses[keyof PatchPreviewGatewaySettingsResponses];
+
+export type GetPreviewGatewayStatusData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/preview-gateway/status';
+};
+
+export type GetPreviewGatewayStatusResponses = {
+    200: GatewayStatus;
+};
+
+export type GetPreviewGatewayStatusResponse = GetPreviewGatewayStatusResponses[keyof GetPreviewGatewayStatusResponses];
+
+export type UpgradePreviewGatewayData = {
+    body: UpgradeRequest;
+    path?: never;
+    query?: never;
+    url: '/preview-gateway/upgrade';
+};
+
+export type UpgradePreviewGatewayResponses = {
+    /**
+     * Gateway upgraded
+     */
+    204: void;
+};
+
+export type UpgradePreviewGatewayResponse = UpgradePreviewGatewayResponses[keyof UpgradePreviewGatewayResponses];
+
 export type GetProjectsData = {
     body?: never;
     path?: never;
@@ -30781,6 +29997,158 @@ export type PurgeProjectLogsResponses = {
     200: unknown;
 };
 
+export type ListMcpsData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/mcp-servers';
+};
+
+export type ListMcpsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type ListMcpsResponses = {
+    200: ListMcpsResponse;
+};
+
+export type ListMcpsResponse2 = ListMcpsResponses[keyof ListMcpsResponses];
+
+export type CreateMcpData = {
+    body: CreateMcpRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/mcp-servers';
+};
+
+export type CreateMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type CreateMcpResponses = {
+    201: McpDefinitionResponse;
+};
+
+export type CreateMcpResponse = CreateMcpResponses[keyof CreateMcpResponses];
+
+export type DeleteMcpData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * MCP server slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/mcp-servers/{slug}';
+};
+
+export type DeleteMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * MCP server not found
+     */
+    404: unknown;
+};
+
+export type DeleteMcpResponses = {
+    /**
+     * MCP server deleted
+     */
+    204: void;
+};
+
+export type DeleteMcpResponse = DeleteMcpResponses[keyof DeleteMcpResponses];
+
+export type GetMcpData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * MCP server slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/mcp-servers/{slug}';
+};
+
+export type GetMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * MCP server not found
+     */
+    404: unknown;
+};
+
+export type GetMcpResponses = {
+    200: McpDefinitionResponse;
+};
+
+export type GetMcpResponse = GetMcpResponses[keyof GetMcpResponses];
+
+export type UpdateMcpData = {
+    body: UpdateMcpRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * MCP server slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/mcp-servers/{slug}';
+};
+
+export type UpdateMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * MCP server not found
+     */
+    404: unknown;
+};
+
+export type UpdateMcpResponses = {
+    200: McpDefinitionResponse;
+};
+
+export type UpdateMcpResponse = UpdateMcpResponses[keyof UpdateMcpResponses];
+
 export type ListMonitorsData = {
     body?: never;
     path: {
@@ -31269,6 +30637,219 @@ export type UpdateProjectSettingsResponses = {
 };
 
 export type UpdateProjectSettingsResponse = UpdateProjectSettingsResponses[keyof UpdateProjectSettingsResponses];
+
+export type ListSkillsData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills';
+};
+
+export type ListSkillsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type ListSkillsResponses = {
+    200: ListSkillsResponse;
+};
+
+export type ListSkillsResponse2 = ListSkillsResponses[keyof ListSkillsResponses];
+
+export type CreateSkillData = {
+    body: CreateSkillRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills';
+};
+
+export type CreateSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type CreateSkillResponses = {
+    201: SkillDefinitionResponse;
+};
+
+export type CreateSkillResponse = CreateSkillResponses[keyof CreateSkillResponses];
+
+export type UploadSkillData = {
+    body: string;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills/upload';
+};
+
+export type UploadSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type UploadSkillResponses = {
+    201: SkillDefinitionResponse;
+};
+
+export type UploadSkillResponse = UploadSkillResponses[keyof UploadSkillResponses];
+
+export type DeleteSkillData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills/{slug}';
+};
+
+export type DeleteSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found
+     */
+    404: unknown;
+};
+
+export type DeleteSkillResponses = {
+    /**
+     * Skill deleted
+     */
+    204: void;
+};
+
+export type DeleteSkillResponse = DeleteSkillResponses[keyof DeleteSkillResponses];
+
+export type GetSkillData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills/{slug}';
+};
+
+export type GetSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found
+     */
+    404: unknown;
+};
+
+export type GetSkillResponses = {
+    200: SkillDefinitionResponse;
+};
+
+export type GetSkillResponse = GetSkillResponses[keyof GetSkillResponses];
+
+export type UpdateSkillData = {
+    body: UpdateSkillRequest;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills/{slug}';
+};
+
+export type UpdateSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found
+     */
+    404: unknown;
+};
+
+export type UpdateSkillResponses = {
+    200: SkillDefinitionResponse;
+};
+
+export type UpdateSkillResponse = UpdateSkillResponses[keyof UpdateSkillResponses];
+
+export type DownloadSkillArchiveData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/skills/{slug}/archive';
+};
+
+export type DownloadSkillArchiveErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found or has no archive
+     */
+    404: unknown;
+};
+
+export type DownloadSkillArchiveResponses = {
+    /**
+     * Skill archive tar.gz
+     */
+    200: Blob | File;
+};
+
+export type DownloadSkillArchiveResponse = DownloadSkillArchiveResponses[keyof DownloadSkillArchiveResponses];
 
 export type ListReleasesData = {
     body?: never;
@@ -34266,6 +33847,113 @@ export type SaveAgentTokenResponses = {
 
 export type SaveAgentTokenResponse2 = SaveAgentTokenResponses[keyof SaveAgentTokenResponses];
 
+export type ListAiProvidersData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/ai-providers';
+};
+
+export type ListAiProvidersErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type ListAiProvidersResponses = {
+    200: ProviderCatalogResponse;
+};
+
+export type ListAiProvidersResponse = ListAiProvidersResponses[keyof ListAiProvidersResponses];
+
+export type UpdateAiProviderData = {
+    body: UpdateProviderRequest;
+    path: {
+        /**
+         * AI provider ID
+         */
+        provider_id: string;
+    };
+    query?: never;
+    url: '/settings/ai-providers/{provider_id}';
+};
+
+export type UpdateAiProviderErrors = {
+    /**
+     * Unknown provider
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type UpdateAiProviderResponses = {
+    200: UpdateProviderResponse;
+};
+
+export type UpdateAiProviderResponse = UpdateAiProviderResponses[keyof UpdateAiProviderResponses];
+
+export type ActivateAiProviderData = {
+    body?: never;
+    path: {
+        /**
+         * AI provider ID
+         */
+        provider_id: string;
+    };
+    query?: never;
+    url: '/settings/ai-providers/{provider_id}/activate';
+};
+
+export type ActivateAiProviderErrors = {
+    /**
+     * Provider not configured
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type ActivateAiProviderResponses = {
+    200: ActivateProviderResponse;
+};
+
+export type ActivateAiProviderResponse = ActivateAiProviderResponses[keyof ActivateAiProviderResponses];
+
+export type SaveAiProviderCredentialData = {
+    body: SaveCredentialRequest;
+    path: {
+        /**
+         * AI provider ID
+         */
+        provider_id: string;
+    };
+    query?: never;
+    url: '/settings/ai-providers/{provider_id}/credential';
+};
+
+export type SaveAiProviderCredentialErrors = {
+    /**
+     * Validation error
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type SaveAiProviderCredentialResponses = {
+    200: SaveCredentialResponse;
+};
+
+export type SaveAiProviderCredentialResponse = SaveAiProviderCredentialResponses[keyof SaveAiProviderCredentialResponses];
+
 export type RevokeJoinTokenData = {
     body?: never;
     path?: never;
@@ -34354,6 +34042,136 @@ export type GetJoinTokenStatusResponses = {
 };
 
 export type GetJoinTokenStatusResponse = GetJoinTokenStatusResponses[keyof GetJoinTokenStatusResponses];
+
+export type ListGlobalMcpsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/mcp-servers';
+};
+
+export type ListGlobalMcpsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type ListGlobalMcpsResponses = {
+    200: ListMcpsResponse;
+};
+
+export type ListGlobalMcpsResponse = ListGlobalMcpsResponses[keyof ListGlobalMcpsResponses];
+
+export type CreateGlobalMcpData = {
+    body: CreateMcpRequest;
+    path?: never;
+    query?: never;
+    url: '/settings/mcp-servers';
+};
+
+export type CreateGlobalMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type CreateGlobalMcpResponses = {
+    201: McpDefinitionResponse;
+};
+
+export type CreateGlobalMcpResponse = CreateGlobalMcpResponses[keyof CreateGlobalMcpResponses];
+
+export type DeleteGlobalMcpData = {
+    body?: never;
+    path: {
+        /**
+         * MCP server slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/mcp-servers/{slug}';
+};
+
+export type DeleteGlobalMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * MCP server not found
+     */
+    404: unknown;
+};
+
+export type DeleteGlobalMcpResponses = {
+    /**
+     * MCP server deleted
+     */
+    204: void;
+};
+
+export type DeleteGlobalMcpResponse = DeleteGlobalMcpResponses[keyof DeleteGlobalMcpResponses];
+
+export type GetGlobalMcpData = {
+    body?: never;
+    path: {
+        /**
+         * MCP server slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/mcp-servers/{slug}';
+};
+
+export type GetGlobalMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * MCP server not found
+     */
+    404: unknown;
+};
+
+export type GetGlobalMcpResponses = {
+    200: McpDefinitionResponse;
+};
+
+export type GetGlobalMcpResponse = GetGlobalMcpResponses[keyof GetGlobalMcpResponses];
+
+export type UpdateGlobalMcpData = {
+    body: UpdateMcpRequest;
+    path: {
+        /**
+         * MCP server slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/mcp-servers/{slug}';
+};
+
+export type UpdateGlobalMcpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * MCP server not found
+     */
+    404: unknown;
+};
+
+export type UpdateGlobalMcpResponses = {
+    200: McpDefinitionResponse;
+};
+
+export type UpdateGlobalMcpResponse = UpdateGlobalMcpResponses[keyof UpdateGlobalMcpResponses];
 
 export type RefreshRouteTableData = {
     body?: never;
@@ -34531,6 +34349,188 @@ export type DeleteSecretResponses = {
 };
 
 export type DeleteSecretResponse = DeleteSecretResponses[keyof DeleteSecretResponses];
+
+export type ListGlobalSkillsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/skills';
+};
+
+export type ListGlobalSkillsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type ListGlobalSkillsResponses = {
+    200: ListSkillsResponse;
+};
+
+export type ListGlobalSkillsResponse = ListGlobalSkillsResponses[keyof ListGlobalSkillsResponses];
+
+export type CreateGlobalSkillData = {
+    body: CreateSkillRequest;
+    path?: never;
+    query?: never;
+    url: '/settings/skills';
+};
+
+export type CreateGlobalSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type CreateGlobalSkillResponses = {
+    201: SkillDefinitionResponse;
+};
+
+export type CreateGlobalSkillResponse = CreateGlobalSkillResponses[keyof CreateGlobalSkillResponses];
+
+export type UploadGlobalSkillData = {
+    body: string;
+    path?: never;
+    query?: never;
+    url: '/settings/skills/upload';
+};
+
+export type UploadGlobalSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+};
+
+export type UploadGlobalSkillResponses = {
+    201: SkillDefinitionResponse;
+};
+
+export type UploadGlobalSkillResponse = UploadGlobalSkillResponses[keyof UploadGlobalSkillResponses];
+
+export type DeleteGlobalSkillData = {
+    body?: never;
+    path: {
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/skills/{slug}';
+};
+
+export type DeleteGlobalSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found
+     */
+    404: unknown;
+};
+
+export type DeleteGlobalSkillResponses = {
+    /**
+     * Skill deleted
+     */
+    204: void;
+};
+
+export type DeleteGlobalSkillResponse = DeleteGlobalSkillResponses[keyof DeleteGlobalSkillResponses];
+
+export type GetGlobalSkillData = {
+    body?: never;
+    path: {
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/skills/{slug}';
+};
+
+export type GetGlobalSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found
+     */
+    404: unknown;
+};
+
+export type GetGlobalSkillResponses = {
+    200: SkillDefinitionResponse;
+};
+
+export type GetGlobalSkillResponse = GetGlobalSkillResponses[keyof GetGlobalSkillResponses];
+
+export type UpdateGlobalSkillData = {
+    body: UpdateSkillRequest;
+    path: {
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/skills/{slug}';
+};
+
+export type UpdateGlobalSkillErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found
+     */
+    404: unknown;
+};
+
+export type UpdateGlobalSkillResponses = {
+    200: SkillDefinitionResponse;
+};
+
+export type UpdateGlobalSkillResponse = UpdateGlobalSkillResponses[keyof UpdateGlobalSkillResponses];
+
+export type DownloadGlobalSkillArchiveData = {
+    body?: never;
+    path: {
+        /**
+         * Skill slug
+         */
+        slug: string;
+    };
+    query?: never;
+    url: '/settings/skills/{slug}/archive';
+};
+
+export type DownloadGlobalSkillArchiveErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Skill not found or has no archive
+     */
+    404: unknown;
+};
+
+export type DownloadGlobalSkillArchiveResponses = {
+    /**
+     * Skill archive tar.gz
+     */
+    200: Blob | File;
+};
+
+export type DownloadGlobalSkillArchiveResponse = DownloadGlobalSkillArchiveResponses[keyof DownloadGlobalSkillArchiveResponses];
 
 export type ListProjectTemplatesData = {
     body?: never;

@@ -45,7 +45,7 @@ export function AddDomain() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Domains', href: '/settings/domains' },
+      { label: 'Domains', href: '/domains' },
       { label: 'Add Domain' },
     ])
   }, [setBreadcrumbs])
@@ -70,7 +70,7 @@ export function AddDomain() {
         'Domain created successfully! Continue with SSL provisioning.'
       )
       // Navigate to domain detail page to complete the wizard
-      navigate(`/settings/domains/${data.id}`)
+      navigate(`/domains/${data.id}`)
     },
   })
 
@@ -125,7 +125,7 @@ export function AddDomain() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate('/settings/domains')}
+            onClick={() => navigate('/domains')}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -213,7 +213,7 @@ export function AddDomain() {
                       <Button
                         type="button"
                         variant="outline"
-                        onClick={() => navigate('/settings/domains')}
+                        onClick={() => navigate('/domains')}
                       >
                         Cancel
                       </Button>

@@ -39,7 +39,7 @@ export function Domains() {
   }, [setBreadcrumbs])
 
   // Keyboard shortcut: N to add new domain
-  useKeyboardShortcut({ key: 'n', path: '/settings/domains/add' })
+  useKeyboardShortcut({ key: 'n', path: '/domains/add' })
 
   usePageTitle('Domains')
 

@@ -97,7 +97,7 @@ pub struct PatchSettingsRequest {
 #[utoipa::path(
     tag = "Preview Gateway",
     get,
-    path = "/api/preview-gateway/status",
+    path = "/preview-gateway/status",
     responses((status = 200, body = GatewayStatus)),
     security(("bearer_auth" = []))
 )]
@@ -119,7 +119,7 @@ pub async fn get_preview_gateway_status(
 #[utoipa::path(
     tag = "Preview Gateway",
     get,
-    path = "/api/preview-gateway/logs",
+    path = "/preview-gateway/logs",
     params(("tail" = Option<usize>, Query, description = "Lines to tail (default 200, max 2000)")),
     responses((status = 200, body = LogsResponse)),
     security(("bearer_auth" = []))
@@ -140,7 +140,7 @@ pub async fn get_preview_gateway_logs(
 #[utoipa::path(
     tag = "Preview Gateway",
     post,
-    path = "/api/preview-gateway/restart",
+    path = "/preview-gateway/restart",
     responses((status = 204, description = "Gateway restarted")),
     security(("bearer_auth" = []))
 )]
@@ -165,7 +165,7 @@ pub async fn restart_preview_gateway(
 #[utoipa::path(
     tag = "Preview Gateway",
     post,
-    path = "/api/preview-gateway/upgrade",
+    path = "/preview-gateway/upgrade",
     request_body = UpgradeRequest,
     responses((status = 204, description = "Gateway upgraded")),
     security(("bearer_auth" = []))
@@ -206,7 +206,7 @@ pub async fn upgrade_preview_gateway(
 #[utoipa::path(
     tag = "Preview Gateway",
     get,
-    path = "/api/preview-gateway/settings",
+    path = "/preview-gateway/settings",
     responses((status = 200, body = PreviewGatewaySettingsResponse)),
     security(("bearer_auth" = []))
 )]
@@ -222,7 +222,7 @@ pub async fn get_preview_gateway_settings(
 #[utoipa::path(
     tag = "Preview Gateway",
     patch,
-    path = "/api/preview-gateway/settings",
+    path = "/preview-gateway/settings",
     request_body = PatchSettingsRequest,
     responses((status = 200, body = PreviewGatewaySettingsResponse)),
     security(("bearer_auth" = []))

@@ -198,7 +198,7 @@ export default function DnsProviderDetail() {
     onSuccess: () => {
       toast.success('Provider deleted successfully')
       queryClient.invalidateQueries({ queryKey: ['dnsProviders'] })
-      navigate('/settings/dns-providers')
+      navigate('/dns-providers')
     },
     onError: (err: Error) => {
       toast.error('Failed to delete provider', {
@@ -317,7 +317,7 @@ export default function DnsProviderDetail() {
   useEffect(() => {
     if (provider) {
       setBreadcrumbs([
-        { label: 'DNS Providers', href: '/settings/dns-providers' },
+        { label: 'DNS Providers', href: '/dns-providers' },
         { label: provider.name },
       ])
     }
@@ -362,7 +362,7 @@ export default function DnsProviderDetail() {
               you may not have permission to view it.
             </AlertDescription>
           </Alert>
-          <Button onClick={() => navigate('/settings/dns-providers')}>
+          <Button onClick={() => navigate('/dns-providers')}>
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Providers
           </Button>
@@ -381,7 +381,7 @@ export default function DnsProviderDetail() {
               variant="ghost"
               size="icon"
               className="shrink-0"
-              onClick={() => navigate('/settings/dns-providers')}
+              onClick={() => navigate('/dns-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>

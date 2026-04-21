@@ -173,7 +173,7 @@ export function DomainDetail() {
   useEffect(() => {
     if (domain) {
       setBreadcrumbs([
-        { label: 'Domains', href: '/settings/domains' },
+        { label: 'Domains', href: '/domains' },
         { label: domain.domain },
       ])
     }
@@ -357,7 +357,7 @@ export function DomainDetail() {
               The requested domain could not be found.
             </AlertDescription>
           </Alert>
-          <Button className="mt-4" onClick={() => navigate('/settings/domains')}>
+          <Button className="mt-4" onClick={() => navigate('/domains')}>
             <ArrowLeft className="mr-2 size-4" />
             Back to Domains
           </Button>
@@ -1262,7 +1262,7 @@ export function DomainDetail() {
               variant="ghost"
               size="icon"
               className="shrink-0"
-              onClick={() => navigate('/settings/domains')}
+              onClick={() => navigate('/domains')}
             >
               <ArrowLeft className="size-4" />
             </Button>
@@ -1373,10 +1373,10 @@ export function DomainDetail() {
 
         {/* Variant picker */}
         <div data-uidotsh-pick="Domain detail layout" className="contents">
-          <div data-uidotsh-option="Split (current)" className="contents" hidden>
+          <div data-uidotsh-option="Split (current)" className="contents">
             {CurrentVariant}
           </div>
-          <div data-uidotsh-option="Timeline" className="contents">
+          <div data-uidotsh-option="Timeline" className="contents" hidden>
             {TimelineVariant}
           </div>
           <div data-uidotsh-option="Focus" className="contents" hidden>

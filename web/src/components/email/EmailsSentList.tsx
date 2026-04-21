@@ -340,7 +340,7 @@ export function EmailsSentList() {
                   <TableRow
                     key={email.id}
                     className="cursor-pointer hover:bg-muted/50"
-                    onClick={() => navigate(`/settings/email/${email.id}`)}
+                    onClick={() => navigate(`/email/${email.id}`)}
                   >
                     <TableCell className="max-w-[300px]">
                       <div className="font-medium truncate">{email.subject}</div>
