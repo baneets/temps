@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils'
 import { AlertCircle, Search, SlidersHorizontal, X } from 'lucide-react'
 import { useState } from 'react'
 import { useLogStream } from '@/hooks/useLogStream'
+import { LogLine } from '@/components/runtime-logs/log-line'
 
 interface ContainerLogsViewerProps {
   fetchUrl: string
@@ -207,7 +208,7 @@ export function ContainerLogsViewer({ fetchUrl }: ContainerLogsViewerProps) {
       <div
         ref={parentRef}
         className={cn(
-          'flex-1 overflow-y-auto bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-50 px-4 sm:px-6 lg:px-8 py-3 font-mono text-sm min-h-0',
+          'flex-1 overflow-auto bg-background text-foreground p-4 font-mono text-xs select-text min-h-0',
           connectionStatus === 'connecting' && 'opacity-50'
         )}
         onScroll={handleScroll}
@@ -229,8 +230,6 @@ export function ContainerLogsViewer({ fetchUrl }: ContainerLogsViewerProps) {
         >
           {virtualizer.getVirtualItems().map((virtualItem) => {
             const log = filteredLogs[virtualItem.index]
-            const isMatch =
-              searchTerm && log.toLowerCase().includes(searchTerm.toLowerCase())
 
             return (
               <div
@@ -244,29 +243,7 @@ export function ContainerLogsViewer({ fetchUrl }: ContainerLogsViewerProps) {
                   width: '100%',
                 }}
               >
-                {isMatch ? (
-                  <div
-                    className="py-1 break-all"
-                    data-match-index={virtualItem.index}
-                  >
-                    {log
-                      .split(new RegExp(`(${searchTerm})`, 'gi'))
-                      .map((part, i) =>
-                        part.toLowerCase() === searchTerm.toLowerCase() ? (
-                          <span
-                            key={i}
-                            className="bg-yellow-500 text-slate-950 font-bold"
-                          >
-                            {part}
-                          </span>
-                        ) : (
-                          <span key={i}>{part}</span>
-                        )
-                      )}
-                  </div>
-                ) : (
-                  <div className="py-1 break-all">{log}</div>
-                )}
+                <LogLine content={log} searchTerm={searchTerm} />
               </div>
             )
           })}

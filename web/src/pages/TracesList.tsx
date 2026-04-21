@@ -597,6 +597,7 @@ export default function TracesList({ project }: TracesListProps) {
     const p = searchParams.get('page')
     return p ? parseInt(p, 10) : 1
   })
+  const [showSetup, setShowSetup] = useState(false)
 
   // Compute time window
   const { startTime, endTime } = useMemo(() => {
@@ -759,9 +760,12 @@ export default function TracesList({ project }: TracesListProps) {
             size="sm"
             className="gap-2"
             onClick={() => {
-              document
-                .getElementById('traces-setup')
-                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              setShowSetup((v) => !v)
+              requestAnimationFrame(() => {
+                document
+                  .getElementById('traces-setup')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              })
             }}
           >
             <Settings2 className="h-3.5 w-3.5" />
@@ -775,8 +779,10 @@ export default function TracesList({ project }: TracesListProps) {
         </div>
       </div>
 
-      {/* Setup section — always visible, like analytics */}
-      <OtelSetupSection project={project} />
+      {/* Setup section — shown when there are no traces yet, or when toggled on */}
+      {((!isLoading && totalCount === 0) || showSetup) && (
+        <OtelSetupSection project={project} />
+      )}
 
       {/* Filters */}
       <Card>
