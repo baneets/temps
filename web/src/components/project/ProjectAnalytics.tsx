@@ -1305,8 +1305,10 @@ function EventsChart({ project, startDate, endDate, environment }: ChartProps) {
   const navigate = useNavigate()
   const { data, isLoading, error } = useQuery({
     ...getEventsCountOptions({
-      query: {
+      path: {
         project_id: project.id,
+      },
+      query: {
         start_date: startDate ? startDate.toISOString() : '',
         end_date: endDate ? endDate.toISOString() : '',
         environment_id: environment,
