@@ -59,6 +59,11 @@ const ServiceDataBrowser = lazy(() =>
     default: m.ServiceDataBrowser,
   }))
 )
+const ServiceRestore = lazy(() =>
+  import('./pages/ServiceRestore').then((m) => ({
+    default: m.ServiceRestore,
+  }))
+)
 const MajorUpgradeDetail = lazy(() =>
   import('./pages/MajorUpgradeDetail').then((m) => ({
     default: m.MajorUpgradeDetail,
@@ -363,6 +368,7 @@ const FullAppRoutes = () => {
                 <Route path="/storage/import" element={<ImportService />} />
                 <Route path="/storage/:id" element={<ServiceDetail />} />
                 <Route path="/storage/:id/browse" element={<ServiceDataBrowser />} />
+                <Route path="/storage/:id/restore" element={<ServiceRestore />} />
                 <Route path="/storage/:id/upgrades/:upgradeId" element={<MajorUpgradeDetail />} />
                 <Route path="/email" element={<Email />} />
                 <Route path="/email/:id" element={<EmailDetail />} />

@@ -1,6 +1,6 @@
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, ServiceConfig, ServiceType};
+use super::{ExternalService, HealthProbeResult, ServiceConfig, ServiceType};
 use anyhow::Result;
 use async_trait::async_trait;
 use bollard::query_parameters::{InspectContainerOptions, StopContainerOptions};
@@ -1170,6 +1170,76 @@ impl ExternalService for RedisService {
         let result: Result<String, redis::RedisError> =
             redis::cmd("PING").query_async(&mut conn.clone()).await;
         Ok(result.is_ok())
+    }
+
+    async fn health_probe(&self, service_config: ServiceConfig) -> Result<HealthProbeResult> {
+        use std::time::{Duration, Instant};
+
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+        const DEGRADED_MS: u128 = 2000;
+
+        let cfg = match self.get_redis_config(service_config) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(HealthProbeResult::down(format!(
+                    "invalid redis config: {}",
+                    e
+                )))
+            }
+        };
+
+        let url = if cfg.password.is_empty() {
+            format!("redis://{}:{}", cfg.host, cfg.port)
+        } else {
+            format!(
+                "redis://:{}@{}:{}",
+                urlencoding::encode(&cfg.password),
+                cfg.host,
+                cfg.port
+            )
+        };
+
+        let start = Instant::now();
+        let probe = async {
+            let client = Client::open(url.as_str()).map_err(|e| format!("open failed: {}", e))?;
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .map_err(|e| format!("connect failed: {}", e))?;
+            let reply: String = redis::cmd("PING")
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| format!("PING failed: {}", e))?;
+            if reply.to_uppercase() != "PONG" {
+                return Err(format!("unexpected PING reply: {}", reply));
+            }
+            Ok::<(), String>(())
+        };
+
+        match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+            Err(_) => Ok(HealthProbeResult::down(format!(
+                "redis probe to {}:{} timed out after {}s",
+                cfg.host,
+                cfg.port,
+                PROBE_TIMEOUT.as_secs()
+            ))),
+            Ok(Err(msg)) => Ok(HealthProbeResult::down(format!(
+                "redis probe to {}:{} {}",
+                cfg.host, cfg.port, msg
+            ))),
+            Ok(Ok(())) => {
+                let elapsed_ms = start.elapsed().as_millis();
+                let response_time = i32::try_from(elapsed_ms).ok();
+                if elapsed_ms > DEGRADED_MS {
+                    Ok(HealthProbeResult::degraded(
+                        format!("redis responded in {}ms (>{}ms)", elapsed_ms, DEGRADED_MS),
+                        response_time,
+                    ))
+                } else {
+                    Ok(HealthProbeResult::operational(response_time))
+                }
+            }
+        }
     }
 
     fn get_type(&self) -> ServiceType {

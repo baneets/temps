@@ -3,10 +3,11 @@ use std::sync::Arc;
 use temps_core::AuditLogger;
 use temps_providers::postgres_upgrade_service::PostgresUpgradeService;
 
-use crate::services::BackupService;
+use crate::services::{BackupService, RestoreService};
 
 pub struct BackupAppState {
     pub backup_service: Arc<BackupService>,
+    pub restore_service: Arc<RestoreService>,
     pub audit_service: Arc<dyn AuditLogger>,
     pub pg_upgrade_service: Arc<PostgresUpgradeService>,
     pub db: Arc<DatabaseConnection>,
@@ -14,12 +15,14 @@ pub struct BackupAppState {
 
 pub async fn create_backup_app_state(
     backup_service: Arc<BackupService>,
+    restore_service: Arc<RestoreService>,
     audit_service: Arc<dyn AuditLogger>,
     pg_upgrade_service: Arc<PostgresUpgradeService>,
     db: Arc<DatabaseConnection>,
 ) -> Arc<BackupAppState> {
     Arc::new(BackupAppState {
         backup_service,
+        restore_service,
         audit_service,
         pg_upgrade_service,
         db,

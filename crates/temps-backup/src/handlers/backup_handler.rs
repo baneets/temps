@@ -305,33 +305,61 @@ pub struct SourceBackupIndexResponse {
     pub last_updated: String,
 }
 
-/// Entry in the source backup index
+/// Entry in the source backup index. Covers both DB-tracked backups
+/// (have a row in `backups`) and S3-scan discoveries (raw S3 objects with
+/// no DB row — used for disaster-recovery from another Temps instance).
 #[derive(Serialize, ToSchema)]
 pub struct SourceBackupEntry {
-    /// Unique identifier for the backup
+    /// DB row id. Zero for S3-scan entries that have no DB row.
     #[schema(example = 1)]
     pub id: i32,
-    /// Unique identifier for the backup
+    /// UUID identifier from the DB row. Empty for S3-scan entries.
     #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
     pub backup_id: String,
-    /// Name of the backup
-    #[schema(example = "Backup 2024-01-15")]
+    /// Human-friendly display name ("postgres backup (svc-name)" for DB
+    /// rows, or a synthesized label derived from the S3 path for scans).
+    #[schema(example = "postgres backup (postgres-n4ea)")]
     pub name: String,
-    /// Type of backup
+    /// Backup variant as recorded by the backup pipeline (e.g. "full").
     #[schema(example = "full")]
     pub backup_type: String,
-    /// When the backup was created
+    /// When the backup was created. For S3-scan entries this is the
+    /// object's LastModified time.
     #[schema(example = "2024-01-15T14:30:00.123Z")]
     pub created_at: String,
-    /// Size of the backup in bytes
+    /// Size of the backup in bytes, if known.
     #[schema(example = 1024000)]
     pub size_bytes: Option<i32>,
-    /// Location of the backup file in S3
-    #[schema(example = "backups/2024/01/15/550e8400-e29b-41d4-a716-446655440000.sqlite.gz")]
+    /// Raw S3 URL / key where the backup sits. For Postgres WAL-G backups
+    /// this starts with `s3://`; for pg_dump-style backups it's the
+    /// relative object key.
+    #[schema(example = "s3://bucket/external_services/postgres/svc-name/walg")]
     pub location: String,
-    /// Location of the backup metadata file in S3
-    #[schema(example = "backups/2024/01/15/550e8400-e29b-41d4-a716-446655440000.sqlite.gz.json")]
+    /// Sidecar metadata.json location, if any. Empty when none.
+    #[schema(example = "")]
     pub metadata_location: String,
+    /// Engine that produced the backup ("postgres", "redis", "mongodb",
+    /// "s3", "rustfs"). Used by the UI to mark engine-compat with the
+    /// target service.
+    #[schema(example = "postgres")]
+    pub engine: Option<String>,
+    /// Name of the service that produced the backup. For S3-scan entries
+    /// this is parsed from the S3 path.
+    #[schema(example = "postgres-n4ea")]
+    pub origin_service_name: Option<String>,
+    /// Storage format: "walg" for continuous-archive (PITR-capable),
+    /// "pg_dump" for point-in-time dumps, "" for non-postgres.
+    #[schema(example = "walg")]
+    pub format: Option<String>,
+    /// Provenance: "db" for rows in this Temps, "s3_scan" for objects
+    /// discovered by the S3 bucket walk (e.g., backups made by another
+    /// Temps instance).
+    #[schema(example = "db")]
+    pub source: String,
+    /// Observed state ("completed", "running", "failed") — DB only.
+    /// Empty string for S3-scan entries.
+    #[schema(example = "completed")]
+    pub state: String,
 }
 
 impl From<temps_entities::s3_sources::Model> for S3SourceResponse {
@@ -408,14 +436,36 @@ struct S3BackupIndex {
 
 #[derive(Deserialize)]
 struct S3BackupEntry {
+    #[serde(default)]
     id: i32,
+    #[serde(default)]
     backup_id: String,
     name: String,
-    r#type: String,
+    #[serde(rename = "type")]
+    backup_type: String,
     created_at: String,
+    #[serde(default)]
     size_bytes: Option<i32>,
+    #[serde(default)]
     location: String,
+    #[serde(default)]
     metadata_location: String,
+    // Newly surfaced fields — older cached JSON may not include them, so
+    // `#[serde(default)]` keeps backwards compat with any legacy index.json.
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    origin_service_name: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default = "default_backup_source")]
+    source: String,
+    #[serde(default)]
+    state: String,
+}
+
+fn default_backup_source() -> String {
+    "db".to_string()
 }
 
 /// List all backups in an S3 source
@@ -459,11 +509,16 @@ async fn list_source_backups(
                 id: entry.id,
                 backup_id: entry.backup_id,
                 name: entry.name,
-                backup_type: entry.r#type,
+                backup_type: entry.backup_type,
                 created_at: entry.created_at,
                 size_bytes: entry.size_bytes,
                 location: entry.location,
                 metadata_location: entry.metadata_location,
+                engine: entry.engine,
+                origin_service_name: entry.origin_service_name,
+                format: entry.format,
+                source: entry.source,
+                state: entry.state,
             })
             .collect(),
         last_updated: s3_index.last_updated,

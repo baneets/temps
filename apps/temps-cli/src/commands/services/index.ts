@@ -1,4 +1,5 @@
 import type { Command } from 'commander'
+import { registerRestoreCommands } from './restore.js'
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import {
@@ -346,6 +347,10 @@ export function registerServicesCommands(program: Command): void {
     .requiredOption('--var <name>', 'Environment variable name')
     .option('--json', 'Output in JSON format')
     .action(envVarAction)
+
+  // Restore-related commands: capabilities, list backups on an S3 source,
+  // kick off a restore (in-place / clone / PITR), show / list runs.
+  registerRestoreCommands(services)
 }
 
 async function listServicesAction(options: { json?: boolean }): Promise<void> {

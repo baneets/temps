@@ -19,7 +19,7 @@ use urlencoding;
 
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, RuntimeEnvVar, ServiceConfig, ServiceType};
+use super::{ExternalService, HealthProbeResult, RuntimeEnvVar, ServiceConfig, ServiceType};
 
 /// POSIX-safe shell escaping: wraps value in single quotes, escaping any
 /// embedded single quotes. Safe for use in `sh -c` command strings.
@@ -568,33 +568,58 @@ impl PostgresService {
     /// This means credential rotations take effect without any restart — just overwrite
     /// the file and the next WAL push uses the new credentials.
     ///
-    /// The env file lives at `/var/lib/postgresql/walg.env` on the shared volume, so it:
-    /// - Survives container restarts
-    /// - Is accessible via `volumes_from` in helper containers
-    /// - Is NOT inside PGDATA (so pg_basebackup/wal-g don't back it up — credentials
-    ///   should not be stored inside backups)
-    async fn enable_wal_archiving(
+    /// Write `/var/lib/postgresql/walg.env` onto the given container.
+    ///
+    /// This is the credential file `archive_command = wal-g wal-push %p`
+    /// relies on when continuous WAL archiving is enabled. Called from
+    /// `enable_wal_archiving` after the first successful backup.
+    ///
+    /// Idempotent — overwrites any existing file. Writes with 0600 perms.
+    async fn write_walg_env_file(&self, container_name: &str, walg_env: &[String]) -> Result<()> {
+        self.write_walg_env_file_at(container_name, walg_env, "/var/lib/postgresql/walg.env")
+            .await
+    }
+
+    /// Write a read-only WAL-G credential file used only by
+    /// `restore_command`. Kept separate from the write-capable `walg.env`
+    /// so a restored cluster can read WAL from the source's prefix without
+    /// ever having the credentials at a path that `archive_command` would
+    /// find, preventing source-prefix contamination during recovery.
+    async fn write_walg_restore_env_file(
         &self,
         container_name: &str,
         walg_env: &[String],
-        postgres_config: &PostgresConfig,
+    ) -> Result<()> {
+        self.write_walg_env_file_at(
+            container_name,
+            walg_env,
+            "/var/lib/postgresql/walg-restore.env",
+        )
+        .await
+    }
+
+    /// Internal: write a wal-g credential file at an arbitrary path.
+    /// See `write_walg_env_file` / `write_walg_restore_env_file` for the
+    /// two concrete roles.
+    async fn write_walg_env_file_at(
+        &self,
+        container_name: &str,
+        walg_env: &[String],
+        target_path: &str,
     ) -> Result<()> {
         use bollard::exec::{CreateExecOptions, StartExecOptions};
 
-        // Build the env file content. Only include S3/WAL-G vars, not PG connection vars
-        // (wal-g wal-push is called by PostgreSQL itself, so PGHOST/PGUSER/etc are not needed).
+        // Only WAL-G / AWS envs go into the file — PG connection envs (PGHOST,
+        // PGUSER, etc.) are not needed by wal-g archive/fetch from inside PG.
         let env_file_lines: Vec<&String> = walg_env
             .iter()
             .filter(|line| line.starts_with("WALG_") || line.starts_with("AWS_"))
             .collect();
 
-        let walg_env_path = "/var/lib/postgresql/walg.env";
+        let walg_env_path = target_path;
 
-        // Write the env file via docker exec.
-        // Use printf to avoid shell interpretation issues with special characters in passwords.
         let write_cmd = format!(
             "printf '%s\\n' {} > {} && chmod 600 {}",
-            // Shell-escape each line and join with newlines
             env_file_lines
                 .iter()
                 .map(|line| format!("'export {}'", line.replace('\'', "'\\''")))
@@ -617,7 +642,6 @@ impl PostgresService {
                 },
             )
             .await?;
-
         self.docker
             .start_exec(
                 &exec.id,
@@ -628,13 +652,13 @@ impl PostgresService {
             )
             .await?;
 
-        // Wait for write to complete
         loop {
             let inspect = self.docker.inspect_exec(&exec.id).await?;
             if inspect.running == Some(false) {
                 if inspect.exit_code != Some(0) {
                     return Err(anyhow::anyhow!(
-                        "Failed to write walg.env (exit code {:?})",
+                        "Failed to write walg.env on container '{}' (exit code {:?})",
+                        container_name,
                         inspect.exit_code
                     ));
                 }
@@ -644,9 +668,29 @@ impl PostgresService {
         }
 
         info!(
-            "Written WAL-G credentials to {} in container '{}'",
+            "Written WAL-G credentials to {} on container '{}'",
             walg_env_path, container_name
         );
+        Ok(())
+    }
+
+    /// The env file lives at `/var/lib/postgresql/walg.env` on the shared volume, so it:
+    /// - Survives container restarts
+    /// - Is accessible via `volumes_from` in helper containers
+    /// - Is NOT inside PGDATA (so pg_basebackup/wal-g don't back it up — credentials
+    ///   should not be stored inside backups)
+    async fn enable_wal_archiving(
+        &self,
+        container_name: &str,
+        walg_env: &[String],
+        postgres_config: &PostgresConfig,
+    ) -> Result<()> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions};
+
+        // Write credentials file (shared helper — same file is used by
+        // restore_command during recovery).
+        self.write_walg_env_file(container_name, walg_env).await?;
+        let walg_env_path = "/var/lib/postgresql/walg.env";
 
         // Enable archive_command via ALTER SYSTEM.
         // The archive_command sources the env file, then runs wal-g wal-push.
@@ -1399,6 +1443,7 @@ impl PostgresService {
         s3_credentials: &super::S3Credentials,
         walg_s3_prefix: &str,
         service_config: ServiceConfig,
+        recovery_target: Option<&super::RecoveryTarget>,
     ) -> Result<()> {
         use bollard::exec::CreateExecOptions;
 
@@ -1505,30 +1550,92 @@ impl PostgresService {
         // Step 2: Prepare restored PGDATA for recovery (while PG still runs).
         //
         // WAL-G backup-push uses pg_start_backup/pg_stop_backup, which creates a
-        // backup_label referencing WAL segments needed for recovery. We must:
+        // backup_label referencing WAL segments needed for recovery. PG MUST be
+        // able to read at least the WAL that runs from the base backup's redo
+        // LSN through the checkpoint at the end of the backup; otherwise it
+        // aborts with "could not locate required checkpoint record".
+        //
+        // Our strategy is identical for plain in-place restore and PITR:
         //
         // a) Add `recovery.signal` — tells PG 12+ to enter recovery mode
-        // b) Set `restore_command = '/bin/true'` — no archived WAL segments to fetch
-        // c) Set `recovery_target = 'immediate'` — stop recovery as soon as the backup
-        //    reaches consistency (right after the backup end point). Without this,
-        //    PG would replay ALL WAL including transactions that happened after the
-        //    backup (e.g., the data loss we're trying to undo).
-        // d) Set `recovery_target_action = 'promote'` — promote to primary after recovery
-        // e) Copy pg_wal from the running PGDATA — the WAL segments needed to complete
-        //    recovery from backup_label's start LSN to the backup end point live in
-        //    the container's pg_wal directory, NOT in S3 (since archive_command=/bin/true).
-        let pgdata_path = Self::get_pgdata_path(&postgres_config.docker_image)?;
+        // b) Set `restore_command = '. walg.env && wal-g wal-fetch %f %p'`
+        //    — PG will fetch any WAL it needs from S3. This is the
+        //    source of truth for WAL during recovery.
+        // c) Set a recovery target: `immediate` (plain restore, stops at first
+        //    consistency point) or the caller-specified PITR target.
+        // d) Set `recovery_target_action = 'promote'` — promote to primary
+        //    after recovery.
+        //
+        // We previously copied `pg_wal` from the running container and used
+        // `restore_command='/bin/true'`. That only worked for same-service
+        // restores where the running container's pg_wal happened to hold the
+        // needed segments. For cross-service restore (e.g., new service, or
+        // restoring onto a fresh service) the target container's pg_wal is
+        // empty, so PG couldn't locate the checkpoint and the cluster would
+        // refuse to start. `wal-g wal-fetch` works for both cases.
+        // Write a READ-ONLY credential file for `restore_command`, distinct
+        // from the regular `walg.env` that `archive_command` uses for
+        // `wal-g wal-push`. This split is load-bearing:
+        //
+        //   - `walg-restore.env` lives only for the duration of recovery and
+        //     points at the SOURCE backup's S3 prefix. `restore_command`
+        //     sources it to call `wal-g wal-fetch`.
+        //   - `walg.env` (the write-capable one) is NOT written here. A
+        //     restored cluster has no business archiving into the source's
+        //     prefix — that's how prior failed restores poisoned the source
+        //     with stray `00000002.history` / `00000003.history` files,
+        //     which then caused every subsequent restore to fail with
+        //     "requested timeline N is not a child of this server's history".
+        //     The restored cluster's own `walg.env` is created fresh the
+        //     first time the user runs a backup of it (via
+        //     `enable_wal_archiving`), pointing at the NEW service's prefix.
+        self.write_walg_restore_env_file(&container_name, &walg_env)
+            .await?;
+
+        let recovery_target_line = match recovery_target {
+            None => "recovery_target = 'immediate'".to_string(),
+            Some(super::RecoveryTarget::Time { time }) => format!(
+                "recovery_target_time = '{}'",
+                time.format("%Y-%m-%d %H:%M:%S%:z")
+            ),
+            Some(super::RecoveryTarget::Xid { xid }) => {
+                format!("recovery_target_xid = '{}'", xid.replace('\'', ""))
+            }
+            Some(super::RecoveryTarget::Lsn { lsn }) => {
+                format!("recovery_target_lsn = '{}'", lsn.replace('\'', ""))
+            }
+            Some(super::RecoveryTarget::Name { name }) => {
+                format!("recovery_target_name = '{}'", name.replace('\'', ""))
+            }
+        };
+
+        // `restore_command` sources the read-only credential file. `archive_command`
+        // and `archive_mode` are explicitly disabled so the restored cluster does
+        // not push anything back into S3 during recovery — see the walg-restore.env
+        // comment block above for why.
         let prepare_cmd_str = format!(
             concat!(
                 "touch {restore_temp}/recovery.signal && ",
-                "echo \"restore_command = '/bin/true'\" >> {restore_temp}/postgresql.auto.conf && ",
-                "echo \"recovery_target = 'immediate'\" >> {restore_temp}/postgresql.auto.conf && ",
-                "echo \"recovery_target_action = 'promote'\" >> {restore_temp}/postgresql.auto.conf && ",
-                "rm -rf {restore_temp}/pg_wal && ",
-                "cp -a {pgdata}/pg_wal {restore_temp}/pg_wal"
+                // Overwrite (not append) so whatever archive_command /
+                // primary_conninfo / recovery_target settings the source baked
+                // into its postgresql.auto.conf are wiped. Our restore is the
+                // sole author of this file going forward.
+                "cat > {restore_temp}/postgresql.auto.conf <<'EOF_TEMPS_RESTORE'\n",
+                "# Written by Temps restore. Overwrites any source-side settings.\n",
+                "restore_command = '. /var/lib/postgresql/walg-restore.env && wal-g wal-fetch %f %p'\n",
+                "{recovery_target_line}\n",
+                "recovery_target_action = 'promote'\n",
+                "archive_mode = 'off'\n",
+                "archive_command = '/bin/true'\n",
+                "EOF_TEMPS_RESTORE\n",
+                // pg_wal may exist in the fetched base backup (WAL-G sometimes
+                // includes the start-of-backup segment). Ensure it exists as
+                // an empty dir at minimum so PG can start; wal-fetch will
+                // populate segments as recovery requests them.
+                "mkdir -p {restore_temp}/pg_wal"
             ),
             restore_temp = restore_temp,
-            pgdata = pgdata_path,
+            recovery_target_line = recovery_target_line,
         );
         let prepare_cmd = vec!["sh", "-c", &prepare_cmd_str];
 
@@ -2373,6 +2480,88 @@ impl ExternalService for PostgresService {
         Ok(true)
     }
 
+    async fn health_probe(&self, service_config: ServiceConfig) -> Result<HealthProbeResult> {
+        use std::time::Instant;
+
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+        const DEGRADED_MS: u128 = 2000;
+
+        let cfg = match self.get_postgres_config(service_config) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(HealthProbeResult::down(format!(
+                    "invalid postgres config: {}",
+                    e
+                )))
+            }
+        };
+
+        let conn_str = format!(
+            "host={} port={} user={} password={} dbname={} connect_timeout=3",
+            cfg.host, cfg.port, cfg.username, cfg.password, cfg.database
+        );
+
+        let start = Instant::now();
+        let connect = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            tokio_postgres::connect(&conn_str, tokio_postgres::NoTls),
+        )
+        .await;
+
+        match connect {
+            Err(_) => Ok(HealthProbeResult::down(format!(
+                "postgres probe to {}:{} timed out after {}s",
+                cfg.host,
+                cfg.port,
+                PROBE_TIMEOUT.as_secs()
+            ))),
+            Ok(Err(e)) => Ok(HealthProbeResult::down(format!(
+                "postgres connect to {}:{} failed: {}",
+                cfg.host, cfg.port, e
+            ))),
+            Ok(Ok((client, connection))) => {
+                // Drive the connection on a background task for the lifetime
+                // of this probe. `client` is dropped at the end of the match
+                // arm which closes the connection cleanly.
+                let connection_task = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+
+                let query_result =
+                    tokio::time::timeout(PROBE_TIMEOUT, client.simple_query("SELECT 1")).await;
+
+                connection_task.abort();
+
+                let elapsed_ms = start.elapsed().as_millis();
+                let response_time = i32::try_from(elapsed_ms).ok();
+
+                match query_result {
+                    Err(_) => Ok(HealthProbeResult::down(format!(
+                        "postgres SELECT 1 timed out after {}s",
+                        PROBE_TIMEOUT.as_secs()
+                    ))),
+                    Ok(Err(e)) => Ok(HealthProbeResult::down(format!(
+                        "postgres SELECT 1 failed: {}",
+                        e
+                    ))),
+                    Ok(Ok(_)) => {
+                        if elapsed_ms > DEGRADED_MS {
+                            Ok(HealthProbeResult::degraded(
+                                format!(
+                                    "postgres responded in {}ms (>{}ms)",
+                                    elapsed_ms, DEGRADED_MS
+                                ),
+                                response_time,
+                            ))
+                        } else {
+                            Ok(HealthProbeResult::operational(response_time))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn get_type(&self) -> ServiceType {
         ServiceType::Postgres
     }
@@ -2751,7 +2940,7 @@ impl ExternalService for PostgresService {
         // Detect if this is a WAL-G backup (s3:// prefix) or a legacy backup (.sql.gz / .pgdump.gz)
         if backup_location.starts_with("s3://") {
             // WAL-G backup: use wal-g backup-fetch
-            self.restore_from_walg(s3_credentials, backup_location, service_config)
+            self.restore_from_walg(s3_credentials, backup_location, service_config, None)
                 .await
         } else {
             // Legacy backup: fall back to old psql/pg_restore approach
@@ -2961,6 +3150,241 @@ impl ExternalService for PostgresService {
             config.name
         );
         Ok(config)
+    }
+
+    /// PostgreSQL restore capability declaration.
+    ///
+    /// Postgres supports all three modes:
+    /// - In-place restore from both WAL-G (`s3://` prefix) and legacy pg_dump backups
+    /// - Restore-to-new-service: clones backup into a fresh container+volume
+    /// - PITR: WAL replay to a target time/xid/LSN/name (WAL-G backups only;
+    ///   the orchestrator rejects PITR requests against legacy pg_dump backups
+    ///   by inspecting the backup row)
+    ///
+    /// We don't populate `earliest_pitr_time` / `latest_pitr_time` here —
+    /// those would require querying `wal-g backup-list` + `wal-g wal-verify`
+    /// per S3 source, which is expensive. The UI shows an unconstrained
+    /// datetime picker and the server validates on execute.
+    async fn restore_capabilities(
+        &self,
+        _service_config: ServiceConfig,
+    ) -> Result<super::RestoreCapabilities> {
+        Ok(super::RestoreCapabilities {
+            restore_in_place: true,
+            restore_to_new_service: true,
+            pitr: true,
+            earliest_pitr_time: None,
+            latest_pitr_time: None,
+        })
+    }
+
+    /// Provision a new PostgreSQL service from an existing backup.
+    ///
+    /// Strategy: clone the source service's config (image, version, database
+    /// name, credentials), allocate a fresh host port, create a new
+    /// container+volume with that name, then invoke the same `restore_from_s3`
+    /// logic (WAL-G or legacy) that in-place restore uses.
+    ///
+    /// The orchestrator creates the `external_services` DB row AFTER this
+    /// returns, using the parameters we hand back.
+    async fn restore_to_new_service(
+        &self,
+        ctx: super::RestoreContext<'_>,
+        new_service_name: String,
+        parameter_overrides: serde_json::Value,
+    ) -> Result<super::NewServiceRestoreResult> {
+        info!(
+            "Provisioning new PostgreSQL service '{}' from backup at {}",
+            new_service_name, ctx.backup_location
+        );
+
+        // Start from the source service's parameters, then apply caller overrides.
+        let mut source_config = self.get_postgres_config(ctx.source_config.clone())?;
+
+        // Allocate a fresh host port (source's port is taken).
+        let new_port = find_available_port(5432)
+            .ok_or_else(|| anyhow::anyhow!("No available ports for new PostgreSQL service"))?
+            .to_string();
+        source_config.port = new_port.clone();
+
+        // Apply caller overrides on top of the cloned config.
+        if let Some(overrides) = parameter_overrides.as_object() {
+            if let Some(port) = overrides.get("port").and_then(|v| v.as_str()) {
+                source_config.port = port.to_string();
+            }
+            if let Some(image) = overrides.get("docker_image").and_then(|v| v.as_str()) {
+                source_config.docker_image = image.to_string();
+            }
+            if let Some(db) = overrides.get("database").and_then(|v| v.as_str()) {
+                source_config.database = db.to_string();
+            }
+        }
+
+        // Build a new PostgresService for the target name.
+        let new_service = PostgresService::new(new_service_name.clone(), self.docker.clone());
+
+        // Stash the runtime config so later methods (restore_from_walg -> get_postgres_config)
+        // can resolve via ServiceConfig.
+        *new_service.config.write().await = Some(source_config.clone());
+
+        // Create the new container+volume.
+        new_service
+            .create_container(&self.docker, &source_config)
+            .await?;
+
+        // Build a ServiceConfig that parses cleanly back into PostgresConfig.
+        let new_service_config = ServiceConfig {
+            name: new_service_name.clone(),
+            service_type: ServiceType::Postgres,
+            version: ctx.source_config.version.clone(),
+            parameters: serde_json::to_value(&source_config)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize new PostgreSQL config: {}", e))?,
+        };
+
+        // Dispatch to the same WAL-G / legacy paths used for in-place restore.
+        if ctx.backup_location.starts_with("s3://") {
+            new_service
+                .restore_from_walg(
+                    ctx.s3_credentials,
+                    ctx.backup_location,
+                    new_service_config,
+                    None,
+                )
+                .await?;
+        } else {
+            new_service
+                .restore_from_legacy(
+                    ctx.s3_client,
+                    ctx.backup_location,
+                    ctx.s3_source,
+                    new_service_config,
+                )
+                .await?;
+        }
+
+        // Serialize the final runtime config for the orchestrator to persist.
+        let runtime_json = serde_json::to_value(&source_config)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize runtime config: {}", e))?;
+        let mut parameters = HashMap::new();
+        if let Some(obj) = runtime_json.as_object() {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    parameters.insert(k.clone(), s.to_string());
+                } else if let Some(n) = v.as_u64() {
+                    parameters.insert(k.clone(), n.to_string());
+                }
+            }
+        }
+
+        let connection_info = format!(
+            "postgres://{}:***@{}:{}/{}",
+            source_config.username, source_config.host, source_config.port, source_config.database
+        );
+
+        Ok(super::NewServiceRestoreResult {
+            parameters,
+            connection_info,
+        })
+    }
+
+    /// Perform point-in-time recovery on a PostgreSQL service.
+    ///
+    /// Requires a WAL-G backup (orchestrator validates the source backup's
+    /// `s3_location` starts with `s3://`). For in-place PITR we restore onto
+    /// the existing service; for to_new_service we clone first.
+    async fn restore_pitr(
+        &self,
+        ctx: super::RestoreContext<'_>,
+        target: super::RecoveryTarget,
+        to_new_service: bool,
+        new_service_name: Option<String>,
+    ) -> Result<Option<super::NewServiceRestoreResult>> {
+        if !ctx.backup_location.starts_with("s3://") {
+            return Err(anyhow::anyhow!(
+                "PITR requires a WAL-G backup (s3:// prefix); got '{}'",
+                ctx.backup_location
+            ));
+        }
+
+        info!(
+            "Running PostgreSQL PITR to target {:?} (to_new_service={}) on backup {}",
+            target, to_new_service, ctx.backup_location
+        );
+
+        if to_new_service {
+            let new_name = new_service_name.ok_or_else(|| {
+                anyhow::anyhow!("new_service_name is required when to_new_service=true")
+            })?;
+
+            // Clone the source's config onto a fresh container+port, like
+            // restore_to_new_service does, then run WAL-G fetch with the PITR
+            // target configuration.
+            let mut source_config = self.get_postgres_config(ctx.source_config.clone())?;
+            let new_port = find_available_port(5432)
+                .ok_or_else(|| anyhow::anyhow!("No available ports for new PostgreSQL service"))?
+                .to_string();
+            source_config.port = new_port;
+
+            let new_service = PostgresService::new(new_name.clone(), self.docker.clone());
+            *new_service.config.write().await = Some(source_config.clone());
+            new_service
+                .create_container(&self.docker, &source_config)
+                .await?;
+
+            let new_service_config = ServiceConfig {
+                name: new_name.clone(),
+                service_type: ServiceType::Postgres,
+                version: ctx.source_config.version.clone(),
+                parameters: serde_json::to_value(&source_config).map_err(|e| {
+                    anyhow::anyhow!("Failed to serialize new PostgreSQL config: {}", e)
+                })?,
+            };
+
+            new_service
+                .restore_from_walg(
+                    ctx.s3_credentials,
+                    ctx.backup_location,
+                    new_service_config,
+                    Some(&target),
+                )
+                .await?;
+
+            let runtime_json = serde_json::to_value(&source_config)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize runtime config: {}", e))?;
+            let mut parameters = HashMap::new();
+            if let Some(obj) = runtime_json.as_object() {
+                for (k, v) in obj {
+                    if let Some(s) = v.as_str() {
+                        parameters.insert(k.clone(), s.to_string());
+                    } else if let Some(n) = v.as_u64() {
+                        parameters.insert(k.clone(), n.to_string());
+                    }
+                }
+            }
+
+            let connection_info = format!(
+                "postgres://{}:***@{}:{}/{}",
+                source_config.username,
+                source_config.host,
+                source_config.port,
+                source_config.database
+            );
+
+            Ok(Some(super::NewServiceRestoreResult {
+                parameters,
+                connection_info,
+            }))
+        } else {
+            // In-place PITR — replay the WAL onto the existing container.
+            self.restore_from_walg(
+                ctx.s3_credentials,
+                ctx.backup_location,
+                ctx.source_config.clone(),
+                Some(&target),
+            )
+            .await?;
+            Ok(None)
+        }
     }
 }
 
@@ -4305,5 +4729,175 @@ mod tests {
                 normalized
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_restore_capabilities_declares_all_modes_supported() {
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => Arc::new(d),
+            Err(_) => {
+                println!("Docker not available, skipping");
+                return;
+            }
+        };
+        let pg = PostgresService::new("test-caps".to_string(), docker);
+        let cfg = ServiceConfig {
+            name: "test-caps".into(),
+            service_type: ServiceType::Postgres,
+            version: Some("18".into()),
+            parameters: serde_json::json!({
+                "host": "localhost",
+                "port": "5432",
+                "database": "postgres",
+                "username": "postgres",
+                "password": "p",
+                "max_connections": 100,
+                "docker_image": "gotempsh/postgres-walg:18-bookworm",
+            }),
+        };
+        let caps = pg.restore_capabilities(cfg).await.unwrap();
+        assert!(caps.restore_in_place);
+        assert!(caps.restore_to_new_service);
+        assert!(caps.pitr);
+        // We don't compute bounds here — unbounded picker in UI.
+        assert!(caps.earliest_pitr_time.is_none());
+        assert!(caps.latest_pitr_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_restore_pitr_rejects_legacy_backup_without_docker_work() {
+        // restore_pitr must reject a non-WAL-G backup (missing s3:// prefix)
+        // BEFORE attempting any Docker operations, so this test can run
+        // anywhere the library builds.
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => Arc::new(d),
+            Err(_) => {
+                println!("Docker not available, skipping");
+                return;
+            }
+        };
+        let pg = PostgresService::new("test-pitr-guard".to_string(), docker);
+
+        let cfg = ServiceConfig {
+            name: "test-pitr-guard".into(),
+            service_type: ServiceType::Postgres,
+            version: Some("18".into()),
+            parameters: serde_json::json!({
+                "host": "localhost",
+                "port": "5432",
+                "database": "postgres",
+                "username": "postgres",
+                "password": "p",
+                "max_connections": 100,
+                "docker_image": "gotempsh/postgres-walg:18-bookworm",
+            }),
+        };
+
+        // Synthesize the minimum viable RestoreContext with a legacy backup
+        // location (.pgdump.gz, no s3:// prefix).
+        let legacy_location = "backups/legacy/dump.pgdump.gz".to_string();
+        let s3_creds = crate::externalsvc::S3Credentials {
+            access_key_id: "k".into(),
+            secret_key: "s".into(),
+            region: "us-east-1".into(),
+            endpoint: None,
+            bucket_name: "b".into(),
+            bucket_path: "".into(),
+            force_path_style: true,
+        };
+        let s3_source = temps_entities::s3_sources::Model {
+            id: 1,
+            name: "src".into(),
+            bucket_name: "b".into(),
+            bucket_path: "".into(),
+            access_key_id: "enc".into(),
+            secret_key: "enc".into(),
+            region: "us-east-1".into(),
+            endpoint: None,
+            force_path_style: Some(true),
+            is_default: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let backup = temps_entities::backups::Model {
+            id: 1,
+            name: "b".into(),
+            backup_id: "id".into(),
+            schedule_id: None,
+            backup_type: "external_service".into(),
+            state: "completed".into(),
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            size_bytes: None,
+            file_count: None,
+            s3_source_id: 1,
+            s3_location: legacy_location.clone(),
+            error_message: None,
+            metadata: "{}".into(),
+            checksum: None,
+            compression_type: "gzip".into(),
+            created_by: 1,
+            expires_at: None,
+            tags: "".into(),
+        };
+        let source_service = temps_entities::external_services::Model {
+            id: 1,
+            name: "source".into(),
+            service_type: "postgres".into(),
+            version: Some("18".into()),
+            status: "running".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            slug: None,
+            config: Some("{}".into()),
+            node_id: None,
+            topology: "standalone".into(),
+            error_message: None,
+            health_status: None,
+            last_health_check_at: None,
+            last_health_error: None,
+            consecutive_health_failures: 0,
+        };
+        // Build a MockDatabase for the `pool` slot — restore_pitr for
+        // Postgres doesn't touch it in the legacy-reject path.
+        let mock_db =
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        let s3_client = {
+            let aws_creds = aws_sdk_s3::config::Credentials::new("k", "s", None, None, "test");
+            let conf = aws_sdk_s3::Config::builder()
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                .region(aws_sdk_s3::config::Region::new("us-east-1"))
+                .credentials_provider(aws_creds)
+                .build();
+            aws_sdk_s3::Client::from_conf(conf)
+        };
+        let ctx = crate::externalsvc::RestoreContext {
+            s3_client: &s3_client,
+            s3_credentials: &s3_creds,
+            s3_source: &s3_source,
+            backup: &backup,
+            backup_location: &legacy_location,
+            source_service: &source_service,
+            source_config: cfg,
+            pool: &mock_db,
+        };
+
+        let err = pg
+            .restore_pitr(
+                ctx,
+                crate::externalsvc::RecoveryTarget::Time {
+                    time: chrono::Utc::now(),
+                },
+                false,
+                None,
+            )
+            .await
+            .expect_err("PITR on legacy backup must fail fast");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WAL-G"),
+            "expected WAL-G requirement in error, got: {}",
+            msg
+        );
     }
 }

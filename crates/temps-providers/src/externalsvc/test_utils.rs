@@ -322,6 +322,10 @@ pub fn create_mock_external_service(
         node_id: None,
         topology: "standalone".to_string(),
         error_message: None,
+        health_status: None,
+        last_health_check_at: None,
+        last_health_error: None,
+        consecutive_health_failures: 0,
     }
 }
 

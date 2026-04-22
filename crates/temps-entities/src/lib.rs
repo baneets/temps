@@ -44,6 +44,7 @@ pub mod environment_domains;
 pub mod environments;
 pub mod external_images;
 pub mod external_service_backups;
+pub mod external_service_health_checks;
 pub mod external_services;
 pub mod funnel_steps;
 pub mod funnels;

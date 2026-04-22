@@ -1,5 +1,9 @@
 import { listServicesOptions } from '@/api/client/@tanstack/react-query.gen'
 import { ExternalServiceInfo } from '@/api/client/types.gen'
+import {
+  listServiceHealthStatuses,
+  type HealthStatus,
+} from '@/lib/service-health'
 import { CreateServiceButton } from '@/components/storage/CreateServiceButton'
 import { DeleteServiceButton } from '@/components/storage/DeleteServiceButton'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
@@ -48,6 +52,19 @@ export function Storage() {
     refetch,
   } = useQuery({
     ...listServicesOptions(),
+  })
+
+  // Batch-fetch current health for every service shown so each row can render
+  // a dot without firing N requests. Re-polls every 30s to match the backend
+  // probe cadence.
+  const serviceIds = (services ?? []).map((s) => s.id)
+  const idsKey = serviceIds.join(',')
+  const { data: healthMap } = useQuery({
+    queryKey: ['service-health-batch', idsKey],
+    queryFn: () => listServiceHealthStatuses(serviceIds),
+    enabled: serviceIds.length > 0,
+    refetchInterval: 30_000,
+    staleTime: 25_000,
   })
 
   useEffect(() => {
@@ -129,6 +146,7 @@ export function Storage() {
 
         <ServicesDividerList
           services={services}
+          healthMap={healthMap}
           onOpen={(id) => navigate(`/storage/${id}`)}
           onEdit={(service) => {
             setSelectedService(service)
@@ -194,9 +212,44 @@ export function Storage() {
 
 interface ServicesVariantProps {
   services: ExternalServiceInfo[]
+  healthMap?: Map<number, { status?: HealthStatus | null }>
   onOpen: (id: number) => void
   onEdit: (service: ExternalServiceInfo) => void
   onDeleteSuccess: () => void
+}
+
+/**
+ * Small solid dot reflecting the latest health probe
+ * (green=operational, amber=degraded, red=down). We render nothing when the
+ * service hasn't been probed yet so the row doesn't flash a placeholder.
+ */
+function HealthDot({
+  status,
+  className,
+}: {
+  status: HealthStatus | null | undefined
+  className?: string
+}) {
+  if (!status) return null
+  const tone =
+    status === 'operational'
+      ? 'bg-green-500'
+      : status === 'degraded'
+        ? 'bg-amber-500'
+        : 'bg-red-500'
+  const label =
+    status === 'operational'
+      ? 'Operational'
+      : status === 'degraded'
+        ? 'Degraded'
+        : 'Down'
+  return (
+    <span
+      className={cn('inline-block size-2 rounded-full', tone, className)}
+      title={label}
+      aria-label={label}
+    />
+  )
 }
 
 function ServiceStatusDot({ status }: { status: string }) {
@@ -253,6 +306,7 @@ function ServiceActions({
 
 function ServicesDividerList({
   services,
+  healthMap,
   onOpen,
   onEdit,
   onDeleteSuccess,
@@ -260,45 +314,65 @@ function ServicesDividerList({
   return (
     <div className="overflow-hidden rounded-lg border">
       <ul role="list" className="divide-y">
-        {services.map((service) => (
-          <li
-            key={service.id}
-            onClick={() => onOpen(service.id)}
-            className="group flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/40"
-          >
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
-              <ServiceLogo service={service.service_type} />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <p className="truncate text-sm font-medium">{service.name}</p>
-                <span className="rounded border bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {service.service_type}
-                </span>
-                {service.topology === 'cluster' && (
-                  <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                    Cluster
+        {services.map((service) => {
+          // Only show the health dot for services the backend is actually
+          // probing (status === 'running'). Others haven't been checked.
+          const health =
+            service.status === 'running'
+              ? healthMap?.get(service.id)?.status ?? null
+              : null
+          return (
+            <li
+              key={service.id}
+              onClick={() => onOpen(service.id)}
+              className="group flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/40"
+            >
+              {/*
+                Wrap the logo so we can anchor the health dot in its
+                bottom-right corner (Vercel deployment-status pattern).
+              */}
+              <div className="relative shrink-0">
+                <div className="flex size-9 items-center justify-center rounded-md border bg-background">
+                  <ServiceLogo service={service.service_type} />
+                </div>
+                {health ? (
+                  <HealthDot
+                    status={health}
+                    className="absolute -bottom-0.5 -right-0.5 ring-2 ring-background"
+                  />
+                ) : null}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="truncate text-sm font-medium">{service.name}</p>
+                  <span className="rounded border bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {service.service_type}
                   </span>
-                )}
+                  {service.topology === 'cluster' && (
+                    <span className="rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Cluster
+                    </span>
+                  )}
+                </div>
+                <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                  <ServiceStatusDot status={service.status} />
+                  {service.version && (
+                    <span className="font-mono">v{service.version}</span>
+                  )}
+                  <span>
+                    Created <TimeAgo date={service.created_at} />
+                  </span>
+                </div>
               </div>
-              <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
-                <ServiceStatusDot status={service.status} />
-                {service.version && (
-                  <span className="font-mono">v{service.version}</span>
-                )}
-                <span>
-                  Created <TimeAgo date={service.created_at} />
-                </span>
-              </div>
-            </div>
-            <ServiceActions
-              service={service}
-              onEdit={onEdit}
-              onDeleteSuccess={onDeleteSuccess}
-            />
-            <ChevronRight className="size-4 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
-          </li>
-        ))}
+              <ServiceActions
+                service={service}
+                onEdit={onEdit}
+                onDeleteSuccess={onDeleteSuccess}
+              />
+              <ChevronRight className="size-4 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+            </li>
+          )
+        })}
       </ul>
     </div>
   )

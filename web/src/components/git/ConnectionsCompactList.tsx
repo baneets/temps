@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { ConnectionResponse, ProviderResponse } from '@/api/client/types.gen'
-import { deleteConnectionMutation } from '@/api/client/@tanstack/react-query.gen'
+import {
+  deleteConnectionMutation,
+  runConnectionHealthCheckMutation,
+} from '@/api/client/@tanstack/react-query.gen'
 import { isGitHubApp } from '@/lib/provider'
 import { UpdateTokenDialog } from '@/components/git/UpdateTokenDialog'
 import { Badge } from '@/components/ui/badge'
@@ -22,11 +25,21 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import {
+  Activity,
+  AlertTriangle,
   CheckCircle2,
+  Circle,
   Clock,
   EllipsisVertical,
+  HeartPulse,
   Key,
   RefreshCw,
   Trash2,
@@ -78,6 +91,32 @@ export function ConnectionsCompactList({
     onError: () => toast.error('Failed to delete connection'),
   })
 
+  const [healthCheckInFlight, setHealthCheckInFlight] = useState<number | null>(
+    null
+  )
+  const healthCheckMut = useMutation({
+    ...runConnectionHealthCheckMutation(),
+    onMutate: ({ path }) => setHealthCheckInFlight(path.connection_id),
+    onSuccess: (data) => {
+      if (data.health_status === 'healthy') {
+        toast.success(`Connection "${data.account_name}" is healthy`)
+      } else if (data.health_status === 'unhealthy') {
+        toast.error(
+          `Connection "${data.account_name}" is unhealthy`,
+          { description: data.health_message ?? undefined }
+        )
+      } else {
+        toast.message(`Health status: ${data.health_status}`)
+      }
+      queryClient.invalidateQueries({ queryKey: ['listConnections'] })
+      onConnectionDeleted?.()
+    },
+    onError: (error) => {
+      toast.error(error?.message ?? 'Health check failed')
+    },
+    onSettled: () => setHealthCheckInFlight(null),
+  })
+
   const isPATProvider =
     provider &&
     ((provider.provider_type === 'github' &&
@@ -95,6 +134,21 @@ export function ConnectionsCompactList({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        <DropdownMenuItem
+          onSelect={(e) => {
+            e.preventDefault()
+            healthCheckMut.mutate({ path: { connection_id: c.id } })
+          }}
+          disabled={healthCheckInFlight === c.id}
+        >
+          <HeartPulse
+            className={`mr-2 h-4 w-4 ${
+              healthCheckInFlight === c.id ? 'animate-pulse' : ''
+            }`}
+          />
+          Check now
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={(e) => {
             e.preventDefault()
@@ -166,15 +220,79 @@ export function ConnectionsCompactList({
       </Badge>
     ) : null
 
+  const HealthBadge = ({ c }: { c: ConnectionResponse }) => {
+    const checkedAt = c.last_health_check_at
+    const label = (() => {
+      switch (c.health_status) {
+        case 'healthy':
+          return {
+            variant: 'secondary' as const,
+            icon: <Activity className="h-2.5 w-2.5 text-emerald-500" />,
+            text: 'Healthy',
+          }
+        case 'unhealthy':
+          return {
+            variant: 'destructive' as const,
+            icon: <AlertTriangle className="h-2.5 w-2.5" />,
+            text: 'Unhealthy',
+          }
+        default:
+          return {
+            variant: 'outline' as const,
+            icon: <Circle className="h-2.5 w-2.5 text-muted-foreground" />,
+            text: 'Not checked',
+          }
+      }
+    })()
+
+    const tooltip = (() => {
+      if (c.health_status === 'unhealthy' && c.health_message) {
+        return c.health_message
+      }
+      if (!checkedAt) return 'No health check has run yet'
+      return `Last checked: ${new Date(checkedAt).toLocaleString()}`
+    })()
+
+    return (
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              variant={label.variant}
+              className="h-5 cursor-help gap-0.5 px-1.5 text-[10px]"
+            >
+              {label.icon}
+              {label.text}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs text-xs">
+            {tooltip}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    )
+  }
+
   const renderRow = (c: ConnectionResponse) => {
     if (variant === 'single-line') {
+      const unhealthy = c.health_status === 'unhealthy'
+      const healthy = c.health_status === 'healthy'
+      const railColor = unhealthy
+        ? 'bg-destructive'
+        : healthy
+        ? 'bg-emerald-500'
+        : 'bg-muted-foreground/30'
+
       return (
         <li
           key={c.id}
-          className="flex flex-col gap-2 px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3"
+          className="relative flex flex-col gap-1 px-4 py-3 pl-5"
         >
-          {/* Primary: icon + account + type + status */}
-          <div className="flex min-w-0 items-center gap-2 sm:shrink-0">
+          <span
+            aria-hidden
+            className={`absolute inset-y-2 left-1.5 w-[3px] rounded-full ${railColor}`}
+          />
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <Users className="h-4 w-4 text-muted-foreground shrink-0" />
             <span className="truncate text-sm font-medium">
               {c.account_name}
@@ -184,33 +302,43 @@ export function ConnectionsCompactList({
             </Badge>
             <StatusBadge c={c} />
             <SyncBadge c={c} />
+            <div className="ml-auto flex items-center gap-2">
+              <ActionsMenu c={c} />
+            </div>
           </div>
-
-          {/* Meta: installation id + last synced */}
-          <div className="flex min-w-0 flex-1 items-center gap-3 text-xs text-muted-foreground">
-            {c.installation_id && (
-              <span className="font-mono truncate">
-                id:{c.installation_id}
-              </span>
-            )}
-            <span className="flex items-center gap-1 shrink-0">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-6 text-xs text-muted-foreground">
+            <span
+              className={
+                unhealthy
+                  ? 'font-medium text-destructive'
+                  : healthy
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : ''
+              }
+            >
+              {unhealthy && c.health_message
+                ? c.health_message
+                : healthy
+                ? 'Healthy'
+                : 'Not checked yet'}
+            </span>
+            <span aria-hidden>·</span>
+            <span className="flex items-center gap-1">
               <Clock className="h-3 w-3" />
-              {c.last_synced_at ? (
+              {c.last_health_check_at ? (
                 <>
-                  synced <TimeAgo date={c.last_synced_at} />
+                  checked <TimeAgo date={c.last_health_check_at} />
                 </>
               ) : (
-                'never synced'
+                'never checked'
               )}
             </span>
-          </div>
-
-          {/* Right: time + menu */}
-          <div className="flex items-center gap-2 sm:shrink-0">
-            <span className="whitespace-nowrap text-xs text-muted-foreground">
-              <TimeAgo date={c.created_at} />
-            </span>
-            <ActionsMenu c={c} />
+            {c.installation_id && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="font-mono">id:{c.installation_id}</span>
+              </>
+            )}
           </div>
         </li>
       )
@@ -234,6 +362,7 @@ export function ConnectionsCompactList({
                 {c.account_type || 'unknown'}
               </Badge>
               <StatusBadge c={c} />
+              <HealthBadge c={c} />
               <SyncBadge c={c} />
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
@@ -305,6 +434,7 @@ export function ConnectionsCompactList({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <StatusBadge c={c} />
+          <HealthBadge c={c} />
           <SyncBadge c={c} />
           <ActionsMenu c={c} />
         </div>

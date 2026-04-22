@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod connection_health;
 pub mod git_ops;
 pub mod git_provider;
 pub mod git_provider_manager;

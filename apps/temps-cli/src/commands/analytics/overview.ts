@@ -96,8 +96,8 @@ export async function overview(options: OverviewOptions): Promise<void> {
         }),
         getEventsCount({
           client,
+          path: { project_id: projectId },
           query: {
-            project_id: projectId,
             start_date: startDate,
             end_date: endDate,
             limit: 10,

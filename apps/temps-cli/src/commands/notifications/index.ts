@@ -6,9 +6,9 @@ import {
   createSlackProvider,
   createNotificationProvider,
   getNotificationProvider,
-  deleteProvider2,
-  testProvider2,
-  updateProvider2,
+  deleteNotificationProvider as deleteProvider2,
+  testNotificationProvider as testProvider2,
+  updateNotificationProvider as updateProvider2,
   updateSlackProvider,
   updateEmailProvider,
 } from '../../api/sdk.gen.js'

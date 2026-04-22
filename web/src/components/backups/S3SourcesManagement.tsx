@@ -7,6 +7,16 @@ import {
 } from '@/api/client/@tanstack/react-query.gen'
 import { listS3Sources } from '@/api/client/sdk.gen'
 import { S3SourceResponse } from '@/api/client/types.gen'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -203,6 +213,8 @@ export function S3SourcesManagement() {
   const [pendingDefault, setPendingDefault] = useState<S3SourceResponse | null>(
     null,
   )
+  const [sourceToDelete, setSourceToDelete] =
+    useState<S3SourceResponse | null>(null)
 
   const {
     data: sources = [],
@@ -249,6 +261,9 @@ export function S3SourcesManagement() {
       refetch()
       toast.success('S3 source deleted successfully')
     },
+    onSettled: () => {
+      setSourceToDelete(null)
+    },
   })
 
   const runBackupMutation = useMutation({
@@ -274,9 +289,10 @@ export function S3SourcesManagement() {
     },
   })
 
-  const handleDeleteSource = (id: number) => {
+  const confirmDeleteSource = () => {
+    if (!sourceToDelete) return
     deleteMutation.mutate({
-      path: { id },
+      path: { id: sourceToDelete.id },
     })
   }
 
@@ -538,7 +554,7 @@ export function S3SourcesManagement() {
                         <DropdownMenuItem
                           onSelect={(e) => {
                             e.preventDefault()
-                            handleDeleteSource(source.id)
+                            setSourceToDelete(source)
                           }}
                           className="text-destructive"
                           disabled={deleteMutation.isPending}
@@ -556,6 +572,53 @@ export function S3SourcesManagement() {
           </ul>
         </div>
       )}
+
+      <AlertDialog
+        open={sourceToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleteMutation.isPending) {
+            setSourceToDelete(null)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete S3 source?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will remove
+              {sourceToDelete ? (
+                <>
+                  {' '}
+                  <span className="font-medium text-foreground">
+                    {sourceToDelete.name}
+                  </span>{' '}
+                  (<code>{sourceToDelete.bucket_name}</code>)
+                </>
+              ) : null}{' '}
+              from Temps. Backup schedules pointing at this source will fail
+              on their next run, and services that rely on it for WAL
+              archiving will stop shipping new data until reconfigured. Objects
+              already in the bucket will not be deleted. This action cannot be
+              undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                confirmDeleteSource()
+              }}
+              disabled={deleteMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteMutation.isPending ? 'Deleting...' : 'Delete source'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

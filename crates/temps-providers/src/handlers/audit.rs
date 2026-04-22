@@ -55,6 +55,12 @@ pub struct ExternalServiceProjectUnlinkedAudit {
     pub project_id: i32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceHealthChecked {
+    pub context: AuditContext,
+    pub service_id: i32,
+}
+
 impl AuditOperation for ExternalServiceCreatedAudit {
     fn operation_type(&self) -> String {
         "EXTERNAL_SERVICE_CREATED".to_string()
@@ -173,6 +179,29 @@ impl AuditOperation for ExternalServiceProjectLinkedAudit {
 impl AuditOperation for ExternalServiceProjectUnlinkedAudit {
     fn operation_type(&self) -> String {
         "EXTERNAL_SERVICE_PROJECT_UNLINKED".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+impl AuditOperation for ServiceHealthChecked {
+    fn operation_type(&self) -> String {
+        "EXTERNAL_SERVICE_HEALTH_CHECK_TRIGGERED".to_string()
     }
 
     fn user_id(&self) -> i32 {

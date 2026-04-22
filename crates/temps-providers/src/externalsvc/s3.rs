@@ -21,7 +21,7 @@ use tracing::{debug, error, info};
 
 use crate::utils::ensure_network_exists;
 
-use super::{ExternalService, ServiceConfig, ServiceType};
+use super::{ExternalService, HealthProbeResult, ServiceConfig, ServiceType};
 
 /// Input configuration for creating an S3/MinIO service
 /// This is what users provide when creating the service
@@ -647,6 +647,69 @@ impl ExternalService for S3Service {
         // } else {
         //     Ok(false)
         // }
+    }
+
+    async fn health_probe(&self, service_config: ServiceConfig) -> Result<HealthProbeResult> {
+        use std::time::{Duration, Instant};
+
+        const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+        const DEGRADED_MS: u128 = 2000;
+
+        let cfg = match self.get_s3_config(service_config) {
+            Ok(c) => c,
+            Err(e) => return Ok(HealthProbeResult::down(format!("invalid s3 config: {}", e))),
+        };
+
+        let endpoint = format!("http://{}:{}", cfg.host, cfg.port);
+        let start = Instant::now();
+
+        let probe = async {
+            let creds = aws_sdk_s3::config::Credentials::new(
+                cfg.access_key.clone(),
+                cfg.secret_key.clone(),
+                None,
+                None,
+                "s3-health-probe",
+            );
+            let s3_config = aws_sdk_s3::Config::builder()
+                .region(Region::new(cfg.region.clone()))
+                .endpoint_url(endpoint.clone())
+                .credentials_provider(creds)
+                .force_path_style(true)
+                .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+                .build();
+            let client = Client::from_conf(s3_config);
+            client
+                .list_buckets()
+                .send()
+                .await
+                .map_err(|e| format!("ListBuckets failed: {}", e))?;
+            Ok::<(), String>(())
+        };
+
+        match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+            Err(_) => Ok(HealthProbeResult::down(format!(
+                "s3 probe to {} timed out after {}s",
+                endpoint,
+                PROBE_TIMEOUT.as_secs()
+            ))),
+            Ok(Err(msg)) => Ok(HealthProbeResult::down(format!(
+                "s3 probe to {} {}",
+                endpoint, msg
+            ))),
+            Ok(Ok(())) => {
+                let elapsed_ms = start.elapsed().as_millis();
+                let response_time = i32::try_from(elapsed_ms).ok();
+                if elapsed_ms > DEGRADED_MS {
+                    Ok(HealthProbeResult::degraded(
+                        format!("s3 responded in {}ms (>{}ms)", elapsed_ms, DEGRADED_MS),
+                        response_time,
+                    ))
+                } else {
+                    Ok(HealthProbeResult::operational(response_time))
+                }
+            }
+        }
     }
 
     fn get_type(&self) -> ServiceType {

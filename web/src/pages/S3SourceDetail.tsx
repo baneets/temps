@@ -10,6 +10,16 @@ import {
   listSourceBackupsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { BackupScheduleResponse } from '@/api/client/types.gen'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -129,6 +139,8 @@ export function S3SourceDetail() {
     scheduleOptions[1].value,
   )
   const [customCron, setCustomCron] = useState('')
+  const [scheduleToDelete, setScheduleToDelete] =
+    useState<BackupScheduleResponse | null>(null)
 
   const { data: source, isLoading: isLoadingSource } = useQuery({
     ...getS3SourceOptions({
@@ -180,6 +192,9 @@ export function S3SourceDetail() {
     onSuccess: () => {
       refetchSchedules()
       toast.success('Backup schedule deleted successfully')
+    },
+    onSettled: () => {
+      setScheduleToDelete(null)
     },
   })
 
@@ -260,8 +275,9 @@ export function S3SourceDetail() {
     }
   }
 
-  const handleDeleteSchedule = (scheduleId: number) => {
-    deleteMutation.mutate({ path: { id: scheduleId } })
+  const confirmDeleteSchedule = () => {
+    if (!scheduleToDelete) return
+    deleteMutation.mutate({ path: { id: scheduleToDelete.id } })
   }
 
   if (isLoadingSource) {
@@ -652,9 +668,7 @@ export function S3SourceDetail() {
                               </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
-                                onClick={() =>
-                                  handleDeleteSchedule(schedule.id)
-                                }
+                                onClick={() => setScheduleToDelete(schedule)}
                                 className="text-destructive"
                                 disabled={deleteMutation.isPending}
                               >
@@ -711,6 +725,50 @@ export function S3SourceDetail() {
           </CardContent>
         </Card>
       </div>
+
+      <AlertDialog
+        open={scheduleToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !deleteMutation.isPending) {
+            setScheduleToDelete(null)
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete backup schedule?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the schedule
+              {scheduleToDelete ? (
+                <>
+                  {' '}
+                  <span className="font-medium text-foreground">
+                    {scheduleToDelete.name}
+                  </span>
+                </>
+              ) : null}
+              . Existing backups created by this schedule will not be removed,
+              but no new backups will run on this schedule. This action cannot
+              be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                confirmDeleteSchedule()
+              }}
+              disabled={deleteMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteMutation.isPending ? 'Deleting...' : 'Delete schedule'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

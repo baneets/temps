@@ -4,12 +4,19 @@ import {
   getServiceOptions,
   getServicePreviewEnvironmentVariablesMaskedOptions,
   linkServiceToProjectMutation,
+  listS3SourcesOptions,
   listServiceProjectsOptions,
+  listSourceBackupsOptions,
   startServiceMutation,
   stopServiceMutation,
 } from '@/api/client/@tanstack/react-query.gen'
+import type { SourceBackupEntry } from '@/api/client/types.gen'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
 import { MajorUpgradeDialog } from '@/components/storage/MajorUpgradeDialog'
+import {
+  ServiceHealthBadge,
+  ServiceHealthCard,
+} from '@/components/storage/ServiceHealthCard'
 import { TriggerBackupDialog } from '@/components/storage/TriggerBackupDialog'
 import { UpgradeServiceDialog } from '@/components/storage/UpgradeServiceDialog'
 import { listPgUpgrades, phaseIndex, PG_UPGRADE_PHASES, isTerminal } from '@/lib/pg-upgrades'
@@ -44,13 +51,20 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
+import { CopyButton } from '@/components/ui/copy-button'
 import { EnvVariablesDisplay } from '@/components/ui/env-variables-display'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { maskValue, shouldMaskValue } from '@/lib/masking'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { formatBytes } from '@/lib/utils'
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,6 +77,7 @@ import {
   ArrowLeft,
   ArrowUpCircle,
   Database,
+  DatabaseBackup,
   Eye,
   EyeOff,
   HardDrive,
@@ -71,10 +86,11 @@ import {
   Pencil,
   Plus,
   RefreshCcw,
+  RotateCcw,
   Server,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
@@ -156,6 +172,46 @@ export function ServiceDetail() {
   const { data: allProjectsData } = useQuery({
     ...getProjectsOptions({ query: { page: 1, per_page: 100 } }),
   })
+
+  // Backups that belong to this service. We pull the S3 source list and then
+  // fan out to each source's backup index; entries whose origin service name
+  // matches this service are surfaced in the Backups card below.
+  const serviceName = service?.service?.name
+  const { data: s3Sources } = useQuery({
+    ...listS3SourcesOptions(),
+    enabled: !!serviceName,
+  })
+
+  const sourceBackupQueries = useQueries({
+    queries: (s3Sources || []).map((source) => ({
+      ...listSourceBackupsOptions({ path: { id: source.id } }),
+      enabled: !!serviceName,
+    })),
+  })
+
+  const isLoadingBackups =
+    !!serviceName &&
+    (s3Sources === undefined ||
+      sourceBackupQueries.some((q) => q.isLoading))
+
+  const serviceBackups = useMemo(() => {
+    if (!serviceName || !s3Sources) return []
+    const rows: Array<SourceBackupEntry & { source_id: number; source_name: string }> = []
+    sourceBackupQueries.forEach((q, idx) => {
+      const source = s3Sources[idx]
+      if (!source || !q.data) return
+      for (const entry of q.data.backups) {
+        if (entry.origin_service_name === serviceName) {
+          rows.push({ ...entry, source_id: source.id, source_name: source.name })
+        }
+      }
+    })
+    rows.sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    )
+    return rows
+  }, [serviceName, s3Sources, sourceBackupQueries])
 
   const [isLinkPopoverOpen, setIsLinkPopoverOpen] = useState(false)
 
@@ -370,6 +426,9 @@ export function ServiceDetail() {
                 >
                   {service.service.status}
                 </Badge>
+                {service.service.status === 'running' ? (
+                  <ServiceHealthBadge serviceId={parseInt(id!)} />
+                ) : null}
                 <Badge variant="outline" className="gap-1.5">
                   <ServiceLogo
                     service={service.service.service_type}
@@ -391,6 +450,95 @@ export function ServiceDetail() {
           </div>
 
           <div className="flex items-center gap-2 self-start sm:self-auto">
+            {/*
+              Linked projects: collapsed into a header chip so the body of the
+              page can stay focused on Health + Configuration. Click to see the
+              list and link more projects inline.
+            */}
+            <Popover
+              open={isLinkPopoverOpen}
+              onOpenChange={setIsLinkPopoverOpen}
+            >
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-2">
+                  <Plus className="h-4 w-4" />
+                  {linkedProjectsLoading ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <>
+                      {linkedProjectsResponse?.length || 0} linked
+                    </>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-[320px] p-0" align="end">
+                <div className="border-b p-3">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Linked projects
+                  </p>
+                  {linkedProjectsLoading ? (
+                    <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Loading…
+                    </div>
+                  ) : linkedProjectsResponse &&
+                    linkedProjectsResponse.length > 0 ? (
+                    <ul className="mt-2 space-y-1">
+                      {linkedProjectsResponse.map((link) => (
+                        <li
+                          key={link.id}
+                          className="flex items-center justify-between gap-2 text-sm"
+                        >
+                          <span className="truncate">
+                            {link.project.slug}
+                          </span>
+                          <Link
+                            to={`/projects/${link.project.slug}`}
+                            className="text-xs text-muted-foreground hover:text-foreground"
+                          >
+                            View →
+                          </Link>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      No projects yet.
+                    </p>
+                  )}
+                </div>
+                <Command>
+                  <CommandInput placeholder="Link a project..." />
+                  <CommandList>
+                    <CommandEmpty>No projects found.</CommandEmpty>
+                    <CommandGroup>
+                      {allProjectsData?.projects
+                        ?.filter(
+                          (p) =>
+                            !linkedProjectsResponse?.some(
+                              (lp) => lp.project.id === p.id,
+                            ),
+                        )
+                        .map((project) => (
+                          <CommandItem
+                            key={project.id}
+                            value={project.slug}
+                            onSelect={() => {
+                              linkService.mutate({
+                                path: { id: parseInt(id!) },
+                                body: { project_id: project.id },
+                              })
+                            }}
+                          >
+                            {project.slug}
+                          </CommandItem>
+                        ))}
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+
             <Link to={`/storage/${id}/browse`}>
               <Button variant="outline" size="sm" className="gap-2">
                 <Database className="h-4 w-4" />
@@ -407,6 +555,12 @@ export function ServiceDetail() {
                 <DropdownMenuItem onClick={() => setIsBackupDialogOpen(true)}>
                   <HardDrive className="h-4 w-4 mr-2" />
                   Backup
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => navigate(`/storage/${parseInt(id!)}/restore`)}
+                >
+                  <RotateCcw className="h-4 w-4 mr-2" />
+                  Restore…
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => setIsEditDialogOpen(true)}>
                   <Pencil className="h-4 w-4 mr-2" />
@@ -472,109 +626,14 @@ export function ServiceDetail() {
         )}
 
         <div className="grid gap-6">
-          {/* Linked Projects Section */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div className="space-y-1.5">
-                  <CardTitle className="flex items-center gap-2">
-                    <span>Linked Projects</span>
-                    <Badge variant="outline">
-                      {linkedProjectsLoading ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        linkedProjectsResponse?.length || 0
-                      )}
-                    </Badge>
-                  </CardTitle>
-                  <CardDescription>
-                    Projects that are using this service
-                  </CardDescription>
-                </div>
-                <Popover
-                  open={isLinkPopoverOpen}
-                  onOpenChange={setIsLinkPopoverOpen}
-                >
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" size="sm" className="gap-2">
-                      <Plus className="h-4 w-4" />
-                      Link Project
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[250px] p-0" align="end">
-                    <Command>
-                      <CommandInput placeholder="Search projects..." />
-                      <CommandList>
-                        <CommandEmpty>No projects found.</CommandEmpty>
-                        <CommandGroup>
-                          {allProjectsData?.projects
-                            ?.filter(
-                              (p) =>
-                                !linkedProjectsResponse?.some(
-                                  (lp) => lp.project.id === p.id
-                                )
-                            )
-                            .map((project) => (
-                              <CommandItem
-                                key={project.id}
-                                value={project.slug}
-                                onSelect={() => {
-                                  linkService.mutate({
-                                    path: { id: parseInt(id!) },
-                                    body: { project_id: project.id },
-                                  })
-                                }}
-                              >
-                                {project.slug}
-                              </CommandItem>
-                            ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {linkedProjectsLoading ? (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  <span className="text-sm text-muted-foreground">
-                    Loading projects...
-                  </span>
-                </div>
-              ) : linkedProjectsResponse &&
-                linkedProjectsResponse.length > 0 ? (
-                <div className="space-y-2">
-                  {linkedProjectsResponse.map((link) => (
-                    <div
-                      key={link.id}
-                      className="flex items-center justify-between p-3 rounded-md border border-border hover:bg-muted/50 transition-colors"
-                    >
-                      <div className="flex flex-col">
-                        <p className="font-medium text-sm">
-                          {link.project.slug}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          Linked <TimeAgo date={link.service.created_at} />
-                        </p>
-                      </div>
-                      <Link to={`/projects/${link.project.slug}`}>
-                        <Button variant="ghost" size="sm" className="gap-2">
-                          <ArrowLeft className="h-4 w-4 rotate-180" />
-                          View Project
-                        </Button>
-                      </Link>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-sm text-muted-foreground text-center py-8">
-                  No projects are currently using this service
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          {/*
+            Health is the highest-signal block on this page, so it sits
+            directly under the header. Linked Projects moved into the header
+            chip, so Configuration surfaces much sooner now.
+          */}
+          {service.service.status === 'running' ? (
+            <ServiceHealthCard serviceId={parseInt(id!)} />
+          ) : null}
 
           {/* Cluster Creation Progress */}
           {service.service.topology === 'cluster' &&
@@ -733,31 +792,38 @@ export function ServiceDetail() {
             <CardContent>
               {service.current_parameters &&
               Object.keys(service.current_parameters).length > 0 ? (
-                <div className="space-y-4">
+                <dl className="divide-y divide-border">
                   {Object.entries(service.current_parameters).map(
                     ([key, value]) => {
                       const isSensitive = shouldMaskValue(key)
                       const isVisible = visibleParameters.has(key)
                       const displayValue =
                         isSensitive && !isVisible ? maskValue(value) : value
+                      const hasValue = Boolean(value)
 
                       return (
-                        <div key={key} className="space-y-1.5">
-                          <div className="text-sm font-medium capitalize">
+                        <div
+                          key={key}
+                          className="grid grid-cols-1 gap-1 py-3 sm:grid-cols-3 sm:gap-4"
+                        >
+                          <dt className="text-sm font-medium capitalize text-foreground">
                             {key
                               .replace(/_/g, ' ')
                               .replace(/\b\w/g, (char) => char.toUpperCase())}
-                          </div>
-                          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/50 p-3">
-                            <span className="flex-1 break-all text-foreground font-mono text-sm">
-                              {displayValue || (
-                                <span className="text-muted-foreground">-</span>
+                          </dt>
+                          <dd className="flex min-w-0 items-center gap-2 sm:col-span-2">
+                            <span className="min-w-0 flex-1 break-all font-mono text-sm text-muted-foreground tabular-nums">
+                              {hasValue ? (
+                                displayValue
+                              ) : (
+                                <span className="italic">Not set</span>
                               )}
                             </span>
-                            {isSensitive && (
+                            {hasValue && isSensitive && (
                               <Button
                                 variant="ghost"
-                                size="sm"
+                                size="icon"
+                                className="h-8 w-8 shrink-0"
                                 onClick={() => {
                                   setVisibleParameters((prev) => {
                                     const next = new Set(prev)
@@ -769,7 +835,6 @@ export function ServiceDetail() {
                                     return next
                                   })
                                 }}
-                                className="flex-shrink-0"
                                 title={isVisible ? 'Hide value' : 'Show value'}
                               >
                                 {isVisible ? (
@@ -779,16 +844,141 @@ export function ServiceDetail() {
                                 )}
                               </Button>
                             )}
-                          </div>
+                            {hasValue && (!isSensitive || isVisible) && (
+                              <CopyButton
+                                value={String(value)}
+                                minimal
+                                className="h-8 w-8 shrink-0"
+                              />
+                            )}
+                          </dd>
                         </div>
                       )
                     }
                   )}
-                </div>
+                </dl>
               ) : (
                 <div className="text-sm text-muted-foreground">
                   No parameters configured
                 </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Backups Section */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1.5">
+                  <CardTitle className="flex items-center gap-2">
+                    <span>Backups</span>
+                    <Badge variant="outline">
+                      {isLoadingBackups ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        serviceBackups.length
+                      )}
+                    </Badge>
+                  </CardTitle>
+                  <CardDescription>
+                    Backups of this service stored across your S3 sources
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  onClick={() => setIsBackupDialogOpen(true)}
+                >
+                  <HardDrive className="h-4 w-4" />
+                  Trigger backup
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {isLoadingBackups ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  <span className="text-sm text-muted-foreground">
+                    Loading backups...
+                  </span>
+                </div>
+              ) : serviceBackups.length === 0 ? (
+                <div className="text-sm text-muted-foreground text-center py-8">
+                  No backups found for this service yet. Trigger one or
+                  configure a schedule from an S3 source.
+                </div>
+              ) : (
+                <ul role="list" className="divide-y divide-border">
+                  {serviceBackups.slice(0, 10).map((backup) => {
+                    const key = backup.backup_id || `${backup.source_id}-${backup.location}`
+                    const isFailed = backup.state === 'failed'
+                    const isRunning = backup.state === 'running'
+                    return (
+                      <li
+                        key={key}
+                        className="flex items-center gap-4 py-3"
+                      >
+                        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                          <DatabaseBackup className="size-4 text-muted-foreground" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="truncate text-sm font-medium">
+                              <TimeAgo date={backup.created_at} />
+                            </p>
+                            {backup.backup_type && (
+                              <Badge variant="outline" className="text-xs">
+                                {backup.backup_type}
+                              </Badge>
+                            )}
+                            {isRunning && (
+                              <Badge variant="secondary" className="gap-1 text-xs">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Running
+                              </Badge>
+                            )}
+                            {isFailed && (
+                              <Badge variant="destructive" className="text-xs">
+                                Failed
+                              </Badge>
+                            )}
+                            {backup.source === 's3_scan' && (
+                              <Badge variant="secondary" className="text-xs">
+                                External
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
+                            {backup.source_name}
+                            {backup.size_bytes
+                              ? ` · ${formatBytes(backup.size_bytes)}`
+                              : ''}
+                            {backup.format ? ` · ${backup.format}` : ''}
+                          </p>
+                        </div>
+                        <Link
+                          to={
+                            backup.backup_id
+                              ? `/backups/s3-sources/${backup.source_id}/backups/${backup.backup_id}`
+                              : `/backups/s3-sources/${backup.source_id}`
+                          }
+                        >
+                          <Button variant="ghost" size="sm" className="gap-2">
+                            View
+                            <ArrowLeft className="h-4 w-4 rotate-180" />
+                          </Button>
+                        </Link>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+              {serviceBackups.length > 10 && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Showing the 10 most recent backups. Visit the relevant S3
+                  source for the full history.
+                </p>
               )}
             </CardContent>
           </Card>
@@ -1027,7 +1217,27 @@ export function ServiceDetail() {
         onOpenChange={setIsBackupDialogOpen}
         serviceId={parseInt(id!)}
         serviceName={service.service.name}
+        onSuccess={() => {
+          // Reload the service so any status transition (e.g. "backing_up")
+          // shows immediately, plus the S3 source list and every per-source
+          // backup index so the Backups card picks up the new entry.
+          refetch()
+          queryClient.invalidateQueries({
+            queryKey: getServiceOptions({
+              path: { id: parseInt(id!) },
+            }).queryKey,
+          })
+          queryClient.invalidateQueries({
+            predicate: (query) => {
+              const key = query.queryKey[0] as { _id?: string } | undefined
+              return (
+                key?._id === 'listSourceBackups' || key?._id === 'listS3Sources'
+              )
+            },
+          })
+        }}
       />
+
     </div>
   )
 }

@@ -112,7 +112,13 @@ pub struct ActivateProviderResponse {
 /// touching the credential. Keeping credentials out of this shape means
 /// the UI can auto-save model changes on select, without forcing the user
 /// to re-paste their token or config file.
+/// Name-spaced schema name avoids an OpenAPI collision with
+/// `temps-notifications::UpdateProviderRequest`, which has different fields.
+/// Both are exposed as `utoipa::ToSchema`; without the override the merged
+/// OpenAPI doc would silently shadow one struct with the other and break
+/// generated CLI/web clients.
 #[derive(Debug, Deserialize, ToSchema)]
+#[schema(as = UpdateAiProviderRequest)]
 pub struct UpdateProviderRequest {
     /// New default model id. `None` or an empty string clears the stored
     /// value so the CLI falls back to its own default.
@@ -121,6 +127,7 @@ pub struct UpdateProviderRequest {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+#[schema(as = UpdateAiProviderResponse)]
 pub struct UpdateProviderResponse {
     pub provider_id: String,
     pub default_model: Option<String>,

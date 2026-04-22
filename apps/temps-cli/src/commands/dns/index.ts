@@ -2,10 +2,10 @@ import type { Command } from 'commander'
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import {
-  listProviders,
-  createProvider,
-  getProvider,
-  deleteProvider,
+  listDnsProviders as listProviders,
+  createDnsProvider as createProvider,
+  getDnsProvider as getProvider,
+  deleteDnsProvider as deleteProvider,
   testProviderConnection,
   listProviderZones,
 } from '../../api/sdk.gen.js'

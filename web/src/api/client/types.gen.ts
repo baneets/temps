@@ -1176,11 +1176,21 @@ export type ConnectionListResponse = {
 export type ConnectionResponse = {
     account_name: string;
     account_type: string;
+    consecutive_health_failures: number;
     created_at: string;
+    /**
+     * Human-readable reason when health_status is "unhealthy"; null otherwise.
+     */
+    health_message?: string | null;
+    /**
+     * Current health status: "healthy", "unhealthy", or "unknown".
+     */
+    health_status: string;
     id: number;
     installation_id?: string | null;
     is_active: boolean;
     is_expired: boolean;
+    last_health_check_at?: string | null;
     last_synced_at?: string | null;
     provider_id: number;
     syncing: boolean;
@@ -5219,6 +5229,25 @@ export type HealthCheckConfiguration = {
     timeout: number;
 };
 
+export type HealthCheckEntryResponse = {
+    /**
+     * ISO 8601 timestamp of when the probe ran.
+     */
+    checked_at: string;
+    /**
+     * Present only when the probe failed or was degraded.
+     */
+    error_message?: string | null;
+    /**
+     * TCP connect latency in milliseconds.
+     */
+    response_time_ms?: number | null;
+    /**
+     * "operational" | "degraded" | "down"
+     */
+    status: string;
+};
+
 export type HealthResponse = {
     summaries: Array<HealthSummary>;
 };
@@ -7712,6 +7741,41 @@ export type PlanMetadata = {
     warnings: Array<string>;
 };
 
+export type PlanSourceBackup = {
+    created_at?: string | null;
+    /**
+     * "walg", "pg_dump", "unknown".
+     */
+    format: string;
+    /**
+     * DB id, absent for orphan (S3-scan) backups.
+     */
+    id?: number | null;
+    /**
+     * Resolved S3 location the orchestrator will actually use.
+     */
+    location: string;
+    /**
+     * True when the original row's `s3_location` was empty and we resolved
+     * a location by probing S3. The UI shows this as a warning.
+     */
+    location_was_resolved: boolean;
+    /**
+     * Service that originally produced the backup, if known.
+     */
+    origin_service_name?: string | null;
+    size_bytes?: number | null;
+};
+
+export type PlanTarget = {
+    /**
+     * Expected Docker container name.
+     */
+    container: string;
+    id: number;
+    name: string;
+};
+
 /**
  * Platform compatibility information
  */
@@ -8789,6 +8853,26 @@ export type RecordListResponse = {
     records: Array<DnsRecord>;
 };
 
+/**
+ * Engine-specific recovery target for PITR.
+ *
+ * Postgres honors all variants; Redis/Mongo/S3 will likely reject non-Time
+ * variants or define their own semantics when they grow PITR support.
+ */
+export type RecoveryTarget = {
+    kind: 'time';
+    time: string;
+} | {
+    kind: 'xid';
+    xid: string;
+} | {
+    kind: 'lsn';
+    lsn: string;
+} | {
+    kind: 'name';
+    name: string;
+};
+
 export type ReferrerCount = {
     count: number;
     percentage: number;
@@ -9079,6 +9163,142 @@ export type ResourceLimitsResponse = {
 export type ResourcesBody = {
     memory?: number | null;
     vcpus?: number | null;
+};
+
+/**
+ * Capabilities a service exposes for the generic restore framework.
+ *
+ * Each engine overrides `ExternalService::restore_capabilities` to declare
+ * what it supports. The handler layer uses this to validate requests and
+ * the UI uses it to conditionally show options (e.g., PITR picker).
+ */
+export type RestoreCapabilities = {
+    /**
+     * Earliest recoverable timestamp, if `pitr` is true. Derived from
+     * engine-specific archive metadata (e.g., `pg_stat_archiver`).
+     */
+    earliest_pitr_time?: string | null;
+    /**
+     * Latest recoverable timestamp, if `pitr` is true.
+     */
+    latest_pitr_time?: string | null;
+    /**
+     * Point-in-time recovery using engine-specific continuous archives
+     * (WAL for Postgres, AOF for Redis, oplog for MongoDB, object versions for S3).
+     */
+    pitr: boolean;
+    /**
+     * Restore a backup onto the same running service (destructive).
+     */
+    restore_in_place: boolean;
+    /**
+     * Restore a backup into a freshly provisioned service.
+     */
+    restore_to_new_service: boolean;
+};
+
+export type RestoreCapabilitiesResponse = RestoreCapabilities & {
+    /**
+     * Suggested name for the new service when creating a clone. Safe to
+     * pre-fill into the UI dialog; the user can edit before submitting.
+     */
+    suggested_new_service_name: string;
+};
+
+/**
+ * Preview of a restore operation. Answers "what will happen if I click
+ * start?" with engine-level specificity so the user can confirm before
+ * committing to a destructive action.
+ */
+export type RestorePlan = {
+    /**
+     * Whether any step overwrites existing data on the target service.
+     */
+    destructive: boolean;
+    /**
+     * Target engine ("postgres", etc.).
+     */
+    engine: string;
+    /**
+     * Blocking problems. The UI disables the Start button when non-empty.
+     */
+    errors: Array<string>;
+    /**
+     * Echo of the requested mode for the UI.
+     */
+    mode: string;
+    /**
+     * Backup we'll read from.
+     */
+    source_backup: PlanSourceBackup;
+    /**
+     * Ordered list of human-readable actions the orchestrator will take.
+     */
+    steps: Array<string>;
+    /**
+     * How the restore will be performed: "walg_restore", "pg_dump_restore",
+     * or "unsupported".
+     */
+    strategy: string;
+    /**
+     * Service we'll operate on (or provision a sibling of).
+     */
+    target_service: PlanTarget;
+    /**
+     * Non-blocking caveats the user should see (cross-service, empty
+     * location that will be auto-resolved, missing engine metadata, ...).
+     */
+    warnings: Array<string>;
+};
+
+/**
+ * What the caller wants to do. Mirrors `externalsvc::RestoreMode` but
+ * flattened for JSON over the wire.
+ */
+export type RestoreRequestMode = {
+    mode: 'in_place';
+} | {
+    mode: 'new_service';
+    /**
+     * Name for the new service. Orchestrator auto-suggests
+     * `{source}-restore-{yyyymmdd-hhmm}` if caller omits, but we require
+     * an explicit value at the API boundary.
+     */
+    name: string;
+    /**
+     * Optional parameter overrides (port, docker_image, database).
+     */
+    parameter_overrides?: unknown;
+} | {
+    mode: 'pitr';
+    /**
+     * Required when `to_new_service` is true.
+     */
+    new_service_name?: string | null;
+    /**
+     * Recovery target kind + value.
+     */
+    target: RecoveryTarget;
+    /**
+     * Whether PITR restores in place or creates a new service.
+     */
+    to_new_service: boolean;
+};
+
+export type RestoreRunView = {
+    created_at: string;
+    error_message?: string | null;
+    finished_at?: string | null;
+    id: number;
+    mode: string;
+    phase: string;
+    recovery_target?: unknown;
+    source_backup_id: number;
+    source_service_id: number;
+    started_at?: string | null;
+    status: string;
+    target_service_id?: number | null;
+    target_service_name?: string | null;
 };
 
 /**
@@ -9651,6 +9871,45 @@ export type ServiceAccessInfo = {
  */
 export type ServiceAction = 'create' | 'link-external' | 'skip';
 
+export type ServiceHealthResponse = {
+    /**
+     * Consecutive failed probes. Alert fires at 3.
+     */
+    consecutive_failures: number;
+    last_checked_at?: string | null;
+    last_error?: string | null;
+    /**
+     * Most recent checks, newest-first (capped at `limit`).
+     */
+    recent_checks: Array<HealthCheckEntryResponse>;
+    response_time_ms?: number | null;
+    service_id: number;
+    /**
+     * Current health. `null` if the service has not been probed yet.
+     */
+    status?: string | null;
+    /**
+     * Uptime percentage over the last 24 hours (0.0 — 100.0).
+     * `null` when there is not enough history.
+     */
+    uptime_24h_percent?: number | null;
+};
+
+export type ServiceHealthStatusBatchResponse = {
+    statuses: Array<ServiceHealthStatusEntryResponse>;
+};
+
+export type ServiceHealthStatusEntryResponse = {
+    consecutive_failures: number;
+    last_checked_at?: string | null;
+    service_id: number;
+    /**
+     * "operational" | "degraded" | "down". `null` when the service has not
+     * been probed yet.
+     */
+    status?: string | null;
+};
+
 /**
  * Public info about a cluster member.
  */
@@ -10211,41 +10470,74 @@ export type SmtpResult = {
 };
 
 /**
- * Entry in the source backup index
+ * Entry in the source backup index. Covers both DB-tracked backups
+ * (have a row in `backups`) and S3-scan discoveries (raw S3 objects with
+ * no DB row — used for disaster-recovery from another Temps instance).
  */
 export type SourceBackupEntry = {
     /**
-     * Unique identifier for the backup
+     * UUID identifier from the DB row. Empty for S3-scan entries.
      */
     backup_id: string;
     /**
-     * Type of backup
+     * Backup variant as recorded by the backup pipeline (e.g. "full").
      */
     backup_type: string;
     /**
-     * When the backup was created
+     * When the backup was created. For S3-scan entries this is the
+     * object's LastModified time.
      */
     created_at: string;
     /**
-     * Unique identifier for the backup
+     * Engine that produced the backup ("postgres", "redis", "mongodb",
+     * "s3", "rustfs"). Used by the UI to mark engine-compat with the
+     * target service.
+     */
+    engine?: string | null;
+    /**
+     * Storage format: "walg" for continuous-archive (PITR-capable),
+     * "pg_dump" for point-in-time dumps, "" for non-postgres.
+     */
+    format?: string | null;
+    /**
+     * DB row id. Zero for S3-scan entries that have no DB row.
      */
     id: number;
     /**
-     * Location of the backup file in S3
+     * Raw S3 URL / key where the backup sits. For Postgres WAL-G backups
+     * this starts with `s3://`; for pg_dump-style backups it's the
+     * relative object key.
      */
     location: string;
     /**
-     * Location of the backup metadata file in S3
+     * Sidecar metadata.json location, if any. Empty when none.
      */
     metadata_location: string;
     /**
-     * Name of the backup
+     * Human-friendly display name ("postgres backup (svc-name)" for DB
+     * rows, or a synthesized label derived from the S3 path for scans).
      */
     name: string;
     /**
-     * Size of the backup in bytes
+     * Name of the service that produced the backup. For S3-scan entries
+     * this is parsed from the S3 path.
+     */
+    origin_service_name?: string | null;
+    /**
+     * Size of the backup in bytes, if known.
      */
     size_bytes?: number | null;
+    /**
+     * Provenance: "db" for rows in this Temps, "s3_scan" for objects
+     * discovered by the S3 bucket walk (e.g., backups made by another
+     * Temps instance).
+     */
+    source: string;
+    /**
+     * Observed state ("completed", "running", "failed") — DB only.
+     * Empty string for S3-scan entries.
+     */
+    state: string;
 };
 
 /**
@@ -10429,6 +10721,32 @@ export type StartPgUpgradeRequest = {
     from_version: string;
     to_image: string;
     to_version: string;
+};
+
+export type StartRestoreRequest = RestoreRequestMode & {
+    /**
+     * Engine of the backup when specified by `backup_location`
+     * ("postgres", "redis", "mongodb", "s3"). Ignored when `backup_id`
+     * is used — we infer from the DB row.
+     */
+    backup_engine?: string | null;
+    /**
+     * DB id of the backup to restore from. Either `backup_id` or
+     * `backup_location` MUST be provided. Use `backup_id` when restoring
+     * a backup this Temps instance recorded.
+     */
+    backup_id?: number | null;
+    /**
+     * Raw S3 URL / key of the backup — used when restoring a backup
+     * discovered by S3 scan (i.e., produced by another Temps instance).
+     * Requires `backup_engine` and `s3_source_id` to also be set.
+     */
+    backup_location?: string | null;
+    /**
+     * S3 source the `backup_location` lives in. Ignored when `backup_id`
+     * is used.
+     */
+    s3_source_id?: number | null;
 };
 
 export type StartSessionRequest = {
@@ -11210,6 +11528,31 @@ export type UnsupportedFeature = {
     reason: string;
 };
 
+/**
+ * Body for `PATCH /settings/ai-providers/{provider_id}` — updates
+ * provider-scoped settings (just the default model for now) without
+ * touching the credential. Keeping credentials out of this shape means
+ * the UI can auto-save model changes on select, without forcing the user
+ * to re-paste their token or config file.
+ * Name-spaced schema name avoids an OpenAPI collision with
+ * `temps-notifications::UpdateProviderRequest`, which has different fields.
+ * Both are exposed as `utoipa::ToSchema`; without the override the merged
+ * OpenAPI doc would silently shadow one struct with the other and break
+ * generated CLI/web clients.
+ */
+export type UpdateAiProviderRequest = {
+    /**
+     * New default model id. `None` or an empty string clears the stored
+     * value so the CLI falls back to its own default.
+     */
+    default_model?: string | null;
+};
+
+export type UpdateAiProviderResponse = {
+    default_model?: string | null;
+    provider_id: string;
+};
+
 export type UpdateAlertRuleRequest = {
     cooldown_minutes?: number | null;
     enabled?: boolean | null;
@@ -11510,24 +11853,10 @@ export type UpdateProviderKeyRequest = {
     is_active?: boolean | null;
 };
 
-/**
- * Body for `PATCH /settings/ai-providers/{provider_id}` — updates
- * provider-scoped settings (just the default model for now) without
- * touching the credential. Keeping credentials out of this shape means
- * the UI can auto-save model changes on select, without forcing the user
- * to re-paste their token or config file.
- */
 export type UpdateProviderRequest = {
-    /**
-     * New default model id. `None` or an empty string clears the stored
-     * value so the CLI falls back to its own default.
-     */
-    default_model?: string | null;
-};
-
-export type UpdateProviderResponse = {
-    default_model?: string | null;
-    provider_id: string;
+    config?: unknown;
+    enabled?: boolean | null;
+    name?: string | null;
 };
 
 export type UpdateRouteRequest = {
@@ -16730,7 +17059,7 @@ export type UpdateProviderResponses = {
     200: DnsProviderResponse;
 };
 
-export type UpdateProviderResponse2 = UpdateProviderResponses[keyof UpdateProviderResponses];
+export type UpdateProviderResponse = UpdateProviderResponses[keyof UpdateProviderResponses];
 
 export type ListManagedDomainsData = {
     body?: never;
@@ -18538,6 +18867,34 @@ export type GetServiceBySlugResponses = {
 
 export type GetServiceBySlugResponse = GetServiceBySlugResponses[keyof GetServiceBySlugResponses];
 
+export type ListServiceHealthStatusesData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Comma-separated service IDs. Omit for all services.
+         */
+        ids?: string;
+    };
+    url: '/external-services/health-status-batch';
+};
+
+export type ListServiceHealthStatusesErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListServiceHealthStatusesResponses = {
+    /**
+     * Batch of current health statuses
+     */
+    200: ServiceHealthStatusBatchResponse;
+};
+
+export type ListServiceHealthStatusesResponse = ListServiceHealthStatusesResponses[keyof ListServiceHealthStatusesResponses];
+
 export type ImportExternalServiceData = {
     body: ImportExternalServiceRequest;
     path?: never;
@@ -18864,6 +19221,79 @@ export type UpdateServiceResponses = {
 
 export type UpdateServiceResponse = UpdateServiceResponses[keyof UpdateServiceResponses];
 
+export type TriggerServiceHealthCheckData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/health-check';
+};
+
+export type TriggerServiceHealthCheckErrors = {
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+    /**
+     * Health monitor not running on this node
+     */
+    503: unknown;
+};
+
+export type TriggerServiceHealthCheckResponses = {
+    /**
+     * Fresh health snapshot after probing
+     */
+    200: ServiceHealthResponse;
+};
+
+export type TriggerServiceHealthCheckResponse = TriggerServiceHealthCheckResponses[keyof TriggerServiceHealthCheckResponses];
+
+export type GetServiceHealthStatusData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: {
+        /**
+         * Max number of recent checks (default 50, max 200)
+         */
+        limit?: number;
+    };
+    url: '/external-services/{id}/health-status';
+};
+
+export type GetServiceHealthStatusErrors = {
+    /**
+     * Service not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetServiceHealthStatusResponses = {
+    /**
+     * Current health + recent history
+     */
+    200: ServiceHealthResponse;
+};
+
+export type GetServiceHealthStatusResponse = GetServiceHealthStatusResponses[keyof GetServiceHealthStatusResponses];
+
 export type GetServicePreviewEnvironmentVariablesMaskedData = {
     body?: never;
     path: {
@@ -19120,6 +19550,125 @@ export type GetServiceEnvironmentVariableResponses = {
 };
 
 export type GetServiceEnvironmentVariableResponse = GetServiceEnvironmentVariableResponses[keyof GetServiceEnvironmentVariableResponses];
+
+export type StartRestoreData = {
+    body: StartRestoreRequest;
+    path: {
+        /**
+         * External service id (source for the restore)
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/restore';
+};
+
+export type StartRestoreErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Backup or service not found
+     */
+    404: ProblemDetails;
+};
+
+export type StartRestoreError = StartRestoreErrors[keyof StartRestoreErrors];
+
+export type StartRestoreResponses = {
+    /**
+     * Restore run started
+     */
+    202: RestoreRunView;
+};
+
+export type StartRestoreResponse = StartRestoreResponses[keyof StartRestoreResponses];
+
+export type GetRestoreCapabilitiesData = {
+    body?: never;
+    path: {
+        /**
+         * External service id
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/restore-capabilities';
+};
+
+export type GetRestoreCapabilitiesErrors = {
+    /**
+     * Service not found
+     */
+    404: ProblemDetails;
+};
+
+export type GetRestoreCapabilitiesError = GetRestoreCapabilitiesErrors[keyof GetRestoreCapabilitiesErrors];
+
+export type GetRestoreCapabilitiesResponses = {
+    /**
+     * Capabilities declared by the service
+     */
+    200: RestoreCapabilitiesResponse;
+};
+
+export type GetRestoreCapabilitiesResponse = GetRestoreCapabilitiesResponses[keyof GetRestoreCapabilitiesResponses];
+
+export type PlanRestoreData = {
+    body: StartRestoreRequest;
+    path: {
+        /**
+         * Target service id
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/restore-plan';
+};
+
+export type PlanRestoreErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Backup or service not found
+     */
+    404: ProblemDetails;
+};
+
+export type PlanRestoreError = PlanRestoreErrors[keyof PlanRestoreErrors];
+
+export type PlanRestoreResponses = {
+    /**
+     * Preview of what the restore will do
+     */
+    200: RestorePlan;
+};
+
+export type PlanRestoreResponse = PlanRestoreResponses[keyof PlanRestoreResponses];
+
+export type ListRestoreRunsForServiceData = {
+    body?: never;
+    path: {
+        /**
+         * External service id
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/restore-runs';
+};
+
+export type ListRestoreRunsForServiceResponses = {
+    /**
+     * Recent restore runs for the service
+     */
+    200: Array<RestoreRunView>;
+};
+
+export type ListRestoreRunsForServiceResponse = ListRestoreRunsForServiceResponses[keyof ListRestoreRunsForServiceResponses];
 
 export type RetryClusterData = {
     body: RetryClusterRequest;
@@ -20065,6 +20614,42 @@ export type DeactivateConnectionResponses = {
      */
     200: unknown;
 };
+
+export type RunConnectionHealthCheckData = {
+    body?: never;
+    path: {
+        /**
+         * Connection ID
+         */
+        connection_id: number;
+    };
+    query?: never;
+    url: '/git-connections/{connection_id}/health-check';
+};
+
+export type RunConnectionHealthCheckErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Connection not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RunConnectionHealthCheckResponses = {
+    /**
+     * Health check completed
+     */
+    200: ConnectionResponse;
+};
+
+export type RunConnectionHealthCheckResponse = RunConnectionHealthCheckResponses[keyof RunConnectionHealthCheckResponses];
 
 export type ListRepositoriesByConnectionData = {
     body?: never;
@@ -33593,6 +34178,36 @@ export type GetTagsByRepositoryIdResponses = {
 
 export type GetTagsByRepositoryIdResponse = GetTagsByRepositoryIdResponses[keyof GetTagsByRepositoryIdResponses];
 
+export type GetRestoreRunData = {
+    body?: never;
+    path: {
+        /**
+         * Restore run id
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/restore-runs/{id}';
+};
+
+export type GetRestoreRunErrors = {
+    /**
+     * Restore run not found
+     */
+    404: ProblemDetails;
+};
+
+export type GetRestoreRunError = GetRestoreRunErrors[keyof GetRestoreRunErrors];
+
+export type GetRestoreRunResponses = {
+    /**
+     * Restore run progress
+     */
+    200: RestoreRunView;
+};
+
+export type GetRestoreRunResponse = GetRestoreRunResponses[keyof GetRestoreRunResponses];
+
 export type RevenueGlobalEventsData = {
     body?: never;
     path?: never;
@@ -33868,7 +34483,7 @@ export type ListAiProvidersResponses = {
 export type ListAiProvidersResponse = ListAiProvidersResponses[keyof ListAiProvidersResponses];
 
 export type UpdateAiProviderData = {
-    body: UpdateProviderRequest;
+    body: UpdateAiProviderRequest;
     path: {
         /**
          * AI provider ID
@@ -33891,10 +34506,10 @@ export type UpdateAiProviderErrors = {
 };
 
 export type UpdateAiProviderResponses = {
-    200: UpdateProviderResponse;
+    200: UpdateAiProviderResponse;
 };
 
-export type UpdateAiProviderResponse = UpdateAiProviderResponses[keyof UpdateAiProviderResponses];
+export type UpdateAiProviderResponse2 = UpdateAiProviderResponses[keyof UpdateAiProviderResponses];
 
 export type ActivateAiProviderData = {
     body?: never;

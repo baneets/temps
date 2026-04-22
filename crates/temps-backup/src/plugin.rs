@@ -12,7 +12,7 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::{
     handlers::{self, create_backup_app_state, BackupAppState},
-    services::BackupService,
+    services::{BackupService, RestoreService},
 };
 use temps_providers::externalsvc::postgres_upgrade::{
     PostgresContainerLifecycle, PreUpgradeBackupProvider,
@@ -64,6 +64,15 @@ impl TempsPlugin for BackupPlugin {
             ));
             context.register_service(backup_service.clone());
 
+            // Create RestoreService — orchestrates generic restore across
+            // all engines via the ExternalService trait.
+            let restore_service = Arc::new(RestoreService::new(
+                db.clone(),
+                external_service_manager.clone(),
+                encryption_service.clone(),
+            ));
+            context.register_service(restore_service.clone());
+
             // Get AuditService dependency from other plugins
             let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
 
@@ -93,6 +102,7 @@ impl TempsPlugin for BackupPlugin {
             // Create BackupAppState for handlers
             let backup_app_state = create_backup_app_state(
                 backup_service,
+                restore_service,
                 audit_service,
                 pg_upgrade_service,
                 db.clone(),
@@ -163,10 +173,11 @@ impl TempsPlugin for BackupPlugin {
         // Get the BackupAppState
         let backup_app_state = context.require_service::<BackupAppState>();
 
-        // Merge backup + pg-upgrade routes under a single state so both
-        // handler modules share the same auth/audit/service wiring.
+        // Merge backup + pg-upgrade + restore routes under a single state
+        // so all handler modules share the same auth/audit/service wiring.
         let routes = handlers::configure_routes()
             .merge(handlers::pg_upgrade_handler::configure_routes())
+            .merge(handlers::restore_handler::configure_routes())
             .with_state(backup_app_state);
 
         Some(PluginRoutes { router: routes })
@@ -175,6 +186,7 @@ impl TempsPlugin for BackupPlugin {
     fn openapi_schema(&self) -> Option<OpenApi> {
         let mut doc = <handlers::backup_handler::BackupApiDoc as OpenApiTrait>::openapi();
         doc.merge(<handlers::pg_upgrade_handler::PgUpgradeApiDoc as OpenApiTrait>::openapi());
+        doc.merge(<handlers::restore_handler::RestoreApiDoc as OpenApiTrait>::openapi());
         Some(doc)
     }
 }

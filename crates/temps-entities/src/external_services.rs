@@ -25,6 +25,16 @@ pub struct Model {
     pub topology: String,
     /// Error message from failed initialization (null if no error).
     pub error_message: Option<String>,
+    /// Latest health-check result: "operational" | "degraded" | "down".
+    /// NULL means the service has not yet been probed.
+    pub health_status: Option<String>,
+    /// When the last health probe ran.
+    pub last_health_check_at: Option<DBDateTime>,
+    /// Error message from the most recent failed probe (cleared on recovery).
+    pub last_health_error: Option<String>,
+    /// Consecutive failed probes. Used to suppress flapping alerts.
+    #[sea_orm(default_value = 0)]
+    pub consecutive_health_failures: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

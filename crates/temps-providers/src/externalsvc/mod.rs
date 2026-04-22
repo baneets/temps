@@ -292,7 +292,19 @@ pub struct RestoreContext<'a> {
     pub s3_source: &'a temps_entities::s3_sources::Model,
     pub backup: &'a temps_entities::backups::Model,
     pub backup_location: &'a str,
+    /// The TARGET service — where the restored data will land.
     pub source_service: &'a temps_entities::external_services::Model,
+    /// Config to use for the restore. For `restore_to_new_service` this is
+    /// the template the new service clones. For `in_place` / PITR this is
+    /// the config applied to the running container.
+    ///
+    /// The orchestrator pre-merges the ORIGIN service's password into this
+    /// config (when the origin is known) because restored PGDATA / Redis
+    /// AOF / mongo auth files carry source-side credential hashes. Using
+    /// the target's credentials against restored data would fail
+    /// authentication. When the origin is unknown (orphan), this is
+    /// unchanged from the target's config and the caller is warned that
+    /// the password is whatever the backup's original credentials were.
     pub source_config: ServiceConfig,
     pub pool: &'a temps_database::DbConnection,
 }
@@ -471,6 +483,61 @@ pub struct ClusterMemberInfo {
     pub status: String,
 }
 
+/// Result of a single probe against a managed external service.
+/// Returned by `ExternalService::health_probe` so the monitor can record
+/// structured health history without the trait having to know about DB rows.
+#[derive(Debug, Clone)]
+pub struct HealthProbeResult {
+    pub status: HealthProbeStatus,
+    /// Round-trip probe latency, when measurable.
+    pub response_time_ms: Option<i32>,
+    /// Present when status is `Degraded` or `Down`. Never contains secrets.
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthProbeStatus {
+    Operational,
+    Degraded,
+    Down,
+}
+
+impl HealthProbeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Operational => "operational",
+            Self::Degraded => "degraded",
+            Self::Down => "down",
+        }
+    }
+}
+
+impl HealthProbeResult {
+    pub fn operational(response_time_ms: Option<i32>) -> Self {
+        Self {
+            status: HealthProbeStatus::Operational,
+            response_time_ms,
+            error_message: None,
+        }
+    }
+
+    pub fn down(message: impl Into<String>) -> Self {
+        Self {
+            status: HealthProbeStatus::Down,
+            response_time_ms: None,
+            error_message: Some(message.into()),
+        }
+    }
+
+    pub fn degraded(message: impl Into<String>, response_time_ms: Option<i32>) -> Self {
+        Self {
+            status: HealthProbeStatus::Degraded,
+            response_time_ms,
+            error_message: Some(message.into()),
+        }
+    }
+}
+
 #[async_trait]
 #[allow(clippy::too_many_arguments)]
 pub trait ExternalService: Send + Sync {
@@ -480,6 +547,23 @@ pub trait ExternalService: Send + Sync {
 
     /// Check if the service is healthy
     async fn health_check(&self) -> Result<bool>;
+
+    /// Structured health probe used by the background `ExternalServiceHealthMonitor`.
+    ///
+    /// Engines should override this to run a **real** check (Postgres `SELECT 1`,
+    /// Redis `PING`, MongoDB `ping`, S3 `HeadBucket`, …) against the
+    /// credentials in `service_config`. The default implementation returns
+    /// `Down` with a clear message so any engine that forgets to implement
+    /// this is visibly broken rather than silently green.
+    ///
+    /// Implementations MUST:
+    /// - Apply their own timeout (≤ 5s total is recommended).
+    /// - Never return secret material in `error_message`.
+    async fn health_probe(&self, _service_config: ServiceConfig) -> Result<HealthProbeResult> {
+        Ok(HealthProbeResult::down(
+            "health_probe not implemented for this service type",
+        ))
+    }
 
     /// Get service type
     fn get_type(&self) -> ServiceType;

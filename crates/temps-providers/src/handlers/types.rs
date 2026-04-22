@@ -1,3 +1,4 @@
+use crate::health_monitor::ExternalServiceHealthMonitor;
 use crate::{ExternalServiceManager, QueryService};
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,10 @@ pub struct AppState {
     pub external_service_manager: Arc<ExternalServiceManager>,
     pub audit_service: Arc<dyn AuditLogger>,
     pub query_service: Arc<QueryService>,
+    /// Background health monitor. Present when the server wires it during
+    /// startup (single-node control plane). `None` on workers or in tests
+    /// where the loop isn't running.
+    pub health_monitor: Option<Arc<ExternalServiceHealthMonitor>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -396,6 +401,98 @@ pub struct ProjectServiceInfo {
     pub id: i32,
     pub project: ProjectInfo,
     pub service: ExternalServiceInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ServiceHealthStatusEntryResponse {
+    pub service_id: i32,
+    /// "operational" | "degraded" | "down". `null` when the service has not
+    /// been probed yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "operational")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<String>,
+    pub consecutive_failures: i32,
+}
+
+impl From<crate::services::ServiceHealthStatusEntry> for ServiceHealthStatusEntryResponse {
+    fn from(e: crate::services::ServiceHealthStatusEntry) -> Self {
+        Self {
+            service_id: e.service_id,
+            status: e.status,
+            last_checked_at: e.last_checked_at,
+            consecutive_failures: e.consecutive_failures,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ServiceHealthStatusBatchResponse {
+    pub statuses: Vec<ServiceHealthStatusEntryResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct HealthCheckEntryResponse {
+    /// ISO 8601 timestamp of when the probe ran.
+    #[schema(example = "2026-04-22T11:30:00Z")]
+    pub checked_at: String,
+    /// "operational" | "degraded" | "down"
+    #[schema(example = "operational")]
+    pub status: String,
+    /// TCP connect latency in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_time_ms: Option<i32>,
+    /// Present only when the probe failed or was degraded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ServiceHealthResponse {
+    pub service_id: i32,
+    /// Current health. `null` if the service has not been probed yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "operational")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Consecutive failed probes. Alert fires at 3.
+    pub consecutive_failures: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_time_ms: Option<i32>,
+    /// Uptime percentage over the last 24 hours (0.0 — 100.0).
+    /// `null` when there is not enough history.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_24h_percent: Option<f64>,
+    /// Most recent checks, newest-first (capped at `limit`).
+    pub recent_checks: Vec<HealthCheckEntryResponse>,
+}
+
+impl From<crate::services::ServiceHealthSnapshot> for ServiceHealthResponse {
+    fn from(snap: crate::services::ServiceHealthSnapshot) -> Self {
+        Self {
+            service_id: snap.service_id,
+            status: snap.status,
+            last_checked_at: snap.last_checked_at,
+            last_error: snap.last_error,
+            consecutive_failures: snap.consecutive_failures,
+            response_time_ms: snap.response_time_ms,
+            uptime_24h_percent: snap.uptime_24h_percent,
+            recent_checks: snap
+                .recent_checks
+                .into_iter()
+                .map(|e| HealthCheckEntryResponse {
+                    checked_at: e.checked_at,
+                    status: e.status,
+                    response_time_ms: e.response_time_ms,
+                    error_message: e.error_message,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

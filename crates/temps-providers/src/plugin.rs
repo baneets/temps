@@ -10,6 +10,7 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::env_vars_provider_impl::ExternalServicesEnvProvider;
 use crate::handlers::{handlers, types::AppState};
+use crate::health_monitor::ExternalServiceHealthMonitor;
 use crate::services::ExternalServiceManager;
 
 /// Providers Plugin for managing external service integrations
@@ -69,6 +70,11 @@ impl TempsPlugin for ProvidersPlugin {
         let external_service_manager = context.require_service::<ExternalServiceManager>();
         let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
 
+        // Optional: the background health monitor. When the server wired it
+        // during startup it shows up here and the manual-health-check endpoint
+        // can reuse its same code path. Otherwise the endpoint returns 503.
+        let health_monitor = context.get_service::<ExternalServiceHealthMonitor>();
+
         // Create QueryService
         let query_service = Arc::new(crate::QueryService::new(external_service_manager.clone()));
 
@@ -77,6 +83,7 @@ impl TempsPlugin for ProvidersPlugin {
             external_service_manager,
             audit_service,
             query_service,
+            health_monitor,
         });
 
         // Configure routes with the app state

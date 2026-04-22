@@ -197,7 +197,14 @@ function NavPlugins({
         {items.map((item) => {
           const isActive =
             location.pathname === item.url ||
-            location.pathname.startsWith(item.url + '/')
+            (location.pathname.startsWith(item.url + '/') &&
+              !items.some(
+                (other) =>
+                  other.url !== item.url &&
+                  other.url.startsWith(item.url + '/') &&
+                  (location.pathname === other.url ||
+                    location.pathname.startsWith(other.url + '/'))
+              ))
           return (
             <SidebarMenuItem key={item.title}>
               <SidebarMenuButton
@@ -372,13 +379,40 @@ export default function AppSidebar() {
 function NavSection({
   label,
   items,
+  siblingUrls,
 }: {
   label: string
   items: { title: string; url: string; icon: LucideIcon }[]
+  // URLs of items in OTHER sections that share the sidebar. Used so a
+  // parent-like url (e.g. `/settings`) doesn't light up when a more
+  // specific sibling (`/settings/keys`) in a different section matches.
+  siblingUrls?: string[]
 }) {
   const location = useLocation()
   const { isMinimal, isMobile } = useSidebar()
   const compact = isMinimal && !isMobile
+  const allUrls = useMemo(
+    () => [...items.map((i) => i.url), ...(siblingUrls ?? [])],
+    [items, siblingUrls]
+  )
+  // Active = the single longest url (across this section + siblings)
+  // that is either an exact match or a path-prefix of the current
+  // pathname. Keeps only the most specific match highlighted.
+  const activeUrl = useMemo(
+    () =>
+      allUrls
+        .filter(
+          (url) =>
+            location.pathname === url ||
+            location.pathname.startsWith(url + '/')
+        )
+        .reduce<string | null>(
+          (best, url) =>
+            best === null || url.length > best.length ? url : best,
+          null
+        ),
+    [allUrls, location.pathname]
+  )
   return (
     <SidebarGroup
       className={
@@ -390,9 +424,7 @@ function NavSection({
       </SidebarGroupLabel>
       <SidebarMenu>
         {items.map((item) => {
-          const isActive =
-            location.pathname === item.url ||
-            location.pathname.startsWith(item.url + '/')
+          const isActive = item.url === activeUrl
           return (
             <SidebarMenuItem key={item.title}>
               <SidebarMenuButton
@@ -560,13 +592,28 @@ function DefaultNav({ pluginItems }: NavProps) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function SettingsNav({ onBack }: { onBack: () => void }) {
+  // Every url across every settings group. Each section gets the list
+  // minus its own items so active-state resolution sees the full tree
+  // (prevents `/settings` lighting up on `/settings/keys`).
+  const allSettingsUrls = settingsGroups.flatMap((g) =>
+    g.items.map((i) => i.url)
+  )
   return (
     <>
       <NavCommandTrigger />
       <SwapHeader title="Settings" onBack={onBack} />
-      {settingsGroups.map((group) => (
-        <NavSection key={group.label} label={group.label} items={group.items} />
-      ))}
+      {settingsGroups.map((group) => {
+        const ownUrls = new Set(group.items.map((i) => i.url))
+        const siblings = allSettingsUrls.filter((u) => !ownUrls.has(u))
+        return (
+          <NavSection
+            key={group.label}
+            label={group.label}
+            items={group.items}
+            siblingUrls={siblings}
+          />
+        )
+      })}
     </>
   )
 }

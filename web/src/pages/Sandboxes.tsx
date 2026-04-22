@@ -46,10 +46,7 @@ import {
   resumeSandboxMutation,
   stopSandboxMutation,
 } from '@/api/client/@tanstack/react-query.gen'
-import {
-  toSandboxView,
-  type SandboxView,
-} from '@/components/sandboxes/helpers'
+import { toSandboxView, type SandboxView } from '@/components/sandboxes/helpers'
 import { CreateSandboxDocs } from '@/components/sandboxes/CreateSandboxDocs'
 
 function statusVariant(
@@ -208,7 +205,6 @@ export default function Sandboxes() {
           <h1 className="text-2xl font-semibold tracking-tight">Sandboxes</h1>
           <p className="text-sm text-muted-foreground">
             Standalone containers for one-off commands, tests, or agent work.
-            {pageCount > 0 && <span className="ml-1 tabular-nums">· {pageCount}</span>}
           </p>
         </div>
         <div className="flex items-center gap-2">

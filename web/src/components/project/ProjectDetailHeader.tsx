@@ -1,9 +1,12 @@
 import { ProjectResponse } from '@/api/client'
+import { getLastDeploymentOptions } from '@/api/client/@tanstack/react-query.gen'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
+import { ReloadableImage } from '@/components/utils/ReloadableImage'
 import { cn } from '@/lib/utils'
 import { useDashboardHealth } from '@/hooks/useDashboardHealth'
+import { useQuery } from '@tanstack/react-query'
 import { Github, ExternalLink, Users } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
 
@@ -37,6 +40,12 @@ export function ProjectDetailHeader({
   const navigate = useNavigate()
   const healthQuery = useDashboardHealth([project.id])
   const health = healthQuery.data?.projects?.[String(project.id)]
+  const { data: lastDeployment } = useQuery({
+    ...getLastDeploymentOptions({ path: { id: project.id } }),
+    enabled: !!project.id,
+    refetchOnWindowFocus: true,
+  })
+  const screenshotLocation = lastDeployment?.screenshot_location
 
   const handleVisitorsClick = () => {
     if ((activeVisitorsCount?.active_visitors ?? 0) > 0) {
@@ -48,10 +57,24 @@ export function ProjectDetailHeader({
     <header className="flex h-12 sm:h-16 shrink-0 items-center gap-2 border-b px-3 sm:px-4">
       <div className="flex flex-1 items-center justify-between gap-4 min-w-0">
         <div className="flex items-center gap-4">
-          <Avatar className="size-8">
-            <AvatarImage src={`/api/projects/${project.id}/favicon`} />
-            <AvatarFallback>{project.name.charAt(0)}</AvatarFallback>
-          </Avatar>
+          {screenshotLocation ? (
+            <div className="size-8 shrink-0 overflow-hidden rounded-md border bg-muted/30">
+              <ReloadableImage
+                src={`/api/files${
+                  screenshotLocation.startsWith('/')
+                    ? screenshotLocation
+                    : '/' + screenshotLocation
+                }`}
+                alt={`${project.slug} preview`}
+                className="h-full w-full object-cover object-top"
+              />
+            </div>
+          ) : (
+            <Avatar className="size-8">
+              <AvatarImage src={`/api/projects/${project.id}/favicon`} />
+              <AvatarFallback>{project.name.charAt(0)}</AvatarFallback>
+            </Avatar>
+          )}
           <div className="flex items-center gap-2 min-w-0">
             <h1 className="text-base sm:text-lg font-semibold truncate">{project.slug}</h1>
             <Badge variant={project.last_deployment ? 'default' : 'outline'} className="hidden sm:inline-flex shrink-0">

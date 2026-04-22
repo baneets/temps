@@ -4,6 +4,7 @@ use super::repositories::{
 };
 use super::types::GitAppState as AppState;
 use super::types::GitAppState;
+use crate::services::connection_health::ConnectionHealthError;
 use crate::services::git_provider::GitProviderError;
 use crate::services::git_provider_manager::GitProviderManagerError;
 use crate::services::repository::RepositoryServiceError;
@@ -23,6 +24,7 @@ use temps_auth::{permission_check, Permission, RequireAuth};
 
 use temps_core::problemdetails::{new as problem_new, Problem};
 use temps_core::UtcDateTime;
+use temps_entities::git_provider_connections;
 use utoipa::ToSchema;
 
 // Convert RepositoryServiceError to Problem Details
@@ -132,6 +134,20 @@ impl From<GitProviderError> for Problem {
                 .with_type("https://docs.temps.sh/errors/internal_error")
                 .with_title("Internal Error")
                 .with_detail(msg),
+        }
+    }
+}
+
+impl From<ConnectionHealthError> for Problem {
+    fn from(error: ConnectionHealthError) -> Self {
+        match error {
+            ConnectionHealthError::NotFound { connection_id } => problem_new(StatusCode::NOT_FOUND)
+                .with_title("Connection Not Found")
+                .with_detail(format!("Git connection {} was not found", connection_id)),
+            ConnectionHealthError::Database(e) => problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail(e.to_string()),
+            ConnectionHealthError::ProviderManager(e) => e.into(),
         }
     }
 }
@@ -246,10 +262,40 @@ pub struct ConnectionResponse {
     pub syncing: bool,
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_synced_at: Option<UtcDateTime>,
+    /// Current health status: "healthy", "unhealthy", or "unknown".
+    pub health_status: String,
+    /// Human-readable reason when health_status is "unhealthy"; null otherwise.
+    pub health_message: Option<String>,
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub last_health_check_at: Option<UtcDateTime>,
+    pub consecutive_health_failures: i32,
     #[schema(value_type = String, format = DateTime)]
     pub created_at: UtcDateTime,
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: UtcDateTime,
+}
+
+impl From<git_provider_connections::Model> for ConnectionResponse {
+    fn from(conn: git_provider_connections::Model) -> Self {
+        Self {
+            id: conn.id,
+            provider_id: conn.provider_id,
+            user_id: conn.user_id,
+            account_name: conn.account_name,
+            account_type: conn.account_type,
+            installation_id: conn.installation_id,
+            is_active: conn.is_active,
+            is_expired: conn.is_expired,
+            syncing: conn.syncing,
+            last_synced_at: conn.last_synced_at,
+            health_status: conn.health_status,
+            health_message: conn.health_message,
+            last_health_check_at: conn.last_health_check_at,
+            consecutive_health_failures: conn.consecutive_health_failures,
+            created_at: conn.created_at,
+            updated_at: conn.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -577,20 +623,7 @@ pub async fn list_connections(
 
     let response_connections: Vec<ConnectionResponse> = connections
         .into_iter()
-        .map(|conn| ConnectionResponse {
-            id: conn.id,
-            provider_id: conn.provider_id,
-            user_id: conn.user_id,
-            account_name: conn.account_name,
-            account_type: conn.account_type,
-            installation_id: conn.installation_id,
-            is_active: conn.is_active,
-            is_expired: conn.is_expired,
-            syncing: conn.syncing,
-            last_synced_at: conn.last_synced_at,
-            created_at: conn.created_at,
-            updated_at: conn.updated_at,
-        })
+        .map(ConnectionResponse::from)
         .collect();
 
     Ok(Json(ConnectionListResponse {
@@ -1264,6 +1297,10 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
             "/git-connections/{connection_id}/validate",
             get(validate_connection),
         )
+        .route(
+            "/git-connections/{connection_id}/health-check",
+            post(run_connection_health_check),
+        )
         // Repository listing with advanced filtering
         .route("/repositories", get(list_synced_repositories))
         // Repository preset calculation
@@ -1538,6 +1575,7 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
         delete_connection,
         update_connection_token,
         validate_connection,
+        run_connection_health_check,
     ),
     components(
         schemas(
@@ -1807,20 +1845,7 @@ pub async fn get_provider_connections(
 
     let response: Vec<ConnectionResponse> = connections
         .into_iter()
-        .map(|conn| ConnectionResponse {
-            id: conn.id,
-            provider_id: conn.provider_id,
-            user_id: conn.user_id,
-            account_name: conn.account_name,
-            account_type: conn.account_type,
-            installation_id: conn.installation_id,
-            is_active: conn.is_active,
-            is_expired: conn.is_expired,
-            syncing: conn.syncing,
-            last_synced_at: conn.last_synced_at,
-            created_at: conn.created_at,
-            updated_at: conn.updated_at,
-        })
+        .map(ConnectionResponse::from)
         .collect();
 
     Ok((StatusCode::OK, Json(response)))
@@ -2182,4 +2207,48 @@ pub async fn validate_connection(
             "Connection is invalid or token expired".to_string()
         },
     }))
+}
+
+/// Run an on-demand health check for a git connection.
+///
+/// Probes the upstream (GitHub App, PAT, or OAuth token), persists the result,
+/// and fires admin notifications on status transitions. Returns the updated
+/// connection.
+#[utoipa::path(
+    post,
+    path = "/git-connections/{connection_id}/health-check",
+    params(
+        ("connection_id" = i32, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Health check completed", body = ConnectionResponse),
+        (status = 404, description = "Connection not found"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Git Provider Connections",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn run_connection_health_check(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<GitAppState>>,
+    Path(connection_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_check!(auth, Permission::GitConnectionsWrite);
+
+    state
+        .connection_health_service
+        .check_connection_health(connection_id)
+        .await?;
+
+    // Return the fresh connection row so the caller sees the new status
+    // without a second round-trip.
+    let connection = state
+        .git_provider_manager
+        .get_connection(connection_id)
+        .await?;
+
+    Ok(Json(ConnectionResponse::from(connection)))
 }

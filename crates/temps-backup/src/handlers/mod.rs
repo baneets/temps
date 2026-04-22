@@ -1,6 +1,7 @@
 pub(crate) mod audit;
 pub(crate) mod backup_handler;
 pub(crate) mod pg_upgrade_handler;
+pub(crate) mod restore_handler;
 pub(crate) mod types;
 
 // Re-export commonly used types and functions

@@ -1098,6 +1098,37 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         );
     }
 
+    // Start external service health monitoring (Postgres/Redis/MongoDB/RustFS TCP probes)
+    if let (Some(notification_service), Some(external_service_manager)) = (
+        service_context.get_service::<dyn temps_core::notifications::NotificationService>(),
+        service_context.get_service::<temps_providers::ExternalServiceManager>(),
+    ) {
+        use temps_providers::health_monitor::{
+            ExternalServiceHealthConfig, ExternalServiceHealthMonitor,
+        };
+        let health_monitor = Arc::new(ExternalServiceHealthMonitor::new(
+            db.clone(),
+            external_service_manager,
+            notification_service,
+            ExternalServiceHealthConfig::default(),
+        ));
+
+        // Register so the providers plugin can pick it up and expose a
+        // manual-trigger endpoint that reuses the monitor's check logic.
+        service_context.register_service(health_monitor.clone());
+
+        let loop_handle = health_monitor.clone();
+        tokio::spawn(async move {
+            loop_handle.start().await;
+        });
+
+        debug!("External service health monitor started (poll interval: 30s)");
+    } else {
+        tracing::warn!(
+            "NotificationService or ExternalServiceManager not available - external service health monitoring disabled."
+        );
+    }
+
     // OTel background tasks: anomaly detection and health computation require
     // iterating over active project IDs, which will be wired up when project
     // discovery is integrated. The rate limiter is self-cleaning (evicts on check).
