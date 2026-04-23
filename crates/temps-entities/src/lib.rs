@@ -56,6 +56,7 @@ pub mod nodes;
 pub mod notification_preferences;
 pub mod notification_providers;
 pub mod notifications;
+pub mod oauth_states;
 pub mod performance_metrics;
 pub mod postgres_major_upgrades;
 pub mod preset;

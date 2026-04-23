@@ -67,6 +67,8 @@ mod m20260401_000002_add_missing_email_events_columns;
 mod m20260421_000001_squash_apr_post_v006;
 mod m20260422_000001_external_service_health;
 mod m20260422_000002_add_git_connection_health;
+mod m20260423_000001_create_oauth_states;
+mod m20260423_000002_add_sync_progress_count;
 
 pub struct Migrator;
 
@@ -137,6 +139,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260421_000001_squash_apr_post_v006::Migration),
             Box::new(m20260422_000001_external_service_health::Migration),
             Box::new(m20260422_000002_add_git_connection_health::Migration),
+            Box::new(m20260423_000001_create_oauth_states::Migration),
+            Box::new(m20260423_000002_add_sync_progress_count::Migration),
         ]
     }
 }

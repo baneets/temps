@@ -212,13 +212,20 @@ export function ConnectionsCompactList({
       </Badge>
     )
 
-  const SyncBadge = ({ c }: { c: ConnectionResponse }) =>
-    c.syncing ? (
+  const SyncBadge = ({ c }: { c: ConnectionResponse }) => {
+    // `synced_repository_count` is served by the backend but hasn't been
+    // baked into the generated OpenAPI client types yet — runs of
+    // `bun run openapi-ts` after the new server picks it up will expose it
+    // typed. Until then, read it off at runtime.
+    const count = (c as unknown as { synced_repository_count?: number })
+      .synced_repository_count
+    return c.syncing ? (
       <Badge variant="outline" className="h-5 gap-0.5 px-1.5 text-[10px]">
         <RefreshCw className="h-2.5 w-2.5 animate-spin" />
-        Syncing
+        {count && count > 0 ? `Syncing · ${count.toLocaleString()}` : 'Syncing'}
       </Badge>
     ) : null
+  }
 
   const HealthBadge = ({ c }: { c: ConnectionResponse }) => {
     const checkedAt = c.last_health_check_at

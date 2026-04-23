@@ -323,6 +323,15 @@ pub struct Repository {
     pub pushed_at: Option<UtcDateTime>,
 }
 
+/// A single page of repositories returned by `GitProviderService::list_repositories_page`.
+/// `next_page` is `None` when the server has no more pages to return; the
+/// caller should stop paginating.
+#[derive(Debug, Clone)]
+pub struct RepositoryPage {
+    pub items: Vec<Repository>,
+    pub next_page: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Branch {
     pub name: String,
@@ -408,6 +417,38 @@ pub trait GitProviderService: Send + Sync {
         access_token: &str,
         organization: Option<&str>,
     ) -> Result<Vec<Repository>, GitProviderError>;
+
+    /// List a single page of repositories. Used by streaming sync so the
+    /// caller can flush each page to the database before fetching the next —
+    /// essential for tenants with thousands of repos where buffering the full
+    /// list is not feasible.
+    ///
+    /// Providers that don't implement this fall back to `list_repositories`
+    /// via the default implementation, which returns everything as a single
+    /// "page" with no `next_page`. Implementations that do support streaming
+    /// (e.g. GitLab) should override this.
+    async fn list_repositories_page(
+        &self,
+        access_token: &str,
+        organization: Option<&str>,
+        page: u32,
+    ) -> Result<RepositoryPage, GitProviderError> {
+        // Default: only return items on page 1, empty on any other page. This
+        // lets callers uniformly loop until `next_page` is `None` even against
+        // providers that buffer internally.
+        if page <= 1 {
+            let items = self.list_repositories(access_token, organization).await?;
+            Ok(RepositoryPage {
+                items,
+                next_page: None,
+            })
+        } else {
+            Ok(RepositoryPage {
+                items: Vec::new(),
+                next_page: None,
+            })
+        }
+    }
 
     /// Get a specific repository
     async fn get_repository(

@@ -91,6 +91,9 @@ impl From<GitProviderManagerError> for Problem {
             GitProviderManagerError::QueueError(msg) => problem_new(StatusCode::INTERNAL_SERVER_ERROR)
                 .with_title("Queue Error")
                 .with_detail(msg),
+            GitProviderManagerError::OAuthStateInvalid(msg) => problem_new(StatusCode::BAD_REQUEST)
+                .with_title("OAuth State Invalid")
+                .with_detail(msg),
         }
     }
 }
@@ -186,6 +189,30 @@ pub struct CreateGitLabOAuthRequest {
     pub base_url: Option<String>,
 }
 
+/// Partial-update payload for provider credentials. Every field is optional;
+/// only the fields the user re-enters are applied. The server validates that
+/// the fields supplied make sense for the provider's current auth_method
+/// (e.g. `app_id` + `private_key` only apply to GitHub Apps).
+#[derive(Debug, Serialize, Deserialize, ToSchema, Default)]
+pub struct UpdateProviderCredentialsRequest {
+    /// OAuth client ID (GitLab OAuth, GitHub App).
+    pub client_id: Option<String>,
+    /// OAuth client secret (GitLab OAuth, GitHub App).
+    pub client_secret: Option<String>,
+    /// Application ID (GitHub App integer as string; GitLab App string).
+    pub app_id: Option<String>,
+    /// GitLab App secret (not used by GitHub App — use `client_secret`).
+    pub app_secret: Option<String>,
+    /// GitHub App private key (PEM).
+    pub private_key: Option<String>,
+    /// GitHub App webhook secret.
+    pub webhook_secret: Option<String>,
+    /// OAuth redirect URI (GitLab OAuth / GitLab App).
+    pub redirect_uri: Option<String>,
+    /// PAT for PAT-type providers.
+    pub token: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ProviderResponse {
     pub id: i32,
@@ -262,6 +289,10 @@ pub struct ConnectionResponse {
     pub syncing: bool,
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_synced_at: Option<UtcDateTime>,
+    /// Running count of repositories persisted by the current (or most
+    /// recent) sync. Resets to 0 when a new sync begins; useful for showing
+    /// live progress on large syncs.
+    pub synced_repository_count: i32,
     /// Current health status: "healthy", "unhealthy", or "unknown".
     pub health_status: String,
     /// Human-readable reason when health_status is "unhealthy"; null otherwise.
@@ -288,6 +319,7 @@ impl From<git_provider_connections::Model> for ConnectionResponse {
             is_expired: conn.is_expired,
             syncing: conn.syncing,
             last_synced_at: conn.last_synced_at,
+            synced_repository_count: conn.synced_repository_count,
             health_status: conn.health_status,
             health_message: conn.health_message,
             last_health_check_at: conn.last_health_check_at,
@@ -1216,7 +1248,7 @@ pub async fn get_all_repositories_by_name(
 
 /// Configure routes for git providers
 pub fn configure_routes() -> axum::Router<Arc<AppState>> {
-    use axum::routing::{delete, get, post};
+    use axum::routing::{delete, get, patch, post};
 
     axum::Router::new()
         // Provider configuration management
@@ -1256,6 +1288,10 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/git-providers/gitlab/oauth",
             post(create_gitlab_oauth_provider),
+        )
+        .route(
+            "/git-providers/{provider_id}/credentials",
+            patch(update_git_provider_credentials),
         )
         // OAuth flow (provider-specific as it configures the provider)
         .route(
@@ -1378,6 +1414,12 @@ pub async fn start_git_provider_oauth(
 ) -> Result<impl IntoResponse, Problem> {
     permission_check!(auth, Permission::GitConnectionsCreate);
 
+    let user = auth.require_user().map_err(|msg| {
+        problem_new(StatusCode::FORBIDDEN)
+            .with_title("User Required")
+            .with_detail(msg)
+    })?;
+
     // Extract the host from request headers for dynamic callback URL
     let host = headers
         .get("host")
@@ -1392,7 +1434,7 @@ pub async fn start_git_provider_oauth(
 
     let (auth_url, _state) = state
         .git_provider_manager
-        .start_oauth_flow(provider_id, host)
+        .start_oauth_flow(provider_id, user.id, host)
         .await?;
     Ok(axum::response::Redirect::to(&auth_url))
 }
@@ -1419,10 +1461,7 @@ pub async fn handle_git_provider_oauth_callback(
     Path(provider_id): Path<i32>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
-    RequireAuth(auth): RequireAuth,
 ) -> Result<impl IntoResponse, Problem> {
-    permission_check!(auth, Permission::GitConnectionsCreate);
-
     let code = params.get("code").cloned().unwrap_or_default();
     let oauth_state = params.get("state").cloned().unwrap_or_default();
 
@@ -1430,6 +1469,26 @@ pub async fn handle_git_provider_oauth_callback(
         return Err(problem_new(StatusCode::BAD_REQUEST)
             .with_title("Missing Authorization Code")
             .with_detail("OAuth authorization code is required"));
+    }
+
+    if oauth_state.is_empty() {
+        return Err(problem_new(StatusCode::BAD_REQUEST)
+            .with_title("Missing OAuth State")
+            .with_detail("OAuth state parameter is required"));
+    }
+
+    // OAuth callbacks arrive cross-site from the provider; the browser doesn't
+    // carry our API bearer token. Identify the user via the server-issued state
+    // we persisted during start_oauth_flow.
+    let (state_user_id, state_provider_id) = state
+        .git_provider_manager
+        .consume_oauth_state(&oauth_state)
+        .await?;
+
+    if state_provider_id != provider_id {
+        return Err(problem_new(StatusCode::BAD_REQUEST)
+            .with_title("OAuth State Mismatch")
+            .with_detail("OAuth state does not match the requested provider"));
     }
 
     // Extract the host from request headers for consistent callback URL
@@ -1444,15 +1503,9 @@ pub async fn handle_git_provider_oauth_callback(
             format!("{}://{}/api", scheme, host)
         });
 
-    let user = auth.require_user().map_err(|msg| {
-        temps_core::problemdetails::new(StatusCode::FORBIDDEN)
-            .with_title("User Required")
-            .with_detail(msg)
-    })?;
-
     let connection = state
         .git_provider_manager
-        .handle_oauth_callback(provider_id, code, oauth_state, user.id, host)
+        .handle_oauth_callback(provider_id, code, oauth_state, state_user_id, host)
         .await?;
 
     // Redirect to success page or dashboard
@@ -1565,6 +1618,7 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
         create_github_pat_provider,
         create_gitlab_pat_provider,
         create_gitlab_oauth_provider,
+        update_git_provider_credentials,
         delete_git_provider,
         check_provider_deletion_safety,
         delete_provider_safely,
@@ -1593,6 +1647,7 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
             CreateGitHubPATRequest,
             CreateGitLabPATRequest,
             CreateGitLabOAuthRequest,
+            UpdateProviderCredentialsRequest,
             ProjectUsageInfoResponse,
             ProviderDeletionCheckResponse,
             UpdateTokenRequest,
@@ -1739,6 +1794,68 @@ pub async fn create_gitlab_oauth_provider(
 
     Ok((
         StatusCode::CREATED,
+        Json(ProviderResponse {
+            id: provider.id,
+            name: provider.name,
+            provider_type: provider.provider_type,
+            base_url: provider.base_url,
+            auth_method: provider.auth_method,
+            is_active: provider.is_active,
+            is_default: provider.is_default,
+            created_at: provider.created_at,
+            updated_at: provider.updated_at,
+        }),
+    ))
+}
+
+/// Partially update credentials for an existing git provider. Only the fields
+/// you send are replaced; omitted fields keep their stored values. Fields that
+/// don't apply to the provider's auth method are ignored on the service side.
+#[utoipa::path(
+    patch,
+    path = "/git-providers/{provider_id}/credentials",
+    params(
+        ("provider_id" = i32, Path, description = "Git provider ID")
+    ),
+    request_body = UpdateProviderCredentialsRequest,
+    responses(
+        (status = 200, description = "Credentials updated", body = ProviderResponse),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Provider not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Git Providers",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn update_git_provider_credentials(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<i32>,
+    Json(request): Json<UpdateProviderCredentialsRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_check!(auth, Permission::GitProvidersWrite);
+
+    let provider = state
+        .git_provider_manager
+        .update_provider_credentials(
+            provider_id,
+            request.client_id,
+            request.client_secret,
+            request.app_id,
+            request.app_secret,
+            request.private_key,
+            request.webhook_secret,
+            request.redirect_uri,
+            request.token,
+        )
+        .await?;
+
+    Ok((
+        StatusCode::OK,
         Json(ProviderResponse {
             id: provider.id,
             name: provider.name,

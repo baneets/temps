@@ -1,10 +1,16 @@
 import {
+  deleteGitProviderMutation,
   getGitProviderOptions,
   listConnectionsOptions,
+  listConnectionsQueryKey,
   syncRepositoriesMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { ProviderResponse } from '@/api/client/types.gen'
 import { ConnectionsCompactList } from '@/components/git/ConnectionsCompactList'
+import {
+  CredentialsEditorDialog,
+  providerHasEditableCredentials,
+} from '@/components/git-providers/CredentialsEditorDialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -63,6 +69,7 @@ export default function GitProviderDetail() {
   const { setBreadcrumbs } = useBreadcrumbs()
   const { feedback, showSuccess, showError, clearFeedback } = useFeedback()
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showCredentialsDialog, setShowCredentialsDialog] = useState(false)
   const queryClient = useQueryClient()
 
   const providerId = parseInt(id || '0', 10)
@@ -89,6 +96,17 @@ export default function GitProviderDetail() {
       data?.connections?.filter(
         (connection) => connection.provider_id === providerId
       ) || [],
+    // Poll every 2s while any connection under this provider is syncing so
+    // the running repo count + "Syncing" badge advance live. Polling stops
+    // automatically once no connection reports `syncing=true`, keeping idle
+    // tabs quiet.
+    refetchInterval: (query) => {
+      const anySyncing = query.state.data?.connections?.some(
+        (c) => c.provider_id === providerId && c.syncing,
+      )
+      return anySyncing ? 2000 : false
+    },
+    refetchIntervalInBackground: false,
   })
 
   const syncMutation = useMutation({
@@ -96,12 +114,43 @@ export default function GitProviderDetail() {
     meta: {
       errorTitle: 'Failed to sync repositories',
     },
+    // The server flips `syncing=true` at the very start of the request, so a
+    // refetch kicked off the moment we fire the mutation will see the row
+    // already in its syncing state. Without this the user saw nothing change
+    // until the full sync finished (potentially minutes on 20k-repo orgs).
+    onMutate: () => {
+      queryClient.invalidateQueries({ queryKey: listConnectionsQueryKey({}) })
+    },
     onSuccess: () => {
       showSuccess('Repositories synced successfully!')
       refetchConnections()
-      queryClient.invalidateQueries({ queryKey: ['listConnections'] })
+      queryClient.invalidateQueries({ queryKey: listConnectionsQueryKey({}) })
+    },
+    onError: () => {
+      // Server resets `syncing=false` in its cleanup path, so just refresh.
+      queryClient.invalidateQueries({ queryKey: listConnectionsQueryKey({}) })
     },
   })
+
+  const deleteMutation = useMutation({
+    ...deleteGitProviderMutation(),
+    onSuccess: () => {
+      toast.success('Git provider deleted successfully')
+      queryClient.invalidateQueries({ queryKey: ['listGitProviders'] })
+      queryClient.invalidateQueries({ queryKey: ['listConnections'] })
+      setShowDeleteDialog(false)
+      navigate('/git-providers')
+    },
+    onError: (err: Error) => {
+      showError(`Failed to delete provider: ${err?.message || 'Unknown error'}`)
+      setShowDeleteDialog(false)
+    },
+  })
+
+  const handleDelete = () => {
+    if (!provider) return
+    deleteMutation.mutate({ path: { provider_id: provider.id } })
+  }
 
   const handleSyncRepositories = (connectionId: number) => {
     syncMutation.mutate({
@@ -339,6 +388,17 @@ export default function GitProviderDetail() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {providerHasEditableCredentials(provider) && (
+                  <DropdownMenuItem
+                    onSelect={(e) => {
+                      e.preventDefault()
+                      setShowCredentialsDialog(true)
+                    }}
+                  >
+                    <Key className="mr-2 h-4 w-4" />
+                    Edit Credentials
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive"
                   onSelect={(e) => {
@@ -473,25 +533,45 @@ export default function GitProviderDetail() {
         </Card>
       </div>
 
+      {/* Edit Credentials Dialog */}
+      <CredentialsEditorDialog
+        provider={provider}
+        open={showCredentialsDialog}
+        onOpenChange={setShowCredentialsDialog}
+      />
+
       {/* Delete Confirmation Dialog */}
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Git Provider</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this git provider? This action
-              cannot be undone.
+              Are you sure you want to delete &quot;{provider.name}&quot;? This
+              action cannot be undone. Providers with existing connections
+              cannot be deleted — remove connections first.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => setShowDeleteDialog(false)}
+              disabled={deleteMutation.isPending}
             >
               Cancel
             </Button>
-            <Button variant="destructive" disabled>
-              Delete Provider
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete Provider'
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

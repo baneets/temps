@@ -6,7 +6,6 @@ use axum::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use temps_auth::{permission_check, Permission, RequireAuth};
 use temps_core::problemdetails::{new as problem_new, Problem};
 use tracing::info;
 
@@ -14,7 +13,10 @@ use super::types::GitAppState as AppState;
 
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
-        // GitLab OAuth callback endpoint
+        // GitLab OAuth callback endpoint. This is a cross-site redirect target
+        // and MUST NOT require caller auth: the browser won't carry our API
+        // bearer token. The caller identity is recovered from the server-issued
+        // `state` param (see GitProviderManager::consume_oauth_state).
         .route(
             "/webhook/git/gitlab/auth",
             axum::routing::get(gitlab_oauth_callback),
@@ -24,11 +26,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
 /// Handle GitLab OAuth callback
 async fn gitlab_oauth_callback(
     State(state): State<Arc<AppState>>,
-    RequireAuth(auth): RequireAuth,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Redirect, Problem> {
-    permission_check!(auth, Permission::GitConnectionsCreate);
-
     // Extract OAuth parameters
     let code = params
         .get("code")
@@ -39,53 +38,31 @@ async fn gitlab_oauth_callback(
         })?
         .clone();
 
-    let state_param = params.get("state").cloned();
+    let oauth_state = params.get("state").cloned().ok_or_else(|| {
+        problem_new(StatusCode::BAD_REQUEST)
+            .with_title("Missing OAuth State")
+            .with_detail("The 'state' parameter is required for GitLab OAuth callback")
+    })?;
 
     info!(
-        "GitLab OAuth callback received - code: {}, state: {:?}",
-        code, state_param
+        "GitLab OAuth callback received - code: {}, state: {}",
+        code, oauth_state
     );
 
-    // Get the GitLab provider ID from the state or from a default configuration
-    // For now, we'll need to determine which GitLab provider this is for
-    // In a real implementation, you might encode the provider_id in the state parameter
-
-    // Find the GitLab provider
-    // This is a simplified approach - in production, you'd want to encode the provider_id in the state
-    let providers = state
+    // Recover the user + provider that started this flow. This replaces the
+    // RequireAuth extractor we'd use on a normal endpoint.
+    let (user_id, provider_id) = state
         .git_provider_manager
-        .list_providers()
-        .await
-        .map_err(|e| {
-            problem_new(StatusCode::INTERNAL_SERVER_ERROR)
-                .with_title("Failed to list providers")
-                .with_detail(format!("Error: {}", e))
-        })?;
-
-    let gitlab_provider = providers
-        .into_iter()
-        .find(|p| p.provider_type == "gitlab")
-        .ok_or_else(|| {
-            problem_new(StatusCode::NOT_FOUND)
-                .with_title("GitLab Provider Not Found")
-                .with_detail("No GitLab provider configured in the system")
-        })?;
-
-    // Get user ID - deployment tokens are not allowed for OAuth callbacks
-    let user = auth.require_user().map_err(|msg| {
-        problem_new(StatusCode::FORBIDDEN)
-            .with_title("User Required")
-            .with_detail(msg)
-    })?;
-    let user_id = user.id;
+        .consume_oauth_state(&oauth_state)
+        .await?;
 
     // Handle the OAuth callback
     let connection = state
         .git_provider_manager
         .handle_oauth_callback(
-            gitlab_provider.id,
+            provider_id,
             code,
-            state_param.unwrap_or_default(),
+            oauth_state,
             user_id,
             None, // host_override - not needed as we use external_url from config
         )
@@ -112,7 +89,7 @@ async fn gitlab_oauth_callback(
     // Redirect to the git provider page with success status
     let redirect_url = format!(
         "{}/git-providers/{}?status=connected",
-        external_url, gitlab_provider.id
+        external_url, provider_id
     );
 
     Ok(Redirect::to(&redirect_url))

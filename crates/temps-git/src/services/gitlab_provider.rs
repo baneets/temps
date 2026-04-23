@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, PullRequest, Repository, User, WebhookConfig,
+    GitProviderType, PullRequest, Repository, RepositoryPage, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -411,25 +411,78 @@ impl GitProviderService for GitLabProvider {
         access_token: &str,
         organization: Option<&str>,
     ) -> Result<Vec<Repository>, GitProviderError> {
+        // Thin wrapper around `list_repositories_page`. Kept for callers that
+        // don't care about streaming (e.g. `list_repositories_by_connection`
+        // which just wants a snapshot). Large syncs should use the paged API
+        // directly so they can flush per page.
+        const MAX_PAGES: u32 = 200;
+        let mut all = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let RepositoryPage { items, next_page } = self
+                .list_repositories_page(access_token, organization, page)
+                .await?;
+            all.extend(items);
+            match next_page {
+                Some(next) if next > page && page < MAX_PAGES => page = next,
+                _ => break,
+            }
+        }
+        Ok(all)
+    }
+
+    async fn list_repositories_page(
+        &self,
+        access_token: &str,
+        organization: Option<&str>,
+        page: u32,
+    ) -> Result<RepositoryPage, GitProviderError> {
         let client = self.get_client();
         let headers = self.get_headers(access_token);
 
-        let url = if let Some(org) = organization {
-            format!("{}/api/v4/groups/{}/projects", self.base_url, org)
+        // GitLab caps per_page at 100. The silent default of 20 was the reason
+        // nested-group users lost repos past the first page.
+        const PER_PAGE: u32 = 100;
+        let page = page.max(1);
+
+        // Group paths can include slashes (nested groups like `foo/bar`).
+        // GitLab's REST API requires them to be URL-encoded as a single path
+        // segment. include_subgroups=true: without this, projects in
+        // descendant groups are not returned. archived=false skips stale
+        // archived projects. The /projects?membership=true endpoint doesn't
+        // accept include_subgroups — membership already spans subgroups.
+        let base_url = if let Some(org) = organization {
+            let encoded = urlencoding::encode(org);
+            format!(
+                "{}/api/v4/groups/{}/projects?include_subgroups=true&archived=false",
+                self.base_url, encoded
+            )
         } else {
-            format!("{}/api/v4/projects?membership=true", self.base_url)
+            format!(
+                "{}/api/v4/projects?membership=true&archived=false",
+                self.base_url
+            )
         };
+        let paged_url = format!("{}&per_page={}&page={}", base_url, PER_PAGE, page);
 
         let response = self
-            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .send_with_retry(|| client.get(&paged_url).headers(headers.clone()))
             .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
-                "Failed to list repositories: {}",
+                "Failed to list repositories (page {}): {}",
+                page,
                 response.status()
             )));
         }
+
+        // Capture pagination hints BEFORE consuming the body.
+        let next_page_header = response
+            .headers()
+            .get("x-next-page")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u32>().ok());
 
         #[derive(Deserialize)]
         struct GitLabProject {
@@ -453,11 +506,16 @@ impl GitProviderService for GitLabProvider {
             .await
             .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
 
-        let repositories = projects
+        let received = projects.len();
+        let items: Vec<Repository> = projects
             .into_iter()
             .map(|p| {
-                let parts: Vec<&str> = p.path_with_namespace.split('/').collect();
-                let owner = parts[0].to_string();
+                let owner = p
+                    .path_with_namespace
+                    .split('/')
+                    .next()
+                    .unwrap_or(&p.path_with_namespace)
+                    .to_string();
 
                 Repository {
                     id: p.id.to_string(),
@@ -470,8 +528,8 @@ impl GitProviderService for GitLabProvider {
                     clone_url: p.http_url_to_repo,
                     ssh_url: p.ssh_url_to_repo,
                     web_url: p.web_url,
-                    language: None, // GitLab API requires separate call for languages
-                    size: 0,        // Would need separate API call
+                    language: None,
+                    size: 0,
                     stars: p.star_count,
                     forks: p.forks_count,
                     created_at: chrono::DateTime::parse_from_rfc3339(&p.created_at)
@@ -485,7 +543,15 @@ impl GitProviderService for GitLabProvider {
             })
             .collect();
 
-        Ok(repositories)
+        // Only advertise a next page when GitLab says so AND the current page
+        // was full. If either signal is missing we're done — some self-hosted
+        // instances omit the X-Next-Page header entirely.
+        let next_page = match next_page_header {
+            Some(next) if next > page && (received as u32) == PER_PAGE => Some(next),
+            _ => None,
+        };
+
+        Ok(RepositoryPage { items, next_page })
     }
 
     async fn get_repository(
