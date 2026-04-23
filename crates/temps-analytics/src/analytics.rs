@@ -3482,14 +3482,14 @@ WHERE project_id = $1
 
         // Top entry pages (sorted by entry_count DESC)
         let mut top_entry_pages = all_entries.clone();
-        top_entry_pages.sort_by(|a, b| b.entry_count.cmp(&a.entry_count));
+        top_entry_pages.sort_by_key(|b| std::cmp::Reverse(b.entry_count));
         top_entry_pages.truncate(limit as usize);
         // Remove pages with 0 entries
         top_entry_pages.retain(|p| p.entry_count > 0);
 
         // Top exit pages (sorted by exit_count DESC)
         let mut top_exit_pages = all_entries.clone();
-        top_exit_pages.sort_by(|a, b| b.exit_count.cmp(&a.exit_count));
+        top_exit_pages.sort_by_key(|b| std::cmp::Reverse(b.exit_count));
         top_exit_pages.truncate(limit as usize);
         top_exit_pages.retain(|p| p.exit_count > 0);
 

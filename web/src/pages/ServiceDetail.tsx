@@ -76,6 +76,8 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowUpCircle,
+  ChevronLeft,
+  ChevronRight,
   Database,
   DatabaseBackup,
   Eye,
@@ -212,6 +214,40 @@ export function ServiceDetail() {
     )
     return rows
   }, [serviceName, s3Sources, sourceBackupQueries])
+
+  const BACKUPS_PAGE_SIZE = 5
+  const [backupsPage, setBackupsPage] = useState(1)
+  const backupsTotalPages = Math.max(
+    1,
+    Math.ceil(serviceBackups.length / BACKUPS_PAGE_SIZE),
+  )
+
+  useEffect(() => {
+    if (backupsPage > backupsTotalPages) {
+      setBackupsPage(backupsTotalPages)
+    }
+  }, [backupsPage, backupsTotalPages])
+
+  const paginatedBackups = useMemo(
+    () =>
+      serviceBackups.slice(
+        (backupsPage - 1) * BACKUPS_PAGE_SIZE,
+        backupsPage * BACKUPS_PAGE_SIZE,
+      ),
+    [serviceBackups, backupsPage],
+  )
+
+  const backupsPageWindow = useMemo(() => {
+    const windowSize = Math.min(5, backupsTotalPages)
+    const start = Math.max(
+      1,
+      Math.min(
+        backupsPage - Math.floor(windowSize / 2),
+        backupsTotalPages - windowSize + 1,
+      ),
+    )
+    return Array.from({ length: windowSize }, (_, idx) => start + idx)
+  }, [backupsPage, backupsTotalPages])
 
   const [isLinkPopoverOpen, setIsLinkPopoverOpen] = useState(false)
 
@@ -910,7 +946,7 @@ export function ServiceDetail() {
                 </div>
               ) : (
                 <ul role="list" className="divide-y divide-border">
-                  {serviceBackups.slice(0, 10).map((backup) => {
+                  {paginatedBackups.map((backup) => {
                     const key = backup.backup_id || `${backup.source_id}-${backup.location}`
                     const isFailed = backup.state === 'failed'
                     const isRunning = backup.state === 'running'
@@ -974,11 +1010,63 @@ export function ServiceDetail() {
                   })}
                 </ul>
               )}
-              {serviceBackups.length > 10 && (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Showing the 10 most recent backups. Visit the relevant S3
-                  source for the full history.
-                </p>
+              {backupsTotalPages > 1 && (
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mt-4">
+                  <div className="text-sm text-muted-foreground">
+                    <span className="hidden sm:inline tabular-nums">
+                      Showing {(backupsPage - 1) * BACKUPS_PAGE_SIZE + 1} to{' '}
+                      {Math.min(
+                        backupsPage * BACKUPS_PAGE_SIZE,
+                        serviceBackups.length,
+                      )}{' '}
+                      of {serviceBackups.length} backups
+                    </span>
+                    <span className="sm:hidden tabular-nums">
+                      {backupsPage} / {backupsTotalPages}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setBackupsPage((p) => Math.max(1, p - 1))
+                      }
+                      disabled={backupsPage === 1}
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      <span className="hidden sm:inline">Previous</span>
+                    </Button>
+                    <div className="hidden sm:flex items-center gap-1">
+                      {backupsPageWindow.map((pageNum) => (
+                        <Button
+                          key={pageNum}
+                          variant={
+                            pageNum === backupsPage ? 'default' : 'outline'
+                          }
+                          size="sm"
+                          onClick={() => setBackupsPage(pageNum)}
+                          className="w-10"
+                        >
+                          {pageNum}
+                        </Button>
+                      ))}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setBackupsPage((p) =>
+                          Math.min(backupsTotalPages, p + 1),
+                        )
+                      }
+                      disabled={backupsPage === backupsTotalPages}
+                    >
+                      <span className="hidden sm:inline">Next</span>
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>

@@ -50,6 +50,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Database,
   Loader2,
@@ -177,7 +179,7 @@ export function ServiceRestore() {
   const filteredBackups = useMemo(() => {
     const engine = (service?.service_type ?? '').toLowerCase()
     const q = search.trim().toLowerCase()
-    return allBackups.filter((b) => {
+    const rows = allBackups.filter((b) => {
       if (!engine) return false
       if (!enginesCompatible(b.engine, engine)) return false
       if (!q) return true
@@ -187,7 +189,50 @@ export function ServiceRestore() {
         (b.location ?? '').toLowerCase().includes(q)
       )
     })
+    return [...rows].sort((a, b) => {
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0
+      return tb - ta
+    })
   }, [allBackups, service?.service_type, search])
+
+  const BACKUPS_PAGE_SIZE = 5
+  const [backupsPage, setBackupsPage] = useState(1)
+  const backupsTotalPages = Math.max(
+    1,
+    Math.ceil(filteredBackups.length / BACKUPS_PAGE_SIZE),
+  )
+
+  useEffect(() => {
+    if (backupsPage > backupsTotalPages) {
+      setBackupsPage(backupsTotalPages)
+    }
+  }, [backupsPage, backupsTotalPages])
+
+  useEffect(() => {
+    setBackupsPage(1)
+  }, [search, selectedSourceId])
+
+  const paginatedBackups = useMemo(
+    () =>
+      filteredBackups.slice(
+        (backupsPage - 1) * BACKUPS_PAGE_SIZE,
+        backupsPage * BACKUPS_PAGE_SIZE,
+      ),
+    [filteredBackups, backupsPage],
+  )
+
+  const backupsPageWindow = useMemo(() => {
+    const windowSize = Math.min(5, backupsTotalPages)
+    const start = Math.max(
+      1,
+      Math.min(
+        backupsPage - Math.floor(windowSize / 2),
+        backupsTotalPages - windowSize + 1,
+      ),
+    )
+    return Array.from({ length: windowSize }, (_, idx) => start + idx)
+  }, [backupsPage, backupsTotalPages])
 
   // Incompat backups (dropped above) — count for context so user isn't confused
   const incompatCount = useMemo(() => {
@@ -539,7 +584,7 @@ export function ServiceRestore() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredBackups.map((b) => {
+                  {paginatedBackups.map((b) => {
                     const isSel =
                       selectedBackup &&
                       selectedBackup.location === b.location &&
@@ -589,6 +634,59 @@ export function ServiceRestore() {
                   })}
                 </TableBody>
               </Table>
+            </div>
+          )}
+
+          {!backupsLoading && !backupsError && backupsTotalPages > 1 && (
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-sm text-muted-foreground">
+                <span className="hidden sm:inline tabular-nums">
+                  Showing {(backupsPage - 1) * BACKUPS_PAGE_SIZE + 1} to{' '}
+                  {Math.min(
+                    backupsPage * BACKUPS_PAGE_SIZE,
+                    filteredBackups.length,
+                  )}{' '}
+                  of {filteredBackups.length} backups
+                </span>
+                <span className="sm:hidden tabular-nums">
+                  {backupsPage} / {backupsTotalPages}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setBackupsPage((p) => Math.max(1, p - 1))}
+                  disabled={backupsPage === 1}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  <span className="hidden sm:inline">Previous</span>
+                </Button>
+                <div className="hidden sm:flex items-center gap-1">
+                  {backupsPageWindow.map((pageNum) => (
+                    <Button
+                      key={pageNum}
+                      variant={pageNum === backupsPage ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setBackupsPage(pageNum)}
+                      className="w-10"
+                    >
+                      {pageNum}
+                    </Button>
+                  ))}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    setBackupsPage((p) => Math.min(backupsTotalPages, p + 1))
+                  }
+                  disabled={backupsPage === backupsTotalPages}
+                >
+                  <span className="hidden sm:inline">Next</span>
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           )}
 
