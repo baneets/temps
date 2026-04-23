@@ -73,6 +73,21 @@ const PHASES: Array<{ id: string; label: string }> = [
   { id: 'completed', label: 'Completed' },
 ]
 
+// Engine-family check — mirror of the backend `engines_compatible` helper in
+// crates/temps-backup/src/services/restore.rs. S3-compatible object stores
+// all share the mc-mirror restore path and are mutually restorable.
+const OBJECT_STORE_FAMILY = new Set(['s3', 'rustfs', 'minio', 'blob'])
+function enginesCompatible(
+  backupEngine: string | null | undefined,
+  targetEngine: string,
+): boolean {
+  const a = (backupEngine ?? '').toLowerCase()
+  const b = targetEngine.toLowerCase()
+  if (!a) return false
+  if (a === b) return true
+  return OBJECT_STORE_FAMILY.has(a) && OBJECT_STORE_FAMILY.has(b)
+}
+
 export function ServiceRestore() {
   const { id } = useParams<{ id: string }>()
   const serviceId = id ? Number(id) : NaN
@@ -153,17 +168,18 @@ export function ServiceRestore() {
   const allBackups: SourceBackupEntry[] =
     (backupIndex as { backups?: SourceBackupEntry[] } | undefined)?.backups ?? []
 
-  // Filter:
-  // - engine compat (only same-engine backups)
-  // - search matches service name or backup id
+  // Filter rule: the backup row's `engine` must be in the same engine family
+  // as the target service. Today the only multi-engine family is the
+  // S3-compatible object stores (s3/rustfs/minio/blob), which all use the
+  // same mc-mirror restore path. Every other engine is its own family.
+  // Missing/null engine is still an exclusion — control-plane backups have
+  // no engine tag and shouldn't slip into a service restore picker.
   const filteredBackups = useMemo(() => {
-    const engine = service?.service_type ?? ''
+    const engine = (service?.service_type ?? '').toLowerCase()
     const q = search.trim().toLowerCase()
     return allBackups.filter((b) => {
-      // Engine compat
-      if (b.engine && engine && b.engine.toLowerCase() !== engine.toLowerCase()) {
-        return false
-      }
+      if (!engine) return false
+      if (!enginesCompatible(b.engine, engine)) return false
       if (!q) return true
       return (
         (b.origin_service_name ?? '').toLowerCase().includes(q) ||
@@ -175,10 +191,9 @@ export function ServiceRestore() {
 
   // Incompat backups (dropped above) — count for context so user isn't confused
   const incompatCount = useMemo(() => {
-    const engine = service?.service_type ?? ''
-    return allBackups.filter(
-      (b) => b.engine && engine && b.engine.toLowerCase() !== engine.toLowerCase(),
-    ).length
+    const engine = (service?.service_type ?? '').toLowerCase()
+    if (!engine) return 0
+    return allBackups.filter((b) => !enginesCompatible(b.engine, engine)).length
   }, [allBackups, service?.service_type])
 
   // ----- Run polling --------------------------------------------------------

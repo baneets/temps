@@ -4,7 +4,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// Default RustFS Docker image
-pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:1.0.0-alpha.78";
+pub const DEFAULT_RUSTFS_IMAGE: &str = "rustfs/rustfs:1.0.0-alpha.98";
 /// Default container name
 pub const DEFAULT_CONTAINER_NAME: &str = "temps-blob-rustfs";
 /// Default volume name
@@ -15,7 +15,7 @@ pub const DEFAULT_BUCKET_NAME: &str = "temps-blobs";
 /// User-provided configuration for Blob service (with defaults)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BlobInputConfig {
-    /// Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.78")
+    /// Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.98")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub docker_image: Option<String>,
 
@@ -112,7 +112,7 @@ impl BlobConfig {
 
     /// Get the version from the image tag
     /// Examples:
-    /// - RustFS: "1.0.0-alpha.78" -> "1.0.0-alpha.78"
+    /// - RustFS: "1.0.0-alpha.98" -> "1.0.0-alpha.98"
     /// - Legacy MinIO: "RELEASE.2024-11-07T00-52-20Z" -> "2024-11-07"
     pub fn version(&self) -> String {
         let tag = self.image_tag();
@@ -196,19 +196,19 @@ mod tests {
     #[test]
     fn test_image_name_and_tag() {
         let config = BlobConfig {
-            docker_image: "rustfs/rustfs:1.0.0-alpha.78".to_string(),
+            docker_image: "rustfs/rustfs:1.0.0-alpha.98".to_string(),
             ..Default::default()
         };
 
         assert_eq!(config.image_name(), "rustfs/rustfs");
-        assert_eq!(config.image_tag(), "1.0.0-alpha.78");
+        assert_eq!(config.image_tag(), "1.0.0-alpha.98");
     }
 
     #[test]
     fn test_version_extraction() {
         let tests = vec![
             // RustFS versions
-            ("rustfs/rustfs:1.0.0-alpha.78", "1.0.0-alpha.78"),
+            ("rustfs/rustfs:1.0.0-alpha.98", "1.0.0-alpha.98"),
             ("rustfs/rustfs:1.0.0", "1.0.0"),
             ("rustfs/rustfs:latest", "latest"),
             // Legacy MinIO versions (backward compatibility)

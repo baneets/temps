@@ -298,7 +298,7 @@ impl RestoreService {
         // Engine compat.
         let engine_from_backup = backup_engine_hint.clone();
         if let Some(engine) = &engine_from_backup {
-            if !engine.eq_ignore_ascii_case(&target.service_type) {
+            if !engines_compatible(engine, &target.service_type) {
                 errors.push(format!(
                     "Engine mismatch: backup is '{}' but target '{}' is '{}'.",
                     engine, target.name, target.service_type
@@ -679,7 +679,7 @@ impl RestoreService {
         // Engine-compat guard: refuse to restore a postgres backup onto a
         // redis target, etc.
         if let Some(engine) = &backup_engine_hint {
-            if !engine.eq_ignore_ascii_case(&target.service_type) {
+            if !engines_compatible(engine, &target.service_type) {
                 return Err(RestoreError::Validation {
                     message: format!(
                         "Engine mismatch: backup is '{}', target service '{}' is '{}'. Restore requires matching engines.",
@@ -860,6 +860,23 @@ impl RestoreService {
             .await?
             .ok_or(RestoreError::ServiceNotFound { service_id: id })
     }
+}
+
+/// Engine-family check: two engines are restore-compatible if they
+/// speak the same wire protocol and share the same backup/restore path.
+///
+/// Today there's exactly one family: the S3-compatible object stores.
+/// A RustFS backup can be restored onto a MinIO/S3 target (and back)
+/// because both are just buckets of opaque objects mirrored via `mc`.
+/// Postgres/Redis/Mongo each form their own single-engine family.
+fn engines_compatible(a: &str, b: &str) -> bool {
+    let a = a.to_ascii_lowercase();
+    let b = b.to_ascii_lowercase();
+    if a == b {
+        return true;
+    }
+    let object_store = ["s3", "rustfs", "minio", "blob"];
+    object_store.contains(&a.as_str()) && object_store.contains(&b.as_str())
 }
 
 /// Worker: marks the run through phases, dispatches to the trait, and
@@ -1094,8 +1111,25 @@ async fn run_restore_inner(
                                 origin_id, target_service.id
                             );
                         } else {
+                            // Online restore (Mongo). Don't overwrite the
+                            // target's live-auth password, but expose the
+                            // origin's as `_alt_password` so the engine
+                            // can use it as a fallback if a prior failed
+                            // restore already flipped admin.system.users.
+                            if let (Some(target_params), Some(origin_password)) = (
+                                source_config.parameters.as_object_mut(),
+                                origin_cfg
+                                    .parameters
+                                    .get("password")
+                                    .and_then(|v| v.as_str()),
+                            ) {
+                                target_params.insert(
+                                    "_alt_password".to_string(),
+                                    serde_json::Value::String(origin_password.to_string()),
+                                );
+                            }
                             info!(
-                                "Engine '{}' restore is online — NOT merging origin credentials into pre-restore config (would break live-mongod auth). Origin password captured for post-restore config patch.",
+                                "Engine '{}' restore is online — attached origin password as _alt_password fallback for auth probe. Origin password captured for post-restore config patch.",
                                 target_service.service_type
                             );
                         }
@@ -1147,6 +1181,18 @@ async fn run_restore_inner(
         bucket_name: s3_source.bucket_name.clone(),
         bucket_path: s3_source.bucket_path.clone(),
         force_path_style: s3_source.force_path_style.unwrap_or(true),
+    };
+
+    // Build a plaintext copy of the source row. The original model carries
+    // ENCRYPTED access/secret keys; any engine that reaches into `s3_source`
+    // for mc-alias setup (s3/rustfs/blob) needs plaintext or it will pass
+    // ciphertext to mc and get "not signed up" back. `backup_to_s3` already
+    // decrypts before passing; the restore dispatch path did not — that was
+    // the source of the in-place-restore auth failure.
+    let s3_source_plain = temps_entities::s3_sources::Model {
+        access_key_id: decrypted_access_key.clone(),
+        secret_key: decrypted_secret_key.clone(),
+        ..s3_source.clone()
     };
 
     let s3_client = build_s3_client(&s3_credentials);
@@ -1210,7 +1256,7 @@ async fn run_restore_inner(
     let ctx = RestoreContext {
         s3_client: &s3_client,
         s3_credentials: &s3_credentials,
-        s3_source: &s3_source,
+        s3_source: &s3_source_plain,
         backup: &backup_model,
         backup_location: &backup_model.s3_location,
         source_service: &target_service,
@@ -1225,7 +1271,7 @@ async fn run_restore_inner(
                     &s3_client,
                     &s3_credentials,
                     &backup_model.s3_location,
-                    &s3_source,
+                    &s3_source_plain,
                     source_config.clone(),
                 )
                 .await

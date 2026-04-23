@@ -292,7 +292,7 @@ impl ParameterStrategy for S3ParameterStrategy {
         if is_empty_value(params.get("docker_image")) {
             params.insert(
                 "docker_image".to_string(),
-                JsonValue::String("rustfs/rustfs:1.0.0-alpha.78".to_string()),
+                JsonValue::String("rustfs/rustfs:1.0.0-alpha.98".to_string()),
             );
         }
 
@@ -404,7 +404,7 @@ impl ParameterStrategy for S3ParameterStrategy {
                 "docker_image": {
                     "type": "string",
                     "description": "Docker image (updateable)",
-                    "default": "rustfs/rustfs:1.0.0-alpha.78"
+                    "default": "rustfs/rustfs:1.0.0-alpha.98"
                 }
             },
             "readonly": ["access_key", "secret_key", "host", "region"]
@@ -569,7 +569,7 @@ impl ParameterStrategy for RustfsParameterStrategy {
         if is_empty_value(params.get("docker_image")) {
             params.insert(
                 "docker_image".to_string(),
-                JsonValue::String("rustfs/rustfs:1.0.0-alpha.78".to_string()),
+                JsonValue::String("rustfs/rustfs:1.0.0-alpha.98".to_string()),
             );
         }
 
@@ -681,7 +681,7 @@ impl ParameterStrategy for RustfsParameterStrategy {
                 "docker_image": {
                     "type": "string",
                     "description": "Docker image (updateable)",
-                    "default": "rustfs/rustfs:1.0.0-alpha.78"
+                    "default": "rustfs/rustfs:1.0.0-alpha.98"
                 }
             },
             "readonly": ["access_key", "secret_key", "host", "region"]

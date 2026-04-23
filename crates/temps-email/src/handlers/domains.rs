@@ -12,7 +12,7 @@ use axum::{
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::{
     error_builder::{bad_request, internal_server_error, not_found},
-    problemdetails::Problem,
+    problemdetails::{self, Problem},
     AuditContext, RequestMetadata,
 };
 use temps_dns::providers::{DnsProvider, DnsRecordContent, DnsRecordRequest};
@@ -23,7 +23,50 @@ use super::types::{
     AppState, CreateEmailDomainRequest, DnsRecordResponse, DnsRecordSetupResult,
     EmailDomainResponse, EmailDomainWithDnsResponse, SetupDnsRequest, SetupDnsResponse,
 };
+use crate::errors::EmailError;
 use crate::services::CreateDomainRequest;
+
+/// Map every EmailError variant to its correct HTTP status + real error message.
+///
+/// Previously every email-domain handler did a manual `map_err` that collapsed every
+/// possible failure into `404 "Domain not found"` (or `500 "..."`), which masked real
+/// problems like decryption failures and missing providers behind the wrong status
+/// code. Keep this impl exhaustive so future variants force a conscious mapping.
+impl From<EmailError> for Problem {
+    fn from(error: EmailError) -> Self {
+        match error {
+            EmailError::DomainNotFound(_)
+            | EmailError::ProviderNotFound(_)
+            | EmailError::EmailNotFound(_) => problemdetails::new(StatusCode::NOT_FOUND)
+                .with_title("Resource Not Found")
+                .with_detail(error.to_string()),
+
+            EmailError::DomainNotVerified(_) => problemdetails::new(StatusCode::CONFLICT)
+                .with_title("Domain Not Verified")
+                .with_detail(error.to_string()),
+
+            EmailError::Validation(_) | EmailError::InvalidProviderType(_) => {
+                problemdetails::new(StatusCode::BAD_REQUEST)
+                    .with_title("Validation Error")
+                    .with_detail(error.to_string())
+            }
+
+            EmailError::Database(_)
+            | EmailError::ProviderError(_)
+            | EmailError::Encryption(_)
+            | EmailError::Decryption(_)
+            | EmailError::Configuration(_)
+            | EmailError::AwsSes(_)
+            | EmailError::Scaleway(_)
+            | EmailError::Serialization(_)
+            | EmailError::TrackingRewrite { .. } => {
+                problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Internal Server Error")
+                    .with_detail(error.to_string())
+            }
+        }
+    }
+}
 
 /// Configure domain routes
 pub fn routes() -> Router<Arc<AppState>> {
@@ -194,14 +237,7 @@ pub async fn get_domain(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, EmailDomainsRead);
 
-    let result = state
-        .domain_service
-        .get_with_dns_records(id)
-        .await
-        .map_err(|e| {
-            error!("Failed to get email domain: {}", e);
-            not_found().detail("Domain not found").build()
-        })?;
+    let result = state.domain_service.get_with_dns_records(id).await?;
 
     let response = EmailDomainWithDnsResponse {
         domain: EmailDomainResponse {

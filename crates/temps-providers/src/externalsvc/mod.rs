@@ -289,6 +289,12 @@ pub enum RecoveryTarget {
 pub struct RestoreContext<'a> {
     pub s3_client: &'a aws_sdk_s3::Client,
     pub s3_credentials: &'a S3Credentials,
+    /// S3 source row with DECRYPTED `access_key_id` / `secret_key` fields.
+    /// The orchestrator clones the DB row and swaps the ciphertext out before
+    /// handing it here, so trait implementations can use these values
+    /// directly (passing to mc, env vars, etc.) without calling
+    /// `EncryptionService::decrypt_string` again — doing so would fail
+    /// because the bytes are no longer ciphertext.
     pub s3_source: &'a temps_entities::s3_sources::Model,
     pub backup: &'a temps_entities::backups::Model,
     pub backup_location: &'a str,

@@ -5553,7 +5553,7 @@ mod tests {
     fn test_service_type_detection_rustfs() {
         let images = vec![
             "rustfs/rustfs:latest",
-            "rustfs/rustfs:1.0.0-alpha.78",
+            "rustfs/rustfs:1.0.0-alpha.98",
             "rustfs/rustfs:1.0.0",
         ];
 

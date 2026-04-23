@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use urlencoding;
 
 use crate::utils::ensure_network_exists;
@@ -479,6 +479,18 @@ impl MongodbService {
         walg_s3_prefix: &str,
         service_config: ServiceConfig,
     ) -> Result<()> {
+        // Pull the optional `_alt_password` fallback out of parameters
+        // before `get_mongodb_config` drops it. The orchestrator sets this
+        // to the origin service's password for cross-service restores so
+        // we have a second credential to try if the target's stored one
+        // no longer works (e.g., a prior partial restore already wrote
+        // admin.system.users with the source's hashes).
+        let alt_password: Option<String> = service_config
+            .parameters
+            .get("_alt_password")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         let config = self.get_mongodb_config(service_config)?;
         let container_name = self.get_container_name();
 
@@ -487,11 +499,70 @@ impl MongodbService {
             walg_s3_prefix, container_name
         );
 
-        // Build the MongoDB URI for WAL-G and mongorestore
+        // Auth probe: figure out which password the LIVE mongod actually
+        // accepts before we hand one to mongorestore. mongorestore streams
+        // over the wire and will fail the whole restore if its initial
+        // connection auth rejects. Candidates, in order:
+        //
+        //   1. target's stored password (the common case)
+        //   2. alt_password if provided (covers partial-retry, where a
+        //      prior run already replaced admin.system.users with origin's
+        //      hash)
+        //
+        // Whichever succeeds is used. If neither works, fail loudly with
+        // a clear message so the operator can reset creds manually.
+        let mut candidates: Vec<(&str, String)> = vec![("target", config.password.clone())];
+        if let Some(alt) = alt_password.as_ref() {
+            if *alt != config.password {
+                candidates.push(("origin", alt.clone()));
+            }
+        }
+
+        let chosen_password = {
+            let mut chosen: Option<(&str, String)> = None;
+            for (label, pw) in &candidates {
+                match self
+                    .probe_mongo_auth(&container_name, &config.username, pw)
+                    .await
+                {
+                    Ok(true) => {
+                        info!(
+                            "Mongo auth probe: {} password accepted by live mongod on '{}'",
+                            label, container_name
+                        );
+                        chosen = Some((*label, pw.clone()));
+                        break;
+                    }
+                    Ok(false) => {
+                        warn!(
+                            "Mongo auth probe: {} password rejected by live mongod on '{}'",
+                            label, container_name
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Mongo auth probe: error while testing {} password on '{}': {}. Treating as rejection.",
+                            label, container_name, e
+                        );
+                    }
+                }
+            }
+            chosen.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Mongo auth probe failed for container '{}': none of the {} candidate password(s) authenticated. The target's stored password and any origin-service fallback have both been tried. The live mongod's effective credentials may have drifted — reset via `docker exec {} mongosh --quiet --eval 'db.changeUserPassword(...)' ` or redeploy the service.",
+                    container_name, candidates.len(), container_name
+                )
+            })?
+        };
+
+        let (chosen_label, chosen_pw) = chosen_password;
+        let _ = chosen_label; // used only in logs above; retain for future
+
+        // Build the MongoDB URI with the password we just confirmed works.
         let mongodb_uri = format!(
             "mongodb://{}:{}@localhost:{}/?authSource=admin",
             urlencoding::encode(&config.username),
-            urlencoding::encode(&config.password),
+            urlencoding::encode(&chosen_pw),
             MONGODB_INTERNAL_PORT
         );
 
@@ -521,8 +592,18 @@ impl MongodbService {
 
         let walg_env_refs: Vec<&str> = walg_env.iter().map(|s| s.as_str()).collect();
 
-        // Run wal-g backup-fetch LATEST inside the container
-        // WAL-G downloads from S3 and pipes to mongorestore via WALG_STREAM_RESTORE_COMMAND
+        // Run wal-g backup-fetch LATEST inside the container. WAL-G
+        // downloads from S3 and pipes to mongorestore via
+        // WALG_STREAM_RESTORE_COMMAND.
+        //
+        // ATTACH stdout+stderr (not detached) so we can:
+        //   - Surface the real error when something fails. Every
+        //     restore-gone-wrong before this was bare "exit code 1" with no
+        //     context, forcing us to hand-repro to diagnose.
+        //   - Detect the "exit 1 but mongorestore actually succeeded"
+        //     pattern — mongorestore can be chatty and emit warnings that
+        //     bump the exit code while still having completed every
+        //     collection. In that case we salvage success.
         let restore_cmd = vec!["sh", "-c", "wal-g backup-fetch LATEST 2>&1"];
 
         info!(
@@ -536,47 +617,94 @@ impl MongodbService {
                 &container_name,
                 CreateExecOptions {
                     cmd: Some(restore_cmd),
-                    attach_stdout: Some(false),
-                    attach_stderr: Some(false),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
                     env: Some(walg_env_refs),
                     ..Default::default()
                 },
             )
             .await?;
 
-        use bollard::exec::StartExecOptions;
-        self.docker
+        use bollard::exec::{StartExecOptions, StartExecResults};
+        use futures::StreamExt;
+
+        let start = self
+            .docker
             .start_exec(
                 &exec.id,
                 Some(StartExecOptions {
-                    detach: true,
+                    detach: false,
                     ..Default::default()
                 }),
             )
             .await?;
 
-        // Poll for completion
-        loop {
-            let inspect = self.docker.inspect_exec(&exec.id).await?;
-            if let Some(running) = inspect.running {
-                if !running {
-                    if let Some(exit_code) = inspect.exit_code {
-                        if exit_code != 0 {
-                            return Err(anyhow::anyhow!(
-                                "WAL-G backup-fetch failed with exit code {} in container '{}'",
-                                exit_code,
-                                container_name
-                            ));
+        // Drain the chunk stream. Keep the last ~8 KB — enough to explain a
+        // failure or confirm a chatty success without unbounded memory for
+        // large-archive restores.
+        let mut captured = String::new();
+        const CAPTURE_TAIL_BYTES: usize = 8 * 1024;
+        if let StartExecResults::Attached { mut output, .. } = start {
+            while let Some(chunk) = output.next().await {
+                match chunk {
+                    Ok(log) => {
+                        let s = log.to_string();
+                        captured.push_str(&s);
+                        if captured.len() > CAPTURE_TAIL_BYTES * 4 {
+                            let cut = captured.len() - CAPTURE_TAIL_BYTES;
+                            let safe_cut = captured
+                                .char_indices()
+                                .find(|(i, _)| *i >= cut)
+                                .map(|(i, _)| i)
+                                .unwrap_or(captured.len());
+                            captured = captured.split_off(safe_cut);
                         }
                     }
-                    break;
+                    Err(e) => {
+                        captured.push_str(&format!("\n[stream error: {}]\n", e));
+                    }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
-        info!("MongoDB WAL-G restore completed successfully");
-        Ok(())
+        let inspect = self.docker.inspect_exec(&exec.id).await?;
+        let exit_code = inspect.exit_code.unwrap_or(-1);
+
+        if exit_code == 0 {
+            info!(
+                "MongoDB WAL-G restore completed successfully (exit 0) on container '{}'",
+                container_name
+            );
+            return Ok(());
+        }
+
+        // Non-zero exit. mongorestore can exit non-zero after warnings even
+        // when every document landed. Look for its completion markers in the
+        // captured tail and salvage success if present.
+        let looks_like_success = captured.contains("done restoring")
+            || captured.contains("finished restoring")
+            || captured.contains("0 document(s) failed to restore");
+
+        if looks_like_success {
+            warn!(
+                "wal-g backup-fetch exited {} but mongorestore output indicates the restore completed. Treating as success. Output tail:\n{}",
+                exit_code,
+                captured.trim()
+            );
+            return Ok(());
+        }
+
+        let tail = captured.trim();
+        Err(anyhow::anyhow!(
+            "WAL-G backup-fetch failed with exit code {} in container '{}'. Last output:\n{}",
+            exit_code,
+            container_name,
+            if tail.is_empty() {
+                "<no output captured>".to_string()
+            } else {
+                tail.to_string()
+            }
+        ))
     }
 
     /// Restore from a legacy backup (pre-WAL-G .gz files created by mongodump).
@@ -751,6 +879,94 @@ impl MongodbService {
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// Authenticate against the live mongod with a candidate password.
+    ///
+    /// Returns `Ok(true)` on successful auth + ping, `Ok(false)` on clean
+    /// auth rejection (so the caller can fall back to another candidate),
+    /// and `Err(...)` only for unexpected Docker / exec-plumbing failures
+    /// that aren't attributable to the credential itself.
+    ///
+    /// The password is passed via env var (not argv or a shell-interp'd
+    /// string) to avoid breaking on special characters like `$`, `!`, `&`.
+    async fn probe_mongo_auth(
+        &self,
+        container_name: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<bool> {
+        use bollard::exec::{CreateExecOptions, StartExecOptions, StartExecResults};
+        use futures::StreamExt;
+
+        // Probe via env var so special chars can't break the shell. mongosh
+        // reads `--password "$P"` literally.
+        let probe_cmd = vec![
+            "sh",
+            "-c",
+            "mongosh --quiet -u \"$PROBE_USER\" --authenticationDatabase admin --password \"$PROBE_PASS\" --eval 'db.runCommand({ping:1})' mongodb://127.0.0.1:27017/admin 2>&1",
+        ];
+
+        let env = [
+            format!("PROBE_USER={}", username),
+            format!("PROBE_PASS={}", password),
+        ];
+        let env_refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+
+        let exec = self
+            .docker
+            .create_exec(
+                container_name,
+                CreateExecOptions {
+                    cmd: Some(probe_cmd),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    env: Some(env_refs),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let start = self
+            .docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        let mut captured = String::new();
+        if let StartExecResults::Attached { mut output, .. } = start {
+            while let Some(chunk) = output.next().await {
+                if let Ok(log) = chunk {
+                    captured.push_str(&log.to_string());
+                    if captured.len() > 2048 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let inspect = self.docker.inspect_exec(&exec.id).await?;
+        let exit_code = inspect.exit_code.unwrap_or(-1);
+
+        if exit_code == 0 && captured.contains("{ ok: 1 }") {
+            return Ok(true);
+        }
+        // Treat AuthenticationFailed as a clean rejection.
+        if captured.contains("Authentication failed") {
+            return Ok(false);
+        }
+        // Unknown state — could be container not ready, mongosh missing,
+        // network glitch. Surface to the caller; it logs + falls through.
+        Err(anyhow::anyhow!(
+            "mongo auth probe returned unexpected result (exit {}): {}",
+            exit_code,
+            captured.trim()
+        ))
     }
 
     /// Legacy MongoDB backup using mongodump via Bollard exec.

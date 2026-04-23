@@ -338,17 +338,17 @@ function useMongodbPreset(): PresetState {
 
 const S3_OPTIONS: PresetOption[] = [
   {
-    id: 'minio',
-    title: 'MinIO',
-    subtitle: 'S3-compatible',
-    value: 'minio/minio:RELEASE.2025-09-07T16-13-09Z',
-    hint: 'Default',
-  },
-  {
     id: 'rustfs',
     title: 'RustFS',
     subtitle: 'Rust-native',
-    value: 'rustfs/rustfs:1.0.0-alpha.78',
+    value: 'rustfs/rustfs:1.0.0-alpha.98',
+    hint: 'Default',
+  },
+  {
+    id: 'minio',
+    title: 'MinIO',
+    subtitle: 'S3-compatible (legacy)',
+    value: 'minio/minio:RELEASE.2025-09-07T16-13-09Z',
   },
   {
     id: 'custom',
@@ -359,7 +359,7 @@ const S3_OPTIONS: PresetOption[] = [
 ]
 
 function useS3Preset(): PresetState {
-  const [selected, setSelected] = useState('minio')
+  const [selected, setSelected] = useState('rustfs')
   const [custom, setCustom] = useState('')
   const option = S3_OPTIONS.find((o) => o.id === selected)
   const resolved = option?.value ?? (option?.custom ? custom.trim() : '')
@@ -373,13 +373,13 @@ function useS3Preset(): PresetState {
     ui: (
       <PresetGroup
         label="Storage engine"
-        description="MinIO is battle-tested; RustFS is a faster Rust-native alternative."
+        description="RustFS is the default Rust-native engine. MinIO is kept for legacy services."
         options={S3_OPTIONS}
         selected={selected}
         customValue={custom}
         onSelect={setSelected}
         onCustomChange={setCustom}
-        customPlaceholder="e.g. minio/minio:latest"
+        customPlaceholder="e.g. rustfs/rustfs:latest"
       />
     ),
   }

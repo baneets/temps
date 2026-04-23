@@ -138,6 +138,11 @@ const Email = lazy(() =>
 const EmailDetail = lazy(() =>
   import('./pages/EmailDetail').then((m) => ({ default: m.EmailDetail }))
 )
+const EmailDomainDetail = lazy(() =>
+  import('./pages/EmailDomainDetail').then((m) => ({
+    default: m.EmailDomainDetail,
+  }))
+)
 const ExternalConnectivitySetup = lazy(() =>
   import('./pages/ExternalConnectivitySetup').then((m) => ({
     default: m.ExternalConnectivitySetup,
@@ -371,6 +376,7 @@ const FullAppRoutes = () => {
                 <Route path="/storage/:id/restore" element={<ServiceRestore />} />
                 <Route path="/storage/:id/upgrades/:upgradeId" element={<MajorUpgradeDetail />} />
                 <Route path="/email" element={<Email />} />
+                <Route path="/email/domains/:id" element={<EmailDomainDetail />} />
                 <Route path="/email/:id" element={<EmailDetail />} />
                 <Route path="/ai-gateway" element={<AiGateway />} />
                 <Route path="/agent-sandbox" element={<AgentSandboxLayout />}>

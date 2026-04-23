@@ -11580,7 +11580,7 @@ export type UpdateAutomaticDeployRequest = {
  */
 export type UpdateBlobRequest = {
     /**
-     * Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.78")
+     * Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.98")
      */
     docker_image?: string | null;
 };

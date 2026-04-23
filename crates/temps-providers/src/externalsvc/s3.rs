@@ -1569,6 +1569,397 @@ impl ExternalService for S3Service {
         Ok(())
     }
 
+    async fn restore_capabilities(
+        &self,
+        _service_config: ServiceConfig,
+    ) -> Result<super::RestoreCapabilities> {
+        Ok(super::RestoreCapabilities {
+            restore_in_place: true,
+            restore_to_new_service: true,
+            // PITR for object stores would require versioned buckets + per-version
+            // pointers; not yet wired up.
+            pitr: false,
+            earliest_pitr_time: None,
+            latest_pitr_time: None,
+        })
+    }
+
+    /// Provision a fresh S3/MinIO service and mirror a backup into it.
+    ///
+    /// Strategy: clone the source service's config (image, region), generate new
+    /// credentials and an unused host port, spin up a new container+volume, then
+    /// run `mc mirror` from the backup location into every bucket discovered
+    /// under the backup prefix. The new service gets its OWN access keys — it's
+    /// not a clone of the source's credentials.
+    ///
+    /// The orchestrator creates the `external_services` DB row AFTER this
+    /// returns, using the parameters we hand back.
+    async fn restore_to_new_service(
+        &self,
+        ctx: super::RestoreContext<'_>,
+        new_service_name: String,
+        parameter_overrides: serde_json::Value,
+    ) -> Result<super::NewServiceRestoreResult> {
+        info!(
+            "Provisioning new S3/MinIO service '{}' from backup at {}",
+            new_service_name, ctx.backup_location
+        );
+
+        // Start from the source service's parameters so we keep the image/region.
+        let mut new_config = self.get_s3_config(ctx.source_config.clone())?;
+
+        // Fresh port (source's is taken).
+        let new_port = find_available_port(9000)
+            .ok_or_else(|| anyhow::anyhow!("No available ports for new S3/MinIO service"))?
+            .to_string();
+        new_config.port = new_port;
+
+        // Fresh credentials — the restored bucket contents are just objects; they
+        // carry no embedded auth, so we don't need to preserve the source's keys.
+        new_config.access_key = default_access_key();
+        new_config.secret_key = default_secret_key();
+
+        // Apply caller overrides on top of the cloned config.
+        if let Some(overrides) = parameter_overrides.as_object() {
+            if let Some(port) = overrides.get("port").and_then(|v| v.as_str()) {
+                new_config.port = port.to_string();
+            }
+            if let Some(image) = overrides.get("docker_image").and_then(|v| v.as_str()) {
+                new_config.docker_image = image.to_string();
+            }
+            if let Some(ak) = overrides.get("access_key").and_then(|v| v.as_str()) {
+                new_config.access_key = ak.to_string();
+            }
+            if let Some(sk) = overrides.get("secret_key").and_then(|v| v.as_str()) {
+                new_config.secret_key = sk.to_string();
+            }
+        }
+
+        // Build a sibling service instance targeting the new container name.
+        let new_service = S3Service::new(
+            new_service_name.clone(),
+            self.docker.clone(),
+            self.encryption_service.clone(),
+        );
+        *new_service.config.write().await = Some(new_config.clone());
+
+        // Provision the new container (image pull, volume, port binding, health check).
+        new_service
+            .create_container(&self.docker, &new_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create new S3/MinIO container: {}", e))?;
+
+        // The orchestrator already decrypted these into the plaintext copy
+        // of s3_source it hands us via RestoreContext. Passing them straight
+        // through — re-decrypting would fail because the bytes are no longer
+        // ciphertext.
+        let source_access_key = ctx.s3_source.access_key_id.clone();
+        let source_secret_key = ctx.s3_source.secret_key.clone();
+        let source_endpoint = ctx
+            .s3_source
+            .endpoint
+            .as_deref()
+            .unwrap_or("s3.amazonaws.com");
+
+        // Reuse the same mc-based mirror flow that restore_from_s3 uses, but
+        // dest is the NEW container. We shell out to a disposable mc container
+        // (host networking) rather than calling restore_from_s3 directly because
+        // restore_from_s3 calls self.start() — which is a no-op on a fresh
+        // instance that hasn't been init()'d.
+        self.pull_mc_image(&self.docker).await?;
+
+        let mc_container_name = format!("mc-restore-new-{}", uuid::Uuid::new_v4());
+        let env_vars = [
+            format!(
+                "MC_HOST_source=http://{}:{}@{}",
+                source_access_key, source_secret_key, source_endpoint
+            ),
+            format!(
+                "MC_HOST_dest=http://{}:{}@localhost:{}",
+                new_config.access_key, new_config.secret_key, new_config.port
+            ),
+        ];
+
+        let container_config = bollard::models::ContainerCreateBody {
+            image: Some(Self::MC_IMAGE.to_string()),
+            env: Some(env_vars.iter().map(|s| s.as_str().to_string()).collect()),
+            entrypoint: Some(vec!["sh".to_string()]),
+            tty: Some(true),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            host_config: Some(bollard::models::HostConfig {
+                network_mode: Some("host".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let container = self
+            .docker
+            .create_container(
+                Some(
+                    bollard::query_parameters::CreateContainerOptionsBuilder::new()
+                        .name(&mc_container_name)
+                        .build(),
+                ),
+                container_config,
+            )
+            .await?;
+
+        self.docker
+            .start_container(
+                &container.id,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await?;
+
+        let dest_endpoint = format!("http://localhost:{}", new_config.port);
+
+        // Configure aliases.
+        let setup_commands: Vec<Vec<&str>> = vec![
+            vec![
+                "mc",
+                "alias",
+                "set",
+                "backup-source",
+                source_endpoint,
+                &source_access_key,
+                &source_secret_key,
+            ],
+            vec![
+                "mc",
+                "alias",
+                "set",
+                "dest",
+                &dest_endpoint,
+                &new_config.access_key,
+                &new_config.secret_key,
+            ],
+        ];
+
+        for cmd in setup_commands {
+            let exec = self
+                .docker
+                .create_exec(
+                    &container.id,
+                    bollard::exec::CreateExecOptions {
+                        cmd: Some(cmd.clone()),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+                self.docker.start_exec(&exec.id, None).await?
+            {
+                while let Ok(Some(chunk)) = output.try_next().await {
+                    match chunk {
+                        bollard::container::LogOutput::StdOut { message } => {
+                            info!("mc stdout: {}", String::from_utf8_lossy(&message));
+                        }
+                        bollard::container::LogOutput::StdErr { message } => {
+                            error!("mc stderr: {}", String::from_utf8_lossy(&message));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let exit_code = self
+                .docker
+                .inspect_exec(&exec.id)
+                .await?
+                .exit_code
+                .unwrap_or(-1);
+            if exit_code != 0 {
+                let _ = self
+                    .docker
+                    .remove_container(
+                        &container.id,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await;
+                return Err(anyhow::anyhow!(
+                    "mc alias setup failed with exit code {} for command {:?}",
+                    exit_code,
+                    cmd
+                ));
+            }
+        }
+
+        // List buckets at the backup prefix and mirror each into the new service.
+        let source_backup_location = format!(
+            "backup-source/{}/{}",
+            ctx.s3_source.bucket_name, ctx.backup_location
+        );
+        let list_command = vec!["mc", "ls", "--json", &source_backup_location];
+
+        let exec = self
+            .docker
+            .create_exec(
+                &container.id,
+                bollard::exec::CreateExecOptions {
+                    cmd: Some(list_command),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let mut list_output = String::new();
+        if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+            self.docker.start_exec(&exec.id, None).await?
+        {
+            while let Ok(Some(chunk)) = output.try_next().await {
+                if let bollard::container::LogOutput::StdOut { message } = chunk {
+                    list_output.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+        }
+
+        let mut buckets: Vec<String> = Vec::new();
+        let json_objects = parse_multiline_json_output(&list_output)?;
+        for listing in json_objects {
+            if let (Some("folder"), Some(key)) = (
+                listing.get("type").and_then(|t| t.as_str()),
+                listing.get("key").and_then(|k| k.as_str()),
+            ) {
+                buckets.push(key.to_string());
+            }
+        }
+
+        info!(
+            "Restoring {} bucket(s) into new service '{}'",
+            buckets.len(),
+            new_service_name
+        );
+
+        for bucket in buckets {
+            let bucket_name = bucket.trim_end_matches('/');
+            let dest_location = format!("dest/{}", bucket_name);
+
+            // Create destination bucket (ignore "already exists" / empty-name noise).
+            let mb_cmd = vec!["mc", "mb", &dest_location];
+            let mb_exec = self
+                .docker
+                .create_exec(
+                    &container.id,
+                    bollard::exec::CreateExecOptions {
+                        cmd: Some(mb_cmd),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            let mut mb_stdout = String::new();
+            if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+                self.docker.start_exec(&mb_exec.id, None).await?
+            {
+                while let Ok(Some(chunk)) = output.try_next().await {
+                    if let bollard::container::LogOutput::StdOut { message } = chunk {
+                        mb_stdout.push_str(&String::from_utf8_lossy(&message));
+                    }
+                }
+            }
+            if let Some(code) = self.docker.inspect_exec(&mb_exec.id).await?.exit_code {
+                if code != 0 && !mb_stdout.contains("already") {
+                    info!(
+                        "mc mb returned {} for bucket {}, continuing: {}",
+                        code, bucket_name, mb_stdout
+                    );
+                }
+            }
+
+            // Mirror bucket contents into the fresh bucket.
+            let source_bucket_loc = format!(
+                "backup-source/{}/{}/{}",
+                ctx.s3_source.bucket_name, ctx.backup_location, bucket_name
+            );
+            let mirror_cmd = vec![
+                "mc",
+                "mirror",
+                "--skip-errors",
+                "--overwrite",
+                &source_bucket_loc,
+                &dest_location,
+            ];
+
+            info!("Mirroring bucket {} -> new service", bucket_name);
+            let mirror_exec = self
+                .docker
+                .create_exec(
+                    &container.id,
+                    bollard::exec::CreateExecOptions {
+                        cmd: Some(mirror_cmd),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            if let bollard::exec::StartExecResults::Attached { mut output, .. } =
+                self.docker.start_exec(&mirror_exec.id, None).await?
+            {
+                while let Ok(Some(chunk)) = output.try_next().await {
+                    match chunk {
+                        bollard::container::LogOutput::StdOut { message } => {
+                            info!("mirror stdout: {}", String::from_utf8_lossy(&message));
+                        }
+                        bollard::container::LogOutput::StdErr { message } => {
+                            error!("mirror stderr: {}", String::from_utf8_lossy(&message));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Tear down the helper mc container.
+        let _ = self
+            .docker
+            .remove_container(
+                &container.id,
+                Some(bollard::query_parameters::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+
+        // Serialize the final runtime config so the orchestrator can persist it
+        // as the new service's parameters.
+        let runtime_json = serde_json::to_value(&new_config)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize runtime config: {}", e))?;
+        let mut parameters = HashMap::new();
+        if let Some(obj) = runtime_json.as_object() {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    parameters.insert(k.clone(), s.to_string());
+                } else if let Some(n) = v.as_u64() {
+                    parameters.insert(k.clone(), n.to_string());
+                }
+            }
+        }
+
+        let connection_info = format!(
+            "s3://{}:***@{}:{}",
+            new_config.access_key, new_config.host, new_config.port
+        );
+
+        Ok(super::NewServiceRestoreResult {
+            parameters,
+            connection_info,
+        })
+    }
+
     fn get_default_docker_image(&self) -> (String, String) {
         // Return (image_name, version)
         // Default MinIO image and release version

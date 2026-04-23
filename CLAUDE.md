@@ -888,6 +888,7 @@ if (isLoading) return <Spinner />
 - Use `CopyButton` component for copy-to-clipboard (never manual clipboard handlers)
 - Center content with `mx-auto` when using `max-w-*` constraints
 - Use cards for selections instead of dropdowns where practical
+- **Skeletons over spinners for content loading** -- when a page, card, or list is waiting on data, render `Skeleton` placeholders that match the real layout. Never use centered `Loader2` spinners for content loading; the page should not visibly "collapse" then "expand" when data arrives. Inline button spinners on mutations (`verify.isPending`) are still fine since they indicate action execution, not content loading.
 
 ### Mobile Responsiveness
 - **Tables**: wrap in `overflow-x-auto`; hide secondary columns with `hidden md:table-cell`

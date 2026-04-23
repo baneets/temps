@@ -35,9 +35,22 @@ fn shell_escape(s: &str) -> String {
 /// Classify a backup location into one of the known storage formats.
 /// Returns `None` for non-postgres / unknown locations so the UI can show
 /// a neutral badge without guessing.
-fn classify_backup_format(location: &str) -> Option<String> {
+///
+/// The `engine` hint is used to disambiguate formats that share location
+/// shapes. Object-store backups (s3/rustfs/blob/minio) are always a
+/// bucket-to-bucket mirror — their path has no extension — so we tag them
+/// `"mirror"` when the engine identifies them as such.
+fn classify_backup_format(location: &str, engine: Option<&str>) -> Option<String> {
     if location.is_empty() {
         return None;
+    }
+    // Engine-first: object-store backups are always mc-mirror dumps regardless
+    // of location shape. No extension-based inference applies.
+    if let Some(e) = engine {
+        let e = e.to_ascii_lowercase();
+        if matches!(e.as_str(), "s3" | "rustfs" | "blob" | "minio") {
+            return Some("mirror".to_string());
+        }
     }
     if location.starts_with("s3://") {
         // WAL-G backups use `s3://bucket/.../walg` as their prefix. Every
@@ -131,7 +144,8 @@ async fn scan_s3_for_orphan_backups(
                 if seen_locations.contains(&key) {
                     continue;
                 }
-                let format = classify_backup_format(&key).unwrap_or_else(|| "unknown".to_string());
+                let format = classify_backup_format(&key, Some(&engine))
+                    .unwrap_or_else(|| "unknown".to_string());
                 out.push(serde_json::json!({
                     "id": 0,
                     "backup_id": "",
@@ -3920,12 +3934,22 @@ impl BackupService {
                 .and_then(|v| v.as_str())
                 .map(String::from);
 
+            // Skip control-plane backups — this endpoint powers the
+            // "restore into an external service" UI, and whole-Temps-DB
+            // backups (stored under `backups/...`, no service_type in
+            // metadata) are not valid candidates for that flow. They'd
+            // render as "pg_dump" with blank engine and confuse users
+            // into thinking they could be restored onto their service.
+            if service_type.is_none() && !backup.s3_location.contains("external_services/") {
+                continue;
+            }
+
             let display_name = match (&service_name, &service_type) {
                 (Some(n), Some(t)) => format!("{} backup ({})", t, n),
                 _ => backup.name.clone(),
             };
 
-            let format = classify_backup_format(&backup.s3_location);
+            let format = classify_backup_format(&backup.s3_location, service_type.as_deref());
 
             let metadata_location = if backup.s3_location.is_empty() {
                 String::new()
