@@ -18,11 +18,10 @@ import { ProblemDetails } from './api/client'
 import { client } from './api/client/client.gen'
 import { Header } from './components/dashboard/Header'
 import AppSidebar from './components/dashboard/Sidebar'
-import { DemoLayout } from './components/layout/DemoLayout'
 import { ProtectedLayout } from './components/layout/ProtectedLayout'
 import { SettingsLayout } from './components/settings/SettingsLayout'
 import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
-import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { AuthProvider } from './contexts/AuthContext'
 import { BreadcrumbProvider } from './contexts/BreadcrumbContext'
 import { PlatformAccessProvider } from './contexts/PlatformAccessContext'
 import './globals.css'
@@ -32,15 +31,17 @@ import { EditNotificationProvider } from './pages/EditNotificationProvider'
 import { Monitoring } from './pages/Monitoring'
 import { PluginPage } from './pages/plugins/PluginPage'
 // Lazy load all pages
-const Dashboard = lazy(() =>
-  import('./pages/Dashboard').then((m) => ({ default: m.Dashboard }))
-)
 const Account = lazy(() =>
   import('./pages/Account').then((m) => ({ default: m.Account }))
 )
 const Projects = lazy(() =>
   import('./pages/Projects').then((m) => ({ default: m.Projects }))
 )
+const Revenue = lazy(() =>
+  import('./pages/Revenue').then((m) => ({ default: m.Revenue }))
+)
+const Sandboxes = lazy(() => import('./pages/Sandboxes'))
+const SandboxDetail = lazy(() => import('./pages/SandboxDetail'))
 const Storage = lazy(() =>
   import('./pages/Storage').then((m) => ({ default: m.Storage }))
 )
@@ -58,8 +59,21 @@ const ServiceDataBrowser = lazy(() =>
     default: m.ServiceDataBrowser,
   }))
 )
+const ServiceRestore = lazy(() =>
+  import('./pages/ServiceRestore').then((m) => ({
+    default: m.ServiceRestore,
+  }))
+)
+const MajorUpgradeDetail = lazy(() =>
+  import('./pages/MajorUpgradeDetail').then((m) => ({
+    default: m.MajorUpgradeDetail,
+  }))
+)
 const Users = lazy(() =>
   import('./pages/Users').then((m) => ({ default: m.Users }))
+)
+const UserDetail = lazy(() =>
+  import('./pages/UserDetail').then((m) => ({ default: m.UserDetail }))
 )
 const CustomRoutes = lazy(() =>
   import('./pages/Routes').then((m) => ({ default: m.Routes }))
@@ -124,6 +138,11 @@ const Email = lazy(() =>
 const EmailDetail = lazy(() =>
   import('./pages/EmailDetail').then((m) => ({ default: m.EmailDetail }))
 )
+const EmailDomainDetail = lazy(() =>
+  import('./pages/EmailDomainDetail').then((m) => ({
+    default: m.EmailDomainDetail,
+  }))
+)
 const ExternalConnectivitySetup = lazy(() =>
   import('./pages/ExternalConnectivitySetup').then((m) => ({
     default: m.ExternalConnectivitySetup,
@@ -185,6 +204,61 @@ const AiGateway = lazy(() =>
     default: m.AiGatewayPage,
   }))
 )
+const AgentSandboxLayout = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxLayout').then((m) => ({
+    default: m.AgentSandboxLayout,
+  }))
+)
+const AgentSandboxDashboard = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxDashboard').then((m) => ({
+    default: m.AgentSandboxDashboard,
+  }))
+)
+const AgentSandboxProvidersList = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxProvidersList').then((m) => ({
+    default: m.AgentSandboxProvidersList,
+  }))
+)
+const AgentSandboxProviderDetail = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxProviderDetail').then((m) => ({
+    default: m.AgentSandboxProviderDetail,
+  }))
+)
+const AgentSandboxSandboxPage = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxSandboxPage').then((m) => ({
+    default: m.AgentSandboxSandboxPage,
+  }))
+)
+const AgentSandboxPreviewPage = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxPreviewPage').then((m) => ({
+    default: m.AgentSandboxPreviewPage,
+  }))
+)
+const AgentSandboxSecretsPage = lazy(() =>
+  import('./pages/agent-sandbox/AgentSandboxSecretsPage').then((m) => ({
+    default: m.AgentSandboxSecretsPage,
+  }))
+)
+const GlobalSkillsSettingsPage = lazy(() =>
+  import('./components/settings/GlobalSkillsSettings').then((m) => ({
+    default: m.GlobalSkillsSettings,
+  }))
+)
+const GlobalMcpServersSettingsPage = lazy(() =>
+  import('./components/settings/GlobalMcpServersSettings').then((m) => ({
+    default: m.GlobalMcpServersSettings,
+  }))
+)
+const GlobalSkillDetailPage = lazy(() =>
+  import('./pages/settings/GlobalSkillDetail').then((m) => ({
+    default: m.GlobalSkillDetail,
+  }))
+)
+const GlobalMcpServerDetailPage = lazy(() =>
+  import('./pages/settings/GlobalMcpServerDetail').then((m) => ({
+    default: m.GlobalMcpServerDetail,
+  }))
+)
 
 // Loading component
 const PageLoader = () => (
@@ -192,32 +266,6 @@ const PageLoader = () => (
     <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
   </div>
 )
-
-// Demo mode routes - limited to projects only
-const DemoRoutes = () => {
-  return (
-    <BreadcrumbProvider>
-      <DemoLayout>
-        <ErrorBoundary
-          fallback={(error, errorInfo, resetError) => (
-            <ErrorFallback
-              error={error}
-              errorInfo={errorInfo}
-              resetError={resetError}
-            />
-          )}
-        >
-          <Routes>
-            <Route path="/" element={<Navigate to="/projects" replace />} />
-            <Route path="/projects" element={<Projects />} />
-            <Route path="/projects/:slug/*" element={<ProjectDetail />} />
-            <Route path="*" element={<Navigate to="/projects" replace />} />
-          </Routes>
-        </ErrorBoundary>
-      </DemoLayout>
-    </BreadcrumbProvider>
-  )
-}
 
 // Full app routes with sidebar
 const FullAppRoutes = () => {
@@ -274,10 +322,13 @@ const FullAppRoutes = () => {
           >
             <div className="h-full overflow-y-auto py-2 px-0 sm:p-4">
               <Routes>
-                <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/" element={<Navigate to="/projects" replace />} />
+                <Route path="/dashboard" element={<Navigate to="/projects" replace />} />
                 <Route path="/account" element={<Account />} />
                 <Route path="/projects" element={<Projects />} />
+                <Route path="/revenue" element={<Revenue />} />
+                <Route path="/sandboxes" element={<Sandboxes />} />
+                <Route path="/sandboxes/:sandboxId" element={<SandboxDetail />} />
                 <Route path="/monitoring" element={<Monitoring />}>
                   <Route index element={<Navigate to="resources" replace />} />
                   <Route path="providers/add" element={<AddNotificationProvider />} />
@@ -288,40 +339,23 @@ const FullAppRoutes = () => {
                 <Route path="/proxy-logs" element={<ProxyLogs />} />
                 <Route path="/proxy-logs/:id" element={<ProxyLogDetail />} />
                 <Route path="/audit-logs" element={<AuditLogs />} />
-                {/* Settings with inner sidebar layout */}
+                {/* Settings drill-down: only items NOT surfaced at the
+                    main sidebar root live here. Top-level resources
+                    (domains, storage, email, AI, source providers,
+                    backups) moved out so they don't trigger the
+                    settings sidebar swap. */}
                 <Route path="/settings" element={<SettingsLayout />}>
                   <Route index element={<Settings />} />
                   <Route path="notifications" element={<Notifications />} />
                   <Route path="users" element={<Users />} />
+                  <Route path="users/:userId" element={<UserDetail />} />
                   <Route path="keys" element={<ApiKeys />} />
                   <Route path="keys/new" element={<ApiKeyCreate />} />
                   <Route path="keys/:id" element={<ApiKeyDetail />} />
                   <Route path="keys/:id/edit" element={<ApiKeyEdit />} />
-                  {/* Infrastructure */}
-                  <Route path="domains" element={<Domains />} />
-                  <Route path="domains/add" element={<AddDomain />} />
-                  <Route path="domains/:id" element={<DomainDetail />} />
-                  <Route path="storage" element={<Storage />} />
-                  <Route path="storage/create" element={<CreateService />} />
-                  <Route path="storage/import" element={<ImportService />} />
-                  <Route path="storage/:id" element={<ServiceDetail />} />
-                  <Route path="storage/:id/browse" element={<ServiceDataBrowser />} />
-                  <Route path="email" element={<Email />} />
-                  <Route path="email/:id" element={<EmailDetail />} />
-                  <Route path="ai-gateway" element={<AiGateway />} />
-                  <Route path="git-providers" element={<GitSources />} />
-                  <Route path="git-providers/add" element={<AddGitProvider />} />
-                  <Route path="git-providers/:id" element={<GitProviderDetail />} />
-                  <Route path="dns-providers" element={<DnsProviders />} />
-                  <Route path="dns-providers/add" element={<AddDnsProvider />} />
-                  <Route path="dns-providers/:id" element={<DnsProviderDetail />} />
                   <Route path="load-balancer" element={<CustomRoutes />} />
                   <Route path="load-balancer/add" element={<AddRoute />} />
                   <Route path="docker-registry" element={<DockerRegistryPage />} />
-                  <Route path="backups" element={<Backups />} />
-                  <Route path="backups/s3-sources/new" element={<CreateS3Source />} />
-                  <Route path="backups/s3-sources/:id" element={<S3SourceDetail />} />
-                  <Route path="backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
                   {/* Security */}
                   <Route path="security" element={<SecurityPage />} />
                   <Route path="rate-limiting" element={<RateLimitingPage />} />
@@ -330,17 +364,60 @@ const FullAppRoutes = () => {
                   <Route path="nodes/:nodeId" element={<NodeDetailPage />} />
                   <Route path="plugins" element={<PluginsPage />} />
                 </Route>
-                {/* Redirects from old top-level routes to settings */}
-                <Route path="/domains" element={<Navigate to="/settings/domains" replace />} />
-                <Route path="/storage" element={<Navigate to="/settings/storage" replace />} />
-                <Route path="/email" element={<Navigate to="/settings/email" replace />} />
-                <Route path="/ai-gateway" element={<Navigate to="/settings/ai-gateway" replace />} />
-                <Route path="/git-providers" element={<Navigate to="/settings/git-providers" replace />} />
-                <Route path="/dns-providers" element={<Navigate to="/settings/dns-providers" replace />} />
+                {/* Top-level resources surfaced in the main sidebar */}
+                <Route path="/domains" element={<Domains />} />
+                <Route path="/domains/add" element={<AddDomain />} />
+                <Route path="/domains/:id" element={<DomainDetail />} />
+                <Route path="/storage" element={<Storage />} />
+                <Route path="/storage/create" element={<CreateService />} />
+                <Route path="/storage/import" element={<ImportService />} />
+                <Route path="/storage/:id" element={<ServiceDetail />} />
+                <Route path="/storage/:id/browse" element={<ServiceDataBrowser />} />
+                <Route path="/storage/:id/restore" element={<ServiceRestore />} />
+                <Route path="/storage/:id/upgrades/:upgradeId" element={<MajorUpgradeDetail />} />
+                <Route path="/email" element={<Email />} />
+                <Route path="/email/domains/:id" element={<EmailDomainDetail />} />
+                <Route path="/email/:id" element={<EmailDetail />} />
+                <Route path="/ai-gateway" element={<AiGateway />} />
+                <Route path="/agent-sandbox" element={<AgentSandboxLayout />}>
+                  <Route index element={<AgentSandboxDashboard />} />
+                  <Route path="providers" element={<AgentSandboxProvidersList />} />
+                  <Route path="providers/:id" element={<AgentSandboxProviderDetail />} />
+                  <Route path="sandbox" element={<AgentSandboxSandboxPage />} />
+                  <Route path="preview" element={<AgentSandboxPreviewPage />} />
+                  <Route path="secrets" element={<AgentSandboxSecretsPage />} />
+                </Route>
+                <Route path="/skills" element={<GlobalSkillsSettingsPage />} />
+                <Route path="/skills/:slug" element={<GlobalSkillDetailPage />} />
+                <Route path="/mcp-servers" element={<GlobalMcpServersSettingsPage />} />
+                <Route path="/mcp-servers/:slug" element={<GlobalMcpServerDetailPage />} />
+                <Route path="/git-providers" element={<GitSources />} />
+                <Route path="/git-providers/add" element={<AddGitProvider />} />
+                <Route path="/git-providers/:id" element={<GitProviderDetail />} />
+                <Route path="/dns-providers" element={<DnsProviders />} />
+                <Route path="/dns-providers/add" element={<AddDnsProvider />} />
+                <Route path="/dns-providers/:id" element={<DnsProviderDetail />} />
+                <Route path="/backups" element={<Backups />} />
+                <Route path="/backups/s3-sources/new" element={<CreateS3Source />} />
+                <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
+                <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
+                {/* Backward-compat: old /settings/<resource> links → new top-level */}
+                <Route path="/settings/domains/*" element={<Navigate to="/domains" replace />} />
+                <Route path="/settings/email/*" element={<Navigate to="/email" replace />} />
+                <Route path="/settings/ai-gateway/*" element={<Navigate to="/ai-gateway" replace />} />
+                <Route path="/settings/agent-sandbox/*" element={<Navigate to="/agent-sandbox" replace />} />
+                <Route path="/settings/skills/*" element={<Navigate to="/skills" replace />} />
+                <Route path="/settings/mcp-servers/*" element={<Navigate to="/mcp-servers" replace />} />
+                <Route path="/settings/git-providers/*" element={<Navigate to="/git-providers" replace />} />
+                <Route path="/settings/dns-providers/*" element={<Navigate to="/dns-providers" replace />} />
+                <Route path="/settings/backups/*" element={<Navigate to="/backups" replace />} />
                 {/* Projects */}
                 <Route path="/projects/new" element={<NewProject />} />
                 <Route path="/projects/import-wizard" element={<Import />} />
-                <Route path="/projects/import/*" element={<ImportProject />} />
+                <Route
+                  path="/projects/import/:repositoryId"
+                  element={<ImportProject />}
+                />
                 <Route path="/projects/:slug/*" element={<ProjectDetail />} />
                 {/* Utility */}
                 <Route path="/ip/:ip" element={<IpGeolocationDetail />} />
@@ -358,14 +435,7 @@ const FullAppRoutes = () => {
   )
 }
 
-// Component that chooses layout based on demo mode
 const AuthenticatedRoutes = () => {
-  const { isDemoMode } = useAuth()
-
-  if (isDemoMode) {
-    return <DemoRoutes />
-  }
-
   return (
     <PlatformAccessProvider>
       <PluginsProvider>

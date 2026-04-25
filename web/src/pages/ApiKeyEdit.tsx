@@ -27,8 +27,10 @@ import {
 import { toast } from 'sonner'
 import { format } from 'date-fns'
 import { getApiKey, updateApiKey, type UpdateApiKeyRequest } from '@/api/client'
+import { usePageTitle } from '@/hooks/usePageTitle'
 
 export default function ApiKeyEdit() {
+  usePageTitle('Edit API Key')
   const navigate = useNavigate()
   const { id } = useParams<{ id: string }>()
   const queryClient = useQueryClient()
@@ -163,7 +165,7 @@ export default function ApiKeyEdit() {
           <CardContent className="space-y-6">
             {/* Read-only Information */}
             <div className="grid gap-4 p-4 bg-muted/50 rounded-lg">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <Label className="text-muted-foreground text-xs">
                     Key Prefix
@@ -334,7 +336,7 @@ export default function ApiKeyEdit() {
           </CardHeader>
           <CardContent>
             <div className="grid gap-4">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1">
                   <Label className="text-muted-foreground text-xs">
                     Status

@@ -29,18 +29,10 @@ impl TempsPlugin for ProxyPlugin {
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
         Box::pin(async move {
             // Get database connection
-            let db = context.get_service::<DbConnection>().ok_or_else(|| {
-                PluginError::ServiceNotFound {
-                    service_type: "DbConnection".to_string(),
-                }
-            })?;
+            let db = context.require_service::<DbConnection>();
 
             // Get IP service
-            let ip_service = context
-                .get_service::<temps_geo::IpAddressService>()
-                .ok_or_else(|| PluginError::ServiceNotFound {
-                    service_type: "IpAddressService".to_string(),
-                })?;
+            let ip_service = context.require_service::<temps_geo::IpAddressService>();
 
             // Create LB service
             let lb_service = Arc::new(LbService::new(db.clone()));
@@ -67,11 +59,11 @@ impl TempsPlugin for ProxyPlugin {
 
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         // Get the required services from the service registry
-        let lb_service = context.get_service::<LbService>()?;
-        let proxy_log_service = context.get_service::<ProxyLogService>()?;
-        let ip_access_control_service = context.get_service::<IpAccessControlService>()?;
-        let challenge_service = context.get_service::<ChallengeService>()?;
-        let db = context.get_service::<DbConnection>()?;
+        let lb_service = context.require_service::<LbService>();
+        let proxy_log_service = context.require_service::<ProxyLogService>();
+        let ip_access_control_service = context.require_service::<IpAccessControlService>();
+        let challenge_service = context.require_service::<ChallengeService>();
+        let db = context.require_service::<DbConnection>();
 
         // Create the app state directly
         let app_state = Arc::new(crate::handler::types::AppState { lb_service });

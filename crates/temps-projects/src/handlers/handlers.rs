@@ -54,9 +54,9 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             post(generate_preset_dockerfile),
         )
         // Template routes
-        .route("/templates", get(list_templates))
-        .route("/templates/tags", get(list_template_tags))
-        .route("/templates/{slug}", get(get_template))
+        .route("/templates", get(list_project_templates))
+        .route("/templates/tags", get(list_project_template_tags))
+        .route("/templates/{slug}", get(get_project_template))
         // Pipeline trigger route
         .route(
             "/projects/{id}/trigger-pipeline",
@@ -96,9 +96,9 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         get_project_statistics,
         list_presets,
         generate_preset_dockerfile,
-        list_templates,
-        get_template,
-        list_template_tags,
+        list_project_templates,
+        get_project_template,
+        list_project_template_tags,
         create_project_from_template,
     ),
     components(
@@ -1085,6 +1085,7 @@ pub async fn generate_preset_dockerfile(
     get,
     path = "/templates",
     tag = "Templates",
+    operation_id = "list_project_templates",
     params(
         ("tag" = Option<String>, Query, description = "Filter templates by tag"),
         ("featured" = Option<bool>, Query, description = "Only return featured templates")
@@ -1096,7 +1097,7 @@ pub async fn generate_preset_dockerfile(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn list_templates(
+pub async fn list_project_templates(
     State(state): State<Arc<AppState>>,
     RequireAuth(_auth): RequireAuth,
     Query(query): Query<super::templates::ListTemplatesQuery>,
@@ -1128,6 +1129,7 @@ pub async fn list_templates(
     get,
     path = "/templates/{slug}",
     tag = "Templates",
+    operation_id = "get_project_template",
     params(
         ("slug" = String, Path, description = "Template slug")
     ),
@@ -1139,7 +1141,7 @@ pub async fn list_templates(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn get_template(
+pub async fn get_project_template(
     State(state): State<Arc<AppState>>,
     RequireAuth(_auth): RequireAuth,
     Path(slug): Path<String>,
@@ -1164,6 +1166,7 @@ pub async fn get_template(
     get,
     path = "/templates/tags",
     tag = "Templates",
+    operation_id = "list_project_template_tags",
     responses(
         (status = 200, description = "List of tags", body = super::templates::ListTagsResponse),
         (status = 401, description = "Unauthorized"),
@@ -1171,7 +1174,7 @@ pub async fn get_template(
     ),
     security(("bearer_auth" = []))
 )]
-pub async fn list_template_tags(
+pub async fn list_project_template_tags(
     State(state): State<Arc<AppState>>,
     RequireAuth(_auth): RequireAuth,
 ) -> Result<impl IntoResponse, Problem> {

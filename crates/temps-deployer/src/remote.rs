@@ -38,9 +38,12 @@ pub struct RemoteNodeDeployer {
 
 impl RemoteNodeDeployer {
     pub fn new(agent_url: String, token: String, node_name: String) -> Result<Self, DeployerError> {
+        // Strict TLS by default; operators with self-signed agent certs
+        // on a trusted internal network can opt in via the
+        // `insecure_tls` toggle in the application settings UI.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
-            .danger_accept_invalid_certs(true) // Agent uses self-signed certs on internal network
+            .danger_accept_invalid_certs(temps_core::tls::insecure_tls_enabled())
             .build()
             .map_err(|e| {
                 DeployerError::NetworkError(format!(
@@ -554,6 +557,7 @@ mod tests {
             image_name: "nginx:latest".to_string(),
             container_name: "test-container".to_string(),
             environment_vars: std::collections::HashMap::new(),
+            secrets: std::collections::HashMap::new(),
             port_mappings: vec![],
             network_name: None,
             resource_limits: crate::ResourceLimits::default(),

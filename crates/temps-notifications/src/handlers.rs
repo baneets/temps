@@ -109,11 +109,11 @@ fn make_audit_context(auth: &temps_auth::AuthContext, metadata: &RequestMetadata
         list_notification_providers,
         get_notification_provider,
         create_notification_provider,
-        update_provider,
-        delete_provider,
-        test_provider,
+        update_notification_provider,
+        delete_notification_provider,
+        test_notification_provider,
         create_slack_provider,
-        create_email_provider,
+        create_notification_email_provider,
         create_webhook_provider,
         update_slack_provider,
         update_email_provider,
@@ -518,7 +518,7 @@ impl From<UpdateProviderRequest> for crate::services::UpdateProviderRequest {
         ("bearer_auth" = [])
     )
 )]
-async fn update_provider(
+async fn update_notification_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
@@ -595,7 +595,7 @@ async fn update_provider(
         ("bearer_auth" = [])
     )
 )]
-async fn delete_provider(
+async fn delete_notification_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
@@ -648,7 +648,7 @@ async fn delete_provider(
         ("bearer_auth" = [])
     )
 )]
-async fn test_provider(
+async fn test_notification_provider(
     State(app_state): State<Arc<NotificationState>>,
     Path(id): Path<i32>,
     RequireAuth(auth): RequireAuth,
@@ -784,7 +784,7 @@ async fn create_slack_provider(
         ("bearer_auth" = [])
     )
 )]
-async fn create_email_provider(
+async fn create_notification_email_provider(
     State(app_state): State<Arc<NotificationState>>,
     RequireAuth(auth): RequireAuth,
     Extension(metadata): Extension<RequestMetadata>,
@@ -1539,7 +1539,10 @@ pub fn configure_routes() -> Router<Arc<NotificationState>> {
             post(create_notification_provider),
         )
         .route("/notification-providers/slack", post(create_slack_provider))
-        .route("/notification-providers/email", post(create_email_provider))
+        .route(
+            "/notification-providers/email",
+            post(create_notification_email_provider),
+        )
         .route(
             "/notification-providers/webhook",
             post(create_webhook_provider),
@@ -1548,7 +1551,10 @@ pub fn configure_routes() -> Router<Arc<NotificationState>> {
             "/notification-providers/{id}",
             get(get_notification_provider),
         )
-        .route("/notification-providers/{id}", put(update_provider))
+        .route(
+            "/notification-providers/{id}",
+            put(update_notification_provider),
+        )
         .route(
             "/notification-providers/slack/{id}",
             put(update_slack_provider),
@@ -1561,8 +1567,14 @@ pub fn configure_routes() -> Router<Arc<NotificationState>> {
             "/notification-providers/webhook/{id}",
             put(update_webhook_provider),
         )
-        .route("/notification-providers/{id}", delete(delete_provider))
-        .route("/notification-providers/{id}/test", post(test_provider))
+        .route(
+            "/notification-providers/{id}",
+            delete(delete_notification_provider),
+        )
+        .route(
+            "/notification-providers/{id}/test",
+            post(test_notification_provider),
+        )
         .route("/notification-preferences", get(get_preferences))
         .route("/notification-preferences", put(update_preferences))
         .route("/notification-preferences", delete(delete_preferences))
@@ -1715,7 +1727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_email_provider() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create_notification_email_provider() -> Result<(), Box<dyn std::error::Error>> {
         let setup = TestSetup::new().await?;
 
         let request_body = CreateEmailProviderRequest {
@@ -1822,7 +1834,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_provider() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_update_notification_provider() -> Result<(), Box<dyn std::error::Error>> {
         let setup = TestSetup::new().await?;
 
         let request_body = UpdateProviderRequest {
@@ -1920,7 +1932,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_provider() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_delete_notification_provider() -> Result<(), Box<dyn std::error::Error>> {
         let setup = TestSetup::new().await?;
 
         let app = configure_routes().with_state(setup.notification_state.clone());
@@ -1940,7 +1952,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_test_provider() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_test_notification_provider() -> Result<(), Box<dyn std::error::Error>> {
         let setup = TestSetup::new().await?;
 
         let app = configure_routes().with_state(setup.notification_state.clone());

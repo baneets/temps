@@ -36,9 +36,9 @@ impl TempsPlugin for EventsPlugin {
     }
 
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
-        let events_service = context.get_service::<crate::services::AnalyticsEventsService>()?;
-        let route_table = context.get_service::<temps_proxy::CachedPeerTable>()?;
-        let ip_address_service = context.get_service::<temps_geo::IpAddressService>()?;
+        let events_service = context.require_service::<crate::services::AnalyticsEventsService>();
+        let route_table = context.require_service::<temps_proxy::CachedPeerTable>();
+        let ip_address_service = context.require_service::<temps_geo::IpAddressService>();
         let cookie_crypto = context.require_service::<temps_core::CookieCrypto>();
 
         let routes =

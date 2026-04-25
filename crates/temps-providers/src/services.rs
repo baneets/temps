@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use temps_entities::{
-    external_service_backups, external_services, nodes, project_services, projects, service_members,
+    external_service_backups, external_service_health_checks, external_services, nodes,
+    project_services, projects, service_members,
 };
 use thiserror::Error;
 use tracing::{error, info, warn};
@@ -256,6 +257,72 @@ pub struct ProjectServiceInfo {
     pub id: i32,
     pub project: ProjectInfo,
     pub service: ExternalServiceInfo,
+}
+
+/// Persisted health snapshot returned by `get_health_snapshot`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceHealthSnapshot {
+    pub service_id: i32,
+    /// "operational" | "degraded" | "down" | null (never probed)
+    pub status: Option<String>,
+    pub last_checked_at: Option<String>,
+    pub last_error: Option<String>,
+    pub consecutive_failures: i32,
+    pub response_time_ms: Option<i32>,
+    /// 24-hour uptime percentage computed from stored history (0.0 — 100.0).
+    /// None when there's not enough history to compute.
+    pub uptime_24h_percent: Option<f64>,
+    /// Most recent check results, newest-first.
+    pub recent_checks: Vec<HealthCheckEntry>,
+}
+
+/// Minimal per-service status entry returned by `list_health_statuses`.
+/// Powers the status dot on the Storage list page.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceHealthStatusEntry {
+    pub service_id: i32,
+    /// "operational" | "degraded" | "down" | null (never probed)
+    pub status: Option<String>,
+    pub last_checked_at: Option<String>,
+    pub consecutive_failures: i32,
+}
+
+/// A single history entry returned alongside the health snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthCheckEntry {
+    pub checked_at: String,
+    pub status: String,
+    pub response_time_ms: Option<i32>,
+    pub error_message: Option<String>,
+}
+
+fn compute_uptime_percent(entries: &[HealthCheckEntry], window_hours: i64) -> Option<f64> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(window_hours);
+    let mut total = 0usize;
+    let mut operational = 0usize;
+
+    for entry in entries {
+        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&entry.checked_at) else {
+            continue;
+        };
+        if ts.with_timezone(&chrono::Utc) < cutoff {
+            continue;
+        }
+        total += 1;
+        if entry.status == "operational" {
+            operational += 1;
+        }
+    }
+
+    if total == 0 {
+        None
+    } else {
+        Some((operational as f64 / total as f64) * 100.0)
+    }
 }
 
 pub struct ExternalServiceManager {
@@ -1222,6 +1289,78 @@ impl ExternalServiceManager {
         let _service = self.get_service(service_id).await?;
 
         Ok(false)
+    }
+
+    /// Return the current health status for many services in one query.
+    /// Used by the Storage list page to render per-row status dots without
+    /// issuing one HTTP request per service.
+    pub async fn list_health_statuses(
+        &self,
+        service_ids: &[i32],
+    ) -> Result<Vec<ServiceHealthStatusEntry>, ExternalServiceError> {
+        if service_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = external_services::Entity::find()
+            .filter(external_services::Column::Id.is_in(service_ids.to_vec()))
+            .all(self.db.as_ref())
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ServiceHealthStatusEntry {
+                service_id: r.id,
+                status: r.health_status,
+                last_checked_at: r.last_health_check_at.map(|t| t.to_rfc3339()),
+                consecutive_failures: r.consecutive_health_failures,
+            })
+            .collect())
+    }
+
+    /// Return the persisted health snapshot for a service (status, last error,
+    /// and the most recent check history). Written by
+    /// `ExternalServiceHealthMonitor` on each probe cycle.
+    pub async fn get_health_snapshot(
+        &self,
+        service_id: i32,
+        history_limit: u64,
+    ) -> Result<ServiceHealthSnapshot, ExternalServiceError> {
+        let service = self.get_service(service_id).await?;
+
+        let history = external_service_health_checks::Entity::find()
+            .filter(external_service_health_checks::Column::ServiceId.eq(service_id))
+            .order_by_desc(external_service_health_checks::Column::CheckedAt)
+            .paginate(self.db.as_ref(), history_limit.clamp(1, 200))
+            .fetch_page(0)
+            .await?;
+
+        let recent_checks = history
+            .into_iter()
+            .map(|row| HealthCheckEntry {
+                checked_at: row.checked_at.to_rfc3339(),
+                status: row.status,
+                response_time_ms: row.response_time_ms,
+                error_message: row.error_message,
+            })
+            .collect::<Vec<_>>();
+
+        // Most recent response time (first entry when sorted DESC).
+        let response_time_ms = recent_checks.first().and_then(|c| c.response_time_ms);
+
+        // 24h uptime percentage based on stored history.
+        let uptime_24h_percent = compute_uptime_percent(&recent_checks, 24);
+
+        Ok(ServiceHealthSnapshot {
+            service_id,
+            status: service.health_status,
+            last_checked_at: service.last_health_check_at.map(|t| t.to_rfc3339()),
+            last_error: service.last_health_error,
+            consecutive_failures: service.consecutive_health_failures,
+            response_time_ms,
+            uptime_24h_percent,
+            recent_checks,
+        })
     }
 
     // Helper methods
@@ -5414,7 +5553,7 @@ mod tests {
     fn test_service_type_detection_rustfs() {
         let images = vec![
             "rustfs/rustfs:latest",
-            "rustfs/rustfs:1.0.0-alpha.78",
+            "rustfs/rustfs:1.0.0-alpha.98",
             "rustfs/rustfs:1.0.0",
         ];
 

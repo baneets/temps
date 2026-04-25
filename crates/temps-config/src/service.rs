@@ -407,14 +407,23 @@ impl ConfigService {
             .one(self.db.as_ref())
             .await?;
 
-        Ok(record
+        let settings = record
             .map(|r| AppSettings::from_json(r.data))
-            .unwrap_or_default())
+            .unwrap_or_default();
+        // Republish process-wide TLS opt-in so server-side make_client()
+        // callsites (deployer, agent, providers) see the latest value
+        // without an explicit init step at startup.
+        temps_core::tls::set_insecure_tls(settings.insecure_tls);
+        Ok(settings)
     }
 
     /// Update the application settings
     pub async fn update_settings(&self, settings: AppSettings) -> Result<(), ConfigServiceError> {
         let now = Utc::now();
+        // Refresh the TLS opt-in cache as soon as the operator toggles it
+        // in the settings UI; otherwise the change wouldn't take effect
+        // until the next get_settings() call.
+        temps_core::tls::set_insecure_tls(settings.insecure_tls);
 
         // Check if record exists
         let existing = settings::Entity::find_by_id(1)

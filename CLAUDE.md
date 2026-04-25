@@ -19,6 +19,9 @@ Guidance for Claude Code when working with the Temps codebase.
 - Create markdown documentation files unless explicitly requested
 - Mark Docker tests with `#[ignore]` -- they MUST skip gracefully at runtime instead
 - Create error types with generic messages -- ALWAYS include IDs, names, and operation context
+- Expose internal dependencies via public accessors (e.g. `service.db()`) -- pass dependencies directly via constructor or AppState
+- Use `Option<T>` for dependencies that are required -- use `Arc<T>` and fail at startup if missing
+- Use `get_service` for required dependencies in plugins -- use `require_service` which fails fast with a clear error
 
 ### ALWAYS
 - Run `cargo check --lib` after every modification
@@ -35,6 +38,9 @@ Guidance for Claude Code when working with the Temps codebase.
 - Use `permission_guard!` macro for authorization in handlers
 - Add audit logging for all write operations (CREATE, UPDATE, DELETE)
 - Include contextual information (IDs, resource names, paths) in every error message
+- Give each component its own copy of shared dependencies (Arc clones) -- never share via accessor methods
+- Use `require_service` in plugins for dependencies the app can't function without
+- Let the user configure and control their setup -- show status, give instructions, don't do things silently on their behalf
 
 ---
 
@@ -882,6 +888,7 @@ if (isLoading) return <Spinner />
 - Use `CopyButton` component for copy-to-clipboard (never manual clipboard handlers)
 - Center content with `mx-auto` when using `max-w-*` constraints
 - Use cards for selections instead of dropdowns where practical
+- **Skeletons over spinners for content loading** -- when a page, card, or list is waiting on data, render `Skeleton` placeholders that match the real layout. Never use centered `Loader2` spinners for content loading; the page should not visibly "collapse" then "expand" when data arrives. Inline button spinners on mutations (`verify.isPending`) are still fine since they indicate action execution, not content loading.
 
 ### Mobile Responsiveness
 - **Tables**: wrap in `overflow-x-auto`; hide secondary columns with `hidden md:table-cell`

@@ -2,11 +2,11 @@ import type { Command } from 'commander'
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import {
-  listProviders as listDnsProviders,
-  createProvider as createDnsProvider,
-  getProvider as getDnsProvider,
+  listDnsProviders,
+  createDnsProvider,
+  getDnsProvider,
   updateProvider as updateDnsProvider,
-  deleteProvider as deleteDnsProvider,
+  deleteDnsProvider,
   testProviderConnection,
   listProviderZones,
   listManagedDomains,

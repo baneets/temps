@@ -40,9 +40,9 @@ impl TempsPlugin for PerformancePlugin {
     }
 
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
-        let performance_service = context.get_service::<PerformanceService>()?;
-        let route_table = context.get_service::<temps_routes::CachedPeerTable>()?;
-        let ip_address_service = context.get_service::<temps_geo::IpAddressService>()?;
+        let performance_service = context.require_service::<PerformanceService>();
+        let route_table = context.require_service::<temps_routes::CachedPeerTable>();
+        let ip_address_service = context.require_service::<temps_geo::IpAddressService>();
 
         let routes = configure_routes().with_state(Arc::new(AppState {
             performance_service,

@@ -16,6 +16,8 @@ import { useForm } from 'react-hook-form'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '@/contexts/AuthContext'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { consumeReturnTo } from '@/lib/return-to'
 import * as z from 'zod'
 
 const formSchema = z.object({
@@ -28,6 +30,7 @@ const formSchema = z.object({
 type FormValues = z.infer<typeof formSchema>
 
 export const MfaVerify = () => {
+  usePageTitle('Verify MFA')
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const { refetch } = useAuth()
@@ -49,8 +52,8 @@ export const MfaVerify = () => {
       // Invalidate and refetch user data
       await queryClient.invalidateQueries({ queryKey: ['getCurrentUser'] })
       await refetch()
-      // Navigate using React Router
-      navigate('/dashboard')
+      // Navigate using React Router, honoring the pre-login return path if any
+      navigate(consumeReturnTo('/dashboard'), { replace: true })
     },
   })
   const onSubmit = async (data: FormValues) => {

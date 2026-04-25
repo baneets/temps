@@ -9,8 +9,8 @@ import {
   updateEmailProviderMutation,
   updateSlackProviderMutation,
   updateWebhookProviderMutation,
-  testProvider2Mutation,
-  deleteProvider2Mutation,
+  testNotificationProviderMutation as testProvider2Mutation,
+  deleteNotificationProviderMutation as deleteProvider2Mutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { ProviderForm } from '@/components/monitoring/ProviderForm'
 import {
@@ -220,7 +220,7 @@ export function EditNotificationProvider() {
           config: {
             url: data.config.url!,
             method: data.config.method || 'POST',
-            headers: data.config.headers || {},
+            headers: (data.config.headers as Record<string, string>) || {},
             timeout_secs: data.config.timeout_secs || 30,
           },
         },

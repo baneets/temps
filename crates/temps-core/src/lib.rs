@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod config;
 pub mod deployment;
+pub mod env_vars_provider;
 pub mod error;
 pub mod error_builder;
 pub mod external_plugin;
@@ -13,6 +14,7 @@ pub mod openapi;
 pub mod plugin;
 pub mod problemdetails;
 pub mod retry;
+pub mod tls;
 pub use problemdetails::ProblemDetails;
 mod app_settings;
 mod constants;
@@ -30,11 +32,16 @@ pub mod url_validation;
 pub mod utils;
 pub mod workflow;
 pub mod workflow_executor;
+pub mod workflow_memory;
 // Re-export commonly used types
 pub use audit::*;
 pub use config::*;
 pub use constants::*;
 pub use deployment::*;
+pub use env_vars_provider::{
+    flatten_integration_env_vars, IntegrationEnvVar, IntegrationServiceInfo,
+    ProjectEnvVarsProvider, ProjectIntegrationEnvVars,
+};
 pub use error::*;
 pub use error_builder::*;
 pub use jobs::*;
@@ -44,8 +51,9 @@ pub use utils::*;
 // Re-export external dependencies
 pub use anyhow;
 pub use app_settings::{
-    AppSettings, ContainerLogSettings, DiskSpaceAlertSettings, DnsProviderSettings,
-    DockerRegistrySettings, LetsEncryptSettings, MultiNodeSettings, RateLimitSettings,
+    AgentSandboxSettings, AiConfigSettings, AppSettings, ContainerLogSettings,
+    DiskSpaceAlertSettings, DnsProviderSettings, DockerRegistrySettings, LetsEncryptSettings,
+    MultiNodeSettings, PreviewGatewaySettings, ProviderConfig, RateLimitSettings,
     ScreenshotSettings, SecurityHeadersSettings,
 };
 pub use async_trait;
@@ -53,7 +61,7 @@ pub use chrono;
 pub use cookie_crypto::{CookieCrypto, CryptoError};
 pub use encryption::EncryptionService;
 pub use repo_config::*;
-pub use request_metadata::RequestMetadata;
+pub use request_metadata::{host_without_port, RequestMetadata};
 pub use serde;
 pub use serde_json;
 pub use stages::*;
@@ -65,6 +73,10 @@ pub use types::*;
 pub use uuid;
 pub use workflow::*;
 pub use workflow_executor::*;
+pub use workflow_memory::{
+    memory_install_command, WorkflowMemoryError, WorkflowMemoryFact, WorkflowMemoryProvider,
+    MEMORY_SCRIPT, MEMORY_SCRIPT_DIR, MEMORY_SCRIPT_PATH,
+};
 
 // Re-export standard datetime type for use across all crates
 pub use types::UtcDateTime;

@@ -18,9 +18,9 @@ use tokio::sync::OnceCell;
 use tracing::{debug, error, info, warn};
 
 use crate::jobs::{
-    BuildImageJobBuilder, ConfigureCronsJobBuilder, CronConfigService, DeployImageJobBuilder,
-    DeployStaticBundleJob, DeployStaticJob, DeploymentTarget, DownloadRepoBuilder,
-    PullExternalImageJob, VerifyLocalImageJob,
+    AgentSyncService, BuildImageJobBuilder, ConfigureAgentsJobBuilder, ConfigureCronsJobBuilder,
+    CronConfigService, DeployImageJobBuilder, DeployStaticBundleJob, DeployStaticJob,
+    DeploymentTarget, DownloadRepoBuilder, PullExternalImageJob, VerifyLocalImageJob,
 };
 use crate::services::DeploymentJobTracker;
 use temps_screenshots::ScreenshotService;
@@ -35,6 +35,7 @@ pub struct WorkflowExecutionService {
     static_deployer: Arc<dyn StaticDeployer>,
     log_service: Arc<LogService>,
     cron_service: Arc<dyn CronConfigService>,
+    agent_sync_service: Arc<dyn AgentSyncService>,
     config_service: Arc<temps_config::ConfigService>,
     screenshot_service: Arc<ScreenshotService>,
     docker: Arc<bollard::Docker>,
@@ -55,6 +56,7 @@ impl WorkflowExecutionService {
         static_deployer: Arc<dyn StaticDeployer>,
         log_service: Arc<LogService>,
         cron_service: Arc<dyn CronConfigService>,
+        agent_sync_service: Arc<dyn AgentSyncService>,
         config_service: Arc<temps_config::ConfigService>,
         screenshot_service: Arc<ScreenshotService>,
         docker: Arc<bollard::Docker>,
@@ -68,6 +70,7 @@ impl WorkflowExecutionService {
             static_deployer,
             log_service,
             cron_service,
+            agent_sync_service,
             config_service,
             screenshot_service,
             docker,
@@ -599,6 +602,20 @@ impl WorkflowExecutionService {
                 let remote_env_variables: Option<HashMap<String, String>> = config
                     .get("remote_environment_variables")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                // Get secrets (decrypted plaintext values to be mounted as files under
+                // /run/secrets/<KEY> by the deployer; never passed as env vars).
+                let secrets: HashMap<String, String> = config
+                    .get("secrets")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+                if !secrets.is_empty() {
+                    debug!(
+                        "🔐 Mounting {} secret file(s) into container: {}",
+                        secrets.len(),
+                        secrets.keys().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                }
                 debug!(
                     "🌍 Using {} environment variables for deployment (from job config): {}",
                     env_variables.len(),
@@ -677,6 +694,7 @@ impl WorkflowExecutionService {
                     .replicas(replicas)
                     .environment_variables(env_variables)
                     .remote_environment_variables(remote_env_variables)
+                    .secrets(secrets)
                     .log_id(db_job.log_id.clone())
                     .log_service(self.log_service.clone());
 
@@ -817,6 +835,42 @@ impl WorkflowExecutionService {
                     .log_id(db_job.log_id.clone())
                     .log_service(self.log_service.clone())
                     .build(self.db.clone(), cron_service)?;
+
+                Ok(Arc::new(job))
+            }
+
+            "ConfigureAgentsJob" => {
+                let config = db_job.job_config.as_ref().ok_or_else(|| {
+                    WorkflowExecutionError::MissingJobConfig(db_job.job_id.clone())
+                })?;
+
+                let download_job_id = config
+                    .get("download_job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("download_repo")
+                    .to_string();
+
+                let dependencies: Vec<String> = db_job
+                    .dependencies
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default();
+
+                let deploy_container_job_id = dependencies
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "deploy_container".to_string());
+
+                let agent_sync_service = self.agent_sync_service.clone();
+
+                let job = ConfigureAgentsJobBuilder::new()
+                    .job_id(db_job.job_id.clone())
+                    .download_job_id(download_job_id)
+                    .deploy_container_job_id(deploy_container_job_id)
+                    .project_id(project.id)
+                    .log_id(Some(db_job.log_id.clone()))
+                    .log_service(self.log_service.clone())
+                    .build(self.db.clone(), agent_sync_service)?;
 
                 Ok(Arc::new(job))
             }
@@ -1887,6 +1941,13 @@ mod tests {
 
     #[async_trait]
     impl GitProviderManagerTrait for MockGitProvider {
+        async fn get_connection_access_token(
+            &self,
+            _connection_id: i32,
+        ) -> Result<(String, String), temps_git::GitProviderManagerError> {
+            Ok(("mock-token".to_string(), "github".to_string()))
+        }
+
         async fn clone_repository(
             &self,
             _connection_id: i32,
@@ -1922,6 +1983,23 @@ mod tests {
         ) -> Result<(), temps_git::GitProviderManagerError> {
             Err(temps_git::GitProviderManagerError::Other(
                 "Not implemented".to_string(),
+            ))
+        }
+
+        async fn push_files_and_create_pr(
+            &self,
+            _connection_id: i32,
+            _owner: &str,
+            _repo: &str,
+            _branch: &str,
+            _base_branch: &str,
+            _files: Vec<(String, Vec<u8>)>,
+            _commit_message: &str,
+            _pr_title: &str,
+            _pr_body: &str,
+        ) -> Result<temps_git::PullRequest, temps_git::GitProviderManagerError> {
+            Err(temps_git::GitProviderManagerError::Other(
+                "not implemented in test".into(),
             ))
         }
     }
@@ -2288,6 +2366,7 @@ mod tests {
             static_deployer,
             log_service,
             cron_service,
+            Arc::new(crate::jobs::NoOpAgentSyncService) as Arc<dyn crate::jobs::AgentSyncService>,
             config_service,
             screenshot_service,
             docker,
@@ -2329,6 +2408,7 @@ mod tests {
             static_deployer,
             log_service,
             cron_service,
+            Arc::new(crate::jobs::NoOpAgentSyncService) as Arc<dyn crate::jobs::AgentSyncService>,
             config_service,
             screenshot_service,
             docker,
@@ -2435,6 +2515,7 @@ mod tests {
             static_deployer,
             log_service,
             cron_service,
+            Arc::new(crate::jobs::NoOpAgentSyncService) as Arc<dyn crate::jobs::AgentSyncService>,
             config_service,
             screenshot_service,
             docker,

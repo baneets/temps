@@ -4,6 +4,7 @@ use super::repositories::{
 };
 use super::types::GitAppState as AppState;
 use super::types::GitAppState;
+use crate::services::connection_health::ConnectionHealthError;
 use crate::services::git_provider::GitProviderError;
 use crate::services::git_provider_manager::GitProviderManagerError;
 use crate::services::repository::RepositoryServiceError;
@@ -23,6 +24,7 @@ use temps_auth::{permission_check, Permission, RequireAuth};
 
 use temps_core::problemdetails::{new as problem_new, Problem};
 use temps_core::UtcDateTime;
+use temps_entities::git_provider_connections;
 use utoipa::ToSchema;
 
 // Convert RepositoryServiceError to Problem Details
@@ -72,6 +74,15 @@ impl From<GitProviderManagerError> for Problem {
                 .with_detail(
                     "Repository synchronization is already in progress for this connection",
                 ),
+            GitProviderManagerError::SyncTimeout {
+                connection_id,
+                deadline_secs,
+            } => problem_new(StatusCode::GATEWAY_TIMEOUT)
+                .with_title("Sync Timed Out")
+                .with_detail(format!(
+                    "Repository sync for connection {} exceeded the {}s hard deadline and was aborted; the syncing flag has been reset so you can retry.",
+                    connection_id, deadline_secs
+                )),
             GitProviderManagerError::RepositoryNotFound(msg) => problem_new(StatusCode::NOT_FOUND)
                 .with_title("Repository Not Found")
                 .with_detail(msg),
@@ -88,6 +99,9 @@ impl From<GitProviderManagerError> for Problem {
             }
             GitProviderManagerError::QueueError(msg) => problem_new(StatusCode::INTERNAL_SERVER_ERROR)
                 .with_title("Queue Error")
+                .with_detail(msg),
+            GitProviderManagerError::OAuthStateInvalid(msg) => problem_new(StatusCode::BAD_REQUEST)
+                .with_title("OAuth State Invalid")
                 .with_detail(msg),
         }
     }
@@ -136,6 +150,20 @@ impl From<GitProviderError> for Problem {
     }
 }
 
+impl From<ConnectionHealthError> for Problem {
+    fn from(error: ConnectionHealthError) -> Self {
+        match error {
+            ConnectionHealthError::NotFound { connection_id } => problem_new(StatusCode::NOT_FOUND)
+                .with_title("Connection Not Found")
+                .with_detail(format!("Git connection {} was not found", connection_id)),
+            ConnectionHealthError::Database(e) => problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Database Error")
+                .with_detail(e.to_string()),
+            ConnectionHealthError::ProviderManager(e) => e.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct CreateProviderRequest {
     pub name: String,
@@ -168,6 +196,30 @@ pub struct CreateGitLabOAuthRequest {
     pub client_secret: String,
     pub redirect_uri: String,
     pub base_url: Option<String>,
+}
+
+/// Partial-update payload for provider credentials. Every field is optional;
+/// only the fields the user re-enters are applied. The server validates that
+/// the fields supplied make sense for the provider's current auth_method
+/// (e.g. `app_id` + `private_key` only apply to GitHub Apps).
+#[derive(Debug, Serialize, Deserialize, ToSchema, Default)]
+pub struct UpdateProviderCredentialsRequest {
+    /// OAuth client ID (GitLab OAuth, GitHub App).
+    pub client_id: Option<String>,
+    /// OAuth client secret (GitLab OAuth, GitHub App).
+    pub client_secret: Option<String>,
+    /// Application ID (GitHub App integer as string; GitLab App string).
+    pub app_id: Option<String>,
+    /// GitLab App secret (not used by GitHub App — use `client_secret`).
+    pub app_secret: Option<String>,
+    /// GitHub App private key (PEM).
+    pub private_key: Option<String>,
+    /// GitHub App webhook secret.
+    pub webhook_secret: Option<String>,
+    /// OAuth redirect URI (GitLab OAuth / GitLab App).
+    pub redirect_uri: Option<String>,
+    /// PAT for PAT-type providers.
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -246,10 +298,45 @@ pub struct ConnectionResponse {
     pub syncing: bool,
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_synced_at: Option<UtcDateTime>,
+    /// Running count of repositories persisted by the current (or most
+    /// recent) sync. Resets to 0 when a new sync begins; useful for showing
+    /// live progress on large syncs.
+    pub synced_repository_count: i32,
+    /// Current health status: "healthy", "unhealthy", or "unknown".
+    pub health_status: String,
+    /// Human-readable reason when health_status is "unhealthy"; null otherwise.
+    pub health_message: Option<String>,
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub last_health_check_at: Option<UtcDateTime>,
+    pub consecutive_health_failures: i32,
     #[schema(value_type = String, format = DateTime)]
     pub created_at: UtcDateTime,
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: UtcDateTime,
+}
+
+impl From<git_provider_connections::Model> for ConnectionResponse {
+    fn from(conn: git_provider_connections::Model) -> Self {
+        Self {
+            id: conn.id,
+            provider_id: conn.provider_id,
+            user_id: conn.user_id,
+            account_name: conn.account_name,
+            account_type: conn.account_type,
+            installation_id: conn.installation_id,
+            is_active: conn.is_active,
+            is_expired: conn.is_expired,
+            syncing: conn.syncing,
+            last_synced_at: conn.last_synced_at,
+            synced_repository_count: conn.synced_repository_count,
+            health_status: conn.health_status,
+            health_message: conn.health_message,
+            last_health_check_at: conn.last_health_check_at,
+            consecutive_health_failures: conn.consecutive_health_failures,
+            created_at: conn.created_at,
+            updated_at: conn.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -273,6 +360,8 @@ pub struct RepositoryResponse {
     pub clone_url: Option<String>,
     /// SSH clone URL (e.g., git@github.com:owner/repo.git)
     pub ssh_url: Option<String>,
+    /// ID of the git provider connection this repository was synced from.
+    pub git_provider_connection_id: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -287,6 +376,18 @@ pub struct RepositorySyncResponse {
     pub total_count: usize,
     #[schema(value_type = String, format = DateTime)]
     pub synced_at: UtcDateTime,
+}
+
+/// Returned by `POST /git-connections/{id}/sync` to acknowledge that a
+/// sync has been kicked off in the background. Clients should poll the
+/// connection's `syncing` and `synced_repository_count` fields to track
+/// progress rather than waiting on this response.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct RepositorySyncStartedResponse {
+    pub connection_id: i32,
+    pub syncing: bool,
+    #[schema(value_type = String, format = DateTime)]
+    pub started_at: UtcDateTime,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -577,20 +678,7 @@ pub async fn list_connections(
 
     let response_connections: Vec<ConnectionResponse> = connections
         .into_iter()
-        .map(|conn| ConnectionResponse {
-            id: conn.id,
-            provider_id: conn.provider_id,
-            user_id: conn.user_id,
-            account_name: conn.account_name,
-            account_type: conn.account_type,
-            installation_id: conn.installation_id,
-            is_active: conn.is_active,
-            is_expired: conn.is_expired,
-            syncing: conn.syncing,
-            last_synced_at: conn.last_synced_at,
-            created_at: conn.created_at,
-            updated_at: conn.updated_at,
-        })
+        .map(ConnectionResponse::from)
         .collect();
 
     Ok(Json(ConnectionListResponse {
@@ -601,10 +689,14 @@ pub async fn list_connections(
     }))
 }
 
-/// Sync repositories from a connection
+/// Start a repository sync for a connection
 ///
-/// Synchronizes repository data from the git provider to the local database.
-/// This updates the local cache of repositories for faster access.
+/// Kicks off a background sync of the connection's repositories from the
+/// provider. Returns `202 Accepted` immediately — the caller should poll
+/// the connection endpoint for `syncing` / `synced_repository_count`
+/// updates rather than waiting on this response. The sync is guarded by
+/// a hard deadline and always releases the `syncing` flag on exit, so a
+/// client that disconnects mid-sync will not leave the connection stuck.
 #[utoipa::path(
     post,
     path = "/git-connections/{connection_id}/sync",
@@ -612,7 +704,7 @@ pub async fn list_connections(
         ("connection_id" = i32, Path, description = "Connection ID")
     ),
     responses(
-        (status = 200, description = "Repositories synced successfully", body = RepositorySyncResponse),
+        (status = 202, description = "Repository sync started in background", body = RepositorySyncStartedResponse),
         (status = 404, description = "Connection not found"),
         (status = 409, description = "Sync already in progress"),
         (status = 401, description = "Unauthorized"),
@@ -630,38 +722,23 @@ pub async fn sync_repositories(
 ) -> Result<impl IntoResponse, Problem> {
     permission_check!(auth, Permission::GitRepositoriesSync);
 
-    // Use the standard sync for all providers, including GitHub Apps
-    // The git_provider_manager now handles GitHub App installation token generation internally
-    let repositories = state
+    // Fire and forget: the manager spawns a detached task owning a drop
+    // guard that resets `syncing=false` on every exit path. We can
+    // safely respond 202 the moment the `syncing=true` write lands.
+    state
         .git_provider_manager
-        .sync_repositories(connection_id)
+        .clone()
+        .spawn_sync_repositories(connection_id)
         .await?;
-    let items: Vec<RepositoryResponse> = repositories
-        .iter()
-        .map(|r| RepositoryResponse {
-            id: r.id,
-            owner: r.owner.clone(),
-            name: r.name.clone(),
-            full_name: r.full_name.clone(),
-            description: r.description.clone(),
-            private: r.private,
-            default_branch: r.default_branch.clone(),
-            language: r.language.clone(),
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            pushed_at: r.pushed_at,
-            preset: convert_preset_json(r.preset.clone()),
-            clone_url: r.clone_url.clone(),
-            ssh_url: r.ssh_url.clone(),
-        })
-        .collect();
 
-    let total_count = items.len();
-    Ok(Json(RepositorySyncResponse {
-        repositories: items,
-        total_count,
-        synced_at: chrono::Utc::now(),
-    }))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RepositorySyncStartedResponse {
+            connection_id,
+            syncing: true,
+            started_at: chrono::Utc::now(),
+        }),
+    ))
 }
 
 /// List repositories for a specific connection
@@ -776,6 +853,7 @@ pub async fn list_repositories_by_connection(
             preset: convert_preset_json(r.preset.clone()),
             clone_url: r.clone_url,
             ssh_url: r.ssh_url,
+            git_provider_connection_id: r.git_provider_connection_id,
         })
         .collect();
 
@@ -836,6 +914,7 @@ pub async fn list_repositories_by_provider(
             preset: convert_preset_json(r.preset.clone()),
             clone_url: r.clone_url,
             ssh_url: r.ssh_url,
+            git_provider_connection_id: r.git_provider_connection_id,
         })
         .collect();
     Ok(Json(response))
@@ -950,6 +1029,7 @@ pub async fn list_synced_repositories(
             preset: convert_preset_json(r.preset.clone()),
             clone_url: r.clone_url,
             ssh_url: r.ssh_url,
+            git_provider_connection_id: r.git_provider_connection_id,
         })
         .collect();
 
@@ -1109,6 +1189,66 @@ pub async fn get_repository_by_name(
             preset: convert_preset_json(repository.preset),
             clone_url: repository.clone_url,
             ssh_url: repository.ssh_url,
+            git_provider_connection_id: repository.git_provider_connection_id,
+        }),
+    ))
+}
+
+/// Get repository by ID
+#[utoipa::path(
+    get,
+    path = "/repository/{repository_id}",
+    params(
+        ("repository_id" = i32, Path, description = "Repository ID")
+    ),
+    responses(
+        (status = 200, description = "Repository found", body = RepositoryResponse),
+        (status = 404, description = "Repository not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Git Providers",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn get_repository_by_id(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(repository_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_check!(auth, Permission::GitRepositoriesRead);
+
+    let repository = state
+        .git_provider_manager
+        .get_repository_by_id(repository_id)
+        .await
+        .map_err(|e| match e {
+            GitProviderManagerError::RepositoryNotFound(_) => problem_new(StatusCode::NOT_FOUND)
+                .with_title("Repository not found")
+                .with_detail(format!("Repository {} not found", repository_id)),
+            _ => problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Failed to find repository")
+                .with_detail(e.to_string()),
+        })?;
+
+    Ok((
+        StatusCode::OK,
+        Json(RepositoryResponse {
+            id: repository.id,
+            owner: repository.owner,
+            name: repository.name,
+            full_name: repository.full_name,
+            description: repository.description,
+            private: repository.private,
+            default_branch: repository.default_branch,
+            language: repository.language,
+            created_at: repository.created_at,
+            updated_at: repository.updated_at,
+            pushed_at: repository.pushed_at,
+            preset: convert_preset_json(repository.preset),
+            clone_url: repository.clone_url,
+            ssh_url: repository.ssh_url,
+            git_provider_connection_id: repository.git_provider_connection_id,
         }),
     ))
 }
@@ -1175,6 +1315,7 @@ pub async fn get_all_repositories_by_name(
             preset: convert_preset_json(repository.preset),
             clone_url: repository.clone_url,
             ssh_url: repository.ssh_url,
+            git_provider_connection_id: repository.git_provider_connection_id,
         })
         .collect();
 
@@ -1183,7 +1324,7 @@ pub async fn get_all_repositories_by_name(
 
 /// Configure routes for git providers
 pub fn configure_routes() -> axum::Router<Arc<AppState>> {
-    use axum::routing::{delete, get, post};
+    use axum::routing::{delete, get, patch, post};
 
     axum::Router::new()
         // Provider configuration management
@@ -1193,7 +1334,7 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/git-providers/{provider_id}",
-            get(get_git_provider).delete(delete_provider),
+            get(get_git_provider).delete(delete_git_provider),
         )
         .route(
             "/git-providers/{provider_id}/deletion-check",
@@ -1223,6 +1364,10 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/git-providers/gitlab/oauth",
             post(create_gitlab_oauth_provider),
+        )
+        .route(
+            "/git-providers/{provider_id}/credentials",
+            patch(update_git_provider_credentials),
         )
         // OAuth flow (provider-specific as it configures the provider)
         .route(
@@ -1264,6 +1409,10 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
             "/git-connections/{connection_id}/validate",
             get(validate_connection),
         )
+        .route(
+            "/git-connections/{connection_id}/health-check",
+            post(run_connection_health_check),
+        )
         // Repository listing with advanced filtering
         .route("/repositories", get(list_synced_repositories))
         // Repository preset calculation
@@ -1297,6 +1446,7 @@ pub fn configure_routes() -> axum::Router<Arc<AppState>> {
             get(get_repository_tags),
         )
         // New endpoints using repository ID (singular)
+        .route("/repository/{repository_id}", get(get_repository_by_id))
         .route(
             "/repository/{repository_id}/branches",
             get(get_branches_by_repository_id),
@@ -1341,6 +1491,12 @@ pub async fn start_git_provider_oauth(
 ) -> Result<impl IntoResponse, Problem> {
     permission_check!(auth, Permission::GitConnectionsCreate);
 
+    let user = auth.require_user().map_err(|msg| {
+        problem_new(StatusCode::FORBIDDEN)
+            .with_title("User Required")
+            .with_detail(msg)
+    })?;
+
     // Extract the host from request headers for dynamic callback URL
     let host = headers
         .get("host")
@@ -1355,7 +1511,7 @@ pub async fn start_git_provider_oauth(
 
     let (auth_url, _state) = state
         .git_provider_manager
-        .start_oauth_flow(provider_id, host)
+        .start_oauth_flow(provider_id, user.id, host)
         .await?;
     Ok(axum::response::Redirect::to(&auth_url))
 }
@@ -1382,10 +1538,7 @@ pub async fn handle_git_provider_oauth_callback(
     Path(provider_id): Path<i32>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
-    RequireAuth(auth): RequireAuth,
 ) -> Result<impl IntoResponse, Problem> {
-    permission_check!(auth, Permission::GitConnectionsCreate);
-
     let code = params.get("code").cloned().unwrap_or_default();
     let oauth_state = params.get("state").cloned().unwrap_or_default();
 
@@ -1393,6 +1546,26 @@ pub async fn handle_git_provider_oauth_callback(
         return Err(problem_new(StatusCode::BAD_REQUEST)
             .with_title("Missing Authorization Code")
             .with_detail("OAuth authorization code is required"));
+    }
+
+    if oauth_state.is_empty() {
+        return Err(problem_new(StatusCode::BAD_REQUEST)
+            .with_title("Missing OAuth State")
+            .with_detail("OAuth state parameter is required"));
+    }
+
+    // OAuth callbacks arrive cross-site from the provider; the browser doesn't
+    // carry our API bearer token. Identify the user via the server-issued state
+    // we persisted during start_oauth_flow.
+    let (state_user_id, state_provider_id) = state
+        .git_provider_manager
+        .consume_oauth_state(&oauth_state)
+        .await?;
+
+    if state_provider_id != provider_id {
+        return Err(problem_new(StatusCode::BAD_REQUEST)
+            .with_title("OAuth State Mismatch")
+            .with_detail("OAuth state does not match the requested provider"));
     }
 
     // Extract the host from request headers for consistent callback URL
@@ -1407,15 +1580,9 @@ pub async fn handle_git_provider_oauth_callback(
             format!("{}://{}/api", scheme, host)
         });
 
-    let user = auth.require_user().map_err(|msg| {
-        temps_core::problemdetails::new(StatusCode::FORBIDDEN)
-            .with_title("User Required")
-            .with_detail(msg)
-    })?;
-
     let connection = state
         .git_provider_manager
-        .handle_oauth_callback(provider_id, code, oauth_state, user.id, host)
+        .handle_oauth_callback(provider_id, code, oauth_state, state_user_id, host)
         .await?;
 
     // Redirect to success page or dashboard
@@ -1524,11 +1691,13 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
         get_repository_preset_live,
         get_repository_preset_by_name,
         get_repository_by_name,
+        get_repository_by_id,
         get_all_repositories_by_name,
         create_github_pat_provider,
         create_gitlab_pat_provider,
         create_gitlab_oauth_provider,
-        delete_provider,
+        update_git_provider_credentials,
+        delete_git_provider,
         check_provider_deletion_safety,
         delete_provider_safely,
         deactivate_provider,
@@ -1538,6 +1707,7 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
         delete_connection,
         update_connection_token,
         validate_connection,
+        run_connection_health_check,
     ),
     components(
         schemas(
@@ -1552,9 +1722,11 @@ fn parse_auth_method(method_type: &str, config: serde_json::Value) -> Result<Aut
             RepositoryListQuery,
             SyncedRepositoryListQuery,
             RepositoryListResponse,
+            RepositorySyncStartedResponse,
             CreateGitHubPATRequest,
             CreateGitLabPATRequest,
             CreateGitLabOAuthRequest,
+            UpdateProviderCredentialsRequest,
             ProjectUsageInfoResponse,
             ProviderDeletionCheckResponse,
             UpdateTokenRequest,
@@ -1715,6 +1887,68 @@ pub async fn create_gitlab_oauth_provider(
     ))
 }
 
+/// Partially update credentials for an existing git provider. Only the fields
+/// you send are replaced; omitted fields keep their stored values. Fields that
+/// don't apply to the provider's auth method are ignored on the service side.
+#[utoipa::path(
+    patch,
+    path = "/git-providers/{provider_id}/credentials",
+    params(
+        ("provider_id" = i32, Path, description = "Git provider ID")
+    ),
+    request_body = UpdateProviderCredentialsRequest,
+    responses(
+        (status = 200, description = "Credentials updated", body = ProviderResponse),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Provider not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Git Providers",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn update_git_provider_credentials(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<i32>,
+    Json(request): Json<UpdateProviderCredentialsRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_check!(auth, Permission::GitProvidersWrite);
+
+    let provider = state
+        .git_provider_manager
+        .update_provider_credentials(
+            provider_id,
+            request.client_id,
+            request.client_secret,
+            request.app_id,
+            request.app_secret,
+            request.private_key,
+            request.webhook_secret,
+            request.redirect_uri,
+            request.token,
+        )
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(ProviderResponse {
+            id: provider.id,
+            name: provider.name,
+            provider_type: provider.provider_type,
+            base_url: provider.base_url,
+            auth_method: provider.auth_method,
+            is_active: provider.is_active,
+            is_default: provider.is_default,
+            created_at: provider.created_at,
+            updated_at: provider.updated_at,
+        }),
+    ))
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct PresetLiveQuery {
     pub branch: Option<String>,
@@ -1807,20 +2041,7 @@ pub async fn get_provider_connections(
 
     let response: Vec<ConnectionResponse> = connections
         .into_iter()
-        .map(|conn| ConnectionResponse {
-            id: conn.id,
-            provider_id: conn.provider_id,
-            user_id: conn.user_id,
-            account_name: conn.account_name,
-            account_type: conn.account_type,
-            installation_id: conn.installation_id,
-            is_active: conn.is_active,
-            is_expired: conn.is_expired,
-            syncing: conn.syncing,
-            last_synced_at: conn.last_synced_at,
-            created_at: conn.created_at,
-            updated_at: conn.updated_at,
-        })
+        .map(ConnectionResponse::from)
         .collect();
 
     Ok((StatusCode::OK, Json(response)))
@@ -1909,7 +2130,7 @@ pub async fn activate_provider(
         ("bearer_auth" = [])
     )
 )]
-pub async fn delete_provider(
+pub async fn delete_git_provider(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(provider_id): Path<i32>,
@@ -2182,4 +2403,48 @@ pub async fn validate_connection(
             "Connection is invalid or token expired".to_string()
         },
     }))
+}
+
+/// Run an on-demand health check for a git connection.
+///
+/// Probes the upstream (GitHub App, PAT, or OAuth token), persists the result,
+/// and fires admin notifications on status transitions. Returns the updated
+/// connection.
+#[utoipa::path(
+    post,
+    path = "/git-connections/{connection_id}/health-check",
+    params(
+        ("connection_id" = i32, Path, description = "Connection ID")
+    ),
+    responses(
+        (status = 200, description = "Health check completed", body = ConnectionResponse),
+        (status = 404, description = "Connection not found"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Git Provider Connections",
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn run_connection_health_check(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<GitAppState>>,
+    Path(connection_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_check!(auth, Permission::GitConnectionsWrite);
+
+    state
+        .connection_health_service
+        .check_connection_health(connection_id)
+        .await?;
+
+    // Return the fresh connection row so the caller sees the new status
+    // without a second round-trip.
+    let connection = state
+        .git_provider_manager
+        .get_connection(connection_id)
+        .await?;
+
+    Ok(Json(ConnectionResponse::from(connection)))
 }

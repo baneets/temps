@@ -571,7 +571,7 @@ pub async fn get_unique_counts(
     path = "/_temps/event",
     request_body = EventMetricsPayload,
     responses(
-        (status = 200, description = "Event recorded successfully"),
+        (status = 204, description = "Event recorded successfully"),
         (status = 400, description = "Bad request"),
         (status = 500, description = "Internal server error")
     )
@@ -589,25 +589,31 @@ pub async fn record_event_metrics(
         payload.event_name, payload.request_path
     );
 
-    // Extract domain from Host header
-    let host = match headers.get("host") {
-        Some(host) => match host.to_str() {
-            Ok(host_str) => host_str.to_string(),
-            Err(_) => {
-                error!("Invalid Host header");
-                return StatusCode::BAD_REQUEST.into_response();
-            }
-        },
-        None => {
-            error!("Missing Host header");
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-    };
+    // Resolve the host from request metadata. The middleware has already
+    // stripped the ":port" suffix so it can be used as a route-table key
+    // directly — a raw Host header would break on non-default ports like the
+    // local dev proxy's :8080, which is what the route table never contains.
+    let host = metadata.host.clone();
+    if host.is_empty() {
+        error!("Missing Host header");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
 
     // Look up project/environment/deployment from route table o(1)
     let (project_id, environment_id, deployment_id) = match state.route_table.get_route(&host) {
         Some(route_info) => {
-            let project_id = route_info.project.as_ref().map(|p| p.id).unwrap_or(1);
+            // A route without a project is a sandbox/orphaned route — we can't
+            // attribute the event to anything, so silently drop it (204) rather
+            // than falling back to project_id=1 which FK-violates on insert.
+            let Some(project) = route_info.project.as_ref() else {
+                info!(
+                    "Dropping event for host {} — route has no associated project (sandbox/orphan)",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+
+            let project_id = project.id;
             let environment_id = route_info.environment.as_ref().map(|e| e.id);
             let deployment_id = route_info.deployment.as_ref().map(|d| d.id);
 
@@ -727,7 +733,7 @@ pub async fn record_event_metrics(
                 environment_id,
                 deployment_id
             );
-            StatusCode::OK.into_response()
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
             error!("Failed to record event: {:?}", e);

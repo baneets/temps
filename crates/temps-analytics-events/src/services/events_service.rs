@@ -1420,13 +1420,20 @@ WHERE project_id = $1
                 .await
                 .map_err(EventsError::Database)?;
 
-            // If visitor exists and doesn't have activity flag set, update it
+            // Keep `visitor.last_seen` fresh on every ingested event so the
+            // "live visitors" list (which queries `visitor.last_seen`) stays
+            // in sync with the active-visitor badge (which queries
+            // `events.timestamp`). Without this, only requests that traverse
+            // the proxy bump `last_seen`, so JS-driven heartbeats/page_leave
+            // events would tick the badge but leave the detail list empty.
+            // `has_activity` is stamped on the first event per visitor.
             if let Some(ref v) = visitor_record {
+                let mut active_visitor: visitor::ActiveModel = v.clone().into();
+                active_visitor.last_seen = sea_orm::ActiveValue::Set(chrono::Utc::now());
                 if !v.has_activity {
-                    let mut active_visitor: visitor::ActiveModel = v.clone().into();
                     active_visitor.has_activity = sea_orm::ActiveValue::Set(true);
-                    let _ = active_visitor.update(self.db.as_ref()).await;
                 }
+                let _ = active_visitor.update(self.db.as_ref()).await;
             }
 
             visitor_record.map(|v| v.id)

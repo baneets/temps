@@ -8,9 +8,9 @@ const config: Config = {
 	theme: {
 		extend: {
 			fontFamily: {
-				sans: ['Noto Sans Mono', 'ui-monospace', 'Cascadia Code', 'SF Mono', 'monospace', 'system-ui'],
-				serif: ['Courier Prime', 'IBM Plex Mono', 'Georgia', 'serif'],
-				mono: ['Noto Sans Mono', 'Cascadia Code', 'SF Mono', 'Consolas', 'monospace'],
+				sans: ['Geist', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'sans-serif'],
+				serif: ['Geist', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+				mono: ['Geist Mono', 'ui-monospace', 'Cascadia Code', 'SF Mono', 'Consolas', 'monospace'],
 			},
 			colors: {
 				border: 'var(--border)',

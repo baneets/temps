@@ -7,7 +7,7 @@ import {
   rollbackToDeploymentMutation,
   triggerProjectPipelineMutation,
 } from '@/api/client/@tanstack/react-query.gen'
-import DeploymentListItem from '@/components/deployment/DeploymentListItem'
+import DeploymentCompactRow from '@/components/deployment/DeploymentCompactRow'
 import { RedeploymentModal } from '@/components/deployments/RedeploymentModal'
 import { Card } from '@/components/ui/card'
 import {
@@ -422,7 +422,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
 
   return (
     <>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold">Deployments</h2>
           <Button
@@ -435,7 +435,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
             {isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
-        <Button onClick={handleOpenNewDeployment}>
+        <Button onClick={handleOpenNewDeployment} className="w-full sm:w-auto">
           <PlusIcon className="h-4 w-4 mr-2" />
           New Deployment
           <KeyboardShortcut shortcut="N" onTrigger={handleOpenNewDeployment} />
@@ -450,7 +450,7 @@ export function ProjectDeployments({ project }: { project: ProjectResponse }) {
               to={`/projects/${project.slug}/deployments/${deployment.id}`}
               className="block hover:bg-muted/50 transition-colors"
             >
-              <DeploymentListItem
+              <DeploymentCompactRow
                 deployment={deployment}
                 onRedeploy={() => {
                   setSelectedDeployment(deployment.id)

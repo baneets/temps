@@ -1,13 +1,18 @@
 export const metadata = {
   title: 'Temps SDKs',
-  description: 'Official Temps SDKs for React analytics, Node.js integration, key-value storage, and blob storage. Add observability to your app in minutes.',
+  description: 'Official Temps SDKs for React, Vue, Svelte, vanilla JS analytics, Node.js integration, key-value storage, and blob storage. Add observability to your app in minutes.',
   alternates: {
     canonical: '/docs/sdks',
   },
 }
 
 export const sections = [
+  { title: 'Analytics SDKs Overview', id: 'analytics-overview' },
   { title: 'React Analytics', id: 'react-analytics' },
+  { title: 'Vanilla JS Analytics', id: 'vanilla-analytics' },
+  { title: 'Vue Analytics', id: 'vue-analytics' },
+  { title: 'Svelte Analytics', id: 'svelte-analytics' },
+  { title: 'Analytics Core', id: 'analytics-core' },
   { title: 'Node.js SDK', id: 'node-sdk' },
   { title: 'Key-Value Store', id: 'kv' },
   { title: 'Blob Storage', id: 'blob' },
@@ -15,7 +20,27 @@ export const sections = [
 
 # Temps SDKs
 
-Official SDKs and libraries to integrate Temps into your applications. Choose the right SDK for your use case—from React analytics to server-side API access. {{ className: 'lead' }}
+Official SDKs and libraries to integrate Temps into your applications. Choose the right SDK for your use case—from framework-specific analytics to server-side API access. {{ className: 'lead' }}
+
+---
+
+## Analytics SDKs Overview {{ anchor: true, id: 'analytics-overview' }}
+
+Temps provides analytics SDKs for every major frontend runtime. They all capture the same signals — pageviews, custom events, Web Vitals, engagement heartbeats, page-leave events, and optional session recording — and send them to the same `/api/_temps` endpoints on your Temps instance.
+
+| Package | Use for | Install |
+|---------|---------|---------|
+| [`@temps-sdk/react-analytics`](#react-analytics) | React / Next.js apps | `npm install @temps-sdk/react-analytics` |
+| [`@temps-sdk/analytics-browser`](#vanilla-analytics) | Plain HTML pages, Astro islands, non-React SPAs | `npm install @temps-sdk/analytics-browser` |
+| [`@temps-sdk/vue-analytics`](#vue-analytics) | Vue 3 apps | `npm install @temps-sdk/vue-analytics` |
+| [`@temps-sdk/svelte-analytics`](#svelte-analytics) | Svelte 4 / 5 and SvelteKit apps | `npm install @temps-sdk/svelte-analytics` |
+| [`@temps-sdk/analytics-core`](#analytics-core) | Building your own framework adapter | `npm install @temps-sdk/analytics-core` |
+
+Every SDK wraps the same framework-agnostic `@temps-sdk/analytics-core`, so behavior — payload shape, localhost detection, session recording, retry logic — is identical across frameworks. Pick the one that matches your stack.
+
+<Note>
+  **What gets tracked by default?** Pageviews (on route change), Web Vitals (LCP, FID, CLS, FCP, TTFB, INP), engagement heartbeats (every 30s while active), and a `page_leave` event on unload. Session recording is opt-in via `enableSessionRecording`.
+</Note>
 
 ---
 
@@ -162,6 +187,394 @@ export default function App({ Component, pageProps }) {
   );
 }
 ```
+
+---
+
+## Vanilla JS Analytics {{ anchor: true, id: 'vanilla-analytics' }}
+
+Framework-free analytics for plain HTML pages, Astro islands, Alpine.js, htmx, or any JS runtime without a framework wrapper.
+
+### Installation
+
+```bash
+npm install @temps-sdk/analytics-browser
+```
+
+### Quick Start (programmatic)
+
+```ts
+import { init, trackEvent } from '@temps-sdk/analytics-browser';
+
+// Boot once, typically in your entry file
+init({
+  basePath: '/api/_temps',
+  autoTrackPageviews: true,
+  autoTrackSpeedAnalytics: true,
+  autoTrackEngagement: true,
+});
+
+// Later, anywhere
+trackEvent('signup_clicked', { plan: 'pro' });
+```
+
+`init()` returns an `AnalyticsApi` and also attaches it to `window.temps` so other scripts can call `window.temps.trackEvent(...)` without importing.
+
+### Quick Start (script tag)
+
+Drop-in for static sites — no bundler required. The `/auto` entrypoint reads `data-*` attributes from its own `<script>` tag and boots on `DOMContentLoaded`:
+
+```html
+<script
+  src="https://unpkg.com/@temps-sdk/analytics-browser/dist/auto.js"
+  data-domain="mysite.com"
+  data-base-path="/api/_temps"
+  data-session-recording="true"
+  data-excluded-paths="/admin/*,/internal/*"
+  defer
+></script>
+```
+
+Supported `data-*` attributes:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `data-domain` | string | Override `window.location.hostname` |
+| `data-base-path` | string | Endpoint path (default `/api/_temps`) |
+| `data-disabled` | `true` / `false` | Disable entirely |
+| `data-ignore-localhost` | `true` / `false` | Skip localhost (default `true`) |
+| `data-auto-track-pageviews` | `true` / `false` | Auto-track route changes |
+| `data-auto-track-page-leave` | `true` / `false` | Track `page_leave` events |
+| `data-auto-track-speed` | `true` / `false` | Track Web Vitals |
+| `data-auto-track-engagement` | `true` / `false` | Heartbeat engagement tracking |
+| `data-session-recording` | `true` / `false` | Enable rrweb session recording |
+| `data-excluded-paths` | comma list | Paths to skip for recording, supports `*` |
+| `data-session-sample-rate` | `0`–`1` | Fraction of sessions to record |
+| `data-heartbeat-interval` | number (ms) | Heartbeat interval |
+| `data-inactivity-timeout` | number (ms) | Inactivity timeout |
+| `data-engagement-threshold` | number (ms) | When a session becomes "engaged" |
+
+### API
+
+```ts
+import {
+  init,
+  getAnalytics,
+  trackEvent,
+  trackPageview,
+  destroy,
+} from '@temps-sdk/analytics-browser';
+
+init(options);                // Boot. Safe to call once per page.
+getAnalytics();               // Returns current AnalyticsApi or null.
+trackEvent(name, data?);      // Async — fires and forgets.
+trackPageview();              // Manual pageview. Usually not needed with auto-tracking.
+destroy();                    // Tear down listeners, timers, and session recorder.
+```
+
+---
+
+## Vue Analytics {{ anchor: true, id: 'vue-analytics' }}
+
+First-class Vue 3 support via a plugin + composables. Works with Nuxt, Vite, and any Vue 3 SPA.
+
+### Installation
+
+```bash
+npm install @temps-sdk/vue-analytics
+```
+
+### Quick Start
+
+```ts
+// main.ts
+import { createApp } from 'vue';
+import { TempsAnalyticsPlugin } from '@temps-sdk/vue-analytics';
+import App from './App.vue';
+
+const app = createApp(App);
+
+app.use(TempsAnalyticsPlugin, {
+  basePath: '/api/_temps',
+  autoTrackPageviews: true,
+  enableSessionRecording: false,
+});
+
+app.mount('#app');
+```
+
+### Composables
+
+```vue
+<script setup lang="ts">
+import {
+  useTempsAnalytics,
+  useTrackEvent,
+  useTrackPageview,
+  usePageLeave,
+  useEngagementTracking,
+  useScrollVisibility,
+  useSessionRecording,
+} from '@temps-sdk/vue-analytics';
+
+// Raw API
+const analytics = useTempsAnalytics();
+
+// Convenience helpers
+const trackEvent = useTrackEvent();
+const trackPageview = useTrackPageview();
+
+function onCtaClick() {
+  trackEvent('cta_clicked', { location: 'hero' });
+}
+
+// Track when the current page is about to be left
+usePageLeave((data) => {
+  console.log('Leaving with engagement:', data.engagement_time_seconds);
+});
+
+// Reactive engagement signal
+const { engagement, isEngaged } = useEngagementTracking();
+
+// Scroll visibility for a ref
+import { ref } from 'vue';
+const pricingSection = ref<HTMLElement | null>(null);
+useScrollVisibility(pricingSection, () => {
+  trackEvent('pricing_viewed');
+});
+
+// Session recording toggle
+const { isEnabled, enable, disable, toggle } = useSessionRecording();
+</script>
+
+<template>
+  <button @click="onCtaClick">Get started</button>
+  <section ref="pricingSection">…</section>
+</template>
+```
+
+### Global property
+
+The plugin also registers `$temps` as a global property for Options API components:
+
+```vue
+<script>
+export default {
+  methods: {
+    handleClick() {
+      this.$temps.trackEvent('legacy_button');
+    },
+  },
+};
+</script>
+```
+
+### Nuxt 3
+
+In `plugins/temps.client.ts`:
+
+```ts
+import { TempsAnalyticsPlugin } from '@temps-sdk/vue-analytics';
+
+export default defineNuxtPlugin((nuxtApp) => {
+  nuxtApp.vueApp.use(TempsAnalyticsPlugin, {
+    basePath: '/api/_temps',
+  });
+});
+```
+
+---
+
+## Svelte Analytics {{ anchor: true, id: 'svelte-analytics' }}
+
+Store-based analytics for Svelte 4, Svelte 5 runes mode, and SvelteKit.
+
+### Installation
+
+```bash
+npm install @temps-sdk/svelte-analytics
+```
+
+### Quick Start
+
+```ts
+// src/lib/analytics.ts
+import { initTempsAnalytics } from '@temps-sdk/svelte-analytics';
+
+export const analytics = initTempsAnalytics({
+  basePath: '/api/_temps',
+  autoTrackPageviews: true,
+  autoTrackSpeedAnalytics: true,
+});
+```
+
+Call `initTempsAnalytics()` once in your root layout (browser-only — wrap in `if (browser)` on SvelteKit):
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts">
+  import { browser } from '$app/environment';
+  import { onMount } from 'svelte';
+  import { initTempsAnalytics } from '@temps-sdk/svelte-analytics';
+
+  onMount(() => {
+    if (browser) {
+      initTempsAnalytics({ basePath: '/api/_temps' });
+    }
+  });
+</script>
+
+<slot />
+```
+
+### Tracking events
+
+```svelte
+<script lang="ts">
+  import { getTempsAnalytics } from '@temps-sdk/svelte-analytics';
+
+  function onClick() {
+    getTempsAnalytics()?.trackEvent('hero_cta_clicked', { variant: 'a' });
+  }
+</script>
+
+<button on:click={onClick}>Get started</button>
+```
+
+### The `trackVisibility` action
+
+Fire an event when an element scrolls into view:
+
+```svelte
+<script lang="ts">
+  import { trackVisibility } from '@temps-sdk/svelte-analytics';
+</script>
+
+<section
+  use:trackVisibility={{
+    eventName: 'pricing_viewed',
+    once: true,
+    threshold: 0.5,
+    data: { section: 'pricing' },
+  }}
+>
+  <h2>Pricing</h2>
+</section>
+```
+
+### Engagement store
+
+```svelte
+<script lang="ts">
+  import { engagementStore } from '@temps-sdk/svelte-analytics';
+  const engagement = engagementStore();
+</script>
+
+<p>Engagement: {$engagement.engagement_time_seconds}s</p>
+{#if $engagement.is_engaged}
+  <span>Active visitor</span>
+{/if}
+```
+
+### Session recording store
+
+```svelte
+<script lang="ts">
+  import { sessionRecordingStore } from '@temps-sdk/svelte-analytics';
+  const recording = sessionRecordingStore();
+</script>
+
+<button on:click={recording.toggle}>
+  {$recording.enabled ? 'Stop' : 'Start'} recording
+</button>
+```
+
+### `analyticsStore` readable
+
+A Svelte readable that resolves to the current `AnalyticsApi` (or `null` before init completes). Handy for reactive templates:
+
+```svelte
+<script lang="ts">
+  import { analyticsStore } from '@temps-sdk/svelte-analytics';
+</script>
+
+{#if $analyticsStore}
+  <p>Analytics ready on {$analyticsStore.enabled ? 'prod' : 'local'}</p>
+{/if}
+```
+
+---
+
+## Analytics Core {{ anchor: true, id: 'analytics-core' }}
+
+`@temps-sdk/analytics-core` is the framework-agnostic engine behind the React, Vue, Svelte, and vanilla packages. Use it directly only when building a custom integration (Solid, Qwik, Preact, Web Components, etc.).
+
+### Installation
+
+```bash
+npm install @temps-sdk/analytics-core
+```
+
+### API
+
+```ts
+import {
+  createAnalytics,
+  EngagementTracker,
+  SpeedTracker,
+  SessionRecorder,
+  sendAnalytics,
+  sendAnalyticsReliable,
+  DEFAULT_BASE_PATH,
+  type AnalyticsApi,
+  type AnalyticsOptions,
+  type EngagementData,
+  type SpeedMetric,
+} from '@temps-sdk/analytics-core';
+
+const analytics: AnalyticsApi = createAnalytics({
+  basePath: DEFAULT_BASE_PATH, // "/api/_temps"
+  autoTrackPageviews: true,
+  autoTrackSpeedAnalytics: true,
+  autoTrackEngagement: true,
+  enableSessionRecording: false,
+});
+
+analytics.trackEvent('custom_event', { foo: 'bar' });
+analytics.trackPageview();
+analytics.enableSessionRecording();
+// When your app unmounts
+analytics.destroy();
+```
+
+### Building your own adapter
+
+The individual trackers are standalone classes:
+
+```ts
+import { EngagementTracker, SpeedTracker, SessionRecorder } from '@temps-sdk/analytics-core';
+
+const engagement = new EngagementTracker({
+  basePath: '/api/_temps',
+  heartbeatInterval: 30000,
+  onHeartbeat: (data) => console.log('beat', data),
+});
+
+const speed = new SpeedTracker({ basePath: '/api/_temps' });
+
+const session = new SessionRecorder({
+  basePath: '/api/_temps',
+  enabled: true,
+  excludedPaths: ['/admin/*'],
+});
+session.start();
+
+// Later
+engagement.destroy();
+speed.destroy();
+session.destroy();
+```
+
+All trackers are safe to call in SSR contexts — they no-op when `window` is undefined.
 
 ---
 

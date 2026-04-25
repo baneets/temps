@@ -1,7 +1,7 @@
 import {
   addManagedDomain,
-  deleteProvider,
-  getProvider,
+  deleteDnsProvider as deleteProvider,
+  getDnsProvider as getProvider,
   listManagedDomains,
   listProviderZones,
   removeManagedDomain,
@@ -198,7 +198,7 @@ export default function DnsProviderDetail() {
     onSuccess: () => {
       toast.success('Provider deleted successfully')
       queryClient.invalidateQueries({ queryKey: ['dnsProviders'] })
-      navigate('/settings/dns-providers')
+      navigate('/dns-providers')
     },
     onError: (err: Error) => {
       toast.error('Failed to delete provider', {
@@ -317,7 +317,7 @@ export default function DnsProviderDetail() {
   useEffect(() => {
     if (provider) {
       setBreadcrumbs([
-        { label: 'DNS Providers', href: '/settings/dns-providers' },
+        { label: 'DNS Providers', href: '/dns-providers' },
         { label: provider.name },
       ])
     }
@@ -328,7 +328,7 @@ export default function DnsProviderDetail() {
   if (isLoading) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="space-y-6 p-6">
+        <div className="space-y-6 p-4 sm:p-6">
           <div className="flex items-center gap-4">
             <Skeleton className="h-10 w-10 rounded-full" />
             <div className="space-y-2">
@@ -337,7 +337,7 @@ export default function DnsProviderDetail() {
             </div>
           </div>
           <Card>
-            <CardContent className="p-6">
+            <CardContent className="p-4 sm:p-6">
               <div className="space-y-4">
                 <Skeleton className="h-4 w-full" />
                 <Skeleton className="h-4 w-3/4" />
@@ -353,7 +353,7 @@ export default function DnsProviderDetail() {
   if (error || !provider) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="space-y-6 p-6">
+        <div className="space-y-6 p-4 sm:p-6">
           <Alert variant="destructive">
             <AlertCircle className="h-4 w-4" />
             <AlertTitle>Error</AlertTitle>
@@ -362,7 +362,7 @@ export default function DnsProviderDetail() {
               you may not have permission to view it.
             </AlertDescription>
           </Alert>
-          <Button onClick={() => navigate('/settings/dns-providers')}>
+          <Button onClick={() => navigate('/dns-providers')}>
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Providers
           </Button>
@@ -373,24 +373,25 @@ export default function DnsProviderDetail() {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="space-y-6 p-6">
+      <div className="space-y-6 p-4 sm:p-6">
         {/* Header */}
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex items-start gap-3 min-w-0 sm:items-center sm:gap-4">
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate('/settings/dns-providers')}
+              className="shrink-0"
+              onClick={() => navigate('/dns-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            <div className="flex items-center gap-3">
-              {getProviderIcon(provider.provider_type)}
-              <div>
-                <h1 className="text-2xl font-bold">{provider.name}</h1>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="shrink-0">{getProviderIcon(provider.provider_type)}</div>
+              <div className="min-w-0">
+                <h1 className="text-xl sm:text-2xl font-bold truncate">{provider.name}</h1>
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm text-muted-foreground">
                   <span>{formatProviderType(provider.provider_type)}</span>
-                  <span>•</span>
+                  <span className="hidden sm:inline">•</span>
                   <span>
                     Created <TimeAgo date={provider.created_at} />
                   </span>
@@ -398,7 +399,7 @@ export default function DnsProviderDetail() {
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"

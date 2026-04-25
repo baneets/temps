@@ -221,8 +221,8 @@ pub struct DisableBlobResponse {
 /// Request to update Blob service configuration
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct UpdateBlobRequest {
-    /// Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.78")
-    #[schema(example = "rustfs/rustfs:1.0.0-alpha.78")]
+    /// Docker image to use (e.g., "rustfs/rustfs:1.0.0-alpha.98")
+    #[schema(example = "rustfs/rustfs:1.0.0-alpha.98")]
     pub docker_image: Option<String>,
 }
 

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use temps_core::notifications::{
     NotificationData, NotificationPriority, NotificationService, NotificationType,
 };
-use temps_core::{Job, JobReceiver};
+use temps_core::{AutopilotTriggerJob, Job, JobQueue, JobReceiver};
 use temps_entities::{environments, status_checks, status_incidents, status_monitors};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -34,8 +34,8 @@ impl MonitorStatus {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "operational" => Self::Operational,
-            "degraded" => Self::Degraded,
-            "down" => Self::Down,
+            "degraded" | "partial_outage" => Self::Degraded,
+            "down" | "major_outage" => Self::Down,
             _ => Self::Operational,
         }
     }
@@ -131,6 +131,9 @@ pub struct OutageDetectionService {
     db: Arc<DatabaseConnection>,
     notification_service: Arc<dyn NotificationService>,
     alarm_service: Arc<AlarmService>,
+    /// Optional job queue for emitting workflow triggers on outage events.
+    /// When set, monitoring.downtime workflows will be fired automatically.
+    job_queue: Option<Arc<dyn JobQueue>>,
     /// Cache of monitor states to detect transitions
     monitor_states: RwLock<HashMap<i32, MonitorState>>,
     /// Number of consecutive failures before triggering alert
@@ -149,10 +152,18 @@ impl OutageDetectionService {
             db,
             notification_service,
             alarm_service,
+            job_queue: None,
             monitor_states: RwLock::new(HashMap::new()),
-            failure_threshold: 2, // Alert after 2 consecutive failures
+            failure_threshold: 1, // Alert on first failure
             alert_cooldown: Duration::minutes(5),
         }
+    }
+
+    /// Attach a job queue so this service can emit workflow trigger events
+    /// when outages are detected.
+    pub fn with_job_queue(mut self, queue: Arc<dyn JobQueue>) -> Self {
+        self.job_queue = Some(queue);
+        self
     }
 
     /// Configure the failure threshold
@@ -242,17 +253,34 @@ impl OutageDetectionService {
             }
             None => {
                 // First check for this monitor - initialize state
+                let is_down = status.is_outage();
                 states.insert(
                     monitor_id,
                     MonitorState {
                         status,
                         active_incident_id: None,
-                        consecutive_failures: if status.is_outage() { 1 } else { 0 },
+                        consecutive_failures: if is_down { 1 } else { 0 },
                     },
                 );
 
-                // Don't alert on first check even if it's down
-                (false, None)
+                // Alert immediately if monitor is down on first check
+                let event = if is_down {
+                    Some(OutageEvent {
+                        monitor_id,
+                        monitor_name: monitor.name.clone(),
+                        project_id: monitor.project_id,
+                        environment_id: monitor.environment_id,
+                        previous_status: MonitorStatus::Operational,
+                        current_status: status,
+                        error_message: error_message.clone(),
+                        incident_id: None,
+                        occurred_at: now,
+                    })
+                } else {
+                    None
+                };
+
+                (is_down, event)
             }
         };
 
@@ -276,6 +304,9 @@ impl OutageDetectionService {
             // Fire alarm for the outage
             self.fire_outage_alarm(event).await;
 
+            // Trigger any workflows configured to run on monitoring.downtime
+            self.trigger_downtime_workflows(event).await;
+
             // Update cached state with incident ID
             let mut states = self.monitor_states.write().await;
             if let Some(state) = states.get_mut(&event.monitor_id) {
@@ -293,6 +324,36 @@ impl OutageDetectionService {
         }
 
         Ok(())
+    }
+
+    /// Emit an AutopilotTrigger job for monitoring.downtime workflows.
+    /// Failures here are logged but never fail the parent operation —
+    /// workflow triggering is best-effort.
+    async fn trigger_downtime_workflows(&self, event: &OutageEvent) {
+        let queue = match &self.job_queue {
+            Some(q) => q,
+            None => return,
+        };
+
+        let job = Job::AutopilotTrigger(AutopilotTriggerJob {
+            project_id: event.project_id,
+            trigger_type: "monitoring_downtime".to_string(),
+            trigger_source_id: Some(event.monitor_id),
+            trigger_source_type: Some("status_monitor".to_string()),
+            error_group_id: None,
+        });
+
+        if let Err(e) = queue.send(job).await {
+            warn!(
+                "Failed to enqueue monitoring.downtime workflow trigger for monitor {}: {}",
+                event.monitor_id, e
+            );
+        } else {
+            info!(
+                "Enqueued monitoring.downtime workflow trigger for project {} monitor {}",
+                event.project_id, event.monitor_id
+            );
+        }
     }
 
     /// Fire an alarm when an outage is detected
@@ -801,7 +862,12 @@ mod tests {
             MonitorStatus::Operational
         );
         assert_eq!(MonitorStatus::from_str("degraded"), MonitorStatus::Degraded);
+        assert_eq!(
+            MonitorStatus::from_str("partial_outage"),
+            MonitorStatus::Degraded
+        );
         assert_eq!(MonitorStatus::from_str("down"), MonitorStatus::Down);
+        assert_eq!(MonitorStatus::from_str("major_outage"), MonitorStatus::Down);
         assert_eq!(
             MonitorStatus::from_str("OPERATIONAL"),
             MonitorStatus::Operational

@@ -1,24 +1,18 @@
 import type React from "react";
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+import type {
+  JsonValue,
+  AnalyticsClientOptions,
+  SessionRecordingConfig,
+} from "@temps-sdk/analytics-core";
 
-export interface AnalyticsEventBase {
-  event_name: string;
-  request_query?: string;
-  request_path?: string;
-  event_data?: Record<string, JsonValue>;
-}
-
-export interface AnalyticsClientOptions {
-  /** Base endpoint path. Defaults to `/_temps`. */
-  basePath?: string;
-  /** Set to true to disable analytics (e.g., for tests). */
-  disabled?: boolean;
-  /** Ignore localhost/test env automatically. Defaults to true. */
-  ignoreLocalhost?: boolean;
-  /** Custom domain to use for analytics. Defaults to window.location.hostname. */
-  domain?: string;
-}
+export type {
+  JsonPrimitive,
+  JsonValue,
+  AnalyticsEventBase,
+  AnalyticsClientOptions,
+  WebVitalMetric,
+  SpeedMetric,
+} from "@temps-sdk/analytics-core";
 
 export interface AnalyticsContextValue {
   /** Send a custom event. */
@@ -51,46 +45,7 @@ export interface TempsAnalyticsProviderProps extends AnalyticsClientOptions {
   /** Enable session recording. Defaults to false. */
   enableSessionRecording?: boolean;
   /** Session recording configuration. */
-  sessionRecordingConfig?: {
-    /** Paths to exclude from recording. */
-    excludedPaths?: string[];
-    /** Sample rate for recording sessions (0.0 to 1.0). Defaults to 1.0. */
-    sessionSampleRate?: number;
-    /** Mask all inputs. Defaults to true. */
-    maskAllInputs?: boolean;
-    /** CSS selector for masking text. Defaults to "[data-mask]". */
-    maskTextSelector?: string;
-    /** CSS class to block from recording. Defaults to "rr-block". */
-    blockClass?: string;
-    /** CSS class to ignore from recording. Defaults to "rr-ignore". */
-    ignoreClass?: string;
-    /** CSS class to mask text. Defaults to "rr-mask". */
-    maskTextClass?: string;
-    /** Record canvas elements. Defaults to false. */
-    recordCanvas?: boolean;
-    /** Collect fonts. Defaults to false. */
-    collectFonts?: boolean;
-    /** Number of events to batch before sending. Defaults to 100. */
-    batchSize?: number;
-    /** Interval in ms to flush events. Defaults to 5000. */
-    flushInterval?: number;
-  };
+  sessionRecordingConfig?: SessionRecordingConfig;
   /** Children to render inside the provider. */
   children: React.ReactNode;
-}
-
-export interface WebVitalMetric {
-  value: number;
-  rating: "good" | "needs-improvement" | "poor";
-}
-
-export interface SpeedMetric {
-  ttfb?: number | null;
-  lcp?: number | null;
-  fid?: number | null;
-  fcp?: number | null;
-  cls?: number | null;
-  inp?: number | null;
-  path?: string | null;
-  query?: string | null;
 }

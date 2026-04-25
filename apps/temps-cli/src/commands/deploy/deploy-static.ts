@@ -267,10 +267,11 @@ export async function deployStatic(options: DeployStaticOptions): Promise<void> 
 
     const formData = new FormData()
     // Convert Buffer to Uint8Array for Blob compatibility
-    const uint8Data = new Uint8Array(fileData.buffer, fileData.byteOffset, fileData.byteLength)
+    const arrayBuffer = new ArrayBuffer(fileData.byteLength)
+    new Uint8Array(arrayBuffer).set(fileData)
     formData.append(
       'file',
-      new Blob([uint8Data], { type: contentType }),
+      new Blob([arrayBuffer], { type: contentType }),
       filename
     )
     formData.append('metadata', options.metadata || '{}')

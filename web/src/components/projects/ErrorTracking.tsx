@@ -41,11 +41,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity,
   AlertTriangle,
-  Bug,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
+  EyeOff,
   Info,
   Plus,
   RefreshCw,
@@ -54,7 +54,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { TimeAgo } from '../utils/TimeAgo'
@@ -73,6 +73,11 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
     '1h' | '24h' | '7d' | '30d'
   >('24h')
   const [isDsnConfigOpen, setIsDsnConfigOpen] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<
+    'unresolved' | 'resolved' | 'all'
+  >('unresolved')
+  const [page, setPage] = useState(1)
+  const pageSize = 25
 
   // Get tab from URL or default to 'errors'
   const selectedTab =
@@ -139,12 +144,19 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
   // Determine if we have errors
   const hasErrors = hasErrorGroupsData?.has_error_groups || false
 
+  // Reset to page 1 whenever filters change
+  useEffect(() => {
+    setPage(1)
+  }, [statusFilter, selectedTimeRange])
+
   // Fetch error groups for the project (only if we have errors)
   const { data: errorGroupsResponse, isLoading: isLoadingGroups } = useQuery({
     ...listErrorGroupsOptions({
       path: { project_id: project.id },
       query: {
-        page_size: 50,
+        page,
+        page_size: pageSize,
+        status: statusFilter === 'all' ? null : statusFilter,
         start_date: timeRange.startTime,
         end_date: timeRange.endTime,
       },
@@ -187,6 +199,20 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
     }),
   })
 
+  // When the project has never received any errors, route to the onboarding
+  // wizard (mirrors analytics empty-state behavior).
+  useEffect(() => {
+    if (isCheckingErrors) return
+    if (!hasErrorGroupsData?.has_error_groups) {
+      navigate(`/projects/${project.slug}/errors/setup`, { replace: true })
+    }
+  }, [
+    isCheckingErrors,
+    hasErrorGroupsData?.has_error_groups,
+    navigate,
+    project.slug,
+  ])
+
   // Create DSN mutation
   const createDsnMutation = useMutation({
     ...getOrCreateDsnMutation(),
@@ -215,13 +241,17 @@ export function ErrorTracking({ project }: ErrorTrackingProps) {
     switch (level?.toLowerCase()) {
       case 'error':
       case 'fatal':
-        return 'text-red-600 bg-red-100 dark:bg-red-900/20'
+      case 'referenceerror':
+      case 'typeerror':
+      case 'syntaxerror':
+      case 'rangeerror':
+        return 'text-red-400 bg-red-500/15 border border-red-500/20'
       case 'warning':
-        return 'text-yellow-600 bg-yellow-100 dark:bg-yellow-900/20'
+        return 'text-yellow-400 bg-yellow-500/15 border border-yellow-500/20'
       case 'info':
-        return 'text-blue-600 bg-blue-100 dark:bg-blue-900/20'
+        return 'text-blue-400 bg-blue-500/15 border border-blue-500/20'
       default:
-        return 'text-gray-600 bg-gray-100 dark:bg-gray-900/20'
+        return 'text-red-400 bg-red-500/15 border border-red-500/20'
     }
   }
   const handleCreateOrRegenerateDsn = () => {
@@ -377,140 +407,138 @@ After setup, trigger a test error and check the Temps error tracking dashboard t
     )
   }
 
-  return (
-    <div className="space-y-6">
-      {/* Show dashboard only if we have errors */}
-      {hasErrors ? (
-        <>
-          {/* Time Range Selector */}
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-medium">Error Tracking Overview</h2>
-            <Select
-              value={selectedTimeRange}
-              onValueChange={(v) =>
-                setSelectedTimeRange(v as '1h' | '24h' | '7d' | '30d')
-              }
+  const timeRangeLabel = (r: string) =>
+    r === '1h' ? 'last hour' : r === '24h' ? 'last 24 hours' : r === '7d' ? 'last 7 days' : 'last 30 days'
+
+  const renderTimeRangeButtons = () => (
+    <div className="flex gap-1">
+      {(['1h', '24h', '7d', '30d'] as const).map((range) => (
+        <Button
+          key={range}
+          variant={selectedTimeRange === range ? 'default' : 'outline'}
+          size="sm"
+          onClick={() => setSelectedTimeRange(range)}
+        >
+          {range}
+        </Button>
+      ))}
+    </div>
+  )
+
+  const trendDelta = dashboardStats?.total_errors_change_percent ?? 0
+  const trendUp = trendDelta > 0
+
+  type ErrorGroupRow = NonNullable<NonNullable<typeof errorGroupsResponse>['data']>[number]
+
+  const renderErrorRow = (group: ErrorGroupRow, idx: number) => {
+    const isSettled = group.status === 'resolved' || group.status === 'ignored'
+    const messageDiffers = group.message_template && group.message_template !== group.title
+    const onClick = () => handleErrorGroupClick(group.id.toString())
+
+    return (
+      <div
+        key={group.id}
+        className={cn(
+          'group flex items-center gap-4 py-3 cursor-pointer transition-colors hover:bg-muted/40 -mx-3 px-3 rounded-md',
+          isSettled && 'opacity-55',
+          idx > 0 && 'border-t border-border/60'
+        )}
+        onClick={onClick}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <Badge
+              variant="outline"
+              className={cn(
+                'text-[10px] font-medium uppercase tracking-wide px-1.5 py-0',
+                getSeverityColor(group.error_type || 'error')
+              )}
             >
-              <SelectTrigger className="w-[120px]">
-                <SelectValue placeholder="Time range" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="1h">Last hour</SelectItem>
-                <SelectItem value="24h">Last 24h</SelectItem>
-                <SelectItem value="7d">Last 7 days</SelectItem>
-                <SelectItem value="30d">Last 30 days</SelectItem>
-              </SelectContent>
-            </Select>
+              {group.error_type || 'error'}
+            </Badge>
+            <p className="font-medium text-sm leading-snug truncate">{group.title}</p>
+            {group.status === 'resolved' && (
+              <span className="flex items-center gap-1 text-xs text-green-500 shrink-0">
+                <CheckCircle2 className="h-3 w-3" /> Resolved
+              </span>
+            )}
+            {group.status === 'ignored' && (
+              <span className="flex items-center gap-1 text-xs text-yellow-500 shrink-0">
+                <EyeOff className="h-3 w-3" /> Ignored
+              </span>
+            )}
           </div>
-
-          {/* Error Dashboard Statistics Cards */}
-          {dashboardStats && (
-            <div className="grid gap-4 md:grid-cols-3">
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">
-                    Total Errors
-                  </CardTitle>
-                  <Bug className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {dashboardStats.total_errors.toLocaleString()}
-                  </div>
-                  <p className="text-xs text-muted-foreground flex items-center gap-1">
-                    {dashboardStats.total_errors_change_percent !== 0 && (
-                      <>
-                        {dashboardStats.total_errors_change_percent > 0 ? (
-                          <TrendingUp className="h-3 w-3 text-red-500" />
-                        ) : (
-                          <TrendingDown className="h-3 w-3 text-green-500" />
-                        )}
-                        <span
-                          className={
-                            dashboardStats.total_errors_change_percent > 0
-                              ? 'text-red-600'
-                              : 'text-green-600'
-                          }
-                        >
-                          {Math.abs(
-                            dashboardStats.total_errors_change_percent
-                          ).toFixed(1)}
-                          %
-                        </span>
-                      </>
-                    )}
-                    {dashboardStats.total_errors_change_percent === 0
-                      ? 'No change'
-                      : 'from last period'}
-                  </p>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">
-                    Error Groups
-                  </CardTitle>
-                  <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {dashboardStats.error_groups.toLocaleString()}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {dashboardStats.error_groups_previous_period > 0 ? (
-                      <>
-                        {dashboardStats.error_groups >
-                        dashboardStats.error_groups_previous_period
-                          ? '+'
-                          : ''}
-                        {dashboardStats.error_groups -
-                          dashboardStats.error_groups_previous_period}{' '}
-                        from last period
-                      </>
-                    ) : (
-                      'Unique error signatures'
-                    )}
-                  </p>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">
-                    Previous Period
-                  </CardTitle>
-                  <Activity className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">
-                    {dashboardStats.total_errors_previous_period.toLocaleString()}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {dashboardStats.error_groups_previous_period.toLocaleString()}{' '}
-                    error groups
-                  </p>
-                </CardContent>
-              </Card>
-            </div>
+          {messageDiffers && (
+            <p className="mt-1 text-xs text-muted-foreground truncate">{group.message_template}</p>
           )}
-        </>
-      ) : (
-        /* Show setup instructions when no errors */
-        !isCheckingErrors && (
-          <Alert className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
-            <Info className="h-4 w-4 text-blue-600" />
-            <AlertDescription className="text-sm">
-              No errors have been tracked yet.{' '}
-              {hasDsn
-                ? 'Your error tracking is configured and ready to receive errors.'
-                : 'Get started by setting up your DSN below.'}
-            </AlertDescription>
-          </Alert>
-        )
+          <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+            {group.last_seen && (
+              <span>Last <TimeAgo date={group.last_seen} /></span>
+            )}
+            {group.first_seen && group.last_seen && group.first_seen !== group.last_seen && (
+              <span className="hidden sm:inline">First <TimeAgo date={group.first_seen} /></span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-baseline gap-1.5 shrink-0 tabular-nums text-right">
+          <span className="text-base font-semibold leading-none">
+            {group.total_count.toLocaleString()}
+          </span>
+          <span className="text-[11px] text-muted-foreground leading-none">events</span>
+        </div>
+        <ChevronRight className="h-4 w-4 text-muted-foreground/60 group-hover:text-muted-foreground shrink-0" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-1">
+          <h2 className="text-2xl font-semibold tracking-tight">Errors</h2>
+          {hasErrors && dashboardStats ? (
+            <p className="text-sm text-muted-foreground">
+              <span className="font-medium text-foreground tabular-nums">
+                {dashboardStats.total_errors.toLocaleString()}
+              </span>{' '}
+              events across{' '}
+              <span className="font-medium text-foreground tabular-nums">
+                {dashboardStats.error_groups.toLocaleString()}
+              </span>{' '}
+              groups in the {timeRangeLabel(selectedTimeRange)}
+              {trendDelta !== 0 && (
+                <span
+                  className={cn(
+                    'ml-2 inline-flex items-center gap-0.5 text-xs font-medium tabular-nums',
+                    trendUp ? 'text-red-500' : 'text-green-500'
+                  )}
+                >
+                  {trendUp ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                  {Math.abs(trendDelta).toFixed(1)}% vs previous
+                </span>
+              )}
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Track exceptions and stack traces from your applications.
+            </p>
+          )}
+        </div>
+        {hasErrors && renderTimeRangeButtons()}
+      </div>
+
+      {!hasErrors && !isCheckingErrors && (
+        <Alert className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
+          <Info className="h-4 w-4 text-blue-600" />
+          <AlertDescription className="text-sm">
+            No errors have been tracked yet.{' '}
+            {hasDsn
+              ? 'Your error tracking is configured and ready to receive errors.'
+              : 'Get started by setting up your DSN below.'}
+          </AlertDescription>
+        </Alert>
       )}
 
-      {/* Tabs */}
       <Tabs
         value={selectedTab}
         onValueChange={(v) =>
@@ -538,127 +566,118 @@ After setup, trigger a test error and check the Temps error tracking dashboard t
           </TabsTrigger>
         </TabsList>
 
-        {/* Errors Tab */}
-        <TabsContent value="errors" className="mt-6">
-          <Card>
-            <CardContent className="pt-6 space-y-4">
-              {hasErrors ? (
-                <>
-                  {/* Time Range Filter */}
-                  <div className="flex justify-end">
-                    <div className="flex gap-2">
-                      {['1h', '24h', '7d', '30d'].map((range) => (
-                        <Button
-                          key={range}
-                          variant={
-                            selectedTimeRange === range ? 'default' : 'outline'
-                          }
-                          size="sm"
-                          onClick={() =>
-                            setSelectedTimeRange(
-                              range as typeof selectedTimeRange
-                            )
-                          }
-                        >
-                          {range}
-                        </Button>
-                      ))}
+        <TabsContent value="errors" className="mt-5 space-y-3">
+          {hasErrors && (
+            <div className="flex items-center gap-1">
+              {(
+                [
+                  { key: 'unresolved', label: 'Unresolved' },
+                  { key: 'resolved', label: 'Resolved' },
+                  { key: 'all', label: 'All' },
+                ] as const
+              ).map((f) => (
+                <Button
+                  key={f.key}
+                  variant={statusFilter === f.key ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setStatusFilter(f.key)}
+                >
+                  {f.label}
+                </Button>
+              ))}
+            </div>
+          )}
+          {hasErrors ? (
+            isLoadingGroups ? (
+              <div className="space-y-3">
+                {[...Array(5)].map((_, i) => (
+                  <Skeleton key={i} className="h-16" />
+                ))}
+              </div>
+            ) : errorGroupsResponse?.pagination?.total_count &&
+              errorGroupsResponse.pagination.total_count > 0 ? (
+              <>
+                <div className="rounded-md border border-border/60 bg-card px-3">
+                  {errorGroupsResponse.data?.map((group, idx) => renderErrorRow(group, idx))}
+                </div>
+                {errorGroupsResponse.pagination.total_pages > 1 && (
+                  <div className="flex items-center justify-between pt-1">
+                    <p className="text-xs text-muted-foreground tabular-nums">
+                      <span className="hidden sm:inline">
+                        Showing{' '}
+                        {(errorGroupsResponse.pagination.page - 1) *
+                          errorGroupsResponse.pagination.page_size +
+                          1}
+                        –
+                        {Math.min(
+                          errorGroupsResponse.pagination.page *
+                            errorGroupsResponse.pagination.page_size,
+                          errorGroupsResponse.pagination.total_count
+                        )}{' '}
+                        of {errorGroupsResponse.pagination.total_count}
+                      </span>
+                      <span className="sm:hidden">
+                        {errorGroupsResponse.pagination.page} /{' '}
+                        {errorGroupsResponse.pagination.total_pages}
+                      </span>
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        disabled={errorGroupsResponse.pagination.page <= 1}
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setPage((p) => p + 1)}
+                        disabled={
+                          errorGroupsResponse.pagination.page >=
+                          errorGroupsResponse.pagination.total_pages
+                        }
+                      >
+                        Next
+                      </Button>
                     </div>
                   </div>
-
-                  {/* Error Groups List */}
-                  {isLoadingGroups ? (
-                    <div className="space-y-4">
-                      {[...Array(3)].map((_, i) => (
-                        <Skeleton key={i} className="h-24" />
-                      ))}
-                    </div>
-                  ) : errorGroupsResponse?.pagination?.total_count &&
-                    errorGroupsResponse?.pagination?.total_count > 0 ? (
-                    <div className="space-y-4">
-                      {errorGroupsResponse?.data?.map((group) => (
-                        <div
-                          key={group.id}
-                          className="flex items-start space-x-4 rounded-lg border p-4 hover:bg-muted/50 cursor-pointer transition-colors"
-                          onClick={() =>
-                            handleErrorGroupClick(group.id.toString())
-                          }
-                        >
-                          <div className="flex-1 space-y-2">
-                            <div className="flex items-start justify-between">
-                              <div className="space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <Badge
-                                    className={cn(
-                                      getSeverityColor(
-                                        group.error_type || 'error'
-                                      )
-                                    )}
-                                  >
-                                    {group.error_type || 'error'}
-                                  </Badge>
-                                  <span className="font-medium">
-                                    {group.title}
-                                  </span>
-                                </div>
-                                {group.message_template && (
-                                  <p className="text-sm text-muted-foreground line-clamp-2">
-                                    {group.message_template}
-                                  </p>
-                                )}
-                              </div>
-                              <ChevronRight className="h-5 w-5 text-muted-foreground" />
-                            </div>
-                            <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                              <span className="flex items-center gap-1">
-                                <Bug className="h-3 w-3" />
-                                {group.total_count} occurrences
-                              </span>
-                              <span className="flex items-center gap-1">
-                                <Activity className="h-3 w-3" />
-                                {group.status}
-                              </span>
-                              {group.first_seen && (
-                                <span>
-                                  First seen <TimeAgo date={group.first_seen} />
-                                </span>
-                              )}
-                              {group.last_seen && (
-                                <span>
-                                  Last seen <TimeAgo date={group.last_seen} />
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <EmptyState
-                      icon={AlertTriangle}
-                      title="No errors in this period"
-                      description={`No error groups found in the last ${selectedTimeRange === '1h' ? 'hour' : selectedTimeRange === '24h' ? '24 hours' : selectedTimeRange === '7d' ? '7 days' : '30 days'}. Try selecting a different time range or check back later.`}
-                    />
-                  )}
-                </>
-              ) : (
-                <EmptyState
-                  icon={Info}
-                  title="No errors detected"
-                  description="Your application is running smoothly with no errors reported."
-                  action={
-                    !hasDsn && (
-                      <Button onClick={() => setSelectedTab('setup')}>
-                        <Settings className="h-4 w-4 mr-2" />
-                        Configure Error Tracking
-                      </Button>
-                    )
-                  }
-                />
-              )}
-            </CardContent>
-          </Card>
+                )}
+              </>
+            ) : (
+              <EmptyState
+                icon={AlertTriangle}
+                title={
+                  statusFilter === 'unresolved'
+                    ? 'No unresolved errors'
+                    : statusFilter === 'resolved'
+                      ? 'No resolved errors'
+                      : 'No errors in this period'
+                }
+                description={
+                  statusFilter === 'unresolved'
+                    ? `Nothing needs attention in the ${timeRangeLabel(selectedTimeRange)}.`
+                    : `No ${statusFilter === 'all' ? '' : statusFilter + ' '}error groups found in the ${timeRangeLabel(selectedTimeRange)}.`
+                }
+              />
+            )
+          ) : (
+            <EmptyState
+              icon={Info}
+              title="No errors detected"
+              description="Your application is running smoothly with no errors reported."
+              action={
+                !hasDsn && (
+                  <Button onClick={() => setSelectedTab('setup')}>
+                    <Settings className="h-4 w-4 mr-2" /> Configure Error Tracking
+                  </Button>
+                )
+              }
+            />
+          )}
         </TabsContent>
+
 
         {/* Analytics Tab */}
         <TabsContent value="analytics" className="mt-6">
@@ -923,6 +942,7 @@ sentry_sdk.init(
           </div>
         </TabsContent>
       </Tabs>
+      {/* end shared Analytics / Source Maps / Setup tabs */}
 
       {/* Create/Regenerate DSN Dialog */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>

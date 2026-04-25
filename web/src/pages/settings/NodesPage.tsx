@@ -475,7 +475,7 @@ function JoinInstructions({ joinCommand }: { joinCommand: string }) {
           </div>
           <div>
             <a
-              href="/docs/multi-node"
+              href="https://temps.sh/docs/multi-node"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"

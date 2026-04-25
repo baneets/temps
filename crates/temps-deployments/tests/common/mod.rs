@@ -63,6 +63,13 @@ pub struct LocalFixtureGitProvider {
 
 #[async_trait]
 impl GitProviderManagerTrait for LocalFixtureGitProvider {
+    async fn get_connection_access_token(
+        &self,
+        _connection_id: i32,
+    ) -> Result<(String, String), GitProviderManagerError> {
+        Ok(("fixture-token".to_string(), "github".to_string()))
+    }
+
     async fn clone_repository(
         &self,
         _connection_id: i32,
@@ -124,6 +131,23 @@ impl GitProviderManagerTrait for LocalFixtureGitProvider {
         // Force fallback to clone for fixtures
         Err(GitProviderManagerError::Other(
             "Archive not available for fixtures".to_string(),
+        ))
+    }
+
+    async fn push_files_and_create_pr(
+        &self,
+        _connection_id: i32,
+        _owner: &str,
+        _repo: &str,
+        _branch: &str,
+        _base_branch: &str,
+        _files: Vec<(String, Vec<u8>)>,
+        _commit_message: &str,
+        _pr_title: &str,
+        _pr_body: &str,
+    ) -> Result<temps_git::PullRequest, temps_git::GitProviderManagerError> {
+        Err(temps_git::GitProviderManagerError::Other(
+            "not implemented in test".into(),
         ))
     }
 }

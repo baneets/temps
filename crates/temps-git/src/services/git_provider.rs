@@ -323,6 +323,15 @@ pub struct Repository {
     pub pushed_at: Option<UtcDateTime>,
 }
 
+/// A single page of repositories returned by `GitProviderService::list_repositories_page`.
+/// `next_page` is `None` when the server has no more pages to return; the
+/// caller should stop paginating.
+#[derive(Debug, Clone)]
+pub struct RepositoryPage {
+    pub items: Vec<Repository>,
+    pub next_page: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Branch {
     pub name: String,
@@ -337,6 +346,17 @@ pub struct Commit {
     pub author: String,
     pub author_email: String,
     pub date: UtcDateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PullRequest {
+    pub number: i32,
+    pub url: String,
+    pub title: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    /// The commit SHA at the head of the PR branch.
+    pub head_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +383,7 @@ pub struct User {
 }
 
 /// Trait that all git providers must implement
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait GitProviderService: Send + Sync {
     /// Get the provider type
@@ -396,6 +417,38 @@ pub trait GitProviderService: Send + Sync {
         access_token: &str,
         organization: Option<&str>,
     ) -> Result<Vec<Repository>, GitProviderError>;
+
+    /// List a single page of repositories. Used by streaming sync so the
+    /// caller can flush each page to the database before fetching the next —
+    /// essential for tenants with thousands of repos where buffering the full
+    /// list is not feasible.
+    ///
+    /// Providers that don't implement this fall back to `list_repositories`
+    /// via the default implementation, which returns everything as a single
+    /// "page" with no `next_page`. Implementations that do support streaming
+    /// (e.g. GitLab) should override this.
+    async fn list_repositories_page(
+        &self,
+        access_token: &str,
+        organization: Option<&str>,
+        page: u32,
+    ) -> Result<RepositoryPage, GitProviderError> {
+        // Default: only return items on page 1, empty on any other page. This
+        // lets callers uniformly loop until `next_page` is `None` even against
+        // providers that buffer internally.
+        if page <= 1 {
+            let items = self.list_repositories(access_token, organization).await?;
+            Ok(RepositoryPage {
+                items,
+                next_page: None,
+            })
+        } else {
+            Ok(RepositoryPage {
+                items: Vec::new(),
+                next_page: None,
+            })
+        }
+    }
 
     /// Get a specific repository
     async fn get_repository(
@@ -607,6 +660,32 @@ pub trait GitProviderService: Send + Sync {
         files: Vec<(String, Vec<u8>)>,
         commit_message: &str,
     ) -> Result<Commit, GitProviderError>;
+
+    /// Create a pull request / merge request
+    ///
+    /// # Arguments
+    /// * `access_token` - Access token for authentication
+    /// * `owner` - Repository owner
+    /// * `repo` - Repository name
+    /// * `title` - Pull request title
+    /// * `body` - Pull request description body
+    /// * `head_branch` - Source branch containing the changes
+    /// * `base_branch` - Target branch to merge into
+    ///
+    /// # Returns
+    /// * `Ok(PullRequest)` - The created pull request
+    /// * `Err(GitProviderError::NotImplemented)` - If the provider does not support pull requests
+    /// * `Err(GitProviderError)` - If creation fails
+    async fn create_pull_request(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<PullRequest, GitProviderError>;
 }
 
 /// Factory for creating provider instances

@@ -1,0 +1,13 @@
+[package]
+name = "temps-agents-mcp-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "MCP proxy server that bridges custom tool definitions to webhook endpoints"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,6 +1,7 @@
 import { Command } from 'commander'
 import chalk from 'chalk'
 import { colors } from './ui/output.js'
+import { setQuietMode } from './ui/spinner.js'
 import { handleError } from './utils/errors.js'
 import { createRequire } from 'module'
 
@@ -45,8 +46,15 @@ import { registerMigrateCommands } from './commands/migrate/index.js'
 import { registerTemplatesCommands } from './commands/templates/index.js'
 import { registerPlatformCommands } from './commands/platform/index.js'
 import { registerPresetsCommands } from './commands/presets/index.js'
+import { registerAnalyticsCommands } from './commands/analytics/index.js'
 import { registerFunnelsCommands } from './commands/funnels/index.js'
 import { registerNotificationPreferencesCommands } from './commands/notification-preferences/index.js'
+import { registerSkillsCommands } from './commands/skills/index.js'
+import { registerMcpServersCommands } from './commands/mcp-servers/index.js'
+import { registerSecretsCommands } from './commands/secrets/index.js'
+import { registerSandboxCommands } from './commands/sandbox/index.js'
+import { registerWorkflowCommands } from './commands/workflow/index.js'
+import { registerRevenueCommands } from './commands/revenue/index.js'
 
 // Developer workflow commands
 import { registerInitCommand } from './commands/init/index.js'
@@ -82,13 +90,19 @@ export function createProgram(): Command {
     .version(VERSION, '-V, --version', 'Display version number')
     .option('--no-color', 'Disable colored output')
     .option('--debug', 'Enable debug output')
-    .hook('preAction', (thisCommand) => {
+    .hook('preAction', (thisCommand, actionCommand) => {
       const opts = thisCommand.opts()
       if (opts.debug) {
         process.env.DEBUG = '1'
       }
       if (opts.noColor) {
         chalk.level = 0
+      }
+      // Any leaf command invoked with --json should render machine-readable
+      // output only: suppress spinners and other terminal chrome so callers
+      // can pipe stdout to `jq` or parse it directly.
+      if (actionCommand?.opts().json) {
+        setQuietMode(true)
       }
     })
 
@@ -132,8 +146,15 @@ export function createProgram(): Command {
   registerTemplatesCommands(program)
   registerPlatformCommands(program)
   registerPresetsCommands(program)
+  registerAnalyticsCommands(program)
   registerFunnelsCommands(program)
   registerNotificationPreferencesCommands(program)
+  registerSkillsCommands(program)
+  registerMcpServersCommands(program)
+  registerSecretsCommands(program)
+  registerSandboxCommands(program)
+  registerWorkflowCommands(program)
+  registerRevenueCommands(program)
 
   // Developer workflow commands
   registerInitCommand(program)

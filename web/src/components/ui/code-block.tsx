@@ -37,6 +37,9 @@ export function CodeBlock({
   const [wrapLines, setWrapLines] = useState(defaultWrap)
   const [showLineNumbers, setShowLineNumbers] = useState(defaultShowLineNumbers)
 
+  const visibleButtonCount =
+    1 + (disableWrapToggle ? 0 : 1) + (showCopy ? 1 : 0)
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(code)
     setCopied(true)
@@ -49,86 +52,84 @@ export function CodeBlock({
 
     if (lang === 'bash' || lang === 'shell') {
       return lines.map((line, i) => (
-        <div key={i} className="flex">
+        <span key={i} className="block">
           {showLineNumbers && (
             <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
               {i + 1}
             </span>
           )}
-          <div className="flex-1">
-            {line.trim().startsWith('#') ? (
-              <span className="text-muted-foreground opacity-70 italic">
-                {line}
-              </span>
-            ) : (
-              <>
-                {line.split(' ').map((word, j) => {
-                  // Commands
-                  if (
-                    j === 0 &&
-                    [
-                      'npm',
-                      'yarn',
-                      'pnpm',
-                      'bun',
-                      'curl',
-                      'brew',
-                      'sudo',
-                      'chmod',
-                      'cloudflared',
-                      'systemctl',
-                      'mkdir',
-                      'cd',
-                      'ls',
-                      'echo',
-                      'export',
-                      'cat',
-                      'mv',
-                      'cp',
-                    ].includes(word)
-                  ) {
-                    return (
-                      <span
-                        key={j}
-                        className="text-blue-600 dark:text-blue-400 font-semibold"
-                      >
-                        {word}{' '}
+          {line.trim().startsWith('#') ? (
+            <span className="text-muted-foreground opacity-70 italic">
+              {line || '\u00A0'}
+            </span>
+          ) : (
+            <>
+              {line.split(' ').map((word, j) => {
+                // Commands
+                if (
+                  j === 0 &&
+                  [
+                    'npm',
+                    'yarn',
+                    'pnpm',
+                    'bun',
+                    'curl',
+                    'brew',
+                    'sudo',
+                    'chmod',
+                    'cloudflared',
+                    'systemctl',
+                    'mkdir',
+                    'cd',
+                    'ls',
+                    'echo',
+                    'export',
+                    'cat',
+                    'mv',
+                    'cp',
+                  ].includes(word)
+                ) {
+                  return (
+                    <span
+                      key={j}
+                      className="text-blue-600 dark:text-blue-400 font-semibold"
+                    >
+                      {word}{' '}
+                    </span>
+                  )
+                }
+                // Flags
+                if (word.startsWith('-')) {
+                  return (
+                    <span
+                      key={j}
+                      className="text-orange-600 dark:text-orange-400"
+                    >
+                      {word}{' '}
+                    </span>
+                  )
+                }
+                // Environment variables
+                if (word.includes('=') && !word.startsWith('-')) {
+                  const [key, value] = word.split('=')
+                  return (
+                    <span key={j}>
+                      <span className="text-purple-600 dark:text-purple-400">
+                        {key}
                       </span>
-                    )
-                  }
-                  // Flags
-                  if (word.startsWith('-')) {
-                    return (
-                      <span
-                        key={j}
-                        className="text-orange-600 dark:text-orange-400"
-                      >
-                        {word}{' '}
+                      <span className="text-muted-foreground">=</span>
+                      <span className="text-green-600 dark:text-green-400">
+                        {value}
                       </span>
-                    )
-                  }
-                  // Environment variables
-                  if (word.includes('=') && !word.startsWith('-')) {
-                    const [key, value] = word.split('=')
-                    return (
-                      <span key={j}>
-                        <span className="text-purple-600 dark:text-purple-400">
-                          {key}
-                        </span>
-                        <span className="text-muted-foreground">=</span>
-                        <span className="text-green-600 dark:text-green-400">
-                          {value}
-                        </span>
-                        <span> </span>
-                      </span>
-                    )
-                  }
-                  return <span key={j}>{word} </span>
-                })}
-              </>
-            )}
-          </div>
-        </div>
+                      <span> </span>
+                    </span>
+                  )
+                }
+                return <span key={j}>{word} </span>
+              })}
+            </>
+          )}
+        </span>
       ))
     }
 
@@ -191,16 +192,16 @@ export function CodeBlock({
         // Comments
         if (line.trim().startsWith('#')) {
           return (
-            <div key={lineIdx} className="flex">
+            <span key={lineIdx} className="block">
               {showLineNumbers && (
                 <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                   {lineIdx + 1}
                 </span>
               )}
-              <div className="flex-1 text-muted-foreground opacity-70 italic">
-                {line}
-              </div>
-            </div>
+              <span className="text-muted-foreground opacity-70 italic">
+                {line || '\u00A0'}
+              </span>
+            </span>
           )
         }
 
@@ -272,14 +273,14 @@ export function CodeBlock({
         }
 
         return (
-          <div key={lineIdx} className="flex">
+          <span key={lineIdx} className="block">
             {showLineNumbers && (
               <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                 {lineIdx + 1}
               </span>
             )}
-            <div className="flex-1">{tokens}</div>
-          </div>
+            {tokens.length === 0 ? '\u00A0' : tokens}
+          </span>
         )
       })
     }
@@ -320,17 +321,16 @@ export function CodeBlock({
         )
 
         return (
-          <div key={lineIdx} className="flex">
+          <span key={lineIdx} className="block">
             {showLineNumbers && (
-              <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block shrink-0">
+              <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                 {lineIdx + 1}
               </span>
             )}
-            <div
-              className="flex-1 min-w-0 break-all"
-              dangerouslySetInnerHTML={{ __html: processedLine }}
+            <span
+              dangerouslySetInnerHTML={{ __html: processedLine || '&nbsp;' }}
             />
-          </div>
+          </span>
         )
       })
     }
@@ -390,16 +390,16 @@ export function CodeBlock({
         // Comments
         if (line.trim().startsWith('//')) {
           return (
-            <div key={lineIdx} className="flex">
+            <span key={lineIdx} className="block">
               {showLineNumbers && (
                 <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                   {lineIdx + 1}
                 </span>
               )}
-              <div className="flex-1 text-muted-foreground opacity-70 italic">
-                {line}
-              </div>
-            </div>
+              <span className="text-muted-foreground opacity-70 italic">
+                {line || '\u00A0'}
+              </span>
+            </span>
           )
         }
 
@@ -473,14 +473,14 @@ export function CodeBlock({
         }
 
         return (
-          <div key={lineIdx} className="flex">
+          <span key={lineIdx} className="block">
             {showLineNumbers && (
               <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                 {lineIdx + 1}
               </span>
             )}
-            <div className="flex-1">{tokens}</div>
-          </div>
+            {tokens.length === 0 ? '\u00A0' : tokens}
+          </span>
         )
       })
     }
@@ -541,16 +541,16 @@ export function CodeBlock({
         // Comments
         if (line.trim().startsWith('//')) {
           return (
-            <div key={lineIdx} className="flex">
+            <span key={lineIdx} className="block">
               {showLineNumbers && (
                 <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                   {lineIdx + 1}
                 </span>
               )}
-              <div className="flex-1 text-muted-foreground opacity-70 italic">
-                {line}
-              </div>
-            </div>
+              <span className="text-muted-foreground opacity-70 italic">
+                {line || '\u00A0'}
+              </span>
+            </span>
           )
         }
 
@@ -626,28 +626,129 @@ export function CodeBlock({
         }
 
         return (
-          <div key={lineIdx} className="flex">
+          <span key={lineIdx} className="block">
             {showLineNumbers && (
               <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
                 {lineIdx + 1}
               </span>
             )}
-            <div className="flex-1">{tokens}</div>
-          </div>
+            {tokens.length === 0 ? '\u00A0' : tokens}
+          </span>
+        )
+      })
+    }
+
+    if (lang === 'yaml') {
+      return lines.map((line, lineIdx) => {
+        // Comments
+        if (line.trim().startsWith('#')) {
+          return (
+            <span key={lineIdx} className="block">
+              {showLineNumbers && (
+                <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
+                  {lineIdx + 1}
+                </span>
+              )}
+              <span className="text-muted-foreground opacity-70 italic">
+                {line || '\u00A0'}
+              </span>
+            </span>
+          )
+        }
+
+        // Preserve leading whitespace for indentation
+        const leadingWs = line.match(/^(\s*)/)?.[1] ?? ''
+        const rest = line.slice(leadingWs.length)
+
+        // List items: leading "- "
+        let listDash: string | null = null
+        let afterList = rest
+        if (rest.startsWith('- ')) {
+          listDash = '- '
+          afterList = rest.slice(2)
+        } else if (rest === '-') {
+          listDash = '-'
+          afterList = ''
+        }
+
+        // Match `key:` optionally followed by a value
+        const keyMatch = afterList.match(/^([^:#\s][^:]*?):(\s*)(.*)$/)
+
+        const renderValue = (value: string) => {
+          const trimmed = value.trim()
+          if (trimmed === '') return value
+          // Block scalar markers
+          if (trimmed === '|' || trimmed === '>' || trimmed === '|-' || trimmed === '>-') {
+            return (
+              <span className="text-orange-600 dark:text-orange-400">
+                {value}
+              </span>
+            )
+          }
+          // Quoted strings
+          if (
+            (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+            (trimmed.startsWith("'") && trimmed.endsWith("'"))
+          ) {
+            return (
+              <span className="text-green-600 dark:text-green-400">{value}</span>
+            )
+          }
+          // Booleans / null
+          if (['true', 'false', 'null', '~', 'yes', 'no'].includes(trimmed)) {
+            return (
+              <span className="text-orange-600 dark:text-orange-400">{value}</span>
+            )
+          }
+          // Numbers
+          if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+            return (
+              <span className="text-cyan-600 dark:text-cyan-400">{value}</span>
+            )
+          }
+          // Plain string value
+          return <span className="text-green-600 dark:text-green-400">{value}</span>
+        }
+
+        return (
+          <span key={lineIdx} className="block">
+            {showLineNumbers && (
+              <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
+                {lineIdx + 1}
+              </span>
+            )}
+            {leadingWs && <span>{leadingWs}</span>}
+            {listDash && (
+              <span className="text-muted-foreground">{listDash}</span>
+            )}
+            {keyMatch ? (
+              <>
+                <span className="text-purple-600 dark:text-purple-400">
+                  {keyMatch[1]}
+                </span>
+                <span className="text-muted-foreground">:</span>
+                {keyMatch[2]}
+                {keyMatch[3] && renderValue(keyMatch[3])}
+              </>
+            ) : (
+              afterList && renderValue(afterList)
+            )}
+            {!leadingWs && !listDash && !keyMatch && !afterList && '\u00A0'}
+          </span>
         )
       })
     }
 
     // Default - no highlighting
     return lines.map((line, i) => (
-      <div key={i} className="flex">
+      <span key={i} className="block">
         {showLineNumbers && (
           <span className="text-muted-foreground/40 select-none pr-4 text-right min-w-[3ch] inline-block">
             {i + 1}
           </span>
         )}
-        <div className="flex-1">{line || '\u00A0'}</div>
-      </div>
+        {line || '\u00A0'}
+      </span>
     ))
   }
 
@@ -726,99 +827,110 @@ export function CodeBlock({
   return (
     <div className={cn('relative group', className)}>
       {title && (
-        <div className="px-4 py-2 bg-muted/50 dark:bg-zinc-900/50 border-b border-border text-xs text-muted-foreground font-mono rounded-t-lg">
+        <div className="px-4 py-2 bg-zinc-200/70 dark:bg-zinc-900/50 border-b border-border text-xs text-muted-foreground font-mono rounded-t-lg">
           {title}
         </div>
       )}
       <div
         className={cn(
-          'relative rounded-lg overflow-hidden',
-          'bg-muted/30 dark:bg-zinc-950/50',
+          'relative rounded-lg min-w-0',
+          'bg-zinc-100 dark:bg-zinc-950/50',
           'border border-border',
           'transition-colors duration-200',
-          'group-hover:bg-muted/40 dark:group-hover:bg-zinc-950/70',
+          'hover:bg-zinc-100/80 dark:group-hover:bg-zinc-950/70',
           title && 'rounded-t-none border-t-0'
         )}
       >
-        <pre
+        <div
           className={cn(
-            'p-4 text-sm font-mono',
-            wrapLines
-              ? 'overflow-x-hidden whitespace-pre-wrap break-all overflow-wrap-anywhere'
-              : 'overflow-x-auto'
+            // w-0 min-w-full max-w-full is the trick: forces this element to
+            // parent width while letting its children overflow horizontally.
+            'w-0 min-w-full max-w-full rounded-lg py-3.5 pl-4',
+            visibleButtonCount === 3 && 'pr-28',
+            visibleButtonCount === 2 && 'pr-20',
+            visibleButtonCount === 1 && 'pr-12',
+            visibleButtonCount === 0 && 'pr-4',
+            wrapLines ? 'overflow-x-hidden' : 'overflow-x-auto'
           )}
         >
-          <code
+          <pre
             className={cn(
-              `language-${language}`,
-              'text-foreground dark:text-zinc-100'
+              'text-sm font-mono leading-6 m-0',
+              wrapLines
+                ? 'whitespace-pre-wrap break-all'
+                : 'whitespace-pre'
             )}
           >
-            {renderHighlightedCode(code, language)}
-          </code>
-        </pre>
-        <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+            <code
+              className={cn(
+                `language-${language}`,
+                'text-foreground dark:text-zinc-100'
+              )}
+            >
+              {renderHighlightedCode(code, language)}
+            </code>
+          </pre>
+        </div>
+        <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-200">
           <Button
-            size="sm"
+            size="icon"
             variant="ghost"
             className={cn(
-              'h-7 px-2',
-              'bg-background/80 dark:bg-zinc-800/50',
-              'hover:bg-background dark:hover:bg-zinc-800',
-              'text-muted-foreground hover:text-foreground',
-              'backdrop-blur-sm'
+              'size-7 rounded-md',
+              'text-muted-foreground/70 hover:text-foreground',
+              'hover:bg-zinc-200/70 dark:hover:bg-zinc-800/60'
             )}
             onClick={() => setShowLineNumbers(!showLineNumbers)}
             title={showLineNumbers ? 'Hide line numbers' : 'Show line numbers'}
+            aria-label={
+              showLineNumbers ? 'Hide line numbers' : 'Show line numbers'
+            }
           >
             <Hash
-              className={cn('h-3 w-3 mr-1', showLineNumbers && 'text-blue-500')}
+              className={cn(
+                'size-3.5',
+                showLineNumbers && 'text-blue-500 dark:text-blue-400'
+              )}
             />
-            <span className="text-xs">Lines</span>
           </Button>
           {!disableWrapToggle && (
             <Button
-              size="sm"
+              size="icon"
               variant="ghost"
               className={cn(
-                'h-7 px-2',
-                'bg-background/80 dark:bg-zinc-800/50',
-                'hover:bg-background dark:hover:bg-zinc-800',
-                'text-muted-foreground hover:text-foreground',
-                'backdrop-blur-sm'
+                'size-7 rounded-md',
+                'text-muted-foreground/70 hover:text-foreground',
+                'hover:bg-zinc-200/70 dark:hover:bg-zinc-800/60'
               )}
               onClick={() => setWrapLines(!wrapLines)}
               title={wrapLines ? 'Disable line wrap' : 'Enable line wrap'}
+              aria-label={wrapLines ? 'Disable line wrap' : 'Enable line wrap'}
             >
               <WrapText
-                className={cn('h-3 w-3 mr-1', wrapLines && 'text-blue-500')}
+                className={cn(
+                  'size-3.5',
+                  wrapLines && 'text-blue-500 dark:text-blue-400'
+                )}
               />
-              <span className="text-xs">Wrap</span>
             </Button>
           )}
           {showCopy && (
             <Button
-              size="sm"
+              size="icon"
               variant="ghost"
               className={cn(
-                'h-7 px-2',
-                'bg-background/80 dark:bg-zinc-800/50',
-                'hover:bg-background dark:hover:bg-zinc-800',
-                'text-muted-foreground hover:text-foreground',
-                'backdrop-blur-sm'
+                'size-7 rounded-md',
+                'text-muted-foreground/70 hover:text-foreground',
+                'hover:bg-zinc-200/70 dark:hover:bg-zinc-800/60'
               )}
               onClick={handleCopy}
+              title={copied ? 'Copied' : 'Copy'}
+              aria-label={copied ? 'Copied' : 'Copy'}
             >
               {copied ? (
-                <>
-                  <Check className="h-3 w-3 mr-1" />
-                  <span className="text-xs">Copied</span>
-                </>
+                <Check className="size-3.5 text-emerald-600 dark:text-emerald-400" />
               ) : (
-                <>
-                  <Copy className="h-3 w-3 mr-1" />
-                  <span className="text-xs">Copy</span>
-                </>
+                <Copy className="size-3.5" />
               )}
             </Button>
           )}

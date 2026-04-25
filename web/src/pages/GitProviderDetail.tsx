@@ -1,10 +1,16 @@
 import {
+  deleteGitProviderMutation,
   getGitProviderOptions,
   listConnectionsOptions,
+  listConnectionsQueryKey,
   syncRepositoriesMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { ProviderResponse } from '@/api/client/types.gen'
-import { ConnectionsTable } from '@/components/git/ConnectionsTable'
+import { ConnectionsCompactList } from '@/components/git/ConnectionsCompactList'
+import {
+  CredentialsEditorDialog,
+  providerHasEditableCredentials,
+} from '@/components/git-providers/CredentialsEditorDialog'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -24,9 +30,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { FeedbackAlert } from '@/components/ui/feedback-alert'
-import { Label } from '@/components/ui/label'
-import { Separator } from '@/components/ui/separator'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useFeedback } from '@/hooks/useFeedback'
@@ -34,18 +44,18 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity,
   AlertTriangle,
   ArrowLeft,
-  Calendar,
   CheckCircle2,
   Database,
+  EllipsisVertical,
   ExternalLink,
   GitBranch,
   GithubIcon,
   Globe,
   Key,
   RefreshCw,
+  Trash2,
   XCircle,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -59,6 +69,7 @@ export default function GitProviderDetail() {
   const { setBreadcrumbs } = useBreadcrumbs()
   const { feedback, showSuccess, showError, clearFeedback } = useFeedback()
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showCredentialsDialog, setShowCredentialsDialog] = useState(false)
   const queryClient = useQueryClient()
 
   const providerId = parseInt(id || '0', 10)
@@ -85,6 +96,17 @@ export default function GitProviderDetail() {
       data?.connections?.filter(
         (connection) => connection.provider_id === providerId
       ) || [],
+    // Poll every 2s while any connection under this provider is syncing so
+    // the running repo count + "Syncing" badge advance live. Polling stops
+    // automatically once no connection reports `syncing=true`, keeping idle
+    // tabs quiet.
+    refetchInterval: (query) => {
+      const anySyncing = query.state.data?.connections?.some(
+        (c) => c.provider_id === providerId && c.syncing,
+      )
+      return anySyncing ? 2000 : false
+    },
+    refetchIntervalInBackground: false,
   })
 
   const syncMutation = useMutation({
@@ -92,12 +114,53 @@ export default function GitProviderDetail() {
     meta: {
       errorTitle: 'Failed to sync repositories',
     },
+    // The server flips `syncing=true` at the very start of the request, so a
+    // refetch kicked off the moment we fire the mutation will see the row
+    // already in its syncing state. Without this the user saw nothing change
+    // until the full sync finished (potentially minutes on 20k-repo orgs).
+    onMutate: () => {
+      queryClient.invalidateQueries({ queryKey: listConnectionsQueryKey({}) })
+    },
     onSuccess: () => {
-      showSuccess('Repositories synced successfully!')
+      // 202 = sync started, not finished. The background task updates
+      // `syncing` / `synced_repository_count` on the connection row as it
+      // progresses; the periodic refetch on this page surfaces that.
+      showSuccess('Repository sync started')
       refetchConnections()
-      queryClient.invalidateQueries({ queryKey: ['listConnections'] })
+      queryClient.invalidateQueries({ queryKey: listConnectionsQueryKey({}) })
+    },
+    onError: (error: any) => {
+      // The backend's drop-guard resets `syncing=false` on failure too, so
+      // refresh the list to clear any stale "syncing" spinner.
+      queryClient.invalidateQueries({ queryKey: listConnectionsQueryKey({}) })
+
+      // Surface the failure. RFC 7807 Problem Details puts the human
+      // message in `detail`; fall back to `title` then `message`.
+      const detail =
+        error?.detail || error?.title || error?.message || 'Unknown error'
+      showError(`Failed to start repository sync: ${detail}`)
     },
   })
+
+  const deleteMutation = useMutation({
+    ...deleteGitProviderMutation(),
+    onSuccess: () => {
+      toast.success('Git provider deleted successfully')
+      queryClient.invalidateQueries({ queryKey: ['listGitProviders'] })
+      queryClient.invalidateQueries({ queryKey: ['listConnections'] })
+      setShowDeleteDialog(false)
+      navigate('/git-providers')
+    },
+    onError: (err: Error) => {
+      showError(`Failed to delete provider: ${err?.message || 'Unknown error'}`)
+      setShowDeleteDialog(false)
+    },
+  })
+
+  const handleDelete = () => {
+    if (!provider) return
+    deleteMutation.mutate({ path: { provider_id: provider.id } })
+  }
 
   const handleSyncRepositories = (connectionId: number) => {
     syncMutation.mutate({
@@ -141,7 +204,7 @@ export default function GitProviderDetail() {
   useEffect(() => {
     if (provider) {
       setBreadcrumbs([
-        { label: 'Git Providers', href: '/settings/git-providers' },
+        { label: 'Git Providers', href: '/git-providers' },
         { label: provider.name },
       ])
     }
@@ -167,12 +230,12 @@ export default function GitProviderDetail() {
   if (isLoading) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="space-y-6 p-6">
+        <div className="space-y-6 p-4 sm:p-6">
           <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/settings/git-providers')}
+              onClick={() => navigate('/git-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -190,12 +253,12 @@ export default function GitProviderDetail() {
   if (error || !provider) {
     return (
       <div className="flex-1 overflow-auto">
-        <div className="space-y-6 p-6">
+        <div className="space-y-6 p-4 sm:p-6">
           <div className="flex items-center gap-3">
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/settings/git-providers')}
+              onClick={() => navigate('/git-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -248,21 +311,22 @@ export default function GitProviderDetail() {
 
   return (
     <div className="flex-1 overflow-auto">
-      <div className="space-y-6 p-6">
+      <div className="space-y-6 p-4 sm:p-6">
         {/* Header */}
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex items-start gap-3 min-w-0">
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => navigate('/settings/git-providers')}
+              className="shrink-0"
+              onClick={() => navigate('/git-providers')}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            <div className="space-y-1">
-              <div className="flex items-center gap-3">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                 {getProviderIcon()}
-                <h1 className="text-2xl font-bold">{provider.name}</h1>
+                <h1 className="text-xl sm:text-2xl font-bold truncate">{provider.name}</h1>
                 {provider.is_active ? (
                   <Badge
                     variant="secondary"
@@ -284,13 +348,33 @@ export default function GitProviderDetail() {
                   <Badge variant="outline">Default</Badge>
                 )}
               </div>
-              <p className="text-muted-foreground">
-                {getProviderDisplayName()} provider using{' '}
-                {getAuthMethodDisplayName()}
-              </p>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+                <span>
+                  {getProviderDisplayName()} provider using{' '}
+                  {getAuthMethodDisplayName()}
+                </span>
+                {provider.base_url && (
+                  <span className="flex items-center gap-1 text-xs">
+                    <Globe className="h-3 w-3" />
+                    <span className="font-mono truncate max-w-[240px]">
+                      {provider.base_url}
+                    </span>
+                    <CopyButton
+                      value={provider.base_url}
+                      className="h-6 w-6 p-0"
+                    />
+                  </span>
+                )}
+                <span className="text-xs">
+                  Created <TimeAgo date={provider.created_at} />
+                </span>
+                <span className="text-xs">
+                  Updated <TimeAgo date={provider.updated_at} />
+                </span>
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {isGitHubApp(provider) && (
               <Button
                 onClick={() => handleInstallGitHubApp(provider)}
@@ -306,106 +390,43 @@ export default function GitProviderDetail() {
                 Authorize
               </Button>
             )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-9 w-9">
+                  <EllipsisVertical className="h-4 w-4" />
+                  <span className="sr-only">Provider actions</span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {providerHasEditableCredentials(provider) && (
+                  <DropdownMenuItem
+                    onSelect={(e) => {
+                      e.preventDefault()
+                      setShowCredentialsDialog(true)
+                    }}
+                  >
+                    <Key className="mr-2 h-4 w-4" />
+                    Edit Credentials
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    setShowDeleteDialog(true)
+                  }}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete Provider
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
         {/* Feedback Alert */}
         <FeedbackAlert feedback={feedback} onDismiss={clearFeedback} />
 
-        {/* Provider Details */}
-        <div className="grid gap-6 md:grid-cols-2">
-          {/* Basic Information */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Activity className="h-5 w-5" />
-                Provider Information
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-3">
-                <div className="flex justify-between items-center">
-                  <Label className="text-sm font-medium">Provider Type</Label>
-                  <span className="text-sm">{getProviderDisplayName()}</span>
-                </div>
-                <Separator />
-                <div className="flex justify-between items-center">
-                  <Label className="text-sm font-medium">
-                    Authentication Method
-                  </Label>
-                  <span className="text-sm">{getAuthMethodDisplayName()}</span>
-                </div>
-                <Separator />
-                <div className="flex justify-between items-center">
-                  <Label className="text-sm font-medium">Status</Label>
-                  {provider.is_active ? (
-                    <Badge variant="secondary" className="text-xs">
-                      Active
-                    </Badge>
-                  ) : (
-                    <Badge variant="destructive" className="text-xs">
-                      Inactive
-                    </Badge>
-                  )}
-                </div>
-                <Separator />
-                {provider.base_url && (
-                  <>
-                    <div className="flex justify-between items-center gap-3">
-                      <Label className="text-sm font-medium">Base URL</Label>
-                      <div className="flex items-center gap-2 text-sm min-w-0">
-                        <Globe className="h-3 w-3 flex-shrink-0" />
-                        <div className="flex items-center gap-2">
-                          <span className="break-all">{provider.base_url}</span>
-                          <CopyButton
-                            value={provider.base_url}
-                            className="h-7 w-7 p-0 hover:bg-accent hover:text-accent-foreground rounded-md flex-shrink-0 items-center"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    <Separator />
-                  </>
-                )}
-                <div className="flex justify-between items-center">
-                  <Label className="text-sm font-medium">
-                    Default Provider
-                  </Label>
-                  {provider.is_default ? (
-                    <Badge variant="outline" className="text-xs">
-                      Yes
-                    </Badge>
-                  ) : (
-                    <span className="text-sm text-muted-foreground">No</span>
-                  )}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Timestamps */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Calendar className="h-5 w-5" />
-                Timeline
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <Label className="text-sm font-medium">Created</Label>
-                  <TimeAgo date={provider.created_at} className="text-sm" />
-                </div>
-                <Separator />
-                <div className="flex justify-between items-center">
-                  <Label className="text-sm font-medium">Last Updated</Label>
-                  <TimeAgo date={provider.updated_at} className="text-sm" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
 
         {/* GitHub App Instructions - Only show if no connections */}
         {isGitHubApp(provider) &&
@@ -465,18 +486,18 @@ export default function GitProviderDetail() {
           </Card>
         )}
 
-        {/* Git Connections Table */}
+        {/* Git Connections */}
         <Card>
-          <CardHeader>
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Database className="h-5 w-5" />
-                Git Connections
-              </CardTitle>
-              <CardDescription>
-                All Git connections associated with this provider
-              </CardDescription>
-            </div>
+          <CardHeader className="flex flex-row items-center justify-between gap-2 py-3">
+            <CardTitle className="flex items-center gap-2 text-sm font-semibold">
+              <Database className="h-4 w-4 text-muted-foreground" />
+              Connections
+              {connections && connections.length > 0 && (
+                <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
+                  {connections.length}
+                </Badge>
+              )}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             {connectionsLoading ? (
@@ -509,41 +530,25 @@ export default function GitProviderDetail() {
                 )}
               </div>
             ) : (
-              <ConnectionsTable
+              <ConnectionsCompactList
+                variant="single-line"
                 connections={connections}
                 provider={provider}
                 onSyncRepository={handleSyncRepositories}
-                onAuthorize={handleAuthorize}
-                onInstallGitHubApp={() => handleInstallGitHubApp(provider)}
                 isSyncing={syncMutation.isPending}
                 onConnectionDeleted={refetchConnections}
               />
             )}
           </CardContent>
         </Card>
-
-        {/* Danger Zone */}
-        <Card className="border-destructive">
-          <CardHeader>
-            <CardTitle className="text-destructive">Danger Zone</CardTitle>
-            <CardDescription>
-              These actions cannot be undone. Please be careful.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button
-              variant="destructive"
-              onClick={() => setShowDeleteDialog(true)}
-              disabled
-            >
-              Delete Provider
-            </Button>
-            <p className="text-xs text-muted-foreground mt-2">
-              Provider deletion is not yet available
-            </p>
-          </CardContent>
-        </Card>
       </div>
+
+      {/* Edit Credentials Dialog */}
+      <CredentialsEditorDialog
+        provider={provider}
+        open={showCredentialsDialog}
+        onOpenChange={setShowCredentialsDialog}
+      />
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
@@ -551,19 +556,32 @@ export default function GitProviderDetail() {
           <DialogHeader>
             <DialogTitle>Delete Git Provider</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this git provider? This action
-              cannot be undone.
+              Are you sure you want to delete &quot;{provider.name}&quot;? This
+              action cannot be undone. Providers with existing connections
+              cannot be deleted — remove connections first.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => setShowDeleteDialog(false)}
+              disabled={deleteMutation.isPending}
             >
               Cancel
             </Button>
-            <Button variant="destructive" disabled>
-              Delete Provider
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete Provider'
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

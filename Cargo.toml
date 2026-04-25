@@ -61,9 +61,17 @@ members = [
     "crates/temps-plugin-sdk",
     "crates/temps-wireguard",
     "crates/temps-ai-gateway",
+    "crates/temps-agents",
+    "crates/temps-agents-mcp-proxy",
+    "crates/temps-memory",
+    "crates/temps-sandbox",
+    "crates/temps-workspace",
+    "crates/temps-pty-agent",
     "crates/temps-agent",
     "crates/temps-edge",
+    "crates/temps-preview-gateway",
     "crates/temps-external-plugins",
+    "crates/temps-revenue",
     "examples/example-plugin",
     "examples/lighthouse-plugin",
     "examples/indexnow-plugin",
@@ -241,6 +249,7 @@ regex = "1.11"
 # ============================================================================
 flate2 = "1.0"
 tar = "0.4.45"
+walkdir = "2"
 zip = "2.2"
 zstd = "0.13"
 
@@ -280,12 +289,13 @@ opt-level = 3
 
 [profile.dev]
 opt-level = 0
-debug = true
+debug = "line-tables-only"
 incremental = true
-codegen-units = 16
+split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]
-opt-level = 2      # Optimize dependencies
+opt-level = 1
+debug = false
 
 # ============================================================================
 # Dependency Overrides - Security Fixes
@@ -319,11 +329,24 @@ opt-level = 2      # Optimize dependencies
 # - rustls-webpki 0.103.7 (RUSTSEC-2026-0049): RESOLVED by cargo update rustls-webpki → 0.103.10
 # - tar 0.4.44 (RUSTSEC-2026-0067, RUSTSEC-2026-0068): RESOLVED by bumping tar to 0.4.45
 # - rkyv 0.7.45 (RUSTSEC-2026-0001): RESOLVED by cargo update rkyv → 0.7.46
+# - rustls-webpki 0.103.10 (RUSTSEC-2026-0098, -0099, -0104): RESOLVED by cargo update rustls-webpki@0.103 → 0.103.13
+# - rand 0.9.2 (RUSTSEC-2026-0097): RESOLVED by cargo update rand@0.9 → 0.9.4
+# - rand 0.8.5 (RUSTSEC-2026-0097): RESOLVED by cargo update rand@0.8 → 0.8.6
 #
 # 5. RUSTSEC-2023-0071: rsa 0.9.10 (MEDIUM severity)
 #    - Title: Marvin Attack: potential key recovery through timing sidechannels
 #    - Status: No fixed upgrade available upstream
 #    - Mitigation: RSA used for SSH key operations only, not exposed to network timing attacks
+#
+# 6. RUSTSEC-2026-0098, -0099, -0104: rustls-webpki 0.101.7 (MEDIUM severity)
+#    - Titles: CRL-parsing panic, name-constraint URI bypass, wildcard constraint bypass
+#    - Path: aws-smithy-http-client 1.1.10 → rustls 0.21.12 → rustls-webpki 0.101.7
+#    - Status: Requires aws-smithy-http-client to migrate from rustls 0.21 to rustls 0.23.
+#      No semver-compatible update available (0.101.x series is on the old rustls 0.21).
+#    - Mitigation: This copy of rustls is only used by the AWS SDK's HTTP client, which
+#      talks to AWS endpoints over well-known certificates. CRL-parsing panic and
+#      name-constraint bypasses require attacker control over the certificate chain,
+#      which AWS's pinned endpoints do not provide.
 #
 # All remaining items are transitive dependencies from third-party crates that we
 # cannot directly patch without forking. Monitoring upstream for updates.

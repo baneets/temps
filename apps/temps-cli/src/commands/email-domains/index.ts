@@ -2,10 +2,10 @@ import type { Command } from 'commander'
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import {
-  listDomains2 as listEmailDomains,
-  createDomain2 as createEmailDomain,
+  listEmailDomains,
+  createEmailDomain,
   getDomain as getEmailDomain,
-  deleteDomain2 as deleteEmailDomain,
+  deleteEmailDomain,
   getDomainByName as getEmailDomainByName,
   getDomainDnsRecords as getEmailDomainDnsRecords,
   setupDns as setupEmailDns,

@@ -320,8 +320,8 @@ export function ScanDetail() {
   return (
     <div className="space-y-4">
       {/* Compact Scan Header */}
-      <div className="flex items-center justify-between gap-4 pb-3 border-b">
-        <div className="flex items-center gap-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4 pb-3 border-b">
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 min-w-0">
           <Button variant="ghost" size="sm" asChild className="pl-0 -ml-2">
             <Link to={`/projects/${slug}/security`}>
               <ArrowLeft className="h-4 w-4 mr-2" />

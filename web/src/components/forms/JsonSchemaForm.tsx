@@ -1,5 +1,10 @@
 import { Button } from '@/components/ui/button'
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import {
   Form,
   FormControl,
   FormDescription,
@@ -17,8 +22,15 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Loader2 } from 'lucide-react'
-import { useEffect, useMemo } from 'react'
+import { customAlphabet } from 'nanoid'
+import {
+  ChevronDown,
+  Eye,
+  EyeOff,
+  Loader2,
+  Sparkles,
+} from 'lucide-react'
+import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import * as z from 'zod'
 
@@ -38,67 +50,162 @@ interface JsonSchema {
   properties: Record<string, JsonSchemaProperty>
 }
 
-interface JsonSchemaFormProps {
-  /**
-   * JSON Schema object defining the form structure
-   */
-  schema: JsonSchema
+type FieldGroup = 'basic' | 'connection' | 'credentials' | 'advanced'
 
-  /**
-   * Callback when form is submitted
-   */
+interface FieldHint {
+  group: FieldGroup
+  /** Hide by default when the service is managed by Temps (container-backed). */
+  hiddenWhenManaged?: boolean
+}
+
+interface JsonSchemaFormProps {
+  schema: JsonSchema
   onSubmit: (
     values: Record<string, string | null | number>
   ) => Promise<void> | void
-
-  /**
-   * Callback when cancel button is clicked
-   */
   onCancel?: () => void
-
-  /**
-   * Text for the submit button
-   * @default "Submit"
-   */
   submitText?: string
-
-  /**
-   * Text for the cancel button
-   * @default "Cancel"
-   */
   cancelText?: string
-
-  /**
-   * Whether to show the cancel button
-   * @default true
-   */
   showCancel?: boolean
-
-  /**
-   * Whether the form is in a loading/submitting state
-   */
   isSubmitting?: boolean
-
-  /**
-   * Initial values for the form fields
-   */
   initialValues?: Record<string, string | null>
-
-  /**
-   * Fields to pair together on the same row
-   * @default [['host', 'port'], ['username', 'password']]
-   */
   pairedFields?: [string, string][]
-
-  /**
-   * Fields to hide from the form (they won't be rendered or submitted)
-   */
   hiddenFields?: string[]
+  /**
+   * Service type for looking up field grouping hints. When unset, all fields
+   * render inline (pre-grouping behaviour) — safe fallback for unknown types.
+   */
+  serviceType?: string
+  /**
+   * When true, fields marked `hiddenWhenManaged` are moved into the Advanced
+   * group. Use for Temps-provisioned services where host/port are outputs.
+   */
+  managedByTemps?: boolean
+  /**
+   * Field values owned by a parent (preset). These are hidden from the form
+   * UI and merged into the submitted payload with precedence over user input.
+   * A value of `undefined` means "preset owns this field but has no value
+   * yet" — the field stays hidden and is omitted from submission.
+   */
+  fieldOverrides?: Record<string, string | null | undefined>
+  /**
+   * Explicit list of field names the parent presets own. Used to hide fields
+   * even when their current override value is undefined/empty.
+   */
+  presetOwnedFields?: string[]
+}
+
+/** Acronyms that should stay uppercase when humanizing snake_case field names. */
+const ACRONYMS = new Set([
+  'api',
+  'db',
+  'id',
+  'ip',
+  'jwt',
+  'rds',
+  'sql',
+  'ssl',
+  'tls',
+  'ttl',
+  'url',
+  'uri',
+])
+
+function humanizeLabel(fieldName: string): string {
+  return fieldName
+    .split('_')
+    .map((word) => {
+      if (ACRONYMS.has(word.toLowerCase())) return word.toUpperCase()
+      return word.charAt(0).toUpperCase() + word.slice(1)
+    })
+    .join(' ')
+}
+
+/** Per-service field classification. Fallback for unknown keys: 'advanced'. */
+const FIELD_HINTS: Record<string, Record<string, FieldHint>> = {
+  postgres: {
+    host: { group: 'connection', hiddenWhenManaged: true },
+    port: { group: 'connection', hiddenWhenManaged: true },
+    database: { group: 'credentials' },
+    username: { group: 'credentials' },
+    password: { group: 'credentials' },
+    max_connections: { group: 'advanced' },
+    ssl_mode: { group: 'advanced' },
+    docker_image: { group: 'advanced' },
+  },
+  redis: {
+    host: { group: 'connection', hiddenWhenManaged: true },
+    port: { group: 'connection', hiddenWhenManaged: true },
+    password: { group: 'credentials' },
+    database: { group: 'advanced' },
+    docker_image: { group: 'advanced' },
+    max_memory: { group: 'advanced' },
+    max_memory_policy: { group: 'advanced' },
+  },
+  mongodb: {
+    host: { group: 'connection', hiddenWhenManaged: true },
+    port: { group: 'connection', hiddenWhenManaged: true },
+    database: { group: 'credentials' },
+    username: { group: 'credentials' },
+    password: { group: 'credentials' },
+    auth_source: { group: 'advanced' },
+    replica_set: { group: 'advanced' },
+    docker_image: { group: 'advanced' },
+  },
+  s3: {
+    endpoint: { group: 'connection' },
+    region: { group: 'connection' },
+    bucket: { group: 'connection' },
+    access_key_id: { group: 'credentials' },
+    secret_access_key: { group: 'credentials' },
+    force_path_style: { group: 'advanced' },
+  },
+  rustfs: {
+    host: { group: 'connection', hiddenWhenManaged: true },
+    port: { group: 'connection', hiddenWhenManaged: true },
+    bucket: { group: 'connection' },
+    access_key_id: { group: 'credentials' },
+    secret_access_key: { group: 'credentials' },
+    docker_image: { group: 'advanced' },
+  },
+  minio: {
+    host: { group: 'connection', hiddenWhenManaged: true },
+    port: { group: 'connection', hiddenWhenManaged: true },
+    bucket: { group: 'connection' },
+    access_key_id: { group: 'credentials' },
+    secret_access_key: { group: 'credentials' },
+    docker_image: { group: 'advanced' },
+  },
+}
+
+const GROUP_LABELS: Record<FieldGroup, string> = {
+  basic: 'Basic',
+  connection: 'Connection',
+  credentials: 'Credentials',
+  advanced: 'Advanced',
+}
+
+/** nanoid alphabet for passwords: letters + digits, no ambiguous chars. */
+const PASSWORD_ALPHABET =
+  'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+const generatePassword = customAlphabet(PASSWORD_ALPHABET, 24)
+
+function resolveGroup(
+  fieldName: string,
+  serviceType: string | undefined,
+  managedByTemps: boolean
+): FieldGroup {
+  if (!serviceType) return 'basic'
+  const hint = FIELD_HINTS[serviceType]?.[fieldName]
+  if (!hint) return 'advanced'
+  if (hint.hiddenWhenManaged && managedByTemps) return 'advanced'
+  return hint.group
 }
 
 /**
- * Form component that generates fields based on JSON Schema
- * Supports text inputs, password inputs, and select dropdowns
+ * Form component that generates fields based on JSON Schema.
+ * Groups fields into Basic → Connection → Credentials → Advanced when a
+ * serviceType is supplied; otherwise renders flat (legacy behaviour).
  */
 export function JsonSchemaForm({
   schema,
@@ -112,19 +219,35 @@ export function JsonSchemaForm({
   pairedFields = [
     ['host', 'port'],
     ['username', 'password'],
+    ['access_key_id', 'secret_access_key'],
   ],
   hiddenFields = [],
+  serviceType,
+  managedByTemps = false,
+  fieldOverrides,
+  presetOwnedFields,
 }: JsonSchemaFormProps) {
-  // Get list of property names in order, excluding hidden fields
+  const ownedFields = useMemo(
+    () => presetOwnedFields ?? Object.keys(fieldOverrides ?? {}),
+    [presetOwnedFields, fieldOverrides]
+  )
+  const effectiveHiddenFields = useMemo(
+    () => [...hiddenFields, ...ownedFields],
+    [hiddenFields, ownedFields]
+  )
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [revealedPasswords, setRevealedPasswords] = useState<
+    Record<string, boolean>
+  >({})
+
   const propertyNames = useMemo(
     () =>
       Object.keys(schema.properties).filter(
-        (name) => !hiddenFields.includes(name)
+        (name) => !effectiveHiddenFields.includes(name)
       ),
-    [schema.properties, hiddenFields]
+    [schema.properties, effectiveHiddenFields]
   )
 
-  // Create Zod schema from JSON Schema
   const formSchema = useMemo(() => {
     const zodFields: Record<string, z.ZodTypeAny> = {}
 
@@ -137,18 +260,18 @@ export function JsonSchemaForm({
       let fieldSchema: z.ZodTypeAny
 
       if (isString && isNullable) {
-        // String or null - use optional instead of nullable for forms
         fieldSchema = z.string().optional()
       } else if (isString) {
-        // String only
         fieldSchema = z.string()
       } else {
-        // Fallback to string
         fieldSchema = z.string()
       }
 
       if (isRequired && !isNullable) {
-        fieldSchema = (fieldSchema as z.ZodString).min(1, `${key} is required`)
+        fieldSchema = (fieldSchema as z.ZodString).min(
+          1,
+          `${humanizeLabel(key)} is required`
+        )
       }
 
       zodFields[key] = fieldSchema
@@ -159,7 +282,6 @@ export function JsonSchemaForm({
 
   type FormValues = z.infer<typeof formSchema>
 
-  // Calculate default values
   const defaultValues = useMemo(() => {
     const defaults: Record<string, string> = {}
 
@@ -182,7 +304,6 @@ export function JsonSchemaForm({
     defaultValues,
   })
 
-  // Reset form when defaultValues change (using JSON.stringify for stable comparison)
   const defaultValuesString = JSON.stringify(defaultValues)
   useEffect(() => {
     const values = JSON.parse(defaultValuesString)
@@ -190,29 +311,26 @@ export function JsonSchemaForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultValuesString])
 
-  // Only render form if we have schema properties
   if (!schema.properties || Object.keys(schema.properties).length === 0) {
     return null
   }
 
   const handleSubmit = async (values: FormValues) => {
-    // Convert values to appropriate types based on schema
     const cleanedValues: Record<string, string | null | number> = {}
 
     Object.entries(values).forEach(([key, value]) => {
-      // Skip hidden fields
       if (hiddenFields.includes(key)) return
+      // Skip override-controlled fields — they'll be merged in below.
+      if (ownedFields.includes(key)) return
 
       const prop = schema.properties[key]
       const types = Array.isArray(prop.type) ? prop.type : [prop.type]
       const isNullable = types.includes('null')
       const isInteger = types.includes('integer')
 
-      // Handle empty values for nullable fields
       if (value === '' && isNullable) {
         cleanedValues[key] = null
       } else if (isInteger && value !== '') {
-        // Convert to number for integer fields
         const numValue = Number(value)
         cleanedValues[key] = isNaN(numValue) ? 0 : numValue
       } else {
@@ -220,10 +338,17 @@ export function JsonSchemaForm({
       }
     })
 
+    if (fieldOverrides) {
+      for (const [key, val] of Object.entries(fieldOverrides)) {
+        // undefined → preset owns this field but has no value — omit entirely.
+        if (val === undefined) continue
+        cleanedValues[key] = val
+      }
+    }
+
     await onSubmit(cleanedValues)
   }
 
-  // Check if a field should be paired with the next one
   const isPairedField = (fieldName: string, nextFieldName?: string) => {
     if (!nextFieldName) return false
     return pairedFields.some(
@@ -233,24 +358,115 @@ export function JsonSchemaForm({
     )
   }
 
-  // Check if this field is the second in a pair (should be skipped)
-  const isSecondInPair = (fieldName: string, index: number) => {
-    if (index === 0) return false
-    const prevField = propertyNames[index - 1]
-    return isPairedField(prevField, fieldName)
-  }
-
-  // Determine if field is password type (heuristic)
   const isPasswordField = (fieldName: string) => {
-    return fieldName.toLowerCase().includes('password')
+    const lower = fieldName.toLowerCase()
+    return (
+      lower.includes('password') ||
+      lower.includes('secret') ||
+      lower === 'access_key_id'
+    )
   }
 
-  // Render a single field
+  const isSecretField = (fieldName: string) => {
+    const lower = fieldName.toLowerCase()
+    return lower.includes('password') || lower.includes('secret')
+  }
+
+  const renderPasswordField = (
+    fieldName: string,
+    property: JsonSchemaProperty,
+    isRequired: boolean
+  ) => {
+    const revealed = revealedPasswords[fieldName] ?? false
+    const isGeneratable =
+      !isRequired && fieldName.toLowerCase() === 'password'
+
+    return (
+      <FormField
+        key={fieldName}
+        control={form.control}
+        name={fieldName as keyof FormValues}
+        render={({ field }) => (
+          <FormItem>
+            <div className="flex items-center justify-between gap-2">
+              <FormLabel>
+                {humanizeLabel(fieldName)}
+                {isRequired && (
+                  <span className="text-destructive ml-1">*</span>
+                )}
+              </FormLabel>
+              {isGeneratable && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 gap-1 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    field.onChange(generatePassword())
+                    setRevealedPasswords((s) => ({ ...s, [fieldName]: true }))
+                  }}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  Generate
+                </Button>
+              )}
+            </div>
+            <FormControl>
+              <div className="relative">
+                <Input
+                  {...field}
+                  value={(field.value as string) || ''}
+                  type={revealed ? 'text' : 'password'}
+                  autoComplete="off"
+                  className="pr-10"
+                  placeholder={
+                    isGeneratable
+                      ? 'Leave empty to auto-generate'
+                      : property.examples?.[0] ||
+                        (property.default
+                          ? String(property.default)
+                          : undefined)
+                  }
+                />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() =>
+                    setRevealedPasswords((s) => ({
+                      ...s,
+                      [fieldName]: !revealed,
+                    }))
+                  }
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground"
+                  aria-label={revealed ? 'Hide value' : 'Show value'}
+                >
+                  {revealed ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
+            </FormControl>
+            {property.description && (
+              <FormDescription>{property.description}</FormDescription>
+            )}
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    )
+  }
+
   const renderField = (fieldName: string, property: JsonSchemaProperty) => {
-    const isRequired = schema.required?.includes(fieldName)
+    const isRequired = schema.required?.includes(fieldName) ?? false
     const hasChoices = property.enum && property.enum.length > 0
     const types = Array.isArray(property.type) ? property.type : [property.type]
     const isInteger = types.includes('integer')
+
+    if (isSecretField(fieldName)) {
+      return renderPasswordField(fieldName, property, isRequired)
+    }
 
     return (
       <FormField
@@ -260,12 +476,11 @@ export function JsonSchemaForm({
         render={({ field }) => (
           <FormItem>
             <FormLabel>
-              {fieldName.charAt(0).toUpperCase() + fieldName.slice(1)}
+              {humanizeLabel(fieldName)}
               {isRequired && <span className="text-destructive ml-1">*</span>}
             </FormLabel>
             <FormControl>
               {hasChoices ? (
-                // Render Select for fields with enum
                 <Select
                   onValueChange={field.onChange}
                   value={
@@ -277,7 +492,7 @@ export function JsonSchemaForm({
                       placeholder={
                         property.default
                           ? `Default: ${property.default}`
-                          : `Select ${fieldName}`
+                          : `Select ${humanizeLabel(fieldName).toLowerCase()}`
                       }
                     />
                   </SelectTrigger>
@@ -289,18 +504,23 @@ export function JsonSchemaForm({
                     ))}
                   </SelectContent>
                 </Select>
-              ) : (
-                // Render Input for regular fields
+              ) : isPasswordField(fieldName) ? (
+                // access_key_id: sensitive but not secret-masked — treat as text.
                 <Input
                   {...field}
                   value={(field.value as string) || ''}
-                  type={
-                    isPasswordField(fieldName)
-                      ? 'password'
-                      : isInteger
-                        ? 'number'
-                        : 'text'
+                  type="text"
+                  autoComplete="off"
+                  placeholder={
+                    property.examples?.[0] ||
+                    (property.default ? String(property.default) : undefined)
                   }
+                />
+              ) : (
+                <Input
+                  {...field}
+                  value={(field.value as string) || ''}
+                  type={isInteger ? 'number' : 'text'}
                   autoComplete="off"
                   placeholder={
                     property.examples?.[0] ||
@@ -319,36 +539,108 @@ export function JsonSchemaForm({
     )
   }
 
+  // Render a list of field names, respecting pair-into-row behaviour.
+  const renderFieldList = (names: string[]) => {
+    const elements: ReactNode[] = []
+    for (let i = 0; i < names.length; i++) {
+      const fieldName = names[i]
+      const nextFieldName = names[i + 1]
+      const property = schema.properties[fieldName]
+      if (!property) continue
+
+      if (nextFieldName && isPairedField(fieldName, nextFieldName)) {
+        const nextProperty = schema.properties[nextFieldName]
+        elements.push(
+          <div key={fieldName} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {renderField(fieldName, property)}
+            {renderField(nextFieldName, nextProperty)}
+          </div>
+        )
+        i++ // skip the paired field
+        continue
+      }
+
+      elements.push(
+        <div key={fieldName}>{renderField(fieldName, property)}</div>
+      )
+    }
+    return elements
+  }
+
+  // Partition fields into groups (only active when serviceType is provided).
+  const grouped = useMemo(() => {
+    const buckets: Record<FieldGroup, string[]> = {
+      basic: [],
+      connection: [],
+      credentials: [],
+      advanced: [],
+    }
+    propertyNames.forEach((name) => {
+      const group = resolveGroup(name, serviceType, managedByTemps)
+      buckets[group].push(name)
+    })
+    return buckets
+  }, [propertyNames, serviceType, managedByTemps])
+
+  const useGrouping = !!serviceType
+  const hasAdvanced = grouped.advanced.length > 0
+  const nonAdvancedGroups: FieldGroup[] = ['basic', 'connection', 'credentials']
+
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-6">
-        {propertyNames.map((fieldName, index) => {
-          const property = schema.properties[fieldName]
-          const nextFieldName = propertyNames[index + 1]
-          const shouldPair = isPairedField(fieldName, nextFieldName)
-          const isSecond = isSecondInPair(fieldName, index)
+        {useGrouping ? (
+          <>
+            {nonAdvancedGroups.map((group) => {
+              const names = grouped[group]
+              if (names.length === 0) return null
+              return (
+                <section key={group} className="space-y-4">
+                  {/* Only show the group header when there are multiple visible groups */}
+                  {nonAdvancedGroups.filter((g) => grouped[g].length > 0)
+                    .length > 1 && (
+                    <h3 className="text-sm font-medium text-muted-foreground">
+                      {GROUP_LABELS[group]}
+                    </h3>
+                  )}
+                  <div className="space-y-6">{renderFieldList(names)}</div>
+                </section>
+              )
+            })}
 
-          // Skip if this is the second field in a pair
-          if (isSecond) {
-            return null
-          }
+            {hasAdvanced && (
+              <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between rounded-md border bg-muted/30 px-4 py-3 text-sm font-medium hover:bg-muted/50 transition-colors"
+                  >
+                    <span className="flex items-center gap-2">
+                      Advanced configuration
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {grouped.advanced.length} field
+                        {grouped.advanced.length === 1 ? '' : 's'}
+                      </span>
+                    </span>
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform ${
+                        advancedOpen ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="pt-4">
+                  <div className="space-y-6 border-l-2 border-muted pl-4">
+                    {renderFieldList(grouped.advanced)}
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+            )}
+          </>
+        ) : (
+          <div className="space-y-6">{renderFieldList(propertyNames)}</div>
+        )}
 
-          // Render paired fields side-by-side
-          if (shouldPair && nextFieldName) {
-            const nextProperty = schema.properties[nextFieldName]
-            return (
-              <div key={fieldName} className="grid grid-cols-2 gap-4">
-                {renderField(fieldName, property)}
-                {renderField(nextFieldName, nextProperty)}
-              </div>
-            )
-          }
-
-          // Render single field
-          return renderField(fieldName, property)
-        })}
-
-        {/* Action Buttons */}
         <div className="flex justify-end space-x-3 pt-6">
           {showCancel && onCancel && (
             <Button

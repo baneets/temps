@@ -25,6 +25,14 @@ pub struct Model {
     pub is_expired: bool, // True if PAT token has been validated and found to be expired
     pub syncing: bool,
     pub last_synced_at: Option<DBDateTime>,
+    /// Running count of repositories the current (or most recent) sync has
+    /// written/updated, flushed per page so the UI can show live progress.
+    /// Reset to 0 at the start of each sync.
+    pub synced_repository_count: i32,
+    pub health_status: String, // "healthy" | "unhealthy" | "unknown"
+    pub health_message: Option<String>,
+    pub last_health_check_at: Option<DBDateTime>,
+    pub consecutive_health_failures: i32,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }

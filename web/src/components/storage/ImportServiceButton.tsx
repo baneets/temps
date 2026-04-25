@@ -9,7 +9,7 @@ export function ImportServiceButton({ onSuccess }: { onSuccess?: () => void }) {
     <Button
       variant="outline"
       className="gap-2"
-      onClick={() => navigate('/settings/storage/import')}
+      onClick={() => navigate('/storage/import')}
     >
       <Download className="h-4 w-4" />
       Import Service

@@ -21,14 +21,14 @@ use axum::{
     extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use chrono::Utc;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use temps_entities::{project_dsns, projects};
+use temps_entities::{deployment_tokens, project_dsns, projects};
 use tracing::{debug, warn};
 use utoipa::{OpenApi, ToSchema};
 
@@ -38,6 +38,8 @@ use crate::services::source_map_service::SourceMapService;
 #[openapi(
     paths(
         create_release,
+        create_project_release,
+        finalize_project_release,
         upload_release_file,
         list_release_files,
         chunk_upload_options,
@@ -121,6 +123,16 @@ pub fn configure_sentry_compat_routes() -> Router<Arc<SentryCompatAppState>> {
             "/0/organizations/{org_slug}/releases/",
             post(create_release),
         )
+        // sentry-cli uses this endpoint when both SENTRY_ORG and SENTRY_PROJECT are set
+        .route(
+            "/0/projects/{org_slug}/{project_slug}/releases/",
+            post(create_project_release),
+        )
+        // sentry-cli `releases finalize` hits PUT /api/0/projects/{org}/{proj}/releases/{version}/
+        .route(
+            "/0/projects/{org_slug}/{project_slug}/releases/{version}/",
+            put(finalize_project_release),
+        )
         .route(
             "/0/projects/{org_slug}/{project_slug}/releases/{version}/files/",
             post(upload_release_file).get(list_release_files),
@@ -136,7 +148,10 @@ pub fn configure_sentry_compat_routes() -> Router<Arc<SentryCompatAppState>> {
 /// Extract project_id from Bearer token authentication.
 ///
 /// sentry-cli sends `Authorization: Bearer <auth_token>`.
-/// We accept the DSN public key as the Bearer token and resolve to a project.
+/// We accept:
+///   1. DSN public key → resolves to project via `project_dsns` table
+///   2. Deployment token (`dt_*`) → resolves to project via `deployment_tokens` table
+///      (used when Temps injects SENTRY_AUTH_TOKEN during builds)
 async fn authenticate_bearer(
     headers: &HeaderMap,
     db: &DatabaseConnection,
@@ -160,7 +175,35 @@ async fn authenticate_bearer(
         ));
     };
 
-    // Look up the DSN public key to find the project
+    // Deployment tokens start with "dt_" — validate via hash lookup
+    if token.starts_with("dt_") {
+        use sha2::{Digest, Sha256};
+        let token_hash = format!("{:x}", Sha256::digest(token.as_bytes()));
+        let token_prefix: String = token.chars().take(8).collect();
+
+        let dt = deployment_tokens::Entity::find()
+            .filter(deployment_tokens::Column::TokenHash.eq(&token_hash))
+            .filter(deployment_tokens::Column::TokenPrefix.eq(&token_prefix))
+            .filter(deployment_tokens::Column::IsActive.eq(true))
+            .one(db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                )
+            })?
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid deployment token".to_string(),
+                )
+            })?;
+
+        return Ok(dt.project_id);
+    }
+
+    // Otherwise try DSN public key lookup
     let dsn = project_dsns::Entity::find()
         .filter(project_dsns::Column::PublicKey.eq(token))
         .filter(project_dsns::Column::IsActive.eq(true))
@@ -279,6 +322,137 @@ async fn create_release(
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
+/// Create a release for a specific project (stub for sentry-cli compatibility).
+///
+/// sentry-cli calls this endpoint (instead of /organizations/.../releases/) when
+/// both SENTRY_ORG and SENTRY_PROJECT env vars are set. Behaves identically to
+/// the organizations endpoint but validates the project slug.
+#[utoipa::path(
+    tag = "sentry-compat",
+    post,
+    path = "/0/projects/{org_slug}/{project_slug}/releases/",
+    params(
+        ("org_slug" = String, Path, description = "Organization slug (ignored in single-tenant mode)"),
+        ("project_slug" = String, Path, description = "Project slug or numeric ID"),
+    ),
+    request_body = SentryCreateReleaseRequest,
+    responses(
+        (status = 201, description = "Release created", body = SentryReleaseResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Project not found"),
+    ),
+)]
+async fn create_project_release(
+    State(state): State<Arc<SentryCompatAppState>>,
+    Path((_org_slug, project_slug)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<SentryCreateReleaseRequest>,
+) -> impl IntoResponse {
+    // Authenticate
+    let auth_project_id = match authenticate_bearer(&headers, state.db.as_ref()).await {
+        Ok(id) => id,
+        Err((status, msg)) => return (status, msg).into_response(),
+    };
+
+    // Validate project slug matches the authenticated token
+    if let Err((status, msg)) =
+        resolve_project_slug(&project_slug, auth_project_id, state.db.as_ref()).await
+    {
+        return (status, msg).into_response();
+    }
+
+    debug!(
+        "sentry-cli: Create project release '{}' for project '{}' (stub)",
+        request.version, project_slug
+    );
+
+    let now = Utc::now().to_rfc3339();
+    let short_version = if request.version.len() > 12 {
+        request.version[..12].to_string()
+    } else {
+        request.version.clone()
+    };
+
+    let project_refs = vec![SentryReleaseProjectRef {
+        name: project_slug.clone(),
+        slug: project_slug,
+    }];
+
+    let response = SentryReleaseResponse {
+        version: request.version,
+        date_created: now,
+        date_released: None,
+        short_version,
+        projects: project_refs,
+    };
+
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
+/// Finalize a release (stub for sentry-cli compatibility).
+///
+/// sentry-cli calls `releases finalize` after uploading source maps. This sets
+/// the dateReleased on the release. Since Temps stores source maps independently
+/// of releases, this is a no-op that returns the expected response.
+#[utoipa::path(
+    tag = "sentry-compat",
+    put,
+    path = "/0/projects/{org_slug}/{project_slug}/releases/{version}/",
+    params(
+        ("org_slug" = String, Path, description = "Organization slug (ignored)"),
+        ("project_slug" = String, Path, description = "Project slug or numeric ID"),
+        ("version" = String, Path, description = "Release version to finalize"),
+    ),
+    responses(
+        (status = 200, description = "Release finalized", body = SentryReleaseResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Project not found"),
+    ),
+)]
+async fn finalize_project_release(
+    State(state): State<Arc<SentryCompatAppState>>,
+    Path((_org_slug, project_slug, version)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Authenticate
+    let auth_project_id = match authenticate_bearer(&headers, state.db.as_ref()).await {
+        Ok(id) => id,
+        Err((status, msg)) => return (status, msg).into_response(),
+    };
+
+    // Validate project slug matches the authenticated token
+    if let Err((status, msg)) =
+        resolve_project_slug(&project_slug, auth_project_id, state.db.as_ref()).await
+    {
+        return (status, msg).into_response();
+    }
+
+    debug!(
+        "sentry-cli: Finalize release '{}' for project '{}' (stub)",
+        version, project_slug
+    );
+
+    let now = Utc::now().to_rfc3339();
+    let short_version = if version.len() > 12 {
+        version[..12].to_string()
+    } else {
+        version.clone()
+    };
+
+    let response = SentryReleaseResponse {
+        version: version.clone(),
+        date_created: now.clone(),
+        date_released: Some(now),
+        short_version,
+        projects: vec![SentryReleaseProjectRef {
+            name: project_slug.clone(),
+            slug: project_slug,
+        }],
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
 /// Upload a source map file for a release.
 ///
 /// Accepts the same multipart format as the Sentry release files API.
@@ -382,10 +556,31 @@ async fn upload_release_file(
         }
     };
 
-    // The `name` field from sentry-cli is typically already in ~/path/to/file.js.map format
-    // For non-.map files (e.g., the JS bundle itself), we still store them as source maps
-    // The SourceMapService will validate if it's a valid source map
-    let file_path = name.clone();
+    // Only store actual source map files (.map extension).
+    // sentry-cli also uploads the JS bundles alongside the maps — skip those.
+    // Storing JS bundles would overwrite the correct source maps stored by capture_source_maps job.
+    if !name.ends_with(".map") && !name.ends_with(".js.map") {
+        debug!(
+            "sentry-cli: Skipping non-source-map file '{}' for release '{}'",
+            name, version
+        );
+        let now = Utc::now().to_rfc3339();
+        let response = SentryReleaseFileResponse {
+            id: "0".to_string(),
+            name: name.clone(),
+            dist,
+            headers: serde_json::json!({}),
+            size: 0,
+            sha1: String::new(),
+            date_created: now,
+        };
+        return (StatusCode::CREATED, Json(response)).into_response();
+    }
+
+    // Strip .map suffix so the stored path matches browser stack trace filenames.
+    // e.g. "~/_next/server/app/api/route.js.map" → "~/_next/server/app/api/route.js"
+    // This matches the convention used by the capture_source_maps job.
+    let file_path = name.strip_suffix(".map").unwrap_or(&name).to_string();
 
     match state
         .source_map_service
@@ -419,17 +614,25 @@ async fn upload_release_file(
             (StatusCode::CREATED, Json(response)).into_response()
         }
         Err(e) => {
-            // For non-source-map files (like JS bundles), sentry-cli uploads them too.
-            // We reject invalid source maps but report it as a warning, not an error.
+            // sentry-cli uploads both JS bundles and .map files.
+            // We only store actual source maps — JS bundles are accepted but not stored.
+            // Return 201 so sentry-cli doesn't fail the build.
             warn!(
-                "sentry-cli: Failed to store file '{}' for release '{}': {}",
+                "sentry-cli: Skipping non-source-map file '{}' for release '{}': {}",
                 name, version, e
             );
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to store file: {}", e),
-            )
-                .into_response()
+
+            let now = Utc::now().to_rfc3339();
+            let response = SentryReleaseFileResponse {
+                id: "0".to_string(),
+                name: name.clone(),
+                dist,
+                headers: serde_json::json!({}),
+                size: 0,
+                sha1: String::new(),
+                date_created: now,
+            };
+            (StatusCode::CREATED, Json(response)).into_response()
         }
     }
 }

@@ -63,13 +63,13 @@ function SourceContext({ frame }: SourceContextProps) {
   const gutterWidth = String(lastLine).length
 
   return (
-    <div className="mt-1 rounded-md overflow-hidden border border-border/50 bg-[#1e1e2e] text-xs font-mono">
+    <div className="mt-1 rounded-md overflow-hidden border border-border/50 bg-muted text-xs font-mono">
       {/* Pre-context lines */}
       {pre_context?.map((line, i) => {
         const lineNum = preStartLine + i
         return (
-          <div key={`pre-${lineNum}`} className="flex hover:bg-white/5">
-            <span className="flex-shrink-0 w-[var(--gutter)] text-right pr-3 pl-2 py-px text-muted-foreground/40 select-none border-r border-border/30 bg-black/20" style={{ '--gutter': `${gutterWidth + 2}ch` } as React.CSSProperties}>
+          <div key={`pre-${lineNum}`} className="flex hover:bg-muted-foreground/5">
+            <span className="flex-shrink-0 w-[var(--gutter)] text-right pr-3 pl-2 py-px text-muted-foreground/40 select-none border-r border-border/30 bg-background/50" style={{ '--gutter': `${gutterWidth + 2}ch` } as React.CSSProperties}>
               {lineNum}
             </span>
             <pre className="flex-1 pl-3 py-px text-muted-foreground/60 overflow-x-auto"><code>{line || ' '}</code></pre>
@@ -91,8 +91,8 @@ function SourceContext({ frame }: SourceContextProps) {
       {post_context?.map((line, i) => {
         const lineNum = contextLineNo + 1 + i
         return (
-          <div key={`post-${lineNum}`} className="flex hover:bg-white/5">
-            <span className="flex-shrink-0 w-[var(--gutter)] text-right pr-3 pl-2 py-px text-muted-foreground/40 select-none border-r border-border/30 bg-black/20" style={{ '--gutter': `${gutterWidth + 2}ch` } as React.CSSProperties}>
+          <div key={`post-${lineNum}`} className="flex hover:bg-muted-foreground/5">
+            <span className="flex-shrink-0 w-[var(--gutter)] text-right pr-3 pl-2 py-px text-muted-foreground/40 select-none border-r border-border/30 bg-background/50" style={{ '--gutter': `${gutterWidth + 2}ch` } as React.CSSProperties}>
               {lineNum}
             </span>
             <pre className="flex-1 pl-3 py-px text-muted-foreground/60 overflow-x-auto"><code>{line || ' '}</code></pre>
@@ -214,7 +214,7 @@ export function StackTrace({
               {/* Badges */}
               <div className="flex items-center gap-1.5 flex-shrink-0">
                 {frame.symbolicated && (
-                  <Code2 className="h-3 w-3 text-green-500" title="Symbolicated via source map" />
+                  <Code2 className="h-3 w-3 text-green-500" aria-label="Symbolicated via source map" />
                 )}
                 {isInApp && (
                   <span className="text-[10px] font-sans text-muted-foreground bg-muted px-1.5 py-0.5 rounded">

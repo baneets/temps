@@ -5,7 +5,7 @@ import {
   listGitProviders,
   createGithubPatProvider,
   createGitlabPatProvider,
-  deleteProvider3 as deleteGitProvider,
+  deleteGitProvider,
   getGitProvider,
   listSyncedRepositories,
   listRepositoriesByConnection,

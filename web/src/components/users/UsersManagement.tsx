@@ -21,14 +21,13 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { KbdBadge } from '@/components/ui/kbd-badge'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   Dialog,
   DialogContent,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog'
 import {
   DropdownMenu,
@@ -70,12 +69,13 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import { useForm } from 'react-hook-form'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
 const createUserSchema = z.object({
   name: z.string().min(3, 'Name must be at least 3 characters'),
-  email: z.string().email('Invalid email address'),
+  email: z.email('Invalid email address'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
   role: z.string().min(1, 'Please select a role'),
 })
@@ -110,6 +110,7 @@ export function UsersManagement({
     useState<RouteUserWithRoles | null>(null)
   const [showPassword, setShowPassword] = useState(false)
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const form = useForm<CreateUserFormData>({
     resolver: zodResolver(createUserSchema),
@@ -266,14 +267,12 @@ export function UsersManagement({
             Manage user access and roles
           </p>
         </div>
+        <CreateActionButton
+          onClick={() => setIsCreateDialogOpen(true)}
+          label="Add User"
+          icon={<UserPlus className="h-4 w-4" />}
+        />
         <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-          <DialogTrigger asChild>
-            <Button>
-              <UserPlus className="mr-2 h-4 w-4" />
-              Add User
-              <KbdBadge keys={['N']} className="ml-2" />
-            </Button>
-          </DialogTrigger>
           <DialogContent className="sm:max-w-[425px]">
             <DialogHeader>
               <DialogTitle>Create New User</DialogTitle>
@@ -551,7 +550,16 @@ export function UsersManagement({
             {users.map((user) => (
               <div
                 key={user.user.id}
-                className="flex items-center justify-between p-4"
+                role="button"
+                tabIndex={0}
+                onClick={() => navigate(`/settings/users/${user.user.id}`)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    navigate(`/settings/users/${user.user.id}`)
+                  }
+                }}
+                className="flex cursor-pointer items-center justify-between p-4 transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-4">
@@ -591,7 +599,7 @@ export function UsersManagement({
                     </div>
                   </div>
                 </div>
-                <div className="ml-4">
+                <div className="ml-4" onClick={(e) => e.stopPropagation()}>
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon">

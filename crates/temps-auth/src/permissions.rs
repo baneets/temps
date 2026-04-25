@@ -223,6 +223,13 @@ pub enum Permission {
     StacksWrite,
     StacksDelete,
     StacksCreate,
+
+    // Sandbox permissions (Vercel-compatible `/v1/sandbox/*` API).
+    // Split from ProjectsRead/ProjectsWrite so sandbox-only API tokens
+    // don't grant broader project access.
+    SandboxesRead,
+    SandboxesWrite,
+    SandboxesExec,
 }
 
 impl fmt::Display for Permission {
@@ -364,6 +371,9 @@ impl fmt::Display for Permission {
             Permission::StacksWrite => "stacks:write",
             Permission::StacksDelete => "stacks:delete",
             Permission::StacksCreate => "stacks:create",
+            Permission::SandboxesRead => "sandboxes:read",
+            Permission::SandboxesWrite => "sandboxes:write",
+            Permission::SandboxesExec => "sandboxes:exec",
         };
         write!(f, "{}", name)
     }
@@ -509,6 +519,9 @@ impl Permission {
             "stacks:write" => Some(Permission::StacksWrite),
             "stacks:delete" => Some(Permission::StacksDelete),
             "stacks:create" => Some(Permission::StacksCreate),
+            "sandboxes:read" => Some(Permission::SandboxesRead),
+            "sandboxes:write" => Some(Permission::SandboxesWrite),
+            "sandboxes:exec" => Some(Permission::SandboxesExec),
             _ => None,
         }
     }
@@ -650,6 +663,9 @@ impl Permission {
             Permission::StacksWrite,
             Permission::StacksDelete,
             Permission::StacksCreate,
+            Permission::SandboxesRead,
+            Permission::SandboxesWrite,
+            Permission::SandboxesExec,
         ]
     }
 }
@@ -661,7 +677,6 @@ pub enum Role {
     Reader,
     Mcp,
     ApiReader,
-    Demo,   // For demo mode with limited read-only access
     Custom, // For API keys with custom permissions
 }
 
@@ -673,7 +688,6 @@ impl fmt::Display for Role {
             Role::Reader => "reader",
             Role::Mcp => "mcp",
             Role::ApiReader => "api_reader",
-            Role::Demo => "demo",
             Role::Custom => "custom",
         };
         write!(f, "{}", name)
@@ -689,7 +703,6 @@ impl Role {
             "reader" => Some(Role::Reader),
             "mcp" => Some(Role::Mcp),
             "api_reader" => Some(Role::ApiReader),
-            "demo" => Some(Role::Demo),
             "custom" => Some(Role::Custom),
             _ => None,
         }
@@ -702,7 +715,6 @@ impl Role {
             Role::Reader,
             Role::Mcp,
             Role::ApiReader,
-            Role::Demo,
             Role::Custom,
         ]
     }
@@ -847,6 +859,9 @@ impl Role {
                 Permission::StacksWrite,
                 Permission::StacksDelete,
                 Permission::StacksCreate,
+                Permission::SandboxesRead,
+                Permission::SandboxesWrite,
+                Permission::SandboxesExec,
             ],
             Role::User => &[
                 Permission::ProjectsRead,
@@ -948,6 +963,9 @@ impl Role {
                 Permission::StacksRead,
                 Permission::StacksWrite,
                 Permission::StacksCreate,
+                Permission::SandboxesRead,
+                Permission::SandboxesWrite,
+                Permission::SandboxesExec,
             ],
             Role::Reader => &[
                 Permission::ProjectsRead,
@@ -988,6 +1006,7 @@ impl Role {
                 Permission::OtelRead,
                 Permission::AiGatewayRead,
                 Permission::StacksRead,
+                Permission::SandboxesRead,
             ],
             Role::Mcp => &[
                 Permission::ProjectsRead,
@@ -1005,11 +1024,6 @@ impl Role {
                 Permission::ProjectsRead,
                 Permission::DeploymentsRead,
                 Permission::AnalyticsRead,
-            ],
-            Role::Demo => &[
-                Permission::ProjectsRead,
-                Permission::AnalyticsRead,
-                Permission::StatusPageRead,
             ],
             Role::Custom => &[], // Custom role has no default permissions
         }

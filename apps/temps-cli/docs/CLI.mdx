@@ -1511,6 +1511,50 @@ Get container resource metrics (all containers if no container ID specified)
 
 ---
 
+## `analytics` (alias: `stats`)
+
+View project analytics from the terminal.
+
+**Subcommands:**
+
+- `overview` (`o`) - Show analytics dashboard overview
+- `top <dimension>` - Show breakdown by dimension
+
+### `analytics overview` (alias: `o`)
+
+Show analytics dashboard overview with key metrics, hourly sparkline, top pages, events, and locations.
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-p, --project <project>` | Project slug or ID | - |
+| `--period <period>` | Time period: today, 24h, 7d, 30d, 90d | `24h` |
+| `--json` | Output in JSON format | - |
+
+```bash
+temps analytics overview -p my-app --period 7d
+temps stats -p my-app
+```
+
+### `analytics top <dimension>`
+
+Show breakdown by dimension: `pages`, `referrers`, `browsers`, `os`, `devices`, `countries`, `channels`, `events`, `languages`, `utm_source`, `utm_medium`, `utm_campaign`
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-p, --project <project>` | Project slug or ID | - |
+| `--period <period>` | Time period: today, 24h, 7d, 30d, 90d | `24h` |
+| `--limit <n>` | Number of results | `20` |
+| `--json` | Output in JSON format | - |
+
+```bash
+temps analytics top pages -p my-app --period 30d
+temps analytics top referrers --period 7d
+temps analytics top browsers --json
+temps analytics top countries --limit 50
+```
+
+---
+
 ## Examples
 
 ### Basic Workflow

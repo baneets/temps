@@ -194,7 +194,7 @@ export function SentryEventDetail({
                     </div>
 
                     {/* Two Column Grid for Dense Information */}
-                    <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3">
                       {/* Left Column */}
                       <div className="space-y-3">
                         {exception.module && (

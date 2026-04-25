@@ -1,6 +1,7 @@
 use crate::services::{
-    cache::GitProviderCacheManager, git_provider_manager::GitProviderManager,
-    github::GithubAppService, repository::RepositoryService,
+    cache::GitProviderCacheManager, connection_health::ConnectionHealthService,
+    git_provider_manager::GitProviderManager, github::GithubAppService,
+    repository::RepositoryService,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,6 +17,7 @@ pub struct GitAppState {
     pub github_service: Arc<GithubAppService>,
     pub config_service: Arc<ConfigService>,
     pub cache_manager: Arc<GitProviderCacheManager>,
+    pub connection_health_service: Arc<ConnectionHealthService>,
 }
 
 pub fn create_git_app_state(
@@ -25,6 +27,7 @@ pub fn create_git_app_state(
     audit_service: Arc<dyn AuditLogger>,
     github_service: Arc<GithubAppService>,
     cache_manager: Arc<GitProviderCacheManager>,
+    connection_health_service: Arc<ConnectionHealthService>,
 ) -> Arc<GitAppState> {
     Arc::new(GitAppState {
         git_provider_manager,
@@ -33,6 +36,7 @@ pub fn create_git_app_state(
         github_service,
         config_service,
         cache_manager,
+        connection_health_service,
     })
 }
 

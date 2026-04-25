@@ -19,10 +19,6 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { CodeBlock } from '@/components/ui/code-block'
-import {
-  Collapsible,
-  CollapsibleContent,
-} from '@/components/ui/collapsible'
 import { EmptyState } from '@/components/ui/empty-state'
 import { Input } from '@/components/ui/input'
 import {
@@ -33,6 +29,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { cn } from '@/lib/utils'
 import {
   Table,
   TableBody,
@@ -47,17 +44,25 @@ import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   AlertTriangle,
-  ChevronDown,
+  Check,
   ChevronLeft,
   ChevronRight,
   Clock,
   Code2,
+  FileCode,
   RefreshCw,
   Search,
   Settings2,
+  Terminal,
   Workflow,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  ReactElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 interface TracesListProps {
@@ -116,8 +121,270 @@ const PAGE_SIZE = 10
 
 // ── Setup Section ───────────────────────────────────────────────────
 
+const NextJsIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M11.572 0c-.176 0-.31.001-.358.007a19.76 19.76 0 0 1-.364.033C7.443.346 4.25 2.185 2.228 5.012a11.875 11.875 0 0 0-2.119 5.243c-.096.659-.108.854-.108 1.747s.012 1.089.108 1.748c.652 4.506 3.86 8.292 8.209 9.695.779.25 1.6.422 2.534.525.363.04 1.935.04 2.299 0 1.611-.178 2.977-.577 4.323-1.264.207-.106.247-.134.219-.158-.02-.013-.9-1.193-1.955-2.62l-1.919-2.592-2.404-3.558a338.739 338.739 0 0 0-2.422-3.556c-.009-.002-.018 1.579-.023 3.51-.007 3.38-.01 3.515-.052 3.595a.426.426 0 0 1-.206.214c-.075.037-.14.044-.495.044H7.81l-.108-.068a.438.438 0 0 1-.157-.171l-.05-.106.006-4.703.007-4.705.072-.092a.645.645 0 0 1 .174-.143c.096-.047.134-.051.54-.051.478 0 .558.018.682.154.035.038 1.337 1.999 2.895 4.361a10760.433 10760.433 0 0 0 4.735 7.17l1.9 2.879.096-.063a12.317 12.317 0 0 0 2.466-2.163 11.944 11.944 0 0 0 2.824-6.134c.096-.66.108-.854.108-1.748 0-.893-.012-1.088-.108-1.747-.652-4.506-3.859-8.292-8.208-9.695a12.597 12.597 0 0 0-2.499-.523A33.119 33.119 0 0 0 11.573 0zm4.069 7.217c.347 0 .408.005.486.047a.473.473 0 0 1 .237.277c.018.06.023 1.365.018 4.304l-.006 4.218-.744-1.14-.746-1.14v-3.066c0-1.982.01-3.097.023-3.15a.478.478 0 0 1 .233-.296c.096-.05.13-.054.5-.054z" />
+  </svg>
+)
+
+const NodeIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M11.998 24c-.321 0-.641-.084-.922-.247l-2.936-1.737c-.438-.245-.224-.332-.08-.383.585-.203.703-.25 1.328-.604.065-.037.151-.023.218.017l2.256 1.339a.286.286 0 00.272 0l8.795-5.076a.276.276 0 00.134-.238V7.12a.283.283 0 00-.137-.242L12.133 1.804a.281.281 0 00-.271 0L3.075 6.879a.284.284 0 00-.139.242v10.146c0 .097.052.189.139.235l2.409 1.392c1.307.654 2.108-.116 2.108-.89V7.865c0-.142.114-.253.256-.253h1.115c.139 0 .255.112.255.253v10.142c0 1.745-.95 2.745-2.604 2.745-.508 0-.909 0-2.026-.551L2.28 18.675a1.856 1.856 0 01-.922-1.607V6.922c0-.663.353-1.281.922-1.61L11.075.236a1.925 1.925 0 011.848 0L21.72 5.312c.57.329.924.947.924 1.61v10.146c0 .663-.354 1.278-.924 1.609l-8.797 5.076c-.28.163-.6.247-.925.247zm2.718-6.993c-3.848 0-4.656-1.766-4.656-3.248 0-.14.114-.253.255-.253h1.136c.127 0 .235.092.254.219.172 1.155.681 1.739 3.01 1.739 1.855 0 2.644-.42 2.644-1.404 0-.568-.224-.991-3.105-1.273-2.407-.239-3.897-.772-3.897-2.698 0-1.776 1.497-2.833 4.005-2.833 2.818 0 4.213.977 4.39 3.08a.26.26 0 01-.067.191.26.26 0 01-.184.081h-1.141c-.118 0-.222-.084-.247-.198-.274-1.215-.938-1.603-2.75-1.603-2.029 0-2.264.706-2.264 1.235 0 .641.278.828 3.008 1.19 2.701.357 3.99.863 3.99 2.762-.001 1.918-1.6 3.018-4.39 3.018z" />
+  </svg>
+)
+
+const ExpressIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M24 18.588a1.529 1.529 0 01-1.895-.72l-3.45-4.771-.5-.667-4.003 5.444a1.466 1.466 0 01-1.802.708l5.158-6.92-4.798-6.251a1.595 1.595 0 011.9.666l3.576 4.83 3.596-4.81a1.435 1.435 0 011.788-.668L21.708 7.9l-2.522 3.283a.666.666 0 000 .994l4.804 6.412zM.002 11.576l.42-2.075c1.154-4.103 5.858-5.81 9.094-3.27 1.895 1.489 2.368 3.597 2.275 5.973H1.116C.943 16.447 4.005 19.009 7.92 17.7a4.078 4.078 0 002.582-2.876c.207-.666.548-.78 1.174-.588a5.417 5.417 0 01-2.589 3.957 6.272 6.272 0 01-7.306-.933 6.575 6.575 0 01-1.64-3.858c0-.235-.08-.455-.134-.666A88.33 88.33 0 010 11.577zm1.127-.286h9.654c-.06-3.076-2.001-5.258-4.59-5.278-2.882-.04-4.944 2.094-5.071 5.264z" />
+  </svg>
+)
+
+const FastifyIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M10.183 5.47h5.947v.823c0 .355.287.64.642.64h.641v-.64h.641l-.641-.823h.32V3.826h-1.28v1h-.642v-.36a1.923 1.923 0 00-1.923-1.92h-1.904a1.923 1.923 0 00-1.72 1.076h-5.48l-.78-.693-.24.373.52.6-.12.247.54.48-.12.247.54.48-.12.247.6.54-.12.246.54.474v1.53z" />
+  </svg>
+)
+
+const DenoIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M12 0a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm-.029 3.04c4.56 0 8.302 2.952 8.302 6.634 0 2.715-1.844 4.926-4.543 6.03l.824 2.978.01.048a.17.17 0 0 1-.13.2l-2.152.48-.049.009a.17.17 0 0 1-.178-.124l-.854-3.105c-.394.033-.79.033-1.184.033-.705 0-1.395-.054-2.056-.15l-.885 3.224a.17.17 0 0 1-.208.116l-2.15-.48-.045-.013a.17.17 0 0 1-.088-.232l.872-3.167C5.116 14.48 3.39 12.428 3.39 9.935c0-4.035 3.906-6.895 8.58-6.895zm.38 3.478a1.09 1.09 0 1 0 0 2.18 1.09 1.09 0 0 0 0-2.18z" />
+  </svg>
+)
+
+const PythonIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05z" />
+  </svg>
+)
+
+const RustIcon = () => (
+  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="currentColor">
+    <path d="M23.835 11.703l-1.008-.623a13.813 13.813 0 0 0-.028-.281l.866-.807a.348.348 0 0 0-.115-.578l-1.109-.414a8.927 8.927 0 0 0-.087-.275l.69-.96a.346.346 0 0 0-.225-.544l-1.175-.191a9.913 9.913 0 0 0-.142-.253l.49-1.083a.347.347 0 0 0-.324-.49l-1.19.042a7.07 7.07 0 0 0-.19-.219l.272-1.163a.347.347 0 0 0-.407-.407l-1.163.272-.219-.19.041-1.19a.346.346 0 0 0-.49-.323l-1.083.49-.253-.142-.191-1.175a.347.347 0 0 0-.544-.225l-.96.69c-.092-.03-.184-.061-.276-.086L14.823.939a.348.348 0 0 0-.578-.115l-.807.866c-.093-.01-.187-.02-.28-.028L12.534.655a.346.346 0 0 0-.588 0l-.624 1.008-.28.028-.807-.866a.348.348 0 0 0-.578.115l-.414 1.109-.275.087-.96-.69a.346.346 0 0 0-.544.224l-.19 1.175-.253.143-1.083-.49a.347.347 0 0 0-.49.323l.041 1.19a7.16 7.16 0 0 0-.219.19L4.107 3.93a.347.347 0 0 0-.407.407l.272 1.164-.19.218-1.19-.041a.345.345 0 0 0-.324.49l.49 1.084c-.048.083-.095.167-.141.253l-1.175.19a.347.347 0 0 0-.225.544l.69.96a8.927 8.927 0 0 0-.087.275l-1.109.414a.347.347 0 0 0-.115.579l.866.806c-.01.094-.02.187-.028.281l-1.008.623a.347.347 0 0 0 0 .588l1.008.624c.008.094.017.187.028.28l-.866.807a.347.347 0 0 0 .115.578l1.109.414.087.275-.69.96a.346.346 0 0 0 .225.544l1.175.191c.046.086.093.17.141.253l-.49 1.083a.347.347 0 0 0 .324.49l1.19-.041c.072.074.144.147.218.218l-.272 1.164a.346.346 0 0 0 .407.407l1.164-.272.218.19-.041 1.19a.346.346 0 0 0 .49.323l1.083-.49.253.142.191 1.175a.346.346 0 0 0 .544.225l.96-.69.276.087.414 1.109a.346.346 0 0 0 .578.115l.807-.866.28.028.624 1.008a.346.346 0 0 0 .588 0l.624-1.008.28-.028.807.866a.347.347 0 0 0 .578-.115l.414-1.109.275-.087.96.69a.345.345 0 0 0 .544-.225l.191-1.175.253-.142 1.083.49a.347.347 0 0 0 .49-.323l-.041-1.19.218-.19 1.164.272a.346.346 0 0 0 .407-.407l-.272-1.164.19-.218 1.19.041a.347.347 0 0 0 .323-.49l-.49-1.083.143-.253 1.175-.191a.346.346 0 0 0 .225-.544l-.69-.96.087-.275 1.109-.414a.347.347 0 0 0 .115-.579l-.866-.806c.01-.093.02-.187.028-.28l1.008-.624a.347.347 0 0 0 0-.588z" />
+  </svg>
+)
+
+type CodeLang =
+  | 'bash'
+  | 'yaml'
+  | 'json'
+  | 'javascript'
+  | 'typescript'
+  | 'shell'
+  | 'text'
+  | 'python'
+  | 'go'
+
+type ExtraBlock = {
+  title: string
+  fileName: string
+  lang: CodeLang
+  code: string
+}
+
+type FrameworkPreset = {
+  id: string
+  name: string
+  description: string
+  icon: () => ReactElement
+  install: string
+  installLang: CodeLang
+  fileName: string
+  setupLang: CodeLang
+  setupCode: string
+  extra?: ExtraBlock
+}
+
+const frameworkPresets: FrameworkPreset[] = [
+  {
+    id: 'nextjs',
+    name: 'Next.js',
+    description: 'App Router + Node runtime',
+    icon: NextJsIcon,
+    install: 'npm install @vercel/otel @opentelemetry/api',
+    installLang: 'bash',
+    fileName: 'instrumentation.ts',
+    setupLang: 'typescript',
+    setupCode: `// instrumentation.ts (project root)
+import { registerOTel } from '@vercel/otel'
+
+export function register() {
+  registerOTel({ serviceName: '__SERVICE_NAME__' })
+}`,
+    extra: {
+      title: 'Enable the instrumentation hook',
+      fileName: 'next.config.js',
+      lang: 'javascript',
+      code: `// next.config.js
+/** @type {import('next').NextConfig} */
+module.exports = {
+  experimental: { instrumentationHook: true },
+}`,
+    },
+  },
+  {
+    id: 'node',
+    name: 'Node.js',
+    description: 'Plain Node, Hono, Koa',
+    icon: NodeIcon,
+    install: `npm install @opentelemetry/sdk-node @opentelemetry/api \\
+  @opentelemetry/auto-instrumentations-node \\
+  @opentelemetry/exporter-trace-otlp-proto`,
+    installLang: 'bash',
+    fileName: 'tracing.ts',
+    setupLang: 'typescript',
+    setupCode: `// tracing.ts — import this FIRST, before your app code.
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
+import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node'
+
+const sdk = new NodeSDK({
+  serviceName: '__SERVICE_NAME__',
+  traceExporter: new OTLPTraceExporter(),
+  instrumentations: [getNodeAutoInstrumentations()],
+})
+
+sdk.start()`,
+    extra: {
+      title: 'Start with tracing preloaded',
+      fileName: 'start command',
+      lang: 'bash',
+      code: `# Load tracing before the app boots
+node --require ./tracing.js ./dist/server.js`,
+    },
+  },
+  {
+    id: 'express',
+    name: 'Express',
+    description: 'Node.js + Express',
+    icon: ExpressIcon,
+    install: `npm install @opentelemetry/sdk-node \\
+  @opentelemetry/instrumentation-express \\
+  @opentelemetry/instrumentation-http \\
+  @opentelemetry/exporter-trace-otlp-proto`,
+    installLang: 'bash',
+    fileName: 'tracing.ts',
+    setupLang: 'typescript',
+    setupCode: `// tracing.ts
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { HttpInstrumentation } from '@opentelemetry/instrumentation-http'
+import { ExpressInstrumentation } from '@opentelemetry/instrumentation-express'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
+
+const sdk = new NodeSDK({
+  serviceName: '__SERVICE_NAME__',
+  traceExporter: new OTLPTraceExporter(),
+  instrumentations: [new HttpInstrumentation(), new ExpressInstrumentation()],
+})
+
+sdk.start()`,
+  },
+  {
+    id: 'fastify',
+    name: 'Fastify',
+    description: 'Node.js + Fastify',
+    icon: FastifyIcon,
+    install: `npm install @opentelemetry/sdk-node \\
+  @opentelemetry/instrumentation-fastify \\
+  @opentelemetry/instrumentation-http \\
+  @opentelemetry/exporter-trace-otlp-proto`,
+    installLang: 'bash',
+    fileName: 'tracing.ts',
+    setupLang: 'typescript',
+    setupCode: `// tracing.ts
+import { NodeSDK } from '@opentelemetry/sdk-node'
+import { HttpInstrumentation } from '@opentelemetry/instrumentation-http'
+import { FastifyInstrumentation } from '@opentelemetry/instrumentation-fastify'
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
+
+const sdk = new NodeSDK({
+  serviceName: '__SERVICE_NAME__',
+  traceExporter: new OTLPTraceExporter(),
+  instrumentations: [new HttpInstrumentation(), new FastifyInstrumentation()],
+})
+
+sdk.start()`,
+  },
+  {
+    id: 'deno',
+    name: 'Deno',
+    description: 'Built-in OpenTelemetry',
+    icon: DenoIcon,
+    install: '# Deno 1.46+ ships with native OTel support — no install needed.',
+    installLang: 'bash',
+    fileName: 'main.ts',
+    setupLang: 'typescript',
+    setupCode: `// main.ts — run with:
+//   OTEL_DENO=true \\
+//   OTEL_SERVICE_NAME=__SERVICE_NAME__ \\
+//   deno run --unstable-otel main.ts
+//
+// Deno auto-instruments fetch + Deno.serve and exports OTLP/http
+// to OTEL_EXPORTER_OTLP_ENDPOINT.
+Deno.serve((_req) => new Response('hello'))`,
+  },
+  {
+    id: 'python',
+    name: 'Python',
+    description: 'FastAPI, Django, Flask',
+    icon: PythonIcon,
+    install: `pip install opentelemetry-distro opentelemetry-exporter-otlp
+opentelemetry-bootstrap --action=install`,
+    installLang: 'bash',
+    fileName: 'start command',
+    setupLang: 'bash',
+    setupCode: `# Zero-code auto-instrumentation — no app changes needed.
+OTEL_SERVICE_NAME=__SERVICE_NAME__ \\
+OTEL_TRACES_EXPORTER=otlp \\
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf \\
+opentelemetry-instrument python main.py`,
+  },
+  {
+    id: 'rust',
+    name: 'Rust',
+    description: 'Axum, Actix, Tokio',
+    icon: RustIcon,
+    install: `# Cargo.toml
+opentelemetry = "0.24"
+opentelemetry_sdk = { version = "0.24", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.17", features = ["http-proto", "reqwest-client"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.25"
+tracing-subscriber = "0.3"`,
+    installLang: 'text',
+    fileName: 'src/main.rs',
+    setupLang: 'text',
+    setupCode: `use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{runtime, Resource};
+use tracing_subscriber::prelude::*;
+
+fn init_tracing() {
+    let provider = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .http()
+                .with_protocol(opentelemetry_otlp::Protocol::HttpBinary),
+        )
+        .with_trace_config(
+            opentelemetry_sdk::trace::Config::default().with_resource(Resource::new(vec![
+                KeyValue::new("service.name", "__SERVICE_NAME__"),
+            ])),
+        )
+        .install_batch(runtime::Tokio)
+        .expect("init otlp");
+
+    tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("app")))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+}`,
+  },
+]
+
 function OtelSetupSection({ project }: { project: ProjectResponse }) {
   const [selectedEnvId, setSelectedEnvId] = useState<string>('')
+  const [selectedFrameworkId, setSelectedFrameworkId] = useState<string>('nextjs')
 
   const { data: environments } = useQuery({
     ...getEnvironmentsOptions({
@@ -139,111 +406,137 @@ function OtelSetupSection({ project }: { project: ProjectResponse }) {
   )
 
   const baseUrl = window.location.origin
-  // Path-based endpoint: /api/otel/v1/{project_id}/{environment_id}/{deployment_id}
-  // Use 0 as deployment_id placeholder — it will be set per-deployment at runtime
   const otlpEndpoint = selectedEnv
     ? `${baseUrl}/api/otel/v1/${project.id}/${selectedEnv.id}/0`
     : `${baseUrl}/api/otel/v1/${project.id}/0/0`
 
-  const nextjsSetupCode = `// instrumentation.ts (project root)
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto'
-import { NodeSDK } from '@opentelemetry/sdk-node'
-import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node'
+  const preset =
+    frameworkPresets.find((f) => f.id === selectedFrameworkId) ??
+    frameworkPresets[0]
 
-export function register() {
-  // OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, and auth headers
-  // are auto-configured via environment variables on Temps deployments.
-  const sdk = new NodeSDK({
-    spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter())],
-  })
+  const setupCode = preset.setupCode.split('__SERVICE_NAME__').join(project.name)
 
-  sdk.start()
-}`
-
-  const nextConfigCode = `// next.config.js
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  experimental: {
-    instrumentationHook: true,
-  },
-}
-
-module.exports = nextConfig`
-
-  const envVarsCode = `# These are auto-injected on Temps deployments.
-# Only set manually for external hosting (Vercel, Netlify, etc.).
+  const envVarsCode = `# Auto-injected on Temps deployments.
+# Set these manually when running on Vercel, Fly, AWS, bare metal, etc.
 OTEL_EXPORTER_OTLP_ENDPOINT=${otlpEndpoint}
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <YOUR_API_KEY>"
+OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer <YOUR_API_KEY>
 OTEL_SERVICE_NAME=${project.name}`
 
-  const installCmd =
-    'npm install @opentelemetry/sdk-node @opentelemetry/sdk-trace-node @opentelemetry/exporter-trace-otlp-proto'
-
   return (
-    <Card>
+    <Card id="traces-setup">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <Code2 className="h-4 w-4" />
           Setup OpenTelemetry
         </CardTitle>
         <CardDescription>
-          Apps deployed on Temps get OpenTelemetry environment variables
-          automatically. Just add the SDK to start sending traces.
+          Pick your framework — the snippet and endpoint are pre-filled for{' '}
+          <strong>{project.name}</strong>. Apps deployed on Temps get these env
+          vars automatically.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Auto-injected note */}
+        {/* Framework picker */}
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium">Framework / runtime</h4>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+            {frameworkPresets.map((fw) => {
+              const Icon = fw.icon
+              const isSelected = selectedFrameworkId === fw.id
+              return (
+                <button
+                  key={fw.id}
+                  type="button"
+                  onClick={() => setSelectedFrameworkId(fw.id)}
+                  className={cn(
+                    'flex items-center gap-3 rounded-lg border bg-card p-3 text-left transition-all hover:border-primary/60 hover:bg-accent/40',
+                    isSelected &&
+                      'border-primary bg-primary/5 ring-2 ring-primary/20'
+                  )}
+                  aria-pressed={isSelected}
+                >
+                  <div className="rounded-md bg-muted p-1.5 text-foreground shrink-0">
+                    <Icon />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium leading-none truncate">
+                      {fw.name}
+                    </p>
+                    <p className="mt-1 text-[11px] text-muted-foreground truncate">
+                      {fw.description}
+                    </p>
+                  </div>
+                  {isSelected && (
+                    <Check className="size-4 shrink-0 text-primary" />
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Deployed-on-Temps note */}
         <div className="rounded-md border border-green-200 bg-green-50 dark:border-green-900/50 dark:bg-green-900/10 p-3">
           <p className="text-xs text-green-800 dark:text-green-200">
             <strong>Deployed on Temps?</strong> The OTLP endpoint, auth token,
-            service name, and version are injected automatically on every
-            deployment. You only need to install the SDK and create the
-            instrumentation file below.
+            service name, and version are injected automatically. Just install
+            the SDK and add the instrumentation file below.
           </p>
         </div>
 
         {/* Step 1: Install */}
         <div className="space-y-2">
-          <h4 className="text-sm font-medium">1. Install dependencies</h4>
-          <CodeBlock code={installCmd} language="bash" />
+          <div className="flex items-center gap-2">
+            <Terminal className="size-4 text-muted-foreground" />
+            <h4 className="text-sm font-medium">1. Install dependencies</h4>
+          </div>
+          <CodeBlock code={preset.install} language={preset.installLang} />
         </div>
 
-        {/* Step 2: Create instrumentation.ts */}
+        {/* Step 2: Instrumentation file */}
         <div className="space-y-2">
-          <h4 className="text-sm font-medium">
-            2. Create <code>instrumentation.ts</code>
-          </h4>
+          <div className="flex items-center gap-2">
+            <FileCode className="size-4 text-muted-foreground" />
+            <h4 className="text-sm font-medium">
+              2. Create <code>{preset.fileName}</code>
+            </h4>
+          </div>
           <CodeBlock
-            code={nextjsSetupCode}
-            language="typescript"
-            title="instrumentation.ts"
+            code={setupCode}
+            language={preset.setupLang}
+            title={preset.fileName}
           />
         </div>
 
-        {/* Step 3: Enable in next.config.js */}
-        <div className="space-y-2">
-          <h4 className="text-sm font-medium">
-            3. Enable instrumentation hook
-          </h4>
-          <CodeBlock
-            code={nextConfigCode}
-            language="javascript"
-            title="next.config.js"
-          />
-        </div>
+        {/* Optional extra step */}
+        {preset.extra && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <FileCode className="size-4 text-muted-foreground" />
+              <h4 className="text-sm font-medium">3. {preset.extra.title}</h4>
+            </div>
+            <CodeBlock
+              code={preset.extra.code}
+              language={preset.extra.lang}
+              title={preset.extra.fileName}
+            />
+          </div>
+        )}
 
-        {/* External hosting: manual env vars */}
+        {/* External hosting env vars */}
         <div className="space-y-2">
-          <h4 className="text-sm font-medium">
-            External hosting (Vercel, Netlify, etc.)
-          </h4>
+          <div className="flex items-center gap-2">
+            <Settings2 className="size-4 text-muted-foreground" />
+            <h4 className="text-sm font-medium">
+              {preset.extra ? '4' : '3'}. External hosting — environment
+              variables
+            </h4>
+          </div>
           <p className="text-xs text-muted-foreground">
-            If your app is <strong>not</strong> deployed on Temps, set these
-            environment variables manually:
+            Skip this if you deploy on Temps. Required when running the app on
+            Vercel, Fly, AWS, bare metal, etc.
           </p>
-
-          {/* Environment selector for endpoint */}
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted-foreground shrink-0">
               Environment:
@@ -261,7 +554,6 @@ OTEL_SERVICE_NAME=${project.name}`
               </SelectContent>
             </Select>
           </div>
-
           <CodeBlock code={envVarsCode} language="bash" title=".env" />
           <p className="text-xs text-muted-foreground">
             Replace <code>&lt;YOUR_API_KEY&gt;</code> with a Temps API key (
@@ -281,7 +573,6 @@ export default function TracesList({ project }: TracesListProps) {
   const [searchParams, setSearchParams] = useSearchParams()
   const { setBreadcrumbs } = useBreadcrumbs()
   usePageTitle(`Traces - ${project.name}`)
-  const [showSetup, setShowSetup] = useState(false)
 
   // State from URL params
   const [timeRange, setTimeRange] = useState<TimeRange>(
@@ -306,6 +597,7 @@ export default function TracesList({ project }: TracesListProps) {
     const p = searchParams.get('page')
     return p ? parseInt(p, 10) : 1
   })
+  const [showSetup, setShowSetup] = useState(false)
 
   // Compute time window
   const { startTime, endTime } = useMemo(() => {
@@ -466,14 +758,18 @@ export default function TracesList({ project }: TracesListProps) {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setShowSetup((v) => !v)}
             className="gap-2"
+            onClick={() => {
+              setShowSetup((v) => !v)
+              requestAnimationFrame(() => {
+                document
+                  .getElementById('traces-setup')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              })
+            }}
           >
             <Settings2 className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Setup</span>
-            <ChevronDown
-              className={`h-3.5 w-3.5 transition-transform ${showSetup ? 'rotate-180' : ''}`}
-            />
           </Button>
           {totalCount > 0 && (
             <span className="text-sm text-muted-foreground">
@@ -483,12 +779,10 @@ export default function TracesList({ project }: TracesListProps) {
         </div>
       </div>
 
-      {/* Setup section */}
-      <Collapsible open={showSetup} onOpenChange={setShowSetup}>
-        <CollapsibleContent>
-          <OtelSetupSection project={project} />
-        </CollapsibleContent>
-      </Collapsible>
+      {/* Setup section — shown when there are no traces yet, or when toggled on */}
+      {((!isLoading && totalCount === 0) || showSetup) && (
+        <OtelSetupSection project={project} />
+      )}
 
       {/* Filters */}
       <Card>
@@ -609,15 +903,19 @@ export default function TracesList({ project }: TracesListProps) {
               : 'Traces will appear here once your application sends data via OpenTelemetry.'
           }
           action={
-            !search && !serviceName && status === 'all' && environmentId === 'all' && deploymentId === 'all' && !showSetup ? (
+            !search && !serviceName && status === 'all' && environmentId === 'all' && deploymentId === 'all' ? (
               <Button
                 variant="outline"
                 size="sm"
                 className="gap-2"
-                onClick={() => setShowSetup(true)}
+                onClick={() => {
+                  document
+                    .getElementById('traces-setup')
+                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                }}
               >
                 <Settings2 className="h-3.5 w-3.5" />
-                View setup instructions
+                Jump to setup
               </Button>
             ) : undefined
           }

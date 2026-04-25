@@ -120,10 +120,14 @@ impl JoinCommand {
         // Generate a node token for agent authentication
         let agent_token = generate_token();
 
-        // Register with the control plane
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()?;
+        // Register with the control plane.
+        //
+        // Direct mode targets a user-supplied URL that may traverse the
+        // public internet. We always require valid TLS here — a MitM on
+        // this request would steal the join token and let the attacker
+        // register a malicious worker. The server-side `insecure_tls`
+        // opt-in does NOT apply to CLI binaries on purpose.
+        let client = reqwest::Client::builder().build()?;
 
         let register_url = format!("{}/api/internal/nodes/register", self.target);
 
@@ -256,10 +260,13 @@ impl JoinCommand {
             relay_response.assigned_ip, relay_response.control_plane_ip
         );
 
-        // Step 6: Register with control plane over WireGuard tunnel
-        let register_client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()?;
+        // Step 6: Register with control plane over WireGuard tunnel.
+        // Traffic is encrypted by WireGuard, but the inner HTTP request
+        // still uses the operator's TLS cert. Strict verification is
+        // mandatory: this exchange carries the join token, and a MitM
+        // (even one fronting a self-signed cert behind the tunnel) could
+        // hijack worker registration.
+        let register_client = reqwest::Client::builder().build()?;
 
         let register_url = format!(
             "{}/api/internal/nodes/register",

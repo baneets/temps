@@ -324,11 +324,11 @@ export function Settings() {
 
       {isDirty && (
         <div className="sticky bottom-0 bg-background border-t pt-4 pb-2">
-          <div className="flex justify-between items-center">
+          <div className="flex flex-col gap-2 sm:flex-row sm:justify-between sm:items-center">
             <p className="text-sm text-muted-foreground">
               You have unsaved changes
             </p>
-            <Button type="submit" disabled={isSubmitting}>
+            <Button type="submit" disabled={isSubmitting} className="w-full sm:w-auto">
               {isSubmitting ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />

@@ -6,7 +6,7 @@ use sea_orm::{
 };
 use std::sync::Arc;
 use temps_entities::email_domains;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::errors::EmailError;
 use crate::providers::{DnsRecord, DnsRecordStatus, DomainIdentityDetails, VerificationStatus};
@@ -137,34 +137,24 @@ impl DomainService {
     }
 
     /// Get a domain with its DNS records (fetches fresh verification status from provider)
-    /// The domain status is computed dynamically based on DNS record verification
+    /// The domain status is computed dynamically based on DNS record verification.
+    ///
+    /// Resilience: the only failure that is allowed to bubble is "domain row doesn't exist".
+    /// If the referenced provider row is gone, credentials won't decrypt, or the upstream
+    /// provider API is unreachable, we fall back to the DNS records we built when the
+    /// domain was first added. That keeps the detail page usable even when the backing
+    /// provider is temporarily broken — the UI can still show the records the user needs
+    /// to configure.
     pub async fn get_with_dns_records(&self, id: i32) -> Result<DomainWithDnsRecords, EmailError> {
         let mut domain = self.get(id).await?;
 
-        // Get the provider to fetch fresh verification status
-        let provider = self.provider_service.get(domain.provider_id).await?;
-
-        // Create provider instance
-        let provider_instance = self
-            .provider_service
-            .create_provider_instance(&provider)
-            .await?;
-
-        // Fetch fresh DNS records with verification status from the provider API
-        let details = provider_instance
-            .get_identity_details(&domain.domain)
-            .await
-            .map_err(|e| {
-                error!(
-                    "Failed to get identity details from provider, falling back to stored data: {}",
-                    e
-                );
-                e
-            });
+        // Try to fetch fresh verification status from the provider. Any failure in the
+        // provider lookup / instantiation / API call falls through to stored data.
+        let details = self.fetch_identity_details(&domain).await;
 
         // Build DNS records and compute status based on verification results
         let (dns_records, computed_status) = match details {
-            Ok(identity_details) => {
+            Some(identity_details) => {
                 let mut records = Vec::new();
 
                 if let Some(spf) = identity_details.spf_record.clone() {
@@ -193,7 +183,7 @@ impl DomainService {
 
                 (records, status)
             }
-            Err(_) => {
+            None => {
                 // Fallback to stored data without status information
                 (self.build_dns_records(&domain), domain.status.clone())
             }
@@ -206,6 +196,50 @@ impl DomainService {
             domain,
             dns_records,
         })
+    }
+
+    /// Best-effort fetch of live identity details from the provider. Returns `None`
+    /// (and logs the cause) if any step fails, so the caller can fall back gracefully.
+    async fn fetch_identity_details(
+        &self,
+        domain: &email_domains::Model,
+    ) -> Option<DomainIdentityDetails> {
+        let provider = match self.provider_service.get(domain.provider_id).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(
+                    "Cannot fetch live status for domain {} (id={}): provider lookup failed: {}",
+                    domain.domain, domain.id, e
+                );
+                return None;
+            }
+        };
+
+        let provider_instance = match self
+            .provider_service
+            .create_provider_instance(&provider)
+            .await
+        {
+            Ok(instance) => instance,
+            Err(e) => {
+                warn!(
+                    "Cannot fetch live status for domain {} (id={}): provider instantiation failed: {}",
+                    domain.domain, domain.id, e
+                );
+                return None;
+            }
+        };
+
+        match provider_instance.get_identity_details(&domain.domain).await {
+            Ok(details) => Some(details),
+            Err(e) => {
+                warn!(
+                    "Cannot fetch live status for domain {} (id={}): provider API call failed: {}",
+                    domain.domain, domain.id, e
+                );
+                None
+            }
+        }
     }
 
     /// Check if all DNS records are verified

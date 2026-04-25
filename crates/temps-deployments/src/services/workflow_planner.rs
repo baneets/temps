@@ -386,6 +386,82 @@ impl WorkflowPlanner {
         Ok(env_vars_map)
     }
 
+    /// Gathers secrets visible to this deployment, decrypted and keyed by name.
+    /// Returns a HashMap ready to be serialized into the job config under the
+    /// `secrets` field; the deployer mounts each entry as a file under
+    /// `/run/secrets/<KEY>`.
+    ///
+    /// Scoping matches the `gather_environment_variables` model:
+    ///   - Secrets with junction rows to this environment are included.
+    ///   - Secrets with no junction rows are treated as project-wide.
+    async fn gather_secrets(
+        &self,
+        project: &projects::Model,
+        environment: &environments::Model,
+    ) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        use std::collections::{HashMap, HashSet};
+        use temps_entities::{secret_environments, secrets};
+
+        let mut out: HashMap<String, String> = HashMap::new();
+
+        // 1. All secrets for this project.
+        let all_secrets = secrets::Entity::find()
+            .filter(secrets::Column::ProjectId.eq(project.id))
+            .all(self.db.as_ref())
+            .await?;
+
+        if all_secrets.is_empty() {
+            return Ok(out);
+        }
+
+        // 2. Junction rows — which secrets are environment-scoped.
+        let secret_ids: Vec<i32> = all_secrets.iter().map(|s| s.id).collect();
+        let junctions = secret_environments::Entity::find()
+            .filter(secret_environments::Column::SecretId.is_in(secret_ids))
+            .all(self.db.as_ref())
+            .await?;
+
+        let mut bindings: HashMap<i32, HashSet<i32>> = HashMap::new();
+        for j in junctions {
+            bindings
+                .entry(j.secret_id)
+                .or_default()
+                .insert(j.environment_id);
+        }
+
+        for secret in all_secrets {
+            let applies = match bindings.get(&secret.id) {
+                // No explicit bindings -> project-wide secret.
+                None => true,
+                // Environment-bound -> only if this environment is listed.
+                Some(envs) => envs.contains(&environment.id),
+            };
+            if !applies {
+                continue;
+            }
+
+            let plaintext = self
+                .encryption_service
+                .decrypt_string(&secret.value)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to decrypt secret '{}' (id={}): {}",
+                        secret.key,
+                        secret.id,
+                        e
+                    )
+                })?;
+            out.insert(secret.key, plaintext);
+        }
+
+        info!(
+            "Gathered {} secret file(s) for deployment to env {}",
+            out.len(),
+            environment.id
+        );
+        Ok(out)
+    }
+
     /// Build remote environment variables by rewriting connection strings for cross-node access.
     ///
     /// When `private_address` is set in multi-node settings, this method:
@@ -815,6 +891,11 @@ impl WorkflowPlanner {
             debug!("📦 Built remote environment variables for cross-node deployments");
         }
 
+        // Gather secrets — decrypted plaintext values, mounted as files at
+        // /run/secrets/<KEY> by the deployer. Intentionally NOT merged into
+        // env_vars so they don't appear in `docker inspect` or build args.
+        let secrets = self.gather_secrets(project, environment).await?;
+
         // Docker Compose preset uses its own deployment path
         if project.preset == temps_entities::preset::Preset::DockerCompose {
             return self
@@ -831,6 +912,7 @@ impl WorkflowPlanner {
                     deployment,
                     env_vars,
                     remote_env_vars,
+                    secrets,
                 )
                 .await
             }
@@ -845,6 +927,7 @@ impl WorkflowPlanner {
                     deployment,
                     env_vars,
                     remote_env_vars,
+                    secrets,
                 )
                 .await
             }
@@ -877,6 +960,7 @@ impl WorkflowPlanner {
         deployment: &deployments::Model,
         mut env_vars: std::collections::HashMap<String, String>,
         remote_env_vars: Option<std::collections::HashMap<String, String>>,
+        secrets: std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Vec<JobDefinition>> {
         let mut jobs = Vec::new();
 
@@ -887,6 +971,30 @@ impl WorkflowPlanner {
                 .entry("SENTRY_RELEASE".to_string())
                 .or_insert_with(|| commit_sha.clone());
         }
+
+        // Inject Sentry source map upload env vars so `@sentry/nextjs` (and other Sentry
+        // build plugins) automatically upload source maps to Temps during the build.
+        // This makes migration from Sentry zero-config — users don't need to change anything.
+        //
+        // Docker builds use networkmode "host" (BuildKit) so the container can reach the
+        // Temps server. Auth uses deployment tokens (dt_*) validated via the Sentry-compat API.
+        if let Some(api_url) = env_vars.get("TEMPS_API_URL").cloned() {
+            let sentry_url = api_url.trim_end_matches("/api").to_string();
+            env_vars
+                .entry("SENTRY_URL".to_string())
+                .or_insert(sentry_url);
+        }
+        if let Some(api_token) = env_vars.get("TEMPS_API_TOKEN").cloned() {
+            env_vars
+                .entry("SENTRY_AUTH_TOKEN".to_string())
+                .or_insert(api_token);
+        }
+        env_vars
+            .entry("SENTRY_ORG".to_string())
+            .or_insert_with(|| "default".to_string());
+        env_vars
+            .entry("SENTRY_PROJECT".to_string())
+            .or_insert_with(|| project.slug.clone());
 
         // Check if git info is available
         let has_git_info = !project.repo_owner.is_empty() && !project.repo_name.is_empty();
@@ -1130,6 +1238,13 @@ impl WorkflowPlanner {
             } else {
                 info!("No remote_environment_variables to store (single-node mode or no active nodes)");
             }
+            if !secrets.is_empty() {
+                info!(
+                    "Storing {} secret file(s) in deploy job config",
+                    secrets.len()
+                );
+                job_config["secrets"] = serde_json::to_value(&secrets).unwrap_or_default();
+            }
 
             jobs.push(JobDefinition {
                 job_id: "deploy_container".to_string(),
@@ -1169,21 +1284,8 @@ impl WorkflowPlanner {
                             ("dist/".to_string(), String::new()),
                         ],
                     )),
-                    // Custom Dockerfile: may contain a frontend app (e.g., Next.js with Dockerfile)
-                    // Try common frontend asset paths — job completes quickly if none exist
-                    temps_entities::preset::Preset::Dockerfile => Some((
-                        vec![
-                            ".next/static".to_string(),
-                            "dist/assets".to_string(),
-                            "build/static".to_string(),
-                        ],
-                        vec![
-                            (".next".to_string(), "_next".to_string()),
-                            ("dist/".to_string(), String::new()),
-                            ("build/".to_string(), String::new()),
-                        ],
-                    )),
-                    // Backend presets (Rust, Go, Python, Java, etc.) don't produce static assets
+                    // Dockerfile and backend presets don't produce predictable static assets.
+                    // Users who want stale-chunk fallback should pick a frontend preset.
                     _ => None,
                 };
 
@@ -1252,6 +1354,24 @@ impl WorkflowPlanner {
             });
             debug!(
                 "Added configure_crons job to workflow (runs after deployment is marked complete)"
+            );
+
+            // Job: Sync agent definitions from .temps/agents/*.yaml
+            // Runs in parallel with configure_crons, after deployment is complete
+            jobs.push(JobDefinition {
+                job_id: "configure_agents".to_string(),
+                job_type: "ConfigureAgentsJob".to_string(),
+                name: "Configure Agents".to_string(),
+                description: Some("Sync agent definitions from .temps/agents/*.yaml".to_string()),
+                dependencies: vec!["mark_deployment_complete".to_string()],
+                job_config: Some(serde_json::json!({
+                    "project_id": project.id,
+                    "download_job_id": "download_repo"
+                })),
+                required_for_completion: false,
+            });
+            debug!(
+                "Added configure_agents job to workflow (runs after deployment is marked complete)"
             );
         } else {
             debug!("Skipping configure_crons job - no git info available");
@@ -1498,6 +1618,7 @@ impl WorkflowPlanner {
         deployment: &deployments::Model,
         env_vars: std::collections::HashMap<String, String>,
         remote_env_vars: Option<std::collections::HashMap<String, String>>,
+        secrets: std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Vec<JobDefinition>> {
         let mut jobs = Vec::new();
 
@@ -1613,6 +1734,13 @@ impl WorkflowPlanner {
                 serde_json::to_value(remote_vars).unwrap_or_default();
         } else {
             info!("No remote_environment_variables for docker image deployment");
+        }
+        if !secrets.is_empty() {
+            info!(
+                "Storing {} secret file(s) in docker image deploy job config",
+                secrets.len()
+            );
+            job_config["secrets"] = serde_json::to_value(&secrets).unwrap_or_default();
         }
 
         jobs.push(JobDefinition {

@@ -1,0 +1,336 @@
+export const metadata = {
+  title: 'Revenue Tracking',
+  description: 'Self-hosted revenue analytics for Stripe and other payment providers. Track MRR, ARR, churn, and active customers without sharing financial data with third parties.',
+  alternates: {
+    canonical: '/docs/revenue-tracking',
+  },
+}
+
+export const sections = [
+  { title: 'Overview', id: 'overview' },
+  { title: 'Supported Providers', id: 'supported-providers' },
+  { title: 'Setup & Integration', id: 'setup' },
+  { title: 'Metrics', id: 'metrics' },
+  { title: 'Webhook Security', id: 'webhook-security' },
+  { title: 'Managing Integrations', id: 'managing-integrations' },
+]
+
+# Revenue Tracking
+
+Track MRR, ARR, churn, and customer movement directly in Temps. All your revenue analytics, self-hosted next to your app — no third-party tools seeing your financial data. {{ className: 'lead' }}
+
+---
+
+## Overview {{ anchor: true, id: 'overview' }}
+
+Revenue Tracking ingests billing events from your payment provider via webhooks and turns them into the metrics founders actually care about. No API keys, no background polling — Temps listens to the events your provider already emits.
+
+<Row>
+  <Col>
+    **What's Included**
+    - MRR and ARR over time
+    - Active subscriptions and customers
+    - New and churned customers per day
+    - 30-day churn rate
+    - Average revenue per user (ARPU)
+    - Recent billing events feed
+    - Per-project dashboards
+    - AES-256-GCM encrypted signing secrets
+  </Col>
+  <Col>
+    **Why It Matters**
+    - Your financial data stays on your server
+    - No per-event pricing — unlimited webhooks
+    - Zero configuration inside your app
+    - Works with sandbox and live modes
+    - Correlate revenue with analytics and errors
+    - One dashboard for every project
+    - Rotate tokens without touching app code
+  </Col>
+</Row>
+
+### Key Features
+
+<Properties>
+  <Property name="Webhook-Driven">
+    Ingests events directly from your provider — no outbound API calls to Stripe or anyone else.
+  </Property>
+  <Property name="Provider Agnostic">
+    Unified metric schema works across providers. Stripe first, more to follow.
+  </Property>
+  <Property name="Unique Webhook URL">
+    Each integration gets a random, unguessable path token you can rotate any time.
+  </Property>
+  <Property name="Encrypted Signing Secrets">
+    Webhook signing secrets are encrypted at rest with AES-256-GCM and never returned in API responses.
+  </Property>
+  <Property name="Time-Bucketed Metrics">
+    Daily buckets for MRR, customer movement, and charges — ready for charts.
+  </Property>
+  <Property name="Historical Events Preserved">
+    Deleting an integration stops ingestion but keeps the metric history intact.
+  </Property>
+</Properties>
+
+---
+
+## Supported Providers {{ anchor: true, id: 'supported-providers' }}
+
+<Row>
+  <Col>
+    **Available Now**
+    - Stripe (Billing, Subscriptions, Invoices)
+  </Col>
+  <Col>
+    **On the Roadmap**
+    - Paddle
+    - Lemon Squeezy
+    - Chargebee
+    - PayPal Subscriptions
+  </Col>
+</Row>
+
+Each provider exposes the events Temps needs to track lifecycle transitions: subscription created, updated, canceled, invoice paid, charge refunded, and customer churn. The Revenue dashboard lists recommended events for every provider you connect.
+
+---
+
+## Setup & Integration {{ anchor: true, id: 'setup' }}
+
+Connecting a provider takes two steps: point its webhook at your Temps project, then paste the signing secret.
+
+### Step 1: Open the Revenue tab
+
+Navigate to the project where you want to track revenue:
+
+```
+https://<temps_app>/projects/<project_slug>/revenue
+```
+
+If no providers are connected yet, the dashboard shows an empty state with a **Connect provider** action for each supported provider.
+
+### Step 2: Copy the webhook URL
+
+Temps generates a unique webhook URL when you open the connect dialog. The format is:
+
+```
+https://<temps_app>/api/webhooks/revenue/<provider>/<webhook_path_token>
+```
+
+**Example:**
+
+```
+https://app.temps.example.com/api/webhooks/revenue/stripe/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+```
+
+<Note>
+The `webhook_path_token` is random and unguessable. It is the only authentication on the public endpoint — anyone with this URL can attempt to deliver events, but they still need a valid signing secret to be accepted. Rotate it any time from the integration row.
+</Note>
+
+### Step 3: Register the webhook with your provider
+
+<CodeGroup title="Add Webhook Endpoint">
+```bash {{ title: 'Stripe Dashboard' }}
+# In the Stripe dashboard:
+# 1. Developers → Webhooks → Add endpoint
+# 2. Paste the URL Temps generated
+# 3. Select the recommended events listed in Temps
+# 4. Copy the signing secret (starts with whsec_)
+```
+
+```bash {{ title: 'Stripe CLI' }}
+# Create a webhook endpoint with the Stripe CLI
+stripe webhook_endpoints create \
+  --url "https://app.temps.example.com/api/webhooks/revenue/stripe/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6" \
+  --enabled-events "customer.subscription.created" \
+  --enabled-events "customer.subscription.updated" \
+  --enabled-events "customer.subscription.deleted" \
+  --enabled-events "invoice.paid" \
+  --enabled-events "invoice.payment_failed" \
+  --enabled-events "charge.refunded"
+```
+</CodeGroup>
+
+### Step 4: Paste the signing secret
+
+Back in Temps, paste the signing secret into the **Connect provider** dialog and click **Connect**. Temps encrypts the secret with AES-256-GCM before it ever touches the database.
+
+Once saved, the integration appears in the list as **Active**. The moment your provider delivers its first event, metrics start flowing into the dashboard.
+
+### Recommended Events (Stripe)
+
+<Properties>
+  <Property name="customer.subscription.created">
+    New subscription — increments active subscriptions and MRR.
+  </Property>
+  <Property name="customer.subscription.updated">
+    Plan change, quantity change, or status transition.
+  </Property>
+  <Property name="customer.subscription.deleted">
+    Cancellation — increments churn and drops MRR.
+  </Property>
+  <Property name="invoice.paid">
+    Successful charge — contributes to MRR and charge volume.
+  </Property>
+  <Property name="invoice.payment_failed">
+    Failed payment — flagged in the recent events feed.
+  </Property>
+  <Property name="charge.refunded">
+    Refund issued — subtracted from the charge total for the bucket.
+  </Property>
+</Properties>
+
+---
+
+## Metrics {{ anchor: true, id: 'metrics' }}
+
+The dashboard exposes six metric endpoints, all scoped to a project.
+
+### Summary
+
+`GET /projects/{project_id}/revenue/metrics/summary`
+
+<Properties>
+  <Property name="current_mrr_minor">
+    Monthly recurring revenue right now, in the minor unit of the account currency (cents for USD, pence for GBP).
+  </Property>
+  <Property name="current_arr_minor">
+    Annual recurring revenue — `current_mrr_minor * 12`.
+  </Property>
+  <Property name="active_subscriptions">
+    Count of subscriptions currently in an active state.
+  </Property>
+  <Property name="active_customers">
+    Distinct customers with at least one active subscription.
+  </Property>
+  <Property name="churned_last_30d">
+    Customers whose subscriptions ended in the last 30 days.
+  </Property>
+  <Property name="arpu_minor">
+    Average revenue per user — `current_mrr_minor / active_customers`.
+  </Property>
+  <Property name="currency">
+    ISO currency code (`usd`, `eur`, `gbp`, …).
+  </Property>
+</Properties>
+
+### MRR Over Time
+
+`GET /projects/{project_id}/revenue/metrics/mrr`
+
+Daily buckets containing the running MRR, total charge volume, charge count, and refund volume. Rendered as an area chart in the dashboard.
+
+### Customer Movement
+
+`GET /projects/{project_id}/revenue/metrics/customers`
+
+Daily buckets with `new_customers` and `churned_customers`. The dashboard renders this as a stacked bar chart with churned shown as a negative bar so the cohort imbalance is obvious at a glance.
+
+### Recent Events
+
+`GET /projects/{project_id}/revenue/events`
+
+A feed of the most recent billing events: type, customer reference, amount, currency, and the MRR contribution. Use it to debug webhook delivery or spot anomalies.
+
+<Note>
+All monetary values are stored and returned in the **minor unit** of the currency — Temps never does floating-point math on money. Format on the client with `Intl.NumberFormat`.
+</Note>
+
+---
+
+## Webhook Security {{ anchor: true, id: 'webhook-security' }}
+
+Every webhook delivery goes through three checks before Temps persists anything.
+
+<Properties>
+  <Property name="Path Token">
+    The `webhook_path_token` in the URL must match the integration record. Mismatches return `404`.
+  </Property>
+  <Property name="Signature Verification">
+    Temps verifies the provider signature header (e.g. `Stripe-Signature`) using the encrypted signing secret. Invalid signatures return `401`.
+  </Property>
+  <Property name="Replay Window">
+    Stripe signatures include a timestamp. Deliveries older than the provider's tolerance window are rejected.
+  </Property>
+</Properties>
+
+### Secret Storage
+
+- Signing secrets are encrypted at rest with **AES-256-GCM** using the same envelope encryption Temps uses for managed-service credentials.
+- API responses never include the plaintext secret — only a `has_secret: true` flag.
+- Rotating the path token is a single click; rotating the signing secret means generating a new one in your provider dashboard and re-entering it.
+
+### Rotate the Webhook URL
+
+Use the **Rotate webhook URL** action in the integration row when:
+
+- You suspect the URL has been leaked.
+- You rotate provider credentials as part of a security review.
+- You want to invalidate an old endpoint after migrating.
+
+Rotation regenerates the `webhook_path_token`, returns the new full URL, and immediately begins rejecting deliveries to the old path. Update the provider dashboard with the new URL to resume ingestion.
+
+---
+
+## Managing Integrations {{ anchor: true, id: 'managing-integrations' }}
+
+### Viewing integrations
+
+The Revenue tab lists every connected integration with its provider, status, the last time an event was received, and the full webhook URL (with a copy button).
+
+### Rotating the path token
+
+<CodeGroup title="Rotate Webhook Token">
+```bash {{ title: 'Dashboard' }}
+# Navigate to:
+#   /projects/<slug>/revenue
+# In the integration row, open the action menu and click
+#   "Rotate webhook URL"
+# Copy the new URL and update your provider dashboard.
+```
+
+```bash {{ title: 'API' }}
+curl -X POST \
+  "https://<temps_app>/api/projects/<project_id>/revenue/integrations/<integration_id>/rotate-token" \
+  -H "Authorization: Bearer $TEMPS_TOKEN"
+```
+</CodeGroup>
+
+### Deleting an integration
+
+Deleting an integration stops ingestion and invalidates the webhook URL. **Historical metric data is preserved** so your dashboard still shows what the integration contributed before it was removed.
+
+<CodeGroup title="Delete Integration">
+```bash {{ title: 'Dashboard' }}
+# /projects/<slug>/revenue → integration row →
+# Action menu → "Delete" → confirm
+```
+
+```bash {{ title: 'API' }}
+curl -X DELETE \
+  "https://<temps_app>/api/projects/<project_id>/revenue/integrations/<integration_id>" \
+  -H "Authorization: Bearer $TEMPS_TOKEN"
+```
+</CodeGroup>
+
+<Note>
+If you delete the only integration on a project, the Revenue tab reverts to the empty state and the project Overview tile prompts you to connect a provider again. Your historical MRR and customer data still live in the database and will re-appear on the dashboard as soon as a new integration starts ingesting events.
+</Note>
+
+---
+
+## Additional Resources
+
+<div className="not-prose">
+  <Button href="/docs/analytics" variant="text" arrow="right">
+    Analytics & Session Replay
+  </Button>
+  <Button href="/docs/webhooks" variant="text" arrow="right">
+    Outgoing Webhooks
+  </Button>
+  <Button href="/docs/monitoring" variant="text" arrow="right">
+    Uptime Monitoring
+  </Button>
+  <Button href="/docs/api" variant="text" arrow="right">
+    Revenue Tracking API
+  </Button>
+</div>

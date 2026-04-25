@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use utoipa::ToSchema;
 
 /// Application settings stored in the database
@@ -9,12 +10,6 @@ pub struct AppSettings {
     // Core settings
     pub external_url: Option<String>,
     pub preview_domain: String,
-
-    // Access control
-    pub allow_readonly_external_access: bool,
-
-    // Demo mode settings
-    pub demo_mode: DemoModeSettings,
 
     // Screenshot settings
     pub screenshots: ScreenshotSettings,
@@ -40,6 +35,23 @@ pub struct AppSettings {
 
     // Multi-node settings
     pub multi_node: MultiNodeSettings,
+
+    // Agent sandbox settings (global defaults)
+    pub agent_sandbox: AgentSandboxSettings,
+
+    // Workspace preview gateway settings (single shared container per node)
+    pub preview_gateway: PreviewGatewaySettings,
+
+    // AI configuration settings (global config repo for skills, MCP servers, etc.)
+    pub ai_config: AiConfigSettings,
+
+    /// Skip TLS certificate verification on outbound HTTP clients built by the
+    /// server (deployer, agent, remote service client). Strictly opt-in for
+    /// operators running self-signed control plane / worker certs on a trusted
+    /// internal network. Worker→control-plane traffic that traverses the public
+    /// internet must keep this `false` — otherwise a MitM steals the join token.
+    #[serde(default)]
+    pub insecure_tls: bool,
 }
 
 /// Docker container log rotation settings
@@ -61,6 +73,178 @@ pub struct ContainerLogSettings {
     /// Maximum rotated log files for external service containers
     #[schema(example = 3)]
     pub service_max_file: u32,
+}
+
+/// Per-provider credential and configuration entry stored inside
+/// `AgentSandboxSettings.providers`. Free-form on purpose: every provider
+/// (`claude_cli`, `codex_cli`, `opencode`, future ones) has its own auth
+/// model — Claude has subscription-vs-api-key, OpenCode has an arbitrary
+/// `auth.json` blob, Codex has a single env var. The Rust-side
+/// `ai_cli::catalog` module describes how to interpret each provider's
+/// fields, so adding a new provider only requires:
+///   1. an entry in the catalog,
+///   2. a `seed_provider_credentials` arm in `session_manager`,
+///   3. (optionally) UI metadata in the catalog for the settings page.
+///
+/// No DB migration is ever needed — everything lives inside the existing
+/// `settings.data` JSON column.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// Auth flavor for this provider. Valid values depend on the provider:
+    ///   - `claude_cli`: "subscription" (OAuth token) | "api_key"
+    ///   - `codex_cli`: "api_key"
+    ///   - `opencode`:  "config_file"
+    pub auth_type: String,
+    /// Encrypted credential payload. The decrypted bytes are interpreted
+    /// according to the catalog entry's `credential_format`:
+    ///   - `ApiKey` / `OauthToken`: plain UTF-8 string (env var value)
+    ///   - `ConfigFile`: raw file body written to the catalog's seed path
+    pub credentials_encrypted: Option<String>,
+    /// Default model id for this provider (e.g. `sonnet` for Claude,
+    /// `gpt-5-codex` for Codex). Empty/`None` means "use the CLI's own
+    /// default". Each provider uses a disjoint id namespace, so keeping
+    /// the default *with* the provider (instead of one global field) means
+    /// switching active provider doesn't drop the user into an invalid
+    /// model for the new CLI.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Per-provider extras (base URL, custom flags, future per-provider
+    /// settings). Intentionally untyped so new providers don't require
+    /// schema changes.
+    pub extra: serde_json::Value,
+}
+
+/// Global agent sandbox settings. Controls whether agent runs are isolated
+/// inside Docker containers by default. Individual agents can override this.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct AgentSandboxSettings {
+    /// Default AI provider for agents: "claude_cli", "opencode", or "codex_cli".
+    /// Workspaces always use this provider — no per-session override.
+    #[schema(example = "claude_cli")]
+    pub default_provider: String,
+    /// Per-provider auth + config. Keyed by provider id (e.g. `claude_cli`,
+    /// `codex_cli`, `opencode`). Adding a new provider only requires a new
+    /// catalog entry on the Rust side — the JSON column stays migration-free.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+
+    // === Legacy fields (read-only, mirrored into `providers` on load) ===
+    // Kept so old settings rows still deserialize. New writes go through
+    // `providers`. Removed in a future release once everyone has migrated.
+    /// DEPRECATED: use `providers[default_provider].auth_type` instead.
+    #[serde(default = "default_auth_type")]
+    pub auth_type: String,
+    /// DEPRECATED: use `providers[default_provider].credentials_encrypted` instead.
+    #[serde(default)]
+    pub api_key_encrypted: Option<String>,
+
+    /// Sandbox is always enabled — the executor refuses to run any agent
+    /// outside a sandboxed container. Field is retained so existing settings
+    /// rows still deserialize, but it is ignored at runtime.
+    #[serde(default = "default_sandbox_enabled")]
+    pub enabled: bool,
+    /// Runtime preset: "node", "bun", "python", "rust", "go", "full", or "custom"
+    #[schema(example = "node")]
+    pub runtime: String,
+    /// Custom Docker image (only used when runtime is "custom").
+    /// Must have git and claude CLI installed.
+    #[schema(example = "")]
+    pub custom_image: String,
+    /// CPU limit in cores for sandbox containers
+    #[schema(example = 4.0)]
+    pub cpu_limit: f64,
+    /// Memory limit in MB for sandbox containers
+    #[schema(example = 8192)]
+    pub memory_limit_mb: u64,
+    /// Network access level: "full" (unrestricted), "restricted" (Temps network only), "none" (no network)
+    #[schema(example = "full")]
+    pub network_mode: String,
+}
+
+/// Global AI configuration settings. Controls the default config repo
+/// containing `.claude/` directory (skills, MCP servers, plugins) that
+/// gets overlaid into every agent sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct AiConfigSettings {
+    /// Global config repo URL in "owner/repo" format (e.g. "myorg/claude-config").
+    /// Cloned at agent run time and overlaid into the sandbox's `.claude/` directory.
+    #[schema(example = "")]
+    pub config_repo: String,
+    /// Branch of the config repo to use.
+    #[schema(example = "main")]
+    pub config_repo_branch: String,
+}
+
+impl Default for AiConfigSettings {
+    fn default() -> Self {
+        Self {
+            config_repo: String::new(),
+            config_repo_branch: "main".to_string(),
+        }
+    }
+}
+
+fn default_auth_type() -> String {
+    "subscription".to_string()
+}
+
+fn default_sandbox_enabled() -> bool {
+    true
+}
+
+impl Default for AgentSandboxSettings {
+    fn default() -> Self {
+        Self {
+            default_provider: "claude_cli".to_string(),
+            providers: HashMap::new(),
+            auth_type: "subscription".to_string(),
+            api_key_encrypted: None,
+            enabled: true,
+            runtime: "node".to_string(),
+            custom_image: String::new(),
+            cpu_limit: 4.0,
+            memory_limit_mb: 8192,
+            network_mode: "full".to_string(),
+        }
+    }
+}
+
+impl AgentSandboxSettings {
+    /// Returns the per-provider config, falling back to the deprecated flat
+    /// `auth_type` / `api_key_encrypted` fields when the provider entry is
+    /// missing. New code reads through this helper so legacy settings rows
+    /// keep working without any DB migration.
+    pub fn provider_config(&self, provider_id: &str) -> ProviderConfig {
+        if let Some(cfg) = self.providers.get(provider_id) {
+            return cfg.clone();
+        }
+        // Legacy fallback. The flat `auth_type` / `api_key_encrypted` fields
+        // predate the multi-provider catalog and only ever stored Claude
+        // credentials — Codex/OpenCode were added after the `providers` map
+        // existed. So we surface the legacy blob under `claude_cli` even
+        // when that isn't the currently active provider; otherwise, a user
+        // who activates codex loses visibility of their pre-existing Claude
+        // credential (and the New-Session picker falsely reports "only one
+        // provider configured").
+        //
+        // We *also* honor it for `default_provider` in case some old install
+        // wrote non-Claude credentials into the flat fields via a path we
+        // haven't found — cheap insurance, since the only way this differs
+        // is if `default_provider != "claude_cli"`, and in that case the
+        // flat fields almost certainly hold a Claude credential anyway.
+        if provider_id == "claude_cli" || provider_id == self.default_provider {
+            return ProviderConfig {
+                auth_type: self.auth_type.clone(),
+                credentials_encrypted: self.api_key_encrypted.clone(),
+                default_model: None,
+                extra: serde_json::Value::Null,
+            };
+        }
+        ProviderConfig::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -136,19 +320,6 @@ pub struct DiskSpaceAlertSettings {
     pub monitor_path: Option<String>,
 }
 
-/// Demo mode settings for allowing unauthenticated access to demo subdomain
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(default)]
-#[derive(Default)]
-pub struct DemoModeSettings {
-    /// Whether demo mode is enabled (disabled by default for security)
-    pub enabled: bool,
-    /// Optional custom domain for demo mode (defaults to demo.<preview_domain>)
-    /// If set, this overrides the default demo.preview_domain pattern
-    #[schema(example = "demo.example.com")]
-    pub domain: Option<String>,
-}
-
 /// Multi-node cluster settings
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
@@ -162,14 +333,58 @@ pub struct MultiNodeSettings {
     pub private_address: Option<String>,
 }
 
+/// Workspace preview gateway settings.
+///
+/// The preview gateway is a single shared Docker container that lives on the
+/// `temps-sandbox-net` network and routes requests to workspace sandbox dev
+/// servers based on the `Host` header (`ws-<sid>-<port>.<preview_domain>`).
+/// `temps serve` reconciles this container on startup; these settings let an
+/// operator override the image, host port, and auto-upgrade behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct PreviewGatewaySettings {
+    /// Docker image reference for the gateway. Pinned per Temps release.
+    /// Operators can override this to test a custom build.
+    #[schema(example = "kfsoftware/temps-preview-gateway:dev")]
+    pub image: String,
+    /// Host port to publish the gateway on (always bound to 127.0.0.1).
+    /// Pingora forwards `ws-*` traffic to this port after authenticating.
+    #[schema(example = 8090)]
+    pub host_port: u16,
+    /// When true (default), the supervisor will pull and apply the image
+    /// pinned in the Temps binary on every startup. When false, the
+    /// currently-running image is left alone — operators upgrade manually
+    /// from the settings UI.
+    #[schema(example = true)]
+    pub auto_upgrade: bool,
+    /// Shared secret the host-side Pingora sends on every forwarded preview
+    /// request via `X-Temps-Preview-Token`; the gateway rejects requests
+    /// without it. Auto-generated on first boot, persisted in DB so the
+    /// secret is stable across `temps serve` restarts regardless of cwd,
+    /// `TEMPS_DATA_DIR`, or data-dir changes. MUST be masked (`***`) in any
+    /// API response — never expose it over HTTP.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schema(example = "")]
+    pub shared_secret: String,
+}
+
+impl Default for PreviewGatewaySettings {
+    fn default() -> Self {
+        Self {
+            image: "kfsoftware/temps-preview-gateway:dev".to_string(),
+            host_port: 8090,
+            auto_upgrade: true,
+            shared_secret: String::new(),
+        }
+    }
+}
+
 const DEFAULT_LOCAL_DOMAIN: &str = "localho.st";
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             external_url: None,
             preview_domain: DEFAULT_LOCAL_DOMAIN.to_string(),
-            allow_readonly_external_access: false,
-            demo_mode: DemoModeSettings::default(),
             screenshots: ScreenshotSettings::default(),
             letsencrypt: LetsEncryptSettings::default(),
             dns_provider: DnsProviderSettings::default(),
@@ -179,6 +394,10 @@ impl Default for AppSettings {
             disk_space_alert: DiskSpaceAlertSettings::default(),
             container_logs: ContainerLogSettings::default(),
             multi_node: MultiNodeSettings::default(),
+            agent_sandbox: AgentSandboxSettings::default(),
+            preview_gateway: PreviewGatewaySettings::default(),
+            ai_config: AiConfigSettings::default(),
+            insecure_tls: false,
         }
     }
 }

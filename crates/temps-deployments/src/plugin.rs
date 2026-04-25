@@ -87,6 +87,8 @@ impl TempsPlugin for DeploymentsPlugin {
                     encryption_service.clone(),
                 ),
             );
+            // Register so other plugins (e.g. workspace) can resolve it via the service registry.
+            context.register_service(deployment_token_service.clone());
 
             // Create DatabaseCronConfigService to manage cron jobs
             let database_cron_service = Arc::new(crate::services::DatabaseCronConfigService::new(
@@ -150,6 +152,9 @@ impl TempsPlugin for DeploymentsPlugin {
                 static_deployer,
                 log_service.clone(),
                 cron_service,
+                context
+                    .get_service::<dyn crate::jobs::AgentSyncService>()
+                    .unwrap_or_else(|| Arc::new(crate::jobs::NoOpAgentSyncService)),
                 config_service.clone(),
                 screenshot_service,
                 docker,
@@ -242,44 +247,26 @@ impl TempsPlugin for DeploymentsPlugin {
     }
 
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
-        let deployment_service = context
-            .get_service::<DeploymentService>()
-            .expect("DeploymentService must be registered before configuring routes");
-        let log_service = context
-            .get_service::<temps_logs::LogService>()
-            .expect("LogService must be registered before configuring routes");
-        let cron_service = context
-            .get_service::<crate::services::DatabaseCronConfigService>()
-            .expect("DatabaseCronConfigService must be registered before configuring routes");
+        let deployment_service = context.require_service::<DeploymentService>();
+        let log_service = context.require_service::<temps_logs::LogService>();
+        let cron_service = context.require_service::<crate::services::DatabaseCronConfigService>();
 
         // Create external deployment manager for handling external images and operations
         let external_deployment_manager =
             Arc::new(crate::services::ExternalDeploymentManager::new());
 
         // Get RemoteDeploymentService for handling remote deployments
-        let remote_deployment_service = context
-            .get_service::<crate::services::RemoteDeploymentService>()
-            .expect("RemoteDeploymentService must be registered before configuring routes");
+        let remote_deployment_service =
+            context.require_service::<crate::services::RemoteDeploymentService>();
 
         // Get services needed for remote deployment triggering
-        let db = context
-            .get_service::<sea_orm::DatabaseConnection>()
-            .expect("DatabaseConnection must be registered before configuring routes");
-        let queue_service = context
-            .get_service::<dyn temps_core::JobQueue>()
-            .expect("JobQueue must be registered before configuring routes");
-        let config_service = context
-            .get_service::<temps_config::ConfigService>()
-            .expect("ConfigService must be registered before configuring routes");
-        let external_service_manager = context
-            .get_service::<temps_providers::ExternalServiceManager>()
-            .expect("ExternalServiceManager must be registered before configuring routes");
-        let dsn_service = context
-            .get_service::<temps_error_tracking::DSNService>()
-            .expect("DSNService must be registered before configuring routes");
-        let encryption_service = context
-            .get_service::<temps_core::EncryptionService>()
-            .expect("EncryptionService must be registered before configuring routes");
+        let db = context.require_service::<sea_orm::DatabaseConnection>();
+        let queue_service = context.require_service::<dyn temps_core::JobQueue>();
+        let config_service = context.require_service::<temps_config::ConfigService>();
+        let external_service_manager =
+            context.require_service::<temps_providers::ExternalServiceManager>();
+        let dsn_service = context.require_service::<temps_error_tracking::DSNService>();
+        let encryption_service = context.require_service::<temps_core::EncryptionService>();
 
         // Create WorkflowPlanner for remote deployments
         let workflow_planner = Arc::new(WorkflowPlanner::new(
@@ -292,19 +279,13 @@ impl TempsPlugin for DeploymentsPlugin {
         ));
 
         // Get WorkflowExecutionService
-        let workflow_executor = context
-            .get_service::<WorkflowExecutionService>()
-            .expect("WorkflowExecutionService must be registered before configuring routes");
+        let workflow_executor = context.require_service::<WorkflowExecutionService>();
 
         // Get ImageBuilder for uploading Docker image tarballs
-        let image_builder = context
-            .get_service::<dyn temps_deployer::ImageBuilder>()
-            .expect("ImageBuilder must be registered before configuring routes");
+        let image_builder = context.require_service::<dyn temps_deployer::ImageBuilder>();
 
         // Get BlobService for static bundle uploads
-        let blob_service = context
-            .get_service::<temps_blob::BlobService>()
-            .expect("BlobService must be registered before configuring routes");
+        let blob_service = context.require_service::<temps_blob::BlobService>();
 
         // Get audit service for logging write operations
         let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
@@ -316,9 +297,7 @@ impl TempsPlugin for DeploymentsPlugin {
         let node_service = Arc::new(crate::services::NodeService::new(db.clone()));
 
         // Re-fetch encryption service for AppState (the first ref was moved into WorkflowPlanner)
-        let encryption_service = context
-            .get_service::<temps_core::EncryptionService>()
-            .expect("EncryptionService must be registered before configuring routes");
+        let encryption_service = context.require_service::<temps_core::EncryptionService>();
 
         // Docker client for container exec/terminal
         let docker_for_exec = Arc::new(

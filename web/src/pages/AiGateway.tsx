@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
@@ -39,6 +40,7 @@ import {
 } from '@/components/ui/table'
 import { CopyButton } from '@/components/ui/copy-button'
 import { CodeBlock } from '@/components/ui/code-block'
+import { CodeTabs, type CodeExample } from '@/components/ui/code-tabs'
 import { EmptyState } from '@/components/ui/empty-state'
 import {
   ChartConfig,
@@ -71,12 +73,9 @@ import {
   Plus,
   Trash2,
   Loader2,
-  Sparkles,
   Power,
   PowerOff,
   Play,
-  CheckCircle2,
-  XCircle,
   Activity,
   Zap,
   Clock,
@@ -100,11 +99,18 @@ import {
   createProviderKey,
   deleteProviderKey,
   updateProviderKey,
+  testProviderKeyById,
   type ProviderKeyResponse,
 } from '@/api/client'
 import { useSettings } from '@/hooks/useSettings'
 import { useProjects } from '@/contexts/ProjectsContext'
-
+import {
+  AI_PROVIDERS,
+  AiProviderIcon,
+  aiProviderName,
+  aiProviderModels,
+  getAiProvider,
+} from '@/lib/ai-providers'
 // ============================================================================
 // Usage Analytics types & fetchers
 // ============================================================================
@@ -249,20 +255,12 @@ const TIME_RANGES = [
   { label: '30d', hours: 720 },
 ] as const
 
-const SUPPORTED_PROVIDERS = [
-  { id: 'openai', name: 'OpenAI', models: 'GPT-5.4, GPT-5 Mini, GPT-5 Nano, GPT-4.1, o3, o4-mini', defaultModel: 'gpt-5.4' },
-  { id: 'anthropic', name: 'Anthropic', models: 'Claude Opus 4.6, Claude Sonnet 4.6, Claude Haiku 4.5', defaultModel: 'claude-sonnet-4-6' },
-  { id: 'xai', name: 'xAI', models: 'Grok 4-1 Fast, Grok Code Fast, Grok 4 Fast, Grok 3', defaultModel: 'grok-4-1-fast-reasoning' },
-  { id: 'gemini', name: 'Google Gemini', models: 'Gemini 3.1 Pro, Gemini 3 Flash, Gemini 2.5 Pro, Gemini 2.5 Flash', defaultModel: 'gemini-2.5-flash' },
-] as const
-
-function providerName(id: string): string {
-  return SUPPORTED_PROVIDERS.find((p) => p.id === id)?.name ?? id
-}
-
-function providerModels(id: string): string {
-  return SUPPORTED_PROVIDERS.find((p) => p.id === id)?.models ?? ''
-}
+// Back-compat local aliases — the shared registry now lives in
+// `@/lib/ai-providers` and is reused by AiQuickstart, provider detail
+// pages, and the sandbox UI.
+const SUPPORTED_PROVIDERS = AI_PROVIDERS
+const providerName = aiProviderName
+const providerModels = aiProviderModels
 
 // ============================================================================
 // Usage Analytics Component
@@ -2258,6 +2256,8 @@ export function AiGatewayPage() {
     setSearchParams({ tab }, { replace: true })
   }
 
+  usePageTitle(activeTab === 'activity' ? 'AI Traces' : 'AI Gateway')
+
   const [dialogOpen, setDialogOpen] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [selectedKey, setSelectedKey] = useState<ProviderKeyResponse | null>(null)
@@ -2322,19 +2322,23 @@ export function AiGatewayPage() {
 
   // Test existing key by ID
   const [testingKeyId, setTestingKeyId] = useState<number | null>(null)
+  // Which provider row is expanded in the keys table
+  const [expandedProvider, setExpandedProvider] = useState<string | null>(null)
   const testKeyMutation = useMutation({
     mutationFn: async (id: number) => {
       setTestingKeyId(id)
-      const res = await fetch(`/api/ai/providers/${id}/test`, { method: 'POST' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return res.json() as Promise<{ success: boolean; provider: string; error?: string; latency_ms: number }>
+      const response = await testProviderKeyById({
+        path: { id },
+        throwOnError: true,
+      })
+      return response.data
     },
     onSuccess: (data) => {
       if (data.success) {
         toast.success(`${providerName(data.provider)} key is valid (${data.latency_ms}ms)`)
       } else {
         toast.error(`${providerName(data.provider)} key test failed`, {
-          description: data.error,
+          description: data.error ?? undefined,
         })
       }
       setTestingKeyId(null)
@@ -2345,38 +2349,15 @@ export function AiGatewayPage() {
     },
   })
 
-  // Test inline key (for the add dialog)
-  const [inlineTestResult, setInlineTestResult] = useState<{ success: boolean; error?: string } | null>(null)
-  const testInlineMutation = useMutation({
-    mutationFn: async (body: { provider: string; api_key: string; base_url?: string }) => {
-      const res = await fetch('/api/ai/providers/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return res.json() as Promise<{ success: boolean; provider: string; error?: string; latency_ms: number }>
-    },
-    onSuccess: (data) => {
-      setInlineTestResult({ success: data.success, error: data.error })
-      if (data.success) {
-        toast.success(`Key verified (${data.latency_ms}ms)`)
-      } else {
-        toast.error('Key test failed', { description: data.error })
-      }
-    },
-    onError: (err) => {
-      setInlineTestResult({ success: false, error: String(err) })
-      toast.error('Failed to test key', { description: String(err) })
-    },
-  })
+  // The add-key dialog used to expose a separate "Test Key" action, but the
+  // backend now verifies on create (see handlers/providers.rs) — a failed
+  // test surfaces as a 400 on the create call itself.
 
   const resetForm = () => {
     setNewProvider('')
     setNewDisplayName('')
     setNewApiKey('')
     setNewBaseUrl('')
-    setInlineTestResult(null)
   }
 
   const handleCreate = () => {
@@ -2409,8 +2390,6 @@ export function AiGatewayPage() {
   const handleToggle = (key: ProviderKeyResponse) => {
     toggleMutation.mutate({ id: key.id, is_active: !key.is_active })
   }
-
-  const activeCount = keys.filter((k) => k.is_active).length
 
   // Pick the first configured provider, or fall back to the first in the list
   const firstConfiguredProvider = SUPPORTED_PROVIDERS.find((p) =>
@@ -2458,14 +2437,24 @@ const response = await client.chat.completions.create({
 console.log(response.choices[0].message.content);`,
   }
 
+  const snippetExamples: CodeExample[] = [
+    { id: 'bash', label: 'cURL', language: 'bash', code: codeSnippets.bash },
+    { id: 'python', label: 'Python', language: 'python', code: codeSnippets.python },
+    { id: 'typescript', label: 'Node.js', language: 'typescript', code: codeSnippets.typescript },
+  ]
+
   return (
     <div className="container mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
       {/* Page Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-bold">AI Gateway</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold">
+            {activeTab === 'activity' ? 'AI Traces' : 'AI Gateway'}
+          </h1>
           <p className="text-muted-foreground mt-1 sm:mt-2 text-sm">
-            Unified API for multiple AI providers with a single endpoint
+            {activeTab === 'activity'
+              ? 'OpenTelemetry traces from your AI workloads (gen_ai.* spans)'
+              : 'Unified API for multiple AI providers with a single endpoint'}
           </p>
         </div>
         <Button onClick={() => setDialogOpen(true)} className="w-full sm:w-auto">
@@ -2474,57 +2463,81 @@ console.log(response.choices[0].message.content);`,
         </Button>
       </div>
 
-      {/* Quick Stats */}
-      <div className="grid gap-3 sm:gap-4 grid-cols-2 md:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Active Providers</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-7 w-8" />
-            ) : (
-              <div className="text-2xl font-bold">{activeCount}</div>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Total Keys</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-7 w-8" />
-            ) : (
-              <div className="text-2xl font-bold">{keys.length}</div>
-            )}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Gateway Endpoint</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-1">
-              <code className="text-xs text-muted-foreground truncate">
-                {gatewayEndpoint}
-              </code>
-              <CopyButton value={gatewayEndpoint} minimal className="h-6 w-6 shrink-0" />
+      {/* Quick Start card — mirrors the provider code example from the Settings
+          tab so first-time users see how to actually call the gateway without
+          having to click through tabs. Layout intentionally echoes Vercel's
+          AI Gateway landing panel: explanation on the left, live code preview
+          on the right with segmented language tabs and a provider switcher. */}
+      <Card className="overflow-hidden p-0">
+        <div className="grid md:grid-cols-2 md:items-stretch">
+          <div className="flex flex-col justify-between gap-6 p-6">
+            <div className="space-y-2">
+              <CardTitle className="text-xl">Start using AI Gateway</CardTitle>
+              <CardDescription className="text-sm leading-relaxed">
+                One OpenAI-compatible endpoint for every configured provider.
+                Swap the base URL, keep the SDK you already use.
+              </CardDescription>
             </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium">Status</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-green-500" />
-              <span className="text-sm font-medium">Operational</span>
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <code className="flex-1 truncate rounded-md bg-muted px-3 py-2 text-xs font-mono">
+                  {gatewayEndpoint}
+                </code>
+                <CopyButton value={gatewayEndpoint} className="shrink-0" />
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={() => setActiveTab('settings')}>
+                  View code examples
+                </Button>
+                {!firstConfiguredProvider && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setDialogOpen(true)}
+                  >
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add a provider key
+                  </Button>
+                )}
+              </div>
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+
+          {/* Right panel — code preview styled to sit flush against the card
+              edges (no inner card-in-card). Header row mirrors Vercel's: tabs
+              on the left, provider dropdown on the right. */}
+          <div className="md:border-l md:border-t-0">
+            <CodeTabs
+              className="h-full rounded-none border-0 border-t md:border-l md:border-t-0"
+              value={snippetLang}
+              onValueChange={(id) =>
+                setSnippetLang(id as 'bash' | 'python' | 'typescript')
+              }
+              examples={snippetExamples}
+              rightSlot={
+                <Select
+                  value={effectiveSnippetProvider}
+                  onValueChange={setSnippetProvider}
+                >
+                  <SelectTrigger className="h-7 w-[150px] text-xs focus:ring-0 focus:ring-offset-0">
+                    <SelectValue placeholder="Provider" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SUPPORTED_PROVIDERS.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        <div className="flex items-center gap-2">
+                          <AiProviderIcon provider={p.id} size={16} />
+                          <span>{p.name}</span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              }
+            />
+          </div>
+        </div>
+      </Card>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <div className="overflow-x-auto -mx-1 px-1">
@@ -2536,124 +2549,213 @@ console.log(response.choices[0].message.content);`,
           </TabsList>
         </div>
 
-        {/* Provider Keys Tab */}
+        {/* Provider Keys Tab — compact table: one row per supported
+            provider. Click the chevron to expand and see individual keys
+            with per-key test/toggle/delete actions. Keeps the screen dense
+            so you can see all providers at once. */}
         <TabsContent value="keys" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Provider Keys</CardTitle>
-              <CardDescription>
-                {isLoading ? (
-                  <Skeleton className="h-4 w-28 inline-block" />
-                ) : (
-                  `${keys.length} key${keys.length !== 1 ? 's' : ''} configured`
-                )}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {isLoading ? (
-                <div className="space-y-3">
-                  {[1, 2, 3].map((i) => (
-                    <Skeleton key={i} className="h-12 w-full" />
-                  ))}
-                </div>
-              ) : keys.length === 0 ? (
-                <EmptyState
-                  icon={Sparkles}
-                  title="No provider keys yet"
-                  description="Add your first AI provider key to start routing requests through the gateway."
-                  action={
-                    <Button onClick={() => setDialogOpen(true)}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Add Provider Key
-                    </Button>
-                  }
-                />
-              ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Provider</TableHead>
-                        <TableHead>Name</TableHead>
-                        <TableHead className="hidden md:table-cell">Key</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead className="hidden md:table-cell">Added</TableHead>
-                        <TableHead className="w-[100px]"></TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {keys.map((key) => (
-                        <TableRow key={key.id}>
-                          <TableCell className="font-medium">
-                            {providerName(key.provider)}
+          {isLoading ? (
+            <div className="space-y-2">
+              {[1, 2, 3, 4].map((i) => (
+                <Skeleton key={i} className="h-14 w-full" />
+              ))}
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="w-[44px]" />
+                    <TableHead>Provider</TableHead>
+                    <TableHead className="hidden lg:table-cell">Models</TableHead>
+                    <TableHead className="hidden sm:table-cell w-[140px]">Status</TableHead>
+                    <TableHead className="w-[180px] text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {SUPPORTED_PROVIDERS.map((provider) => {
+                    const providerKeys = keys.filter((k) => k.provider === provider.id)
+                    const activeKey = providerKeys.find((k) => k.is_active)
+                    const hasAnyKey = providerKeys.length > 0
+                    const configured = !!activeKey
+                    const expanded = expandedProvider === provider.id && hasAnyKey
+
+                    return (
+                      <Fragment key={provider.id}>
+                        <TableRow
+                          className={
+                            hasAnyKey
+                              ? 'cursor-pointer'
+                              : 'hover:bg-transparent'
+                          }
+                          onClick={
+                            hasAnyKey
+                              ? () =>
+                                  setExpandedProvider(
+                                    expanded ? null : provider.id
+                                  )
+                              : undefined
+                          }
+                        >
+                          <TableCell className="py-2 pr-0">
+                            {hasAnyKey ? (
+                              <ChevronRight
+                                className={`h-4 w-4 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
+                              />
+                            ) : null}
                           </TableCell>
-                          <TableCell>{key.display_name}</TableCell>
-                          <TableCell className="hidden md:table-cell font-mono text-sm text-muted-foreground">
-                            {key.api_key_masked}
-                          </TableCell>
-                          <TableCell>
-                            <Badge
-                              variant={key.is_active ? 'default' : 'secondary'}
-                              className={
-                                key.is_active
-                                  ? 'bg-green-500/15 text-green-500 hover:bg-green-500/25'
-                                  : ''
-                              }
-                            >
-                              {key.is_active ? 'Active' : 'Inactive'}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="hidden md:table-cell text-muted-foreground">
-                            {new Date(key.created_at).toLocaleDateString()}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => testKeyMutation.mutate(key.id)}
-                                disabled={testingKeyId === key.id}
-                                title="Test key"
-                              >
-                                {testingKeyId === key.id ? (
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                ) : (
-                                  <Play className="h-4 w-4" />
-                                )}
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => handleToggle(key)}
-                                disabled={toggleMutation.isPending}
-                                title={key.is_active ? 'Disable key' : 'Enable key'}
-                              >
-                                {key.is_active ? (
-                                  <Power className="h-4 w-4" />
-                                ) : (
-                                  <PowerOff className="h-4 w-4 text-muted-foreground" />
-                                )}
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-8 w-8"
-                                onClick={() => handleDelete(key)}
-                              >
-                                <Trash2 className="h-4 w-4 text-destructive" />
-                              </Button>
+                          <TableCell className="py-2">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <AiProviderIcon provider={provider.id} size={32} />
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm font-medium truncate">
+                                    {provider.name}
+                                  </span>
+                                  {hasAnyKey && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="h-5 px-1.5 text-[10px]"
+                                    >
+                                      {providerKeys.length}{' '}
+                                      {providerKeys.length === 1 ? 'key' : 'keys'}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <p className="text-xs text-muted-foreground truncate">
+                                  {provider.tagline}
+                                </p>
+                              </div>
                             </div>
                           </TableCell>
+                          <TableCell className="hidden lg:table-cell py-2 text-xs text-muted-foreground">
+                            <span className="line-clamp-1">{provider.models}</span>
+                          </TableCell>
+                          <TableCell className="hidden sm:table-cell py-2">
+                            {configured ? (
+                              <Badge className="justify-center whitespace-nowrap bg-green-500/15 text-green-600 dark:text-green-400 hover:bg-green-500/25">
+                                Active
+                              </Badge>
+                            ) : hasAnyKey ? (
+                              <Badge
+                                variant="secondary"
+                                className="justify-center whitespace-nowrap"
+                              >
+                                Disabled
+                              </Badge>
+                            ) : (
+                              <Badge
+                                variant="outline"
+                                className="justify-center whitespace-nowrap text-muted-foreground"
+                              >
+                                Not configured
+                              </Badge>
+                            )}
+                          </TableCell>
+                          <TableCell
+                            className="py-2 text-right"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <Button
+                              variant={hasAnyKey ? 'outline' : 'default'}
+                              size="sm"
+                              onClick={() => {
+                                setNewProvider(provider.id)
+                                setNewDisplayName(
+                                  hasAnyKey
+                                    ? `${provider.name} (key ${providerKeys.length + 1})`
+                                    : provider.name
+                                )
+                                setDialogOpen(true)
+                              }}
+                            >
+                              <Plus className="mr-1.5 h-3.5 w-3.5" />
+                              {hasAnyKey ? 'Add key' : 'Configure'}
+                            </Button>
+                          </TableCell>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+
+                        {expanded &&
+                          providerKeys.map((key) => (
+                            <TableRow
+                              key={key.id}
+                              className="bg-muted/30 hover:bg-muted/40"
+                            >
+                              <TableCell />
+                              <TableCell colSpan={3} className="py-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="text-sm font-medium truncate">
+                                    {key.display_name}
+                                  </span>
+                                  {!key.is_active && (
+                                    <Badge
+                                      variant="secondary"
+                                      className="h-5 px-1.5 text-[10px]"
+                                    >
+                                      Disabled
+                                    </Badge>
+                                  )}
+                                  <code className="text-xs text-muted-foreground truncate">
+                                    {key.api_key_masked}
+                                  </code>
+                                </div>
+                              </TableCell>
+                              <TableCell className="py-2 text-right">
+                                <div className="flex items-center justify-end gap-0.5">
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() =>
+                                      testKeyMutation.mutate(key.id)
+                                    }
+                                    disabled={testingKeyId === key.id}
+                                    title="Test key"
+                                  >
+                                    {testingKeyId === key.id ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Play className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() => handleToggle(key)}
+                                    disabled={toggleMutation.isPending}
+                                    title={
+                                      key.is_active
+                                        ? 'Disable key'
+                                        : 'Enable key'
+                                    }
+                                  >
+                                    {key.is_active ? (
+                                      <Power className="h-4 w-4" />
+                                    ) : (
+                                      <PowerOff className="h-4 w-4 text-muted-foreground" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    onClick={() => handleDelete(key)}
+                                    title="Delete key"
+                                  >
+                                    <Trash2 className="h-4 w-4 text-destructive" />
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                      </Fragment>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
         </TabsContent>
 
         {/* Usage Tab */}
@@ -2697,98 +2799,42 @@ console.log(response.choices[0].message.content);`,
                 Copy a code snippet to start making requests.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex gap-2">
-                  {(['bash', 'python', 'typescript'] as const).map((lang) => (
-                    <Button
-                      key={lang}
-                      variant={snippetLang === lang ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => setSnippetLang(lang)}
-                    >
-                      {lang === 'bash'
-                        ? 'cURL'
-                        : lang === 'python'
-                          ? 'Python'
-                          : 'Node.js'}
-                    </Button>
-                  ))}
-                </div>
-                <Select value={effectiveSnippetProvider} onValueChange={setSnippetProvider}>
-                  <SelectTrigger className="w-full sm:w-[180px]">
-                    <SelectValue placeholder="Provider" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SUPPORTED_PROVIDERS.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <CodeBlock
-                code={codeSnippets[snippetLang]}
-                language={snippetLang === 'bash' ? 'bash' : snippetLang}
+            <CardContent>
+              <CodeTabs
+                value={snippetLang}
+                onValueChange={(id) =>
+                  setSnippetLang(id as 'bash' | 'python' | 'typescript')
+                }
+                examples={snippetExamples}
+                rightSlot={
+                  <Select
+                    value={effectiveSnippetProvider}
+                    onValueChange={setSnippetProvider}
+                  >
+                    <SelectTrigger className="h-8 w-full sm:w-[200px]">
+                      <SelectValue placeholder="Provider" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SUPPORTED_PROVIDERS.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          <div className="flex items-center gap-2">
+                            <AiProviderIcon provider={p.id} size={20} />
+                            <span>{p.name}</span>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                }
               />
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Supported Providers</CardTitle>
-              <CardDescription>
-                Models available through the AI Gateway.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {SUPPORTED_PROVIDERS.map((provider) => {
-                  const configured = keys.some(
-                    (k) => k.provider === provider.id && k.is_active
-                  )
-                  return (
-                    <div
-                      key={provider.id}
-                      className="flex items-start justify-between rounded-lg border p-3"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium">{provider.name}</p>
-                          {configured && (
-                            <Badge
-                              variant="default"
-                              className="bg-green-500/15 text-green-500 text-[10px] px-1.5 py-0"
-                            >
-                              Active
-                            </Badge>
-                          )}
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {provider.models}
-                        </p>
-                      </div>
-                      {!configured && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-xs h-7"
-                          onClick={() => {
-                            setNewProvider(provider.id)
-                            setDialogOpen(true)
-                          }}
-                        >
-                          <Plus className="mr-1 h-3 w-3" />
-                          Add
-                        </Button>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </CardContent>
-          </Card>
+          {/* "Supported Providers" grid is intentionally gone — the
+              catalog on the Provider Keys tab covers the same ground
+              (brand icon, models, configured/not-configured status, and
+              a direct "Configure" button). Duplicating it here just
+              meant two places to keep in sync. */}
 
           <Card>
             <CardHeader>
@@ -2818,43 +2864,44 @@ console.log(response.choices[0].message.content);`,
         </TabsContent>
       </Tabs>
 
-      {/* Add Provider Key Dialog */}
+      {/* Add Provider Key Dialog — provider is locked (set by whichever
+          card opened the dialog). No Select inside the dialog; the
+          provider identity is shown as a header. */}
       <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm() }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add Provider Key</DialogTitle>
+            <DialogTitle>
+              {newProvider ? `Configure ${providerName(newProvider)}` : 'Add Provider Key'}
+            </DialogTitle>
             <DialogDescription>
-              Add an API key for an AI provider. The key will be encrypted and
-              used to route requests through the gateway.
+              Your key is encrypted at rest and used only to route requests
+              through the gateway.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="provider">Provider</Label>
-              <Select value={newProvider} onValueChange={(value) => {
-                setNewProvider(value)
-                if (!newDisplayName.trim()) {
-                  const provider = SUPPORTED_PROVIDERS.find((p) => p.id === value)
-                  if (provider) setNewDisplayName(provider.name)
-                }
-              }}>
-                <SelectTrigger id="provider">
-                  <SelectValue placeholder="Select a provider" />
-                </SelectTrigger>
-                <SelectContent>
-                  {SUPPORTED_PROVIDERS.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {newProvider && (
-                <p className="text-xs text-muted-foreground">
-                  Models: {providerModels(newProvider)}
-                </p>
-              )}
-            </div>
+            {newProvider && (
+              <div className="flex items-center gap-3 rounded-md border bg-muted/30 px-3 py-2.5">
+                <AiProviderIcon provider={newProvider} size={36} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium">
+                    {providerName(newProvider)}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate">
+                    {providerModels(newProvider)}
+                  </div>
+                </div>
+                {getAiProvider(newProvider)?.keyDocsUrl && (
+                  <a
+                    href={getAiProvider(newProvider)!.keyDocsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-muted-foreground hover:text-foreground hover:underline shrink-0"
+                  >
+                    Get key →
+                  </a>
+                )}
+              </div>
+            )}
             <div className="grid gap-2">
               <Label htmlFor="displayName">Display Name</Label>
               <Input
@@ -2893,58 +2940,20 @@ console.log(response.choices[0].message.content);`,
               </p>
             </div>
           </div>
-          {inlineTestResult && (
-            <div
-              className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm max-h-24 overflow-y-auto ${
-                inlineTestResult.success
-                  ? 'bg-green-500/10 text-green-500'
-                  : 'bg-destructive/10 text-destructive'
-              }`}
-            >
-              {inlineTestResult.success ? (
-                <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
-              ) : (
-                <XCircle className="h-4 w-4 shrink-0 mt-0.5" />
-              )}
-              <span className="break-all">
-                {inlineTestResult.success
-                  ? 'Key is valid'
-                  : inlineTestResult.error || 'Key test failed'}
-              </span>
-            </div>
-          )}
+          <p className="text-xs text-muted-foreground">
+            We'll verify the key works before saving — this usually takes 1–2
+            seconds.
+          </p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                if (!newProvider || !newApiKey.trim()) {
-                  toast.error('Select a provider and enter an API key to test')
-                  return
-                }
-                setInlineTestResult(null)
-                testInlineMutation.mutate({
-                  provider: newProvider,
-                  api_key: newApiKey,
-                  base_url: newBaseUrl || undefined,
-                })
-              }}
-              disabled={testInlineMutation.isPending}
-            >
-              {testInlineMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Button onClick={handleCreate} disabled={createMutation.isPending} className="w-full sm:w-auto">
+              {createMutation.isPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Verifying &amp; saving…
+                </>
               ) : (
-                <Play className="mr-2 h-4 w-4" />
+                'Add key'
               )}
-              Test Key
-            </Button>
-            <Button onClick={handleCreate} disabled={createMutation.isPending}>
-              {createMutation.isPending && (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              )}
-              Add Key
             </Button>
           </DialogFooter>
         </DialogContent>

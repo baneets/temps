@@ -1,19 +1,16 @@
 import {
   getLastDeploymentOptions,
   getProjectBySlugOptions,
-  getActiveVisitors2Options,
+  getActiveVisitorsOptions,
   getRepositoryByNameOptions,
   updateProjectSettingsMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import NotFound from '@/components/global/NotFound'
 import { ProjectAnalytics } from '@/components/project/ProjectAnalytics'
 import { ProjectDeployments } from '@/components/project/ProjectDeployments'
-import {
-  ProjectDetailSidebar,
-  MobileSidebarProvider,
-} from '@/components/project/ProjectDetailSidebar'
 import { ProjectDetailHeader } from '@/components/project/ProjectDetailHeader'
 import { ProjectOverview } from '@/components/project/ProjectOverview'
+import { ProjectRevenue } from '@/components/project/ProjectRevenue'
 import { ProjectRuntime } from '@/components/project/ProjectRuntime'
 import { ProjectServices } from '@/components/project/ProjectServices'
 import { ProjectSettings } from '@/components/project/ProjectSettings'
@@ -23,6 +20,7 @@ import { ProjectMonitors } from '@/components/project/ProjectMonitors'
 import { ProjectMonitoring } from '@/components/project/ProjectMonitoring'
 import { MonitorDetail } from '@/components/project/MonitorDetail'
 import { ErrorTracking } from '@/components/projects/ErrorTracking'
+import { ErrorTrackingSetup } from '@/components/project/setup/ErrorTrackingSetup'
 import { EnvironmentsTabsView } from './EnvironmentsTabsView'
 import { Confetti } from '@/components/ui/confetti'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -34,7 +32,6 @@ import { AlertRulesManagement } from '@/components/monitoring/AlertRulesManageme
 import { AlertRuleForm } from '@/pages/AlertRuleForm'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
-import { useAuth } from '@/contexts/AuthContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { DeploymentDetails } from '@/pages/DeploymentDetails'
 import { ErrorEventDetail } from './ErrorEventDetail'
@@ -42,6 +39,13 @@ import { ErrorGroupDetail } from './ErrorGroupDetail'
 import RequestLogs from './RequestLogs'
 import Traces from './Traces'
 import { ProjectAgentActivity } from './AiGateway'
+import { AutofixerPage } from '@/components/autofixer/AutofixerPage'
+import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
+import { AgentDetailPage } from '@/components/agents/AgentDetailPage'
+import { AutopilotPage } from '@/components/agents/AutopilotPage'
+import { AutopilotRunDetail } from '@/components/agents/AutopilotRunDetail'
+import { WorkspacePage } from '@/components/workspace/WorkspacePage'
+import { NewSessionPage } from '@/components/workspace/NewSessionPage'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import {
@@ -60,7 +64,6 @@ import { toast } from 'sonner'
 export function ProjectDetail() {
   const { slug } = useParams()
   const { setBreadcrumbs } = useBreadcrumbs()
-  const { isDemoMode } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
 
   // Check for confetti query parameter
@@ -110,7 +113,7 @@ export function ProjectDetail() {
 
   // Fetch active visitors count
   const { data: activeVisitorsCount } = useQuery({
-    ...getActiveVisitors2Options({
+    ...getActiveVisitorsOptions({
       path: {
         project_id: project?.id || 0,
       },
@@ -187,18 +190,13 @@ export function ProjectDetail() {
 
   usePageTitle(project?.slug ? `${project.slug}` : '')
 
-  // In demo mode, redirect to projects list if project not found or error occurs
-  if (isDemoMode && (error || (!isLoading && !project))) {
-    return <Navigate to="/projects" replace />
-  }
-
   if (error?.message?.includes('404') || (!isLoading && !project)) {
     return <NotFound />
   }
 
   if (error) {
     return (
-      <div className="p-6">
+      <div className="p-4 sm:p-6">
         <ErrorAlert
           title="Failed to load project"
           description={
@@ -281,11 +279,9 @@ export function ProjectDetail() {
   }
 
   return (
-    <MobileSidebarProvider>
-      <div className="flex h-full w-full overflow-hidden">
+    <div className="flex h-full w-full overflow-hidden">
         <Confetti active={showConfetti} duration={4000} particleCount={100} />
-        <ProjectDetailSidebar project={project} />
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="flex flex-1 flex-col overflow-hidden min-w-0">
           <ProjectDetailHeader
             project={project}
             activeVisitorsCount={activeVisitorsCount}
@@ -298,7 +294,7 @@ export function ProjectDetail() {
             lastDeploymentUrl={lastDeployment?.url}
             isLoadingLastDeployment={isLoadingLastDeployment}
           />
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
             {/* Attack Mode Banner */}
             {(project as any).attack_mode && (
               <Alert className="mb-4 border-primary bg-primary/10">
@@ -322,9 +318,7 @@ export function ProjectDetail() {
             <Routes>
               <Route
                 index
-                element={
-                  <Navigate to={isDemoMode ? 'analytics' : 'project'} replace />
-                }
+                element={<Navigate to="project" replace />}
               />
               <Route
                 path="project"
@@ -394,12 +388,44 @@ export function ProjectDetail() {
                 element={<Traces project={project} />}
               />
               <Route
-                path="ai-activity"
+                path="ai-gateway"
                 element={<ProjectAgentActivity projectId={project.id} />}
+              />
+              <Route
+                path="revenue"
+                element={<ProjectRevenue project={project} />}
+              />
+              <Route
+                path="workspace"
+                element={<WorkspacePage project={project} />}
+              />
+              <Route
+                path="workspace/new"
+                element={<NewSessionPage project={project} />}
+              />
+              <Route
+                path="agents"
+                element={<AutopilotPage project={project} />}
+              />
+              <Route
+                path="agents/detail/:agentSlug"
+                element={<AgentDetailPage project={project} />}
+              />
+              <Route
+                path="agents/:runId"
+                element={<AutopilotRunDetail project={project} />}
+              />
+              <Route
+                path="autofixer"
+                element={<AutofixerPage project={project} />}
               />
               <Route
                 path="errors"
                 element={<ErrorTracking project={project} />}
+              />
+              <Route
+                path="errors/setup"
+                element={<ErrorTrackingSetup project={project} />}
               />
               <Route
                 path="errors/alert-rules"
@@ -416,6 +442,10 @@ export function ProjectDetail() {
               <Route
                 path="errors/:errorGroupId"
                 element={<ErrorGroupDetail project={project} />}
+              />
+              <Route
+                path="errors/:errorGroupId/autofix"
+                element={<AutofixRedirect project={project} />}
               />
               <Route
                 path="errors/:errorGroupId/event/:eventId"
@@ -438,6 +468,5 @@ export function ProjectDetail() {
           </div>
         </div>
       </div>
-    </MobileSidebarProvider>
   )
 }

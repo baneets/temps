@@ -1,13 +1,18 @@
 'use client'
 
 import {
-  listProviders as listDnsProviders,
-  type DnsProviderResponse,
+  createEmailDomain as createEmailDomainSdk,
+  deleteEmailDomain as deleteEmailDomainSdk,
+  listEmailDomains as listEmailDomainsSdk,
+  listEmailProviders as listEmailProvidersSdk,
+  verifyDomain,
+  type CreateEmailDomainRequest,
+  type EmailDomainResponse,
+  type EmailDomainWithDnsResponse,
+  type EmailProviderResponse,
 } from '@/api/client'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { CopyButton } from '@/components/ui/copy-button'
 import {
   Dialog,
@@ -43,7 +48,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Table,
@@ -53,12 +57,14 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { formatDistanceToNow } from 'date-fns'
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronRight,
   Clock,
   EllipsisVertical,
   Globe,
@@ -66,49 +72,20 @@ import {
   Loader2,
   Plus,
   RefreshCw,
-  Settings2,
-  Wand2,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
+import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
 // Types
 type DnsRecordStatus = 'unknown' | 'verified' | 'pending' | 'failed'
+type EmailDomain = EmailDomainResponse
+type EmailDomainWithDns = EmailDomainWithDnsResponse
+type EmailProvider = EmailProviderResponse
+type DnsRecord = EmailDomainWithDnsResponse['dns_records'][number]
 
-interface DnsRecord {
-  record_type: string
-  name: string
-  value: string
-  priority?: number
-  status?: DnsRecordStatus
-}
-
-interface EmailDomain {
-  id: number
-  provider_id: number
-  domain: string
-  status: string
-  last_verified_at: string | null
-  verification_error: string | null
-  created_at: string
-  updated_at: string
-}
-
-interface EmailDomainWithDns {
-  domain: EmailDomain
-  dns_records: DnsRecord[]
-}
-
-interface EmailProvider {
-  id: number
-  name: string
-  provider_type: 'ses' | 'scaleway'
-  region: string
-}
-
-// Form schema
 const createDomainSchema = z.object({
   provider_id: z.number().min(1, 'Provider is required'),
   domain: z
@@ -122,129 +99,144 @@ const createDomainSchema = z.object({
 
 type CreateDomainFormData = z.infer<typeof createDomainSchema>
 
-// API functions
-async function listEmailDomains(): Promise<EmailDomain[]> {
-  const response = await fetch('/api/email-domains')
-  if (!response.ok) {
-    throw new Error('Failed to fetch email domains')
+function problemMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'detail' in error) {
+    const detail = (error as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.length > 0) {
+      return detail
+    }
   }
-  return response.json()
+  return fallback
 }
 
-async function getEmailDomain(id: number): Promise<EmailDomainWithDns> {
-  const response = await fetch(`/api/email-domains/${id}`)
-  if (!response.ok) {
-    throw new Error('Failed to fetch email domain')
+// API functions
+async function listEmailDomains(): Promise<EmailDomain[]> {
+  const response = await listEmailDomainsSdk()
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email domains'))
   }
-  return response.json()
+  return response.data ?? []
 }
 
 async function createEmailDomain(
   data: CreateDomainFormData
 ): Promise<EmailDomainWithDns> {
-  const response = await fetch('/api/email-domains', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to create email domain')
+  const body: CreateEmailDomainRequest = {
+    provider_id: data.provider_id,
+    domain: data.domain,
   }
-
-  return response.json()
+  const response = await createEmailDomainSdk({ body })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to create email domain'))
+  }
+  return response.data
 }
 
 async function verifyEmailDomain(id: number): Promise<EmailDomainWithDns> {
-  const response = await fetch(`/api/email-domains/${id}/verify`, {
-    method: 'POST',
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to verify email domain')
+  const response = await verifyDomain({ path: { id } })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to verify email domain'))
   }
-
-  return response.json()
+  return response.data
 }
 
 async function deleteEmailDomain(id: number): Promise<void> {
-  const response = await fetch(`/api/email-domains/${id}`, {
-    method: 'DELETE',
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to delete email domain')
+  const response = await deleteEmailDomainSdk({ path: { id } })
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to delete email domain'))
   }
 }
 
 async function listEmailProviders(): Promise<EmailProvider[]> {
-  const response = await fetch('/api/email-providers')
-  if (!response.ok) {
-    throw new Error('Failed to fetch email providers')
+  const response = await listEmailProvidersSdk()
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email providers'))
   }
-  return response.json()
+  return response.data ?? []
 }
 
-// DNS setup types
-interface DnsRecordSetupResult {
-  record_type: string
-  name: string
-  success: boolean
-  automatic: boolean
-  message: string
+// Status dot — small color-coded indicator that mirrors the Storage page's
+// HealthDot, so it sits cleanly on the bottom-right of the provider-logo tile.
+function StatusDot({ status, className }: { status: string; className?: string }) {
+  const tone =
+    status === 'verified'
+      ? 'bg-green-500'
+      : status === 'pending'
+        ? 'bg-amber-500'
+        : status === 'failed'
+          ? 'bg-red-500'
+          : 'bg-muted-foreground/40'
+  const label =
+    status === 'verified'
+      ? 'Verified'
+      : status === 'pending'
+        ? 'Pending'
+        : status === 'failed'
+          ? 'Failed'
+          : 'Unknown'
+  return (
+    <span
+      className={cn(
+        'inline-block size-2 rounded-full ring-2 ring-background',
+        tone,
+        className
+      )}
+      title={label}
+      aria-label={label}
+    />
+  )
 }
 
-interface SetupDnsResponse {
-  success: boolean
-  records_created: number
-  total_records: number
-  results: DnsRecordSetupResult[]
-  message: string
+// Inline status dot + label for the sub-row — matches the Storage page's
+// ServiceStatusDot visual so status reads the same across the app.
+function DomainStatusInline({ status }: { status: string }) {
+  const tone =
+    status === 'verified'
+      ? 'bg-success'
+      : status === 'failed'
+        ? 'bg-destructive'
+        : status === 'pending'
+          ? 'bg-warning'
+          : 'bg-muted-foreground/40'
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={cn('size-1.5 rounded-full', tone)} />
+      <span className="text-xs capitalize text-muted-foreground">
+        {status || 'unknown'}
+      </span>
+    </span>
+  )
 }
 
-async function setupDnsRecords(domainId: number, dnsProviderId: number): Promise<SetupDnsResponse> {
-  const response = await fetch(`/api/email-domains/${domainId}/setup-dns`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dns_provider_id: dnsProviderId }),
-  })
-
-  if (!response.ok) {
-    const error = await response.json()
-    throw new Error(error.detail || 'Failed to setup DNS records')
-  }
-
-  return response.json()
-}
-
-function StatusBadge({ status }: { status: string }) {
+export function StatusPill({ status }: { status: string }) {
   switch (status) {
     case 'verified':
       return (
-        <Badge variant="default" className="gap-1 bg-green-600 hover:bg-green-600 text-white">
-          <CheckCircle2 className="h-3 w-3" />
+        <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:text-emerald-400">
+          <CheckCircle2 className="size-3.5" />
           Verified
-        </Badge>
+        </span>
       )
     case 'pending':
       return (
-        <Badge variant="secondary" className="gap-1">
-          <Clock className="h-3 w-3" />
+        <span className="inline-flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-400">
+          <Clock className="size-3.5" />
           Pending
-        </Badge>
+        </span>
       )
     case 'failed':
       return (
-        <Badge variant="destructive" className="gap-1">
-          <AlertCircle className="h-3 w-3" />
+        <span className="inline-flex items-center gap-1.5 rounded-md bg-red-500/10 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-500/20 dark:text-red-400">
+          <AlertCircle className="size-3.5" />
           Failed
-        </Badge>
+        </span>
       )
     default:
-      return <Badge variant="outline">{status}</Badge>
+      return (
+        <span className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border">
+          {status}
+        </span>
+      )
   }
 }
 
@@ -252,22 +244,22 @@ function DnsRecordStatusBadge({ status }: { status?: DnsRecordStatus }) {
   switch (status) {
     case 'verified':
       return (
-        <div className="flex items-center gap-1.5 text-green-600 dark:text-green-500">
-          <CheckCircle2 className="h-4 w-4" />
+        <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-500">
+          <CheckCircle2 className="size-4" />
           <span className="text-xs font-medium">Verified</span>
         </div>
       )
     case 'pending':
       return (
-        <div className="flex items-center gap-1.5 text-yellow-600 dark:text-yellow-500">
-          <Clock className="h-4 w-4" />
+        <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-500">
+          <Clock className="size-4" />
           <span className="text-xs font-medium">Pending</span>
         </div>
       )
     case 'failed':
       return (
         <div className="flex items-center gap-1.5 text-destructive">
-          <AlertCircle className="h-4 w-4" />
+          <AlertCircle className="size-4" />
           <span className="text-xs font-medium">Failed</span>
         </div>
       )
@@ -275,14 +267,14 @@ function DnsRecordStatusBadge({ status }: { status?: DnsRecordStatus }) {
     default:
       return (
         <div className="flex items-center gap-1.5 text-muted-foreground">
-          <HelpCircle className="h-4 w-4" />
+          <HelpCircle className="size-4" />
           <span className="text-xs font-medium">Unknown</span>
         </div>
       )
   }
 }
 
-function DnsVerificationSummary({ records }: { records: DnsRecord[] }) {
+export function DnsVerificationSummary({ records }: { records: DnsRecord[] }) {
   const verifiedCount = records.filter(r => r.status === 'verified').length
   const pendingCount = records.filter(r => r.status === 'pending').length
   const failedCount = records.filter(r => r.status === 'failed').length
@@ -293,9 +285,9 @@ function DnsVerificationSummary({ records }: { records: DnsRecord[] }) {
 
   if (allVerified) {
     return (
-      <div className="flex items-center gap-2 p-3 rounded-lg bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-900">
-        <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-500" />
-        <span className="text-sm font-medium text-green-700 dark:text-green-400">
+      <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-900 dark:bg-emerald-950/30">
+        <CheckCircle2 className="size-5 text-emerald-600 dark:text-emerald-500" />
+        <span className="text-sm font-medium text-emerald-700 dark:text-emerald-400">
           All {totalCount} DNS records verified successfully
         </span>
       </div>
@@ -303,43 +295,39 @@ function DnsVerificationSummary({ records }: { records: DnsRecord[] }) {
   }
 
   return (
-    <div className="flex items-center gap-4 p-3 rounded-lg bg-muted/50 border">
-      <span className="text-sm font-medium">DNS Status:</span>
-      <div className="flex items-center gap-4 text-sm">
-        {verifiedCount > 0 && (
-          <div className="flex items-center gap-1 text-green-600 dark:text-green-500">
-            <CheckCircle2 className="h-4 w-4" />
-            <span>{verifiedCount} verified</span>
-          </div>
-        )}
-        {pendingCount > 0 && (
-          <div className="flex items-center gap-1 text-yellow-600 dark:text-yellow-500">
-            <Clock className="h-4 w-4" />
-            <span>{pendingCount} pending</span>
-          </div>
-        )}
-        {failedCount > 0 && (
-          <div className="flex items-center gap-1 text-destructive">
-            <AlertCircle className="h-4 w-4" />
-            <span>{failedCount} failed</span>
-          </div>
-        )}
-        {unknownCount > 0 && (
-          <div className="flex items-center gap-1 text-muted-foreground">
-            <HelpCircle className="h-4 w-4" />
-            <span>{unknownCount} unknown</span>
-          </div>
-        )}
-      </div>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border bg-muted/40 p-3">
+      <span className="text-sm font-medium">DNS status</span>
+      {verifiedCount > 0 && (
+        <div className="flex items-center gap-1 text-sm text-emerald-600 dark:text-emerald-500">
+          <CheckCircle2 className="size-4" />
+          <span>{verifiedCount} verified</span>
+        </div>
+      )}
+      {pendingCount > 0 && (
+        <div className="flex items-center gap-1 text-sm text-amber-600 dark:text-amber-500">
+          <Clock className="size-4" />
+          <span>{pendingCount} pending</span>
+        </div>
+      )}
+      {failedCount > 0 && (
+        <div className="flex items-center gap-1 text-sm text-destructive">
+          <AlertCircle className="size-4" />
+          <span>{failedCount} failed</span>
+        </div>
+      )}
+      {unknownCount > 0 && (
+        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+          <HelpCircle className="size-4" />
+          <span>{unknownCount} unknown</span>
+        </div>
+      )}
     </div>
   )
 }
 
-function DnsRecordsTable({ records }: { records: DnsRecord[] }) {
+export function DnsRecordsTable({ records }: { records: DnsRecord[] }) {
   if (!records || records.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">No DNS records available.</p>
-    )
+    return <p className="text-sm text-muted-foreground">No DNS records available.</p>
   }
 
   return (
@@ -360,7 +348,7 @@ function DnsRecordsTable({ records }: { records: DnsRecord[] }) {
               key={index}
               className={
                 record.status === 'verified'
-                  ? 'bg-green-50/50 dark:bg-green-950/20'
+                  ? 'bg-emerald-50/50 dark:bg-emerald-950/20'
                   : record.status === 'failed'
                     ? 'bg-red-50/50 dark:bg-red-950/20'
                     : ''
@@ -371,19 +359,19 @@ function DnsRecordsTable({ records }: { records: DnsRecord[] }) {
               </TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs break-all">{record.name}</span>
+                  <span className="break-all font-mono text-xs">{record.name}</span>
                   <CopyButton
                     value={record.name}
-                    className="h-6 w-6 p-0 hover:bg-accent hover:text-accent-foreground rounded-md flex-shrink-0"
+                    className="h-6 w-6 shrink-0 rounded-md p-0 hover:bg-accent hover:text-accent-foreground"
                   />
                 </div>
               </TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs break-all">{record.value}</span>
+                  <span className="break-all font-mono text-xs">{record.value}</span>
                   <CopyButton
                     value={record.value}
-                    className="h-6 w-6 p-0 hover:bg-accent hover:text-accent-foreground rounded-md flex-shrink-0"
+                    className="h-6 w-6 shrink-0 rounded-md p-0 hover:bg-accent hover:text-accent-foreground"
                   />
                 </div>
               </TableCell>
@@ -399,118 +387,41 @@ function DnsRecordsTable({ records }: { records: DnsRecord[] }) {
   )
 }
 
-function DomainCard({
-  domain,
-  onVerify,
-  onDelete,
-  onViewDetails,
-}: {
-  domain: EmailDomain
-  onVerify: (id: number) => void
-  onDelete: (id: number) => void
-  onViewDetails: (id: number) => void
-}) {
-  return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <div className="flex items-center gap-3">
-          <Globe className="h-5 w-5 text-muted-foreground" />
-          <div>
-            <CardTitle className="text-base font-medium leading-none">
-              {domain.domain}
-            </CardTitle>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <StatusBadge status={domain.status} />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-8 w-8">
-                <EllipsisVertical className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onClick={() => onViewDetails(domain.id)}>
-                View DNS Records
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onVerify(domain.id)}>
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Verify DNS
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive"
-                onClick={() => onDelete(domain.id)}
-              >
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-2 text-sm">
-          {domain.verification_error && (
-            <div className="text-destructive text-xs">
-              {domain.verification_error}
-            </div>
-          )}
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Last Verified</span>
-            <span>
-              {domain.last_verified_at
-                ? formatDistanceToNow(new Date(domain.last_verified_at), {
-                    addSuffix: true,
-                  })
-                : 'Never'}
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">Created</span>
-            <span>
-              {formatDistanceToNow(new Date(domain.created_at), {
-                addSuffix: true,
-              })}
-            </span>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
 function LoadingSkeleton() {
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-      {[1, 2, 3].map((i) => (
-        <Card key={i}>
-          <CardHeader className="pb-2">
-            <div className="flex items-center gap-3">
-              <Skeleton className="h-10 w-10 rounded-full" />
-              <div className="space-y-2">
-                <Skeleton className="h-4 w-24" />
-                <Skeleton className="h-3 w-16" />
+    <div className="space-y-4">
+      <div className="flex items-center justify-end">
+        <Skeleton className="h-9 w-28" />
+      </div>
+      <div className="overflow-hidden rounded-lg border">
+        <ul role="list" className="divide-y">
+          {[1, 2, 3].map((i) => (
+            <li key={i} className="flex items-center gap-4 px-4 py-3">
+              <Skeleton className="size-9 shrink-0 rounded-md" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <Skeleton className="h-4 w-48" />
+                <Skeleton className="h-3 w-32" />
               </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <Skeleton className="h-4 w-full" />
-              <Skeleton className="h-4 w-3/4" />
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+              <Skeleton className="size-8 rounded-md" />
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   )
 }
 
 export function EmailDomainsManagement() {
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
-  const [selectedDomainId, setSelectedDomainId] = useState<number | null>(null)
-  const [selectedDnsProviderId, setSelectedDnsProviderId] = useState<number | null>(null)
-  const [dnsSetupResult, setDnsSetupResult] = useState<SetupDnsResponse | null>(null)
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+
+  const form = useForm<CreateDomainFormData>({
+    resolver: zodResolver(createDomainSchema),
+    defaultValues: {
+      domain: '',
+    },
+  })
 
   const { data: domains, isLoading: isLoadingDomains } = useQuery({
     queryKey: ['email-domains'],
@@ -522,37 +433,23 @@ export function EmailDomainsManagement() {
     queryFn: listEmailProviders,
   })
 
-  // Query for DNS providers (from temps-dns crate)
-  const { data: dnsProviders } = useQuery({
-    queryKey: ['dns-providers'],
-    queryFn: async () => {
-      const response = await listDnsProviders()
-      return response.data as DnsProviderResponse[]
-    },
-  })
-
-  const { data: selectedDomainDetails } = useQuery({
-    queryKey: ['email-domain', selectedDomainId],
-    queryFn: () =>
-      selectedDomainId ? getEmailDomain(selectedDomainId) : null,
-    enabled: !!selectedDomainId,
-  })
-
   const createMutation = useMutation({
     mutationFn: createEmailDomain,
-    onSuccess: () => {
-      toast.success('Domain added successfully', {
+    onSuccess: (data) => {
+      toast.success('Domain added', {
         description:
-          'Please configure the DNS records shown below to verify your domain.',
+          'Configure the DNS records to finish verification.',
       })
       queryClient.invalidateQueries({ queryKey: ['email-domains'] })
+      queryClient.setQueryData(['email-domain', data.domain.id], data)
       setIsCreateDialogOpen(false)
       form.reset()
+      // Navigate straight to the detail page so the DNS setup is the next thing
+      // the user sees — far less fragile than leaving them on the list.
+      navigate(`/email/domains/${data.domain.id}`)
     },
     onError: (error: Error) => {
-      toast.error('Failed to add domain', {
-        description: error.message,
-      })
+      toast.error('Failed to add domain', { description: error.message })
     },
   })
 
@@ -565,16 +462,16 @@ export function EmailDomainsManagement() {
       const failedCount = data.dns_records.filter(r => r.status === 'failed').length
 
       if (data.domain.status === 'verified') {
-        toast.success('Domain verified successfully', {
+        toast.success('Domain verified', {
           description: `All ${totalCount} DNS records are properly configured.`,
         })
       } else if (failedCount > 0) {
         toast.error('Some DNS records failed verification', {
-          description: `${failedCount} of ${totalCount} records failed. Please check your DNS configuration.`,
+          description: `${failedCount} of ${totalCount} records failed.`,
         })
       } else if (pendingCount > 0) {
-        toast.warning('DNS verification in progress', {
-          description: `${verifiedCount} of ${totalCount} records verified. ${pendingCount} pending - DNS propagation can take up to 48 hours.`,
+        toast.warning('Verification in progress', {
+          description: `${verifiedCount} of ${totalCount} records verified. DNS propagation can take up to 48 hours.`,
         })
       } else {
         toast.info('Verification status updated', {
@@ -582,75 +479,27 @@ export function EmailDomainsManagement() {
         })
       }
 
-      // Update the domain details cache directly with the new data
       queryClient.setQueryData(['email-domain', data.domain.id], data)
-
-      // Update the domains list cache to reflect the new status
       queryClient.setQueryData(['email-domains'], (oldDomains: EmailDomain[] | undefined) => {
         if (!oldDomains) return oldDomains
         return oldDomains.map((d) =>
           d.id === data.domain.id ? data.domain : d
         )
       })
-
-      // Also refetch to ensure we have the latest data
-      queryClient.refetchQueries({ queryKey: ['email-domains'] })
-      queryClient.refetchQueries({ queryKey: ['email-domain', data.domain.id] })
     },
     onError: (error: Error) => {
-      toast.error('Failed to verify domain', {
-        description: error.message,
-      })
+      toast.error('Failed to verify domain', { description: error.message })
     },
   })
 
   const deleteMutation = useMutation({
     mutationFn: deleteEmailDomain,
     onSuccess: () => {
-      toast.success('Domain deleted successfully')
+      toast.success('Domain deleted')
       queryClient.invalidateQueries({ queryKey: ['email-domains'] })
     },
     onError: (error: Error) => {
-      toast.error('Failed to delete domain', {
-        description: error.message,
-      })
-    },
-  })
-
-  const setupDnsMutation = useMutation({
-    mutationFn: ({ domainId, dnsProviderId }: { domainId: number; dnsProviderId: number }) =>
-      setupDnsRecords(domainId, dnsProviderId),
-    onSuccess: (data) => {
-      setDnsSetupResult(data)
-      if (data.success) {
-        toast.success('DNS records created successfully', {
-          description: `${data.records_created} of ${data.total_records} records were created automatically.`,
-        })
-        // Trigger verification after successful DNS setup
-        if (selectedDomainId) {
-          verifyMutation.mutate(selectedDomainId)
-        }
-      } else if (data.records_created > 0) {
-        toast.warning('Some DNS records created', {
-          description: `${data.records_created} of ${data.total_records} records were created. Check the results for details.`,
-        })
-      } else {
-        toast.error('Failed to create DNS records', {
-          description: data.message,
-        })
-      }
-    },
-    onError: (error: Error) => {
-      toast.error('Failed to setup DNS records', {
-        description: error.message,
-      })
-    },
-  })
-
-  const form = useForm<CreateDomainFormData>({
-    resolver: zodResolver(createDomainSchema),
-    defaultValues: {
-      domain: '',
+      toast.error('Failed to delete domain', { description: error.message })
     },
   })
 
@@ -658,52 +507,24 @@ export function EmailDomainsManagement() {
     createMutation.mutate(data)
   }
 
-  const handleVerify = (id: number) => {
-    verifyMutation.mutate(id)
-  }
+  const handleVerify = (id: number) => verifyMutation.mutate(id)
+  const handleDelete = (id: number) => deleteMutation.mutate(id)
+  const handleOpen = (id: number) => navigate(`/email/domains/${id}`)
 
-  const handleDelete = (id: number) => {
-    deleteMutation.mutate(id)
-  }
-
-  const handleViewDetails = (id: number) => {
-    setSelectedDomainId(id)
-    setSelectedDnsProviderId(null)
-    setDnsSetupResult(null)
-  }
-
-  const handleSetupDns = () => {
-    if (selectedDomainId && selectedDnsProviderId) {
-      setupDnsMutation.mutate({
-        domainId: selectedDomainId,
-        dnsProviderId: selectedDnsProviderId,
-      })
-    }
-  }
+  // Provider lookup by id — avoids N+1 fetches per row.
+  const providerById = useMemo(() => {
+    const map = new Map<number, EmailProvider>()
+    providers?.forEach((p) => map.set(p.id, p))
+    return map
+  }, [providers])
 
   const hasDomains = domains && domains.length > 0
-  const hasDnsProviders = dnsProviders && dnsProviders.length > 0
   const hasProviders = providers && providers.length > 0
+  const isLoading = isLoadingDomains || isLoadingProviders
 
   return (
     <div className="space-y-4">
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">Email Domains</h2>
-          <p className="text-muted-foreground">
-            Configure domains for sending emails. DNS verification is required.
-          </p>
-        </div>
-
-        {hasDomains && hasProviders && (
-          <Button onClick={() => setIsCreateDialogOpen(true)}>
-            <Plus className="h-4 w-4 mr-2" />
-            Add Domain
-          </Button>
-        )}
-      </div>
-
-      {isLoadingDomains || isLoadingProviders ? (
+      {isLoading ? (
         <LoadingSkeleton />
       ) : !hasProviders ? (
         <EmptyState
@@ -718,33 +539,147 @@ export function EmailDomainsManagement() {
           description="Add a domain to start sending emails. You'll need to configure DNS records for verification."
           action={
             <Button onClick={() => setIsCreateDialogOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add Domain
+              <Plus className="mr-2 size-4" />
+              Add domain
             </Button>
           }
         />
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {domains.map((domain) => (
-            <DomainCard
-              key={domain.id}
-              domain={domain}
-              onVerify={handleVerify}
-              onDelete={handleDelete}
-              onViewDetails={handleViewDetails}
-            />
-          ))}
-        </div>
+        <>
+          <div className="mb-4 flex items-center justify-end">
+            <Button onClick={() => setIsCreateDialogOpen(true)}>
+              <Plus className="mr-2 size-4" />
+              Add Domain
+            </Button>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border">
+            <ul role="list" className="divide-y">
+              {domains.map((domain) => {
+                const provider = providerById.get(domain.provider_id)
+                return (
+                  <li
+                    key={domain.id}
+                    onClick={() => handleOpen(domain.id)}
+                    className="group flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-muted/40"
+                  >
+                    {/* Provider logo tile mirrors Storage page's ServiceLogo pattern,
+                        with a health dot anchored to the bottom-right. */}
+                    <div className="relative shrink-0">
+                      <div className="flex size-9 items-center justify-center rounded-md border bg-background">
+                        {provider ? (
+                          <EmailProviderLogo
+                            provider={provider.provider_type as EmailProviderType}
+                            size={18}
+                          />
+                        ) : (
+                          <Globe className="size-4 text-muted-foreground" />
+                        )}
+                      </div>
+                      <StatusDot
+                        status={domain.status}
+                        className="absolute -bottom-0.5 -right-0.5"
+                      />
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-sm font-medium">
+                          {domain.domain}
+                        </p>
+                        {provider && (
+                          <span className="rounded border bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                            {provider.provider_type}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
+                        <DomainStatusInline status={domain.status} />
+                        <span>
+                          {domain.last_verified_at
+                            ? `Verified ${formatDistanceToNow(
+                                new Date(domain.last_verified_at),
+                                { addSuffix: true }
+                              )}`
+                            : 'Never verified'}
+                        </span>
+                        <span className="hidden sm:inline">
+                          Created {formatDistanceToNow(new Date(domain.created_at), {
+                            addSuffix: true,
+                          })}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div
+                      className="flex items-center gap-1"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8"
+                        onClick={() => handleVerify(domain.id)}
+                        disabled={verifyMutation.isPending}
+                        title="Verify DNS"
+                      >
+                        <RefreshCw
+                          className={cn(
+                            'size-3.5',
+                            verifyMutation.isPending &&
+                              verifyMutation.variables === domain.id &&
+                              'animate-spin'
+                          )}
+                        />
+                        <span className="sr-only">Verify DNS for {domain.domain}</span>
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="size-8"
+                          >
+                            <EllipsisVertical className="size-3.5" />
+                            <span className="sr-only">Actions for {domain.domain}</span>
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => handleOpen(domain.id)}>
+                            Open domain
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleVerify(domain.id)}>
+                            <RefreshCw className="mr-2 size-4" />
+                            Verify DNS
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            className="text-destructive"
+                            onClick={() => handleDelete(domain.id)}
+                          >
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+                  </li>
+                )
+              })}
+            </ul>
+          </div>
+        </>
       )}
 
       {/* Create Domain Dialog */}
       <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Add Email Domain</DialogTitle>
+            <DialogTitle>Add email domain</DialogTitle>
             <DialogDescription>
-              Add a domain for sending emails. You'll need to configure DNS
-              records after adding.
+              Add a domain for sending emails. You'll need to configure DNS records
+              after adding.
             </DialogDescription>
           </DialogHeader>
 
@@ -831,9 +766,9 @@ export function EmailDomainsManagement() {
                 </Button>
                 <Button type="submit" disabled={createMutation.isPending}>
                   {createMutation.isPending && (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Loader2 className="mr-2 size-4 animate-spin" />
                   )}
-                  Add Domain
+                  Add domain
                 </Button>
               </DialogFooter>
             </form>
@@ -841,189 +776,6 @@ export function EmailDomainsManagement() {
         </DialogContent>
       </Dialog>
 
-      {/* DNS Records Dialog */}
-      <Dialog
-        open={!!selectedDomainId}
-        onOpenChange={(open) => !open && setSelectedDomainId(null)}
-      >
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>DNS Records</DialogTitle>
-            <DialogDescription>
-              Add these DNS records to your domain's DNS settings to verify
-              ownership and enable email sending.
-            </DialogDescription>
-          </DialogHeader>
-
-          {selectedDomainDetails ? (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Globe className="h-5 w-5 text-muted-foreground" />
-                  <span className="font-medium">
-                    {selectedDomainDetails.domain.domain}
-                  </span>
-                </div>
-                <StatusBadge status={selectedDomainDetails.domain.status} />
-              </div>
-
-              <DnsVerificationSummary records={selectedDomainDetails.dns_records} />
-
-              <DnsRecordsTable records={selectedDomainDetails.dns_records} />
-
-              {selectedDomainDetails.domain.status !== 'verified' && (
-                <>
-                  {/* Automatic DNS Setup Section */}
-                  {hasDnsProviders && (
-                    <div className="border rounded-lg p-4 space-y-4">
-                      <div className="flex items-center gap-2">
-                        <Wand2 className="h-5 w-5 text-primary" />
-                        <h4 className="font-medium">Automatic DNS Setup</h4>
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        If you have a DNS provider configured, you can automatically create the required DNS records.
-                      </p>
-
-                      <div className="flex flex-col sm:flex-row gap-3">
-                        <Select
-                          value={selectedDnsProviderId?.toString() || ''}
-                          onValueChange={(value) => setSelectedDnsProviderId(parseInt(value))}
-                        >
-                          <SelectTrigger className="w-full sm:w-[280px]">
-                            <SelectValue placeholder="Select DNS provider" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {dnsProviders?.map((provider) => (
-                              <SelectItem key={provider.id} value={provider.id.toString()}>
-                                <div className="flex items-center gap-2">
-                                  <Settings2 className="h-4 w-4" />
-                                  <span>{provider.name}</span>
-                                  <Badge variant="outline" className="ml-1 text-xs">
-                                    {provider.provider_type}
-                                  </Badge>
-                                </div>
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-
-                        <Button
-                          onClick={handleSetupDns}
-                          disabled={!selectedDnsProviderId || setupDnsMutation.isPending}
-                        >
-                          {setupDnsMutation.isPending ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Setting up...
-                            </>
-                          ) : (
-                            <>
-                              <Wand2 className="mr-2 h-4 w-4" />
-                              Setup DNS Automatically
-                            </>
-                          )}
-                        </Button>
-                      </div>
-
-                      {/* DNS Setup Results */}
-                      {dnsSetupResult && (
-                        <div className="space-y-3 mt-4">
-                          <Separator />
-                          <Alert variant={dnsSetupResult.success ? 'default' : 'destructive'}>
-                            {dnsSetupResult.success ? (
-                              <CheckCircle2 className="h-4 w-4" />
-                            ) : (
-                              <AlertCircle className="h-4 w-4" />
-                            )}
-                            <AlertTitle>
-                              {dnsSetupResult.success ? 'DNS Setup Complete' : 'DNS Setup Incomplete'}
-                            </AlertTitle>
-                            <AlertDescription>
-                              {dnsSetupResult.message}
-                            </AlertDescription>
-                          </Alert>
-
-                          <div className="space-y-2">
-                            {dnsSetupResult.results.map((result, index) => (
-                              <div
-                                key={index}
-                                className={`flex items-center gap-2 p-2 rounded text-sm ${
-                                  result.success
-                                    ? 'bg-green-50 dark:bg-green-950/30 text-green-700 dark:text-green-400'
-                                    : 'bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-400'
-                                }`}
-                              >
-                                {result.success ? (
-                                  <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                                ) : (
-                                  <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                                )}
-                                <Badge variant="outline" className="text-xs">
-                                  {result.record_type}
-                                </Badge>
-                                <span className="font-mono text-xs truncate">{result.name}</span>
-                                <span className="text-xs ml-auto">{result.message}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <Separator />
-
-                  {/* Manual Setup Instructions */}
-                  <div className="bg-muted/50 p-4 rounded-lg">
-                    <h4 className="font-medium mb-2">Manual DNS Configuration:</h4>
-                    <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground">
-                      <li>
-                        Log in to your domain registrar or DNS provider (e.g.,
-                        Cloudflare, Route53, GoDaddy)
-                      </li>
-                      <li>Navigate to the DNS management section</li>
-                      <li>Add each record shown above with the exact values</li>
-                      <li>
-                        Wait for DNS propagation (can take up to 48 hours, usually
-                        much faster)
-                      </li>
-                      <li>
-                        Click "Verify DNS" to check if the records are properly
-                        configured
-                      </li>
-                    </ol>
-                  </div>
-                </>
-              )}
-            </div>
-          ) : (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setSelectedDomainId(null)}
-            >
-              Close
-            </Button>
-            {selectedDomainId && (
-              <Button
-                onClick={() => handleVerify(selectedDomainId)}
-                disabled={verifyMutation.isPending}
-              >
-                {verifyMutation.isPending && (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                )}
-                <RefreshCw className="mr-2 h-4 w-4" />
-                Verify DNS
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

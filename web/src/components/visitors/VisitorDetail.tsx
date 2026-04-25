@@ -2,7 +2,7 @@ import {
   enrichVisitorMutation,
   getVisitorDetailsOptions,
   getVisitorDetailsQueryKey,
-  getVisitorSessions2Options,
+  getAnalyticsVisitorSessionsOptions,
   getVisitorSessionsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { VisitorJourney } from './VisitorJourney'
@@ -218,15 +218,15 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
     isLoading: isLoadingSessions,
     error: sessionsError,
   } = useQuery({
-    ...getVisitorSessionsOptions({
+    ...getAnalyticsVisitorSessionsOptions({
       path: {
-        visitor_id: visitorId, // UUID string
+        visitor_id: visitorDetails?.id as number,
       },
       query: {
         project_id: project.id,
       },
     }),
-    enabled: !!visitorDetails?.visitor_id,
+    enabled: !!visitorDetails?.id,
   })
 
   // Query for session replays
@@ -235,7 +235,7 @@ export function VisitorDetail({ project, visitorId }: VisitorDetailProps) {
     isLoading: isLoadingReplays,
     error: replaysError,
   } = useQuery({
-    ...getVisitorSessions2Options({
+    ...getVisitorSessionsOptions({
       path: {
         visitor_id: visitorDetails?.id as number,
       },

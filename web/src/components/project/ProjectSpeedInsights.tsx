@@ -5,7 +5,6 @@ import {
   hasPerformanceMetricsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -15,11 +14,14 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from '@/components/ui/hover-card'
-import { Progress } from '@/components/ui/progress'
+  MetricSparkline,
+  type MetricTone,
+} from '@/components/charts/metric-sparkline'
+import { ScoreRing } from '@/components/charts/score-ring'
+import {
+  ThresholdLineChart,
+  type ThresholdBand,
+} from '@/components/charts/threshold-line-chart'
 import {
   Select,
   SelectContent,
@@ -33,46 +35,60 @@ import { cn } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
 import { format, subDays } from 'date-fns'
 import {
-  Activity,
   AlertTriangle,
   CheckCircle2,
-  Clock,
   Code2,
-  Eye,
   Info,
   Monitor,
   RefreshCw,
   Smartphone,
-  TrendingUp,
   Zap,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import {
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  TooltipProps,
-  XAxis,
-  YAxis,
-} from 'recharts'
 
-const METRIC_THRESHOLDS = {
-  fcp: { good: 1800, poor: 3000, unit: 'ms', label: 'First Contentful Paint' },
+type MetricKey = 'lcp' | 'inp' | 'cls' | 'ttfb' | 'fcp'
+
+const METRIC_THRESHOLDS: Record<
+  MetricKey,
+  { good: number; poor: number; unit: 'ms' | ''; label: string; short: string }
+> = {
+  fcp: {
+    good: 1800,
+    poor: 3000,
+    unit: 'ms',
+    label: 'First Contentful Paint',
+    short: 'FCP',
+  },
   lcp: {
     good: 2500,
     poor: 4000,
     unit: 'ms',
     label: 'Largest Contentful Paint',
+    short: 'LCP',
   },
-  fid: { good: 100, poor: 300, unit: 'ms', label: 'First Input Delay' },
-  cls: { good: 0.1, poor: 0.25, unit: '', label: 'Cumulative Layout Shift' },
-  ttfb: { good: 800, poor: 1800, unit: 'ms', label: 'Time to First Byte' },
-  inp: { good: 200, poor: 500, unit: 'ms', label: 'Interaction to Next Paint' },
-} as const
+  cls: {
+    good: 0.1,
+    poor: 0.25,
+    unit: '',
+    label: 'Cumulative Layout Shift',
+    short: 'CLS',
+  },
+  ttfb: {
+    good: 800,
+    poor: 1800,
+    unit: 'ms',
+    label: 'Time to First Byte',
+    short: 'TTFB',
+  },
+  inp: {
+    good: 200,
+    poor: 500,
+    unit: 'ms',
+    label: 'Interaction to Next Paint',
+    short: 'INP',
+  },
+}
 
 const METRIC_WEIGHTS = {
   fcp: 0.15,
@@ -81,16 +97,34 @@ const METRIC_WEIGHTS = {
   cls: 0.25,
 } as const
 
-function calculateMetricScore(
-  value: number,
-  metric: keyof typeof METRIC_THRESHOLDS
-) {
-  const thresholds = METRIC_THRESHOLDS[metric]
-  if (value <= thresholds.good) return 1
-  if (value >= thresholds.poor) return 0
-  const range = thresholds.poor - thresholds.good
-  const valueFromGood = value - thresholds.good
-  return 1 - valueFromGood / range
+type MetricStatus = 'good' | 'needs-improvement' | 'poor'
+
+function getMetricStatus(value: number, metric: MetricKey): MetricStatus {
+  const t = METRIC_THRESHOLDS[metric]
+  if (value <= t.good) return 'good'
+  if (value >= t.poor) return 'poor'
+  return 'needs-improvement'
+}
+
+function statusToTone(status: MetricStatus): MetricTone {
+  if (status === 'good') return 'good'
+  if (status === 'poor') return 'poor'
+  return 'warn'
+}
+
+function formatMetricValue(value: number | null | undefined, metric: MetricKey) {
+  if (value === null || value === undefined) return '—'
+  const t = METRIC_THRESHOLDS[metric]
+  if (metric === 'cls') return value.toFixed(2)
+  if (value >= 1000) return `${(value / 1000).toFixed(2)}s`
+  return `${Math.round(value)}${t.unit}`
+}
+
+function calculateMetricScore(value: number, metric: MetricKey) {
+  const t = METRIC_THRESHOLDS[metric]
+  if (value <= t.good) return 1
+  if (value >= t.poor) return 0
+  return 1 - (value - t.good) / (t.poor - t.good)
 }
 
 function calculateOverallScore(metrics: any): number {
@@ -98,106 +132,93 @@ function calculateOverallScore(metrics: any): number {
   let totalScore = 0
   let totalWeight = 0
 
-  if (metrics.fcp_p75) {
-    totalScore +=
-      calculateMetricScore(metrics.fcp_p75, 'fcp') * METRIC_WEIGHTS.fcp
-    totalWeight += METRIC_WEIGHTS.fcp
+  const add = (
+    val: number | null | undefined,
+    key: MetricKey,
+    weight: number,
+  ) => {
+    if (val !== null && val !== undefined && val > 0) {
+      totalScore += calculateMetricScore(val, key) * weight
+      totalWeight += weight
+    }
   }
-  if (metrics.lcp_p75) {
-    totalScore +=
-      calculateMetricScore(metrics.lcp_p75, 'lcp') * METRIC_WEIGHTS.lcp
-    totalWeight += METRIC_WEIGHTS.lcp
-  }
-  if (metrics.inp_p75) {
-    totalScore +=
-      calculateMetricScore(metrics.inp_p75, 'inp') * METRIC_WEIGHTS.inp
-    totalWeight += METRIC_WEIGHTS.inp
-  }
-  if (metrics.cls_p75) {
-    totalScore +=
-      calculateMetricScore(metrics.cls_p75, 'cls') * METRIC_WEIGHTS.cls
-    totalWeight += METRIC_WEIGHTS.cls
-  }
+
+  add(metrics.fcp_p75, 'fcp', METRIC_WEIGHTS.fcp)
+  add(metrics.lcp_p75, 'lcp', METRIC_WEIGHTS.lcp)
+  add(metrics.inp_p75, 'inp', METRIC_WEIGHTS.inp)
+  add(metrics.cls_p75, 'cls', METRIC_WEIGHTS.cls)
 
   if (totalWeight === 0) return 0
   return Math.round((totalScore / totalWeight) * 100)
 }
 
-// Custom tooltip component
-const CustomTooltip = ({
-  active,
-  payload,
-  label,
-}: TooltipProps<number, string>) => {
-  if (!active || !payload || !payload.length) return null
+function scoreTone(score: number): MetricTone {
+  if (score >= 90) return 'good'
+  if (score >= 50) return 'warn'
+  return 'poor'
+}
+
+const STATUS_LABEL: Record<MetricStatus, string> = {
+  good: 'Good',
+  'needs-improvement': 'Needs work',
+  poor: 'Poor',
+}
+
+const STATUS_CHIP: Record<MetricStatus, string> = {
+  good: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
+  'needs-improvement':
+    'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+  poor: 'bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20',
+}
+
+const STATUS_TEXT: Record<MetricStatus, string> = {
+  good: 'text-emerald-600 dark:text-emerald-400',
+  'needs-improvement': 'text-amber-600 dark:text-amber-400',
+  poor: 'text-red-600 dark:text-red-400',
+}
+
+interface MetricTileProps {
+  metric: MetricKey
+  value: number | null | undefined
+  history: (number | null)[]
+}
+
+function MetricTile({ metric, value, history }: MetricTileProps) {
+  const t = METRIC_THRESHOLDS[metric]
+  const hasValue = value !== null && value !== undefined && value > 0
+  const status: MetricStatus = hasValue
+    ? getMetricStatus(value, metric)
+    : 'needs-improvement'
+  const tone = statusToTone(status)
 
   return (
-    <div className="rounded-lg border bg-background p-3 shadow-lg">
-      <p className="mb-2 text-sm font-semibold">{label}</p>
-      <div className="space-y-1">
-        {payload.map((entry, index) => {
-          const metric = entry.dataKey as string
-          const value = entry.value as number
-
-          // Get appropriate color and icon based on metric
-          const getMetricStyle = () => {
-            switch (metric) {
-              case 'fcp':
-                return { color: '#8884d8', icon: '⚡' }
-              case 'lcp':
-                return { color: '#82ca9d', icon: '📊' }
-              case 'ttfb':
-                return { color: '#ffc658', icon: '🔄' }
-              case 'cls':
-                return { color: '#ff6b6b', icon: '📐' }
-              default:
-                return { color: entry.color, icon: '•' }
-            }
-          }
-
-          const style = getMetricStyle()
-          const formattedValue =
-            metric === 'cls'
-              ? (value / 1000).toFixed(3)
-              : `${value.toFixed(0)}ms`
-
-          return (
-            <div
-              key={index}
-              className="flex items-center justify-between gap-4 text-sm"
-            >
-              <div className="flex items-center gap-2">
-                <span style={{ color: style.color }}>{style.icon}</span>
-                <span className="text-muted-foreground">{entry.name}</span>
-              </div>
-              <span
-                className="font-mono font-medium"
-                style={{ color: style.color }}
-              >
-                {formattedValue}
-              </span>
-            </div>
-          )
-        })}
+    <div className="flex flex-col gap-2 rounded-lg border bg-card p-4 transition-colors hover:border-foreground/20">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          {t.short}
+        </span>
+        {hasValue ? (
+          <span
+            className={cn(
+              'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+              STATUS_CHIP[status],
+            )}
+          >
+            {STATUS_LABEL[status]}
+          </span>
+        ) : (
+          <span className="rounded-full border border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+            No data
+          </span>
+        )}
       </div>
-    </div>
-  )
-}
-
-// Helper component to display score status
-interface ScoreStatusProps {
-  status: {
-    label: string
-    icon: React.ComponentType<{ className?: string }>
-    color: string
-  }
-}
-
-function ScoreStatus({ status }: ScoreStatusProps) {
-  return (
-    <div className="flex items-center gap-2">
-      <status.icon className={cn('h-4 w-4', status.color)} />
-      <span className={cn('font-medium', status.color)}>{status.label}</span>
+      <div className="flex items-baseline gap-1">
+        <span className="text-2xl font-semibold tabular-nums">
+          {formatMetricValue(value, metric)}
+        </span>
+        <span className="text-[10px] text-muted-foreground">p75</span>
+      </div>
+      <MetricSparkline data={history} tone={hasValue ? tone : 'neutral'} />
     </div>
   )
 }
@@ -208,21 +229,18 @@ interface ProjectSpeedInsightsProps {
 
 export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
   const [selectedEnvironment, setSelectedEnvironment] = useState<number | null>(
-    null
+    null,
   )
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop')
   const [timeRange, setTimeRange] = useState('7d')
+  const [activeMetric, setActiveMetric] = useState<MetricKey>('lcp')
 
-  // Fetch environments for the project
   const { data: environmentsData } = useQuery({
     ...getEnvironmentsOptions({
-      path: {
-        project_id: project.id,
-      },
+      path: { project_id: project.id },
     }),
   })
 
-  // Set the first environment as default when environments are loaded
   useEffect(() => {
     if (
       environmentsData &&
@@ -248,16 +266,13 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
 
   const startDate = useMemo(
     () => subDays(new Date(), getDays(timeRange)).toISOString(),
-    [timeRange]
+    [timeRange],
   )
   const endDate = useMemo(() => new Date().toISOString(), [])
 
-  // Check if the project has ANY performance data (regardless of device filter)
   const { data: hasMetricsData } = useQuery({
     ...hasPerformanceMetricsOptions({
-      query: {
-        project_id: project.id,
-      },
+      query: { project_id: project.id },
     }),
   })
 
@@ -276,101 +291,56 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
         device_type: device,
       },
     }),
-    enabled: selectedEnvironment !== null, // Only fetch when environment is selected
-    refetchInterval: 300000, // Refetch every 5 minutes
+    enabled: selectedEnvironment !== null,
+    refetchInterval: 300000,
   })
 
   const chartData = useMemo(() => {
     if (!metrics?.timestamps) return []
-
-    // Process data to handle nulls properly
-    return metrics.timestamps.map((timestamp: string, i: number) => {
-      const data: any = {
-        timestamp: format(
-          new Date(timestamp),
-          timeRange === '1d' ? 'HH:mm' : 'MMM dd'
-        ),
-        rawTimestamp: timestamp,
-      }
-
-      // Only add metric values if they're not null
-      if (metrics.fcp[i] !== null) data.fcp = metrics.fcp[i]
-      if (metrics.lcp[i] !== null) data.lcp = metrics.lcp[i]
-      if (metrics.ttfb[i] !== null) data.ttfb = metrics.ttfb[i]
-      if (metrics.fid[i] !== null) data.fid = metrics.fid[i]
-      if (metrics.cls[i] !== null) data.cls = metrics.cls[i] * 1000 // Scale CLS for visibility
-
-      return data
-    })
+    return metrics.timestamps.map((timestamp: string, i: number) => ({
+      timestamp: format(
+        new Date(timestamp),
+        timeRange === '1d' ? 'HH:mm' : 'MMM dd',
+      ),
+      fcp: metrics.fcp[i],
+      lcp: metrics.lcp[i],
+      ttfb: metrics.ttfb[i],
+      inp: metrics.inp?.[i] ?? null,
+      // CLS is stored as a ratio; display in raw units (no scaling).
+      cls: metrics.cls[i],
+    }))
   }, [metrics, timeRange])
 
-  const score = useMemo(() => {
-    if (!metrics) return 0
-    return calculateOverallScore(metrics)
-  }, [metrics])
+  const score = useMemo(
+    () => (metrics ? calculateOverallScore(metrics) : 0),
+    [metrics],
+  )
 
-  // Check for data sparsity
-  const dataSparseWarning = useMemo(() => {
-    if (!metrics) return false
-
-    // Count non-null values for each metric
-    const countValid = (arr: any[]) =>
-      arr?.filter((v) => v !== null).length || 0
-
-    const totalPoints = metrics.timestamps?.length || 0
-    const validFcp = countValid(metrics.fcp)
-    const validLcp = countValid(metrics.lcp)
-    const validTtfb = countValid(metrics.ttfb)
-
-    // If less than 50% of data points are valid, show warning
-    const avgValidPercent =
-      ((validFcp + validLcp + validTtfb) / 3 / totalPoints) * 100
-
-    return avgValidPercent < 50
-  }, [metrics])
-
-  // Check if the project has NO performance data at all (show setup screen)
   const hasNoDataAtAll = hasMetricsData?.has_metrics === false
 
-  // Check if the current filtered query returned no data (show empty filter state)
   const hasNoFilteredData = useMemo(() => {
     if (!metrics || isLoading) return false
-
     const countValid = (arr: any[]) =>
       arr?.filter((v) => v !== null && v !== undefined).length || 0
-
-    const validFcp = countValid(metrics.fcp)
-    const validLcp = countValid(metrics.lcp)
-    const validTtfb = countValid(metrics.ttfb)
-    const validFid = countValid(metrics.fid)
-    const validCls = countValid(metrics.cls)
-
     return (
-      validFcp === 0 &&
-      validLcp === 0 &&
-      validTtfb === 0 &&
-      validFid === 0 &&
-      validCls === 0
+      countValid(metrics.fcp) === 0 &&
+      countValid(metrics.lcp) === 0 &&
+      countValid(metrics.ttfb) === 0 &&
+      countValid(metrics.fid) === 0 &&
+      countValid(metrics.cls) === 0
     )
   }, [metrics, isLoading])
 
-  const getScoreColor = (score: number) => {
-    if (score >= 90) return 'text-green-600'
-    if (score >= 50) return 'text-orange-500'
-    return 'text-red-500'
-  }
-
-  const getScoreStatus = (score: number) => {
-    if (score >= 90)
-      return { label: 'Good', icon: CheckCircle2, color: 'text-green-600' }
-    if (score >= 50)
-      return {
-        label: 'Needs Improvement',
-        icon: AlertTriangle,
-        color: 'text-orange-500',
-      }
-    return { label: 'Poor', icon: AlertTriangle, color: 'text-red-500' }
-  }
+  const metricHistory: Record<MetricKey, (number | null)[]> = useMemo(
+    () => ({
+      fcp: metrics?.fcp ?? [],
+      lcp: metrics?.lcp ?? [],
+      inp: metrics?.inp ?? [],
+      cls: metrics?.cls ?? [],
+      ttfb: metrics?.ttfb ?? [],
+    }),
+    [metrics],
+  )
 
   if (error) {
     return (
@@ -383,11 +353,9 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
     )
   }
 
-  // Show setup instructions only if there's no data at all for the project
   if (hasNoDataAtAll && !isLoading) {
     return (
       <div className="space-y-6">
-        {/* Header */}
         <Card>
           <CardHeader>
             <div className="flex items-start gap-3">
@@ -405,7 +373,6 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
           </CardHeader>
         </Card>
 
-        {/* No Data Alert */}
         <Card className="border-yellow-200 bg-yellow-50 dark:border-yellow-800 dark:bg-yellow-950/50">
           <CardHeader>
             <div className="flex items-center gap-2">
@@ -422,7 +389,6 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
           </CardHeader>
         </Card>
 
-        {/* Setup Instructions - Redirect to Analytics */}
         <Card>
           <CardHeader>
             <CardTitle>Setup Analytics to Track Performance</CardTitle>
@@ -442,19 +408,10 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
                     </h4>
                     <p className="text-sm text-muted-foreground">
                       When you install the Temps analytics SDK, it automatically
-                      captures:
+                      captures LCP, INP, CLS, FCP, TTFB, and FID.
                     </p>
-                    <ul className="mt-2 space-y-1 text-sm text-muted-foreground ml-4">
-                      <li>• First Contentful Paint (FCP)</li>
-                      <li>• Largest Contentful Paint (LCP)</li>
-                      <li>• First Input Delay (FID)</li>
-                      <li>• Interaction to Next Paint (INP)</li>
-                      <li>• Cumulative Layout Shift (CLS)</li>
-                      <li>• Time to First Byte (TTFB)</li>
-                    </ul>
                   </div>
                 </div>
-
                 <div className="flex items-start gap-3">
                   <Zap className="h-5 w-5 text-blue-600 mt-0.5 flex-shrink-0" />
                   <div>
@@ -471,12 +428,7 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
 
             <div className="flex flex-col gap-3">
               <Link to={`/projects/${project.slug}/analytics/setup`}>
-                <Button
-                  onClick={() =>
-                    (window.location.href = `/projects/${project.slug}/analytics/setup`)
-                  }
-                  className="w-full sm:w-auto"
-                >
+                <Button className="w-full sm:w-auto">
                   <Code2 className="mr-2 h-4 w-4" />
                   Go to Analytics Setup
                 </Button>
@@ -488,164 +440,124 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
             </div>
           </CardContent>
         </Card>
-
-        {/* Additional Information */}
-        <Card>
-          <CardHeader>
-            <CardTitle>What are Core Web Vitals?</CardTitle>
-            <CardDescription>
-              Key metrics that measure real-world user experience
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Eye className="h-4 w-4 text-muted-foreground" />
-                    <h4 className="font-medium text-sm">LCP - Loading</h4>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Measures how quickly the main content loads. Target: &lt;
-                    2.5s
-                  </p>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Zap className="h-4 w-4 text-muted-foreground" />
-                    <h4 className="font-medium text-sm">INP - Interactivity</h4>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Measures responsiveness to user interactions. Target: &lt;
-                    200ms
-                  </p>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <TrendingUp className="h-4 w-4 text-muted-foreground" />
-                    <h4 className="font-medium text-sm">
-                      CLS - Visual Stability
-                    </h4>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Measures unexpected layout shifts. Target: &lt; 0.1
-                  </p>
-                </div>
-                <div className="rounded-lg border p-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <Clock className="h-4 w-4 text-muted-foreground" />
-                    <h4 className="font-medium text-sm">
-                      TTFB - Server Response
-                    </h4>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Measures server response time. Target: &lt; 800ms
-                  </p>
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
       </div>
     )
   }
 
+  const tileMetrics: MetricKey[] = ['lcp', 'inp', 'cls', 'ttfb']
+  const metricValueMap: Record<MetricKey, number | null | undefined> = {
+    lcp: metrics?.lcp_p75,
+    inp: metrics?.inp_p75,
+    cls: metrics?.cls_p75,
+    ttfb: metrics?.ttfb_p75,
+    fcp: metrics?.fcp_p75,
+  }
+
+  const activeThreshold = METRIC_THRESHOLDS[activeMetric]
+  const activeValue = metricValueMap[activeMetric]
+  const activeTone: MetricTone =
+    activeValue !== null && activeValue !== undefined && activeValue > 0
+      ? statusToTone(getMetricStatus(activeValue, activeMetric))
+      : 'neutral'
+
+  const thresholdBands: ThresholdBand[] = [
+    {
+      value: activeThreshold.good,
+      tone: 'good',
+      label: `Good (${formatMetricValue(activeThreshold.good, activeMetric)})`,
+    },
+    {
+      value: activeThreshold.poor,
+      tone: 'poor',
+      label: `Poor (${formatMetricValue(activeThreshold.poor, activeMetric)})`,
+    },
+  ]
+
+  const failingMetrics = tileMetrics.filter((m) => {
+    const v = metricValueMap[m]
+    return (
+      v !== null && v !== undefined && v > 0 && getMetricStatus(v, m) !== 'good'
+    )
+  })
+
+  const overallStatus: MetricStatus =
+    score >= 90 ? 'good' : score >= 50 ? 'needs-improvement' : 'poor'
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">
+    <div className="space-y-5">
+      {/* Compact header with inline controls */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="space-y-0.5">
+          <h2 className="text-xl font-semibold tracking-tight">
             Performance Insights
           </h2>
-          <p className="text-muted-foreground">
-            Real user metrics and Core Web Vitals for your application
+          <p className="text-sm text-muted-foreground">
+            Real user Core Web Vitals
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={selectedEnvironment?.toString()}
+            onValueChange={(value) => setSelectedEnvironment(Number(value))}
+            disabled={!environmentsData || environmentsData.length === 0}
+          >
+            <SelectTrigger className="h-8 w-[130px] text-xs">
+              <SelectValue placeholder="Environment" />
+            </SelectTrigger>
+            <SelectContent>
+              {environmentsData?.map((env) => (
+                <SelectItem key={env.id} value={env.id.toString()}>
+                  {env.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Tabs
+            value={device}
+            onValueChange={(v) => setDevice(v as 'desktop' | 'mobile')}
+          >
+            <TabsList className="h-8">
+              <TabsTrigger value="desktop" className="h-6 gap-1.5 px-2 text-xs">
+                <Monitor className="h-3.5 w-3.5" />
+                Desktop
+              </TabsTrigger>
+              <TabsTrigger value="mobile" className="h-6 gap-1.5 px-2 text-xs">
+                <Smartphone className="h-3.5 w-3.5" />
+                Mobile
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
+          <Select value={timeRange} onValueChange={setTimeRange}>
+            <SelectTrigger className="h-8 w-[110px] text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="1d">Last 24h</SelectItem>
+              <SelectItem value="7d">Last 7 days</SelectItem>
+              <SelectItem value="30d">Last 30 days</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Button
             variant="outline"
             size="sm"
+            className="h-8"
             onClick={() => refetch()}
             disabled={isLoading}
           >
-            <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
-            Refresh
+            <RefreshCw
+              className={cn('h-3.5 w-3.5', isLoading && 'animate-spin')}
+            />
           </Button>
         </div>
       </div>
 
-      {/* Controls */}
-      <Card>
-        <CardContent className="pt-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-              <div className="flex items-center gap-2">
-                <Select
-                  value={selectedEnvironment?.toString()}
-                  onValueChange={(value) =>
-                    setSelectedEnvironment(Number(value))
-                  }
-                  disabled={!environmentsData || environmentsData.length === 0}
-                >
-                  <SelectTrigger className="w-[140px]">
-                    <SelectValue placeholder="Select environment" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {environmentsData?.map((env) => (
-                      <SelectItem key={env.id} value={env.id.toString()}>
-                        {env.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-
-                <Tabs
-                  value={device}
-                  onValueChange={(v) => setDevice(v as 'desktop' | 'mobile')}
-                >
-                  <TabsList>
-                    <TabsTrigger
-                      value="desktop"
-                      className="flex items-center gap-2"
-                    >
-                      <Monitor className="h-4 w-4" />
-                      Desktop
-                    </TabsTrigger>
-                    <TabsTrigger
-                      value="mobile"
-                      className="flex items-center gap-2"
-                    >
-                      <Smartphone className="h-4 w-4" />
-                      Mobile
-                    </TabsTrigger>
-                  </TabsList>
-                </Tabs>
-              </div>
-            </div>
-
-            <Select value={timeRange} onValueChange={setTimeRange}>
-              <SelectTrigger className="w-[120px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="1d">Last 24h</SelectItem>
-                <SelectItem value="7d">Last 7 days</SelectItem>
-                <SelectItem value="30d">Last 30 days</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </CardContent>
-      </Card>
-
       {isLoading ? (
-        <div className="grid gap-6 lg:grid-cols-[350px_1fr]">
-          <div className="space-y-4">
-            <Skeleton className="h-[400px] w-full" />
-          </div>
-          <div className="space-y-4">
-            <Skeleton className="h-[400px] w-full" />
-          </div>
+        <div className="space-y-5">
+          <Skeleton className="h-[120px] w-full" />
+          <Skeleton className="h-[380px] w-full" />
         </div>
       ) : hasNoFilteredData ? (
         <Card>
@@ -659,447 +571,175 @@ export function ProjectSpeedInsights({ project }: ProjectSpeedInsightsProps) {
               No {device} data available
             </h3>
             <p className="text-sm text-muted-foreground text-center max-w-md">
-              No performance metrics have been recorded for {device} devices in the selected time range. Try switching to{' '}
-              {device === 'desktop' ? 'mobile' : 'desktop'} or selecting a different time range.
+              No performance metrics have been recorded for {device} devices in
+              the selected time range. Try switching to{' '}
+              {device === 'desktop' ? 'mobile' : 'desktop'} or selecting a
+              different time range.
             </p>
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-6 lg:grid-cols-[350px_1fr]">
-          {/* Metrics Overview */}
-          <div className="space-y-4">
-            <Card>
-              <CardHeader className="pb-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle className="text-lg">Performance Score</CardTitle>
-                    <CardDescription>Based on Core Web Vitals</CardDescription>
-                  </div>
-                  <HoverCard>
-                    <HoverCardTrigger asChild>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
-                        <Info className="h-4 w-4" />
-                      </Button>
-                    </HoverCardTrigger>
-                    <HoverCardContent className="w-80">
-                      <div className="space-y-2">
-                        <h4 className="text-sm font-semibold">
-                          How is this calculated?
-                        </h4>
-                        <p className="text-sm text-muted-foreground">
-                          The performance score is a weighted average of your
-                          Core Web Vitals:
-                        </p>
-                        <ul className="text-sm text-muted-foreground space-y-1">
-                          <li>• First Contentful Paint (15%)</li>
-                          <li>• Largest Contentful Paint (30%)</li>
-                          <li>• Interaction to Next Paint (30%)</li>
-                          <li>• Cumulative Layout Shift (25%)</li>
-                        </ul>
-                        <div className="pt-2 border-t">
-                          <div className="text-xs space-y-1">
-                            <div className="flex items-center gap-2">
-                              <div className="w-3 h-3 rounded-full bg-green-500" />
-                              <span>90-100: Good</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <div className="w-3 h-3 rounded-full bg-orange-500" />
-                              <span>50-89: Needs Improvement</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <div className="w-3 h-3 rounded-full bg-red-500" />
-                              <span>0-49: Poor</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </HoverCardContent>
-                  </HoverCard>
+        <>
+          {/* Hero strip */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <div className="flex items-center gap-4 rounded-lg border bg-card p-4">
+              <ScoreRing score={score} tone={scoreTone(score)} />
+              <div className="min-w-0 space-y-1">
+                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Overall
                 </div>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-6">
-                  <div className="relative">
-                    <div className="flex h-20 w-20 items-center justify-center rounded-full border-8 border-muted">
-                      <span
-                        className={cn(
-                          'text-2xl font-bold',
-                          getScoreColor(score)
-                        )}
-                      >
-                        {score}
-                      </span>
-                    </div>
-                    <div
-                      className={cn(
-                        'absolute inset-0 rounded-full border-8 border-transparent',
-                        {
-                          'border-t-green-600': score >= 90,
-                          'border-t-orange-500': score >= 50 && score < 90,
-                          'border-t-red-500': score < 50,
-                        }
-                      )}
-                      style={{
-                        transform: `rotate(${(score / 100) * 360 - 90}deg)`,
-                      }}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <ScoreStatus status={getScoreStatus(score)} />
-                    <p className="text-sm text-muted-foreground">
-                      {score >= 90
-                        ? 'Excellent performance'
-                        : score >= 50
-                          ? 'Room for improvement'
-                          : 'Significant issues detected'}
-                    </p>
-                  </div>
+                <div
+                  className={cn('text-sm font-medium', STATUS_TEXT[overallStatus])}
+                >
+                  {STATUS_LABEL[overallStatus]}
                 </div>
-              </CardContent>
-            </Card>
-
-            {metrics && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-lg">Core Web Vitals</CardTitle>
-                  <CardDescription>75th percentile values</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <MetricCard
-                    label="First Contentful Paint"
-                    value={metrics.fcp_p75 || 0}
-                    unit="ms"
-                    threshold={METRIC_THRESHOLDS.fcp}
-                    icon={<Eye className="h-4 w-4" />}
-                  />
-                  <MetricCard
-                    label="Largest Contentful Paint"
-                    value={metrics.lcp_p75 || 0}
-                    unit="ms"
-                    threshold={METRIC_THRESHOLDS.lcp}
-                    icon={<Activity className="h-4 w-4" />}
-                  />
-                  <MetricCard
-                    label="First Input Delay"
-                    value={metrics.fid_p75 || 0}
-                    unit="ms"
-                    threshold={METRIC_THRESHOLDS.fid}
-                    icon={<Zap className="h-4 w-4" />}
-                  />
-                  <MetricCard
-                    label="Cumulative Layout Shift"
-                    value={metrics.cls_p75 || 0}
-                    unit=""
-                    threshold={METRIC_THRESHOLDS.cls}
-                    icon={<TrendingUp className="h-4 w-4" />}
-                  />
-                  <MetricCard
-                    label="Time to First Byte"
-                    value={metrics.ttfb_p75 || 0}
-                    unit="ms"
-                    threshold={METRIC_THRESHOLDS.ttfb}
-                    icon={<Clock className="h-4 w-4" />}
-                  />
-                </CardContent>
-              </Card>
-            )}
+                <div className="text-xs text-muted-foreground">
+                  Weighted Web Vitals
+                </div>
+              </div>
+            </div>
+            {tileMetrics.map((m) => (
+              <MetricTile
+                key={m}
+                metric={m}
+                value={metricValueMap[m]}
+                history={metricHistory[m]}
+              />
+            ))}
           </div>
 
-          {/* Charts */}
-          <div className="space-y-4">
-            {dataSparseWarning && (
-              <Alert>
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  Limited performance data available. Metrics are being
-                  collected as users visit your site. Data points with missing
-                  values indicate periods with no user activity.
-                </AlertDescription>
-              </Alert>
-            )}
+          {/* Tabbed trend chart */}
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <CardTitle className="text-base">Trend</CardTitle>
+                  <CardDescription>
+                    p75 over time · green/red lines show Good and Poor thresholds
+                  </CardDescription>
+                </div>
+                <Tabs
+                  value={activeMetric}
+                  onValueChange={(v) => setActiveMetric(v as MetricKey)}
+                >
+                  <TabsList className="h-8">
+                    {tileMetrics.map((m) => (
+                      <TabsTrigger
+                        key={m}
+                        value={m}
+                        className="h-6 px-2.5 text-xs"
+                      >
+                        {METRIC_THRESHOLDS[m].short}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <ThresholdLineChart
+                data={chartData}
+                xKey="timestamp"
+                series={{
+                  dataKey: activeMetric,
+                  tone: activeTone,
+                  label: activeThreshold.label,
+                }}
+                thresholds={thresholdBands}
+                height={300}
+                yTickFormatter={(v) => {
+                  if (activeMetric === 'cls') return v.toFixed(2)
+                  if (v >= 1000) return `${(v / 1000).toFixed(1)}s`
+                  return `${v}`
+                }}
+                tooltipValueFormatter={(v) => formatMetricValue(v, activeMetric)}
+                tooltipFooter={(v) => {
+                  const status = getMetricStatus(v, activeMetric)
+                  return STATUS_LABEL[status]
+                }}
+              />
+            </CardContent>
+          </Card>
 
+          {/* Targeted recommendations */}
+          {failingMetrics.length > 0 ? (
             <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <TrendingUp className="h-5 w-5" />
-                  Performance Trends
-                </CardTitle>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Recommendations</CardTitle>
                 <CardDescription>
-                  Metrics over time (75th percentile)
+                  {failingMetrics.length} metric
+                  {failingMetrics.length === 1 ? '' : 's'} below target
                 </CardDescription>
               </CardHeader>
-              <CardContent>
-                <div className="h-[350px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart
-                      data={chartData}
-                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+              <CardContent className="space-y-2">
+                {failingMetrics.map((m) => {
+                  const v = metricValueMap[m] as number
+                  const status = getMetricStatus(v, m)
+                  const t = METRIC_THRESHOLDS[m]
+                  const targetLabel =
+                    m === 'cls' ? t.good.toFixed(2) : `${t.good}${t.unit}`
+                  return (
+                    <div
+                      key={m}
+                      className="flex items-start gap-3 rounded-lg border p-3"
                     >
-                      <defs>
-                        <linearGradient
-                          id="colorFcp"
-                          x1="0"
-                          y1="0"
-                          x2="0"
-                          y2="1"
-                        >
-                          <stop
-                            offset="5%"
-                            stopColor="#8884d8"
-                            stopOpacity={0.3}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor="#8884d8"
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                        <linearGradient
-                          id="colorLcp"
-                          x1="0"
-                          y1="0"
-                          x2="0"
-                          y2="1"
-                        >
-                          <stop
-                            offset="5%"
-                            stopColor="#82ca9d"
-                            stopOpacity={0.3}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor="#82ca9d"
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                        <linearGradient
-                          id="colorTtfb"
-                          x1="0"
-                          y1="0"
-                          x2="0"
-                          y2="1"
-                        >
-                          <stop
-                            offset="5%"
-                            stopColor="#ffc658"
-                            stopOpacity={0.3}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor="#ffc658"
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid
-                        strokeDasharray="3 3"
-                        stroke="hsl(var(--border))"
-                        opacity={0.3}
-                      />
-                      <XAxis
-                        dataKey="timestamp"
-                        stroke="hsl(var(--muted-foreground))"
-                        fontSize={11}
-                        tick={{ fill: 'hsl(var(--muted-foreground))' }}
-                      />
-                      <YAxis
-                        stroke="hsl(var(--muted-foreground))"
-                        fontSize={11}
-                        tick={{ fill: 'hsl(var(--muted-foreground))' }}
-                        label={{
-                          value: 'Time (ms)',
-                          angle: -90,
-                          position: 'insideLeft',
-                          style: {
-                            fontSize: 11,
-                            fill: 'hsl(var(--muted-foreground))',
-                          },
-                        }}
-                      />
-                      <Tooltip content={<CustomTooltip />} />
-                      <Legend
-                        wrapperStyle={{
-                          paddingTop: '20px',
-                        }}
-                        iconType="line"
-                        formatter={(value) => (
-                          <span className="text-xs text-muted-foreground">
-                            {value}
-                          </span>
+                      <div
+                        className={cn(
+                          'mt-0.5 rounded-md border p-1.5',
+                          STATUS_CHIP[status],
                         )}
-                        iconSize={18}
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="fcp"
-                        stroke="#8884d8"
-                        strokeWidth={2.5}
-                        name="First Contentful Paint"
-                        connectNulls={true}
-                        dot={false}
-                        activeDot={{ r: 6, strokeWidth: 0 }}
-                        strokeLinecap="round"
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="lcp"
-                        stroke="#82ca9d"
-                        strokeWidth={2.5}
-                        name="Largest Contentful Paint"
-                        connectNulls={true}
-                        dot={false}
-                        activeDot={{ r: 6, strokeWidth: 0 }}
-                        strokeLinecap="round"
-                      />
-                      <Line
-                        type="monotone"
-                        dataKey="ttfb"
-                        stroke="#ffc658"
-                        strokeWidth={2.5}
-                        name="Time to First Byte"
-                        connectNulls={true}
-                        dot={false}
-                        activeDot={{ r: 6, strokeWidth: 0 }}
-                        strokeLinecap="round"
-                      />
-                    </LineChart>
-                  </ResponsiveContainer>
+                      >
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                      </div>
+                      <div className="flex-1 space-y-0.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium">{t.label}</span>
+                          <span className={cn('text-xs', STATUS_TEXT[status])}>
+                            {formatMetricValue(v, m)} · target {targetLabel}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {recommendationFor(m)}
+                        </p>
+                      </div>
+                    </div>
+                  )
+                })}
+              </CardContent>
+            </Card>
+          ) : score > 0 ? (
+            <Card className="border-emerald-500/20 bg-emerald-500/5">
+              <CardContent className="flex items-center gap-3 py-4">
+                <CheckCircle2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
+                <div>
+                  <div className="text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                    All Core Web Vitals pass
+                  </div>
+                  <div className="text-xs text-emerald-700/70 dark:text-emerald-400/80">
+                    Your application meets every threshold. Keep monitoring for
+                    regressions.
+                  </div>
                 </div>
               </CardContent>
             </Card>
-
-            {/* Recommendations */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Info className="h-5 w-5" />
-                  Performance Recommendations
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-3">
-                  {score < 90 && (
-                    <div className="flex items-start gap-3 rounded-lg border p-3">
-                      <AlertTriangle className="h-5 w-5 text-orange-500 mt-0.5" />
-                      <div>
-                        <h4 className="font-medium">
-                          Optimize Core Web Vitals
-                        </h4>
-                        <p className="text-sm text-muted-foreground">
-                          Focus on improving LCP, FID, and CLS for better user
-                          experience.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                  {metrics?.lcp_p75 && metrics?.lcp_p75 > 2500 && (
-                    <div className="flex items-start gap-3 rounded-lg border p-3">
-                      <Clock className="h-5 w-5 text-blue-500 mt-0.5" />
-                      <div>
-                        <h4 className="font-medium">
-                          Reduce Largest Contentful Paint
-                        </h4>
-                        <p className="text-sm text-muted-foreground">
-                          Optimize images, enable compression, and use a CDN.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                  {metrics?.ttfb_p75 && metrics?.ttfb_p75 > 800 && (
-                    <div className="flex items-start gap-3 rounded-lg border p-3">
-                      <Zap className="h-5 w-5 text-purple-500 mt-0.5" />
-                      <div>
-                        <h4 className="font-medium">
-                          Improve Server Response Time
-                        </h4>
-                        <p className="text-sm text-muted-foreground">
-                          Optimize database queries and enable server-side
-                          caching.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                  {score >= 90 && (
-                    <div className="flex items-start gap-3 rounded-lg border border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-950 p-3">
-                      <CheckCircle2 className="h-5 w-5 text-green-600 mt-0.5" />
-                      <div>
-                        <h4 className="font-medium text-green-800 dark:text-green-200">
-                          Excellent Performance
-                        </h4>
-                        <p className="text-sm text-green-600 dark:text-green-400">
-                          Your application meets all Core Web Vitals thresholds.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
+          ) : null}
+        </>
       )}
     </div>
   )
 }
 
-interface MetricCardProps {
-  label: string
-  value: number | null
-  unit: string
-  threshold: { good: number; poor: number }
-  icon: React.ReactNode
-}
-
-function MetricCard({ label, value, unit, threshold, icon }: MetricCardProps) {
-  if (!value) return null
-
-  const getStatus = (val: number) => {
-    if (val <= threshold.good)
-      return {
-        label: 'Good',
-        color: 'text-green-600 bg-green-100 dark:bg-green-950',
-      }
-    if (val >= threshold.poor)
-      return { label: 'Poor', color: 'text-red-600 bg-red-100 dark:bg-red-950' }
-    return {
-      label: 'Fair',
-      color: 'text-orange-600 bg-orange-100 dark:bg-orange-950',
-    }
+function recommendationFor(metric: MetricKey): string {
+  switch (metric) {
+    case 'lcp':
+      return 'Optimize the largest image or text block: preload critical assets, compress images, and serve from a CDN close to users.'
+    case 'inp':
+      return 'Reduce long JavaScript tasks on interaction. Defer non-critical scripts, break up expensive handlers, and avoid layout thrashing.'
+    case 'cls':
+      return 'Reserve space for images, ads, and embeds. Avoid inserting content above existing content after the page has loaded.'
+    case 'ttfb':
+      return 'Improve server response: cache HTML/edge-render, optimize database queries, or move the origin closer to your users.'
+    case 'fcp':
+      return 'Ship less render-blocking CSS/JS and inline critical styles so the first paint happens sooner.'
   }
-
-  const status = getStatus(value)
-  const progress = Math.min((value / threshold.poor) * 100, 100)
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          {icon}
-          <span className="text-sm font-medium">{label}</span>
-        </div>
-        <div className="text-right">
-          <div className="text-sm font-mono">
-            {value.toFixed(unit === '' ? 3 : 0)}
-            {unit}
-          </div>
-          <Badge className={cn('text-xs', status.color)} variant="secondary">
-            {status.label}
-          </Badge>
-        </div>
-      </div>
-      <div className="space-y-1">
-        <Progress value={progress} className="h-2" />
-        <div className="flex justify-between text-xs text-muted-foreground">
-          <span>
-            Target: {threshold.good}
-            {unit}
-          </span>
-          <span>
-            Poor: {threshold.poor}
-            {unit}
-          </span>
-        </div>
-      </div>
-    </div>
-  )
 }

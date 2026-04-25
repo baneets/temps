@@ -37,16 +37,6 @@ pub struct ServeCommand {
     #[arg(long, env = "TEMPS_SCREENSHOT_PROVIDER", value_parser = ["local", "remote", "noop", "disabled", "none"])]
     pub screenshot_provider: Option<String>,
 
-    /// Enable demo mode for unauthenticated access at demo.<preview_domain>
-    /// WARNING: This allows anyone to access the application without authentication
-    #[arg(long, env = "TEMPS_DEMO_MODE")]
-    pub demo_mode: bool,
-
-    /// Custom domain for demo mode (overrides default demo.<preview_domain>)
-    /// Only used when --demo-mode is enabled
-    #[arg(long, env = "TEMPS_DEMO_DOMAIN")]
-    pub demo_domain: Option<String>,
-
     /// Additional template YAML files to load (can be specified multiple times)
     /// Templates are merged with the bundled defaults; validation errors will prevent startup
     #[arg(long = "templates", env = "TEMPS_ADDITIONAL_TEMPLATES")]
@@ -92,32 +82,6 @@ impl ServeCommand {
         // Create tokio runtime for database connection since we need async for this
         let rt = tokio::runtime::Runtime::new()?;
         let db = rt.block_on(temps_database::establish_connection(&self.database_url))?;
-
-        // Update demo mode settings from CLI flags
-        if self.demo_mode {
-            info!("⚠️  Demo mode ENABLED - unauthenticated access allowed");
-            let db_for_settings = db.clone();
-            let demo_domain = self.demo_domain.clone();
-            let serve_config_for_demo = serve_config.clone();
-            rt.block_on(async move {
-                let config_service =
-                    temps_config::ConfigService::new(serve_config_for_demo, db_for_settings);
-                if let Err(e) = config_service
-                    .update_setting_field(|settings| {
-                        settings.demo_mode.enabled = true;
-                        settings.demo_mode.domain = demo_domain;
-                    })
-                    .await
-                {
-                    tracing::error!("Failed to update demo mode settings: {}", e);
-                }
-            });
-            if let Some(ref domain) = self.demo_domain {
-                info!("Demo mode domain: {}", domain);
-            } else {
-                info!("Demo mode using default domain: demo.<preview_domain>");
-            }
-        }
 
         // Update private address setting from CLI flag
         if let Some(ref private_address) = self.private_address {
@@ -185,9 +149,13 @@ impl ServeCommand {
             }
         });
 
-        // Create OnDemandManager early so it can be shared with both console API
-        // (for wake/sleep REST endpoints) and the proxy (for wake-on-request).
-        let on_demand_manager: Option<Arc<temps_proxy::on_demand::OnDemandManager>> = {
+        // Connect to Docker once and share the handle between:
+        //   1. OnDemandManager (wake-on-request scale-to-zero)
+        //   2. Preview gateway reconciler (workspace preview routing)
+        //
+        // Both are non-fatal — if Docker is unavailable we log and continue.
+        // The proxy server (80/443) MUST come up regardless.
+        let docker_handle: Option<Arc<bollard::Docker>> = {
             let docker_rt = tokio::runtime::Runtime::new()?;
             match docker_rt.block_on(async {
                 let docker = bollard::Docker::connect_with_defaults()
@@ -198,26 +166,50 @@ impl ServeCommand {
                     .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
                 Ok::<_, anyhow::Error>(docker)
             }) {
-                Ok(docker) => {
-                    let docker_runtime = temps_deployer::docker::DockerRuntime::new(
-                        Arc::new(docker),
-                        true,
-                        "temps".to_string(),
-                    );
-                    let adapter = proxy::ContainerLifecycleAdapter::new(
-                        Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
-                    );
-                    Some(Arc::new(temps_proxy::on_demand::OnDemandManager::new(
-                        db.clone(),
-                        Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
-                    )))
-                }
+                Ok(docker) => Some(Arc::new(docker)),
                 Err(e) => {
-                    warn!("Docker not available for on-demand scale-to-zero: {}", e);
+                    warn!(
+                        "Docker not available — on-demand scale-to-zero and workspace \
+                         preview gateway will be disabled: {}",
+                        e
+                    );
                     None
                 }
             }
         };
+
+        let on_demand_manager: Option<Arc<temps_proxy::on_demand::OnDemandManager>> =
+            docker_handle.as_ref().map(|docker| {
+                let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                    docker.clone(),
+                    true,
+                    "temps".to_string(),
+                );
+                let adapter = proxy::ContainerLifecycleAdapter::new(
+                    Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
+                );
+                Arc::new(temps_proxy::on_demand::OnDemandManager::new(
+                    db.clone(),
+                    Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
+                ))
+            });
+
+        // Kick off preview gateway reconciliation in the background. This pulls
+        // the image (if needed), creates the shared sandbox network, and starts
+        // the gateway container. It MUST NOT block proxy startup — workspace
+        // previews are a non-critical subsystem.
+        if let Some(docker) = docker_handle.clone() {
+            let data_dir = self
+                .data_dir
+                .clone()
+                .or_else(|| std::env::var("TEMPS_DATA_DIR").ok().map(PathBuf::from))
+                .unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(".temps")
+                });
+            temps_agents::preview_gateway::spawn_reconcile(&rt, docker, db.clone(), data_dir);
+        }
 
         // Start console API server in background (non-blocking).
         // The proxy does NOT wait for the console to be ready. This ensures that

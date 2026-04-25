@@ -469,8 +469,11 @@ impl VisitorManager for VisitorManagerImpl {
         ip_address: Option<&str>,
         attribution: &FirstVisitAttribution,
     ) -> Result<Visitor, Box<dyn std::error::Error + Send + Sync>> {
-        let project_id = context.as_ref().map(|c| c.project.id).unwrap_or(1);
-        let environment_id = context.as_ref().map(|c| c.environment.id).unwrap_or(1);
+        let Some(ctx) = context else {
+            return Err("Cannot create visitor without a project/environment context".into());
+        };
+        let project_id = ctx.project.id;
+        let environment_id = ctx.environment.id;
 
         // Try to find existing visitor
         if let Some(cookie_value) = visitor_cookie {

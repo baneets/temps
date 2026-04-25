@@ -118,7 +118,7 @@ export default function RequestLogDetail({
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <h4 className="text-sm font-medium text-muted-foreground">
                           Method
@@ -214,7 +214,7 @@ export default function RequestLogDetail({
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       {logDetail.environment_id && (
                         <div className="space-y-1">
                           <h4 className="text-sm font-medium text-muted-foreground">
@@ -273,7 +273,7 @@ export default function RequestLogDetail({
                     {(logDetail.cache_status ||
                       logDetail.upstream_host ||
                       logDetail.container_id) && (
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {logDetail.cache_status && (
                           <div className="space-y-1">
                             <h4 className="text-sm font-medium text-muted-foreground">
@@ -321,7 +321,7 @@ export default function RequestLogDetail({
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div className="space-y-1">
                         <h4 className="text-sm font-medium text-muted-foreground">
                           IP Address
@@ -421,7 +421,7 @@ export default function RequestLogDetail({
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {logDetail.request_size_bytes && (
                           <div className="space-y-1">
                             <h4 className="text-sm font-medium text-muted-foreground">

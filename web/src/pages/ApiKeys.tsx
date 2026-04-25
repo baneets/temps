@@ -2,9 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { KbdBadge } from '@/components/ui/kbd-badge'
-import { Plus } from 'lucide-react'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import { toast } from 'sonner'
 import {
   listApiKeys,
@@ -14,9 +12,10 @@ import {
   type ApiKeyResponse,
 } from '@/api/client'
 import { ApiKeyTable, ApiKeyDeleteModal } from '@/components/api-keys'
-import { useKeyboardShortcut } from '@/hooks/useKeyboardShortcut'
+import { usePageTitle } from '@/hooks/usePageTitle'
 
 export default function ApiKeys() {
+  usePageTitle('API Keys')
   const navigate = useNavigate()
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [selectedKey, setSelectedKey] = useState<ApiKeyResponse | null>(null)
@@ -95,29 +94,22 @@ export default function ApiKeys() {
     navigate('/settings/keys/new')
   }
 
-  // Keyboard shortcut: N to create new API key
-  useKeyboardShortcut({ key: 'n', path: '/settings/keys/new' })
-
   return (
-    <div className="container mx-auto py-6 space-y-6">
+    <div className="container mx-auto px-4 py-6 space-y-6 sm:px-6">
       {/* Page Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
         <div>
-          <h1 className="text-3xl font-bold">API Keys</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold">API Keys</h1>
           <p className="text-muted-foreground mt-2">
             Manage your API keys for programmatic access
           </p>
         </div>
-        <Button onClick={handleCreateClick}>
-          <Plus className="mr-2 h-4 w-4" />
-          Create API Key
-          <KbdBadge keys="N" className="ml-2" />
-        </Button>
+        <CreateActionButton onClick={handleCreateClick} label="Create API Key" />
       </div>
 
       {/* Statistics Cards */}
       {apiKeys && apiKeys.length > 0 && (
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-3 sm:gap-4">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium">Total Keys</CardTitle>

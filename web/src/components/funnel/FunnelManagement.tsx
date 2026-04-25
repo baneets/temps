@@ -2,12 +2,23 @@ import { ProjectResponse, FunnelResponse } from '@/api/client/types.gen'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Calendar } from '@/components/ui/calendar'
+import { KbdBadge } from '@/components/ui/kbd-badge'
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import {
   listFunnelsOptions,
   deleteFunnelMutation,
@@ -33,6 +44,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
     from: subDays(new Date(), 30),
     to: new Date(),
   })
+  const [deletingId, setDeletingId] = React.useState<number | null>(null)
 
   const dateRangeQuery = React.useMemo(() => {
     if (!dateRange?.from || !dateRange?.to) return null
@@ -65,15 +77,48 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
     },
   })
 
-  const handleDelete = async (funnelId: number) => {
-    if (confirm('Are you sure you want to delete this funnel?')) {
-      deleteFunnel.mutate({
-        path: {
-          project_id: project.id,
-          funnel_id: funnelId,
-        },
-      })
+  // Keyboard shortcut: press "N" (no modifiers) to create a new funnel.
+  // Skipped when typing in inputs / textareas / contenteditable.
+  React.useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.key !== 'n' ||
+        e.metaKey ||
+        e.ctrlKey ||
+        e.shiftKey ||
+        e.altKey
+      ) {
+        return
+      }
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return
+      }
+      e.preventDefault()
+      navigate(`/projects/${project.slug}/analytics/funnels/create`)
     }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [navigate, project.slug])
+
+  const handleDelete = (funnelId: number) => {
+    setDeletingId(funnelId)
+  }
+
+  const confirmDelete = () => {
+    if (deletingId === null) return
+    deleteFunnel.mutate({
+      path: {
+        project_id: project.id,
+        funnel_id: deletingId,
+      },
+    })
+    setDeletingId(null)
   }
 
   return (
@@ -130,6 +175,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
           >
             <Plus className="h-4 w-4 sm:mr-2" />
             <span className="hidden sm:inline">Create Funnel</span>
+            <KbdBadge keys={['N']} className="ml-2 hidden sm:inline-flex" />
           </Button>
         </div>
       </div>
@@ -190,6 +236,7 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
             >
               <Plus className="h-4 w-4 mr-2" />
               Create Funnel
+              <KbdBadge keys={['N']} className="ml-2" />
             </Button>
           </CardContent>
         </Card>
@@ -216,6 +263,29 @@ export function FunnelManagement({ project }: FunnelManagementProps) {
           ))}
         </div>
       )}
+
+      <AlertDialog
+        open={deletingId !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeletingId(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete funnel?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This action cannot be undone. The funnel and its configuration
+              will be permanently removed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete}>
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

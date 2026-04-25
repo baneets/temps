@@ -1,9 +1,9 @@
 'use client'
 
 import {
-  deleteProviderMutation,
+  deleteNotificationProviderMutation as deleteProviderSafelyMutation,
   listNotificationProvidersOptions,
-  testProvider2Mutation,
+  testNotificationProviderMutation as testProviderMutation,
   updateEmailProviderMutation,
   updateProviderMutation,
   updateSlackProviderMutation,
@@ -128,7 +128,7 @@ export function ProvidersManagement() {
   })
 
   const deleteMutation = useMutation({
-    ...deleteProviderMutation(),
+    ...deleteProviderSafelyMutation(),
     meta: {
       errorTitle: 'Failed to delete provider',
     },
@@ -139,7 +139,7 @@ export function ProvidersManagement() {
   })
 
   const testMutation = useMutation({
-    ...testProvider2Mutation(),
+    ...testProviderMutation(),
     meta: {
       errorTitle: 'Failed to test provider',
     },
@@ -364,8 +364,7 @@ export function ProvidersManagement() {
                       : provider.provider_type === 'slack'
                         ? typedProvider.config?.webhook_url ||
                           'No webhook configured'
-                        : typedProvider.config?.url ||
-                          'No webhook configured'}
+                        : typedProvider.config?.url || 'No webhook configured'}
                   </p>
                 </CardContent>
               </Card>

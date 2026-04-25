@@ -1,8 +1,8 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  listTemplatesOptions,
-  listTemplateTagsOptions,
+  listProjectTemplatesOptions,
+  listProjectTemplateTagsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import type { TemplateResponse } from '@/api/client/types.gen'
 import { TemplateCard } from './TemplateCard'
@@ -31,7 +31,7 @@ export function TemplateList({
 
   // Fetch templates
   const { data: templatesData, isLoading: isLoadingTemplates } = useQuery({
-    ...listTemplatesOptions({
+    ...listProjectTemplatesOptions({
       query: {
         featured: showFeaturedOnly ? true : undefined,
         tag: selectedTag || undefined,
@@ -41,7 +41,7 @@ export function TemplateList({
 
   // Fetch tags
   const { data: tagsData } = useQuery({
-    ...listTemplateTagsOptions(),
+    ...listProjectTemplateTagsOptions(),
   })
 
   // Filter and sort templates

@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, Repository, User, WebhookConfig,
+    GitProviderType, PullRequest, Repository, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -796,17 +796,24 @@ impl GitProviderService for GitHubProvider {
     ) -> Result<Vec<Branch>, GitProviderError> {
         let octocrab = self.get_octocrab_client(access_token).await?;
 
-        // Get all branches using Octocrab
-        let branches = octocrab
+        // Fetch the first page with the maximum page size, then walk every
+        // remaining page so callers always see the complete branch list.
+        // GitHub paginates branches at 30 items per page by default; without
+        // `all_pages` we'd silently truncate repos like ours where `main`
+        // sorts past page 1.
+        let first_page = octocrab
             .repos(owner, repo)
             .list_branches()
+            .per_page(100)
             .send()
             .await
             .map_err(|e| GitProviderError::ApiError(format!("Failed to list branches: {}", e)))?;
 
-        // Convert Octocrab branches to our Branch type
-        let branches = branches
-            .items
+        let all = octocrab.all_pages(first_page).await.map_err(|e| {
+            GitProviderError::ApiError(format!("Failed to paginate branches: {}", e))
+        })?;
+
+        let branches = all
             .into_iter()
             .map(|b| Branch {
                 name: b.name,
@@ -1514,28 +1521,9 @@ impl GitProviderService for GitHubProvider {
             branch
         );
 
-        // 1. Get the current commit SHA for the branch (reference)
-        let ref_url = format!(
-            "{}/repos/{}/{}/git/ref/heads/{}",
-            self.api_url, owner, repo, branch
-        );
-
-        let ref_response = self
-            .send_with_retry(|| client.get(&ref_url).headers(headers.clone()))
-            .await?;
-
-        if !ref_response.status().is_success() {
-            let status = ref_response.status();
-            let error_text = ref_response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(GitProviderError::ApiError(format!(
-                "Failed to get branch reference: {} - {}",
-                status, error_text
-            )));
-        }
-
+        // 1. Get the base branch SHA.
+        // First try the target branch — if it doesn't exist, get the default branch (main/master)
+        // and create the new branch from it.
         #[derive(Deserialize)]
         struct GitRef {
             object: GitRefObject,
@@ -1546,12 +1534,74 @@ impl GitProviderService for GitHubProvider {
             sha: String,
         }
 
-        let git_ref: GitRef = ref_response
-            .json()
-            .await
-            .map_err(|e| GitProviderError::ApiError(format!("Failed to parse ref: {}", e)))?;
+        let ref_url = format!(
+            "{}/repos/{}/{}/git/ref/heads/{}",
+            self.api_url, owner, repo, branch
+        );
 
-        let base_commit_sha = git_ref.object.sha;
+        let ref_response = self
+            .send_with_retry(|| client.get(&ref_url).headers(headers.clone()))
+            .await?;
+
+        let base_commit_sha =
+            if ref_response.status().is_success() {
+                // Branch exists — use its current SHA
+                let git_ref: GitRef = ref_response.json().await.map_err(|e| {
+                    GitProviderError::ApiError(format!("Failed to parse ref: {}", e))
+                })?;
+                git_ref.object.sha
+            } else {
+                // Branch doesn't exist — get the default branch SHA and create the new branch
+                // Try "main" first, then "master"
+                let mut base_sha = None;
+                for base_branch in &["main", "master"] {
+                    let base_ref_url = format!(
+                        "{}/repos/{}/{}/git/ref/heads/{}",
+                        self.api_url, owner, repo, base_branch
+                    );
+                    let base_response = self
+                        .send_with_retry(|| client.get(&base_ref_url).headers(headers.clone()))
+                        .await?;
+                    if base_response.status().is_success() {
+                        let git_ref: GitRef = base_response.json().await.map_err(|e| {
+                            GitProviderError::ApiError(format!("Failed to parse base ref: {}", e))
+                        })?;
+                        base_sha = Some(git_ref.object.sha);
+                        break;
+                    }
+                }
+
+                let sha = base_sha.ok_or_else(|| {
+                    GitProviderError::ApiError(
+                        "Could not find base branch (tried main, master)".to_string(),
+                    )
+                })?;
+
+                // Create the new branch
+                let create_ref_url = format!("{}/repos/{}/{}/git/refs", self.api_url, owner, repo);
+                let create_response = self
+                    .send_with_retry(|| {
+                        client.post(&create_ref_url).headers(headers.clone()).json(
+                            &serde_json::json!({
+                                "ref": format!("refs/heads/{}", branch),
+                                "sha": &sha
+                            }),
+                        )
+                    })
+                    .await?;
+
+                if !create_response.status().is_success() {
+                    let status = create_response.status();
+                    let error_text = create_response.text().await.unwrap_or_default();
+                    return Err(GitProviderError::ApiError(format!(
+                        "Failed to create branch '{}': {} - {}",
+                        branch, status, error_text
+                    )));
+                }
+
+                info!("Created new branch '{}' from SHA {}", branch, &sha);
+                sha
+            };
         debug!("Base commit SHA: {}", base_commit_sha);
 
         // 2. Get the tree SHA from the base commit
@@ -1780,6 +1830,107 @@ impl GitProviderService for GitHubProvider {
             date: DateTime::parse_from_rfc3339(&new_commit.author.date)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
+        })
+    }
+
+    async fn create_pull_request(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<PullRequest, GitProviderError> {
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
+
+        let url = format!("{}/repos/{}/{}/pulls", self.api_url, owner, repo);
+
+        #[derive(Serialize)]
+        struct CreatePullRequestBody<'a> {
+            title: &'a str,
+            body: &'a str,
+            head: &'a str,
+            base: &'a str,
+        }
+
+        let request_body = CreatePullRequestBody {
+            title,
+            body,
+            head: head_branch,
+            base: base_branch,
+        };
+
+        info!(
+            "Creating pull request '{}' in {}/{}: {} -> {}",
+            title, owner, repo, head_branch, base_branch
+        );
+
+        let response = self
+            .send_with_retry(|| {
+                client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&request_body)
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            error!(
+                "Failed to create pull request in {}/{}: {} - {}",
+                owner, repo, status, error_text
+            );
+            return Err(GitProviderError::ApiError(format!(
+                "Failed to create pull request in {}/{}: {} - {}",
+                owner, repo, status, error_text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct PullRequestHead {
+            #[serde(rename = "ref")]
+            ref_name: String,
+            sha: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct PullRequestBase {
+            #[serde(rename = "ref")]
+            ref_name: String,
+        }
+
+        #[derive(Deserialize)]
+        struct GitHubPullRequest {
+            number: i32,
+            html_url: String,
+            title: String,
+            head: PullRequestHead,
+            base: PullRequestBase,
+        }
+
+        let pr: GitHubPullRequest = response.json().await.map_err(|e| {
+            GitProviderError::ApiError(format!("Failed to parse pull request response: {}", e))
+        })?;
+
+        info!(
+            "Successfully created pull request #{} in {}/{}",
+            pr.number, owner, repo
+        );
+
+        Ok(PullRequest {
+            number: pr.number,
+            url: pr.html_url,
+            title: pr.title,
+            head_branch: pr.head.ref_name,
+            base_branch: pr.base.ref_name,
+            head_sha: pr.head.sha,
         })
     }
 }

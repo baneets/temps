@@ -21,8 +21,8 @@ use utoipa::{openapi::OpenApi, OpenApi as OpenApiTrait};
 
 use crate::handlers::{self, GitProvidersApiDoc, PublicRepositoriesApiDoc};
 use crate::services::{
-    git_provider_manager::GitProviderManager, github::GithubAppService,
-    repository::RepositoryService,
+    connection_health::ConnectionHealthService, git_provider_manager::GitProviderManager,
+    github::GithubAppService, repository::RepositoryService,
 };
 
 /// Git Plugin for managing Git provider integrations
@@ -113,6 +113,57 @@ impl TempsPlugin for GitPlugin {
             // Create cache manager
             let cache_manager = Arc::new(crate::services::cache::GitProviderCacheManager::new());
 
+            // Notifications are optional — if the notifications plugin hasn't
+            // registered a service, health checks still run and persist status,
+            // we just can't alert anyone.
+            let notification_service =
+                context.get_service::<dyn temps_core::notifications::NotificationService>();
+
+            let console_base_url = {
+                let server_config = config_service.get_server_config();
+                format!("http://{}", server_config.console_address)
+            };
+
+            let connection_health_service = Arc::new(ConnectionHealthService::new(
+                db.clone(),
+                git_provider_manager.clone(),
+                github_service.clone(),
+                notification_service,
+                console_base_url,
+            ));
+            context.register_service(connection_health_service.clone());
+
+            // Daily git connection health sweep. The first tick fires
+            // immediately so freshly-started servers get a baseline before the
+            // 24h window elapses.
+            let sweep_service = connection_health_service.clone();
+            tokio::spawn(async move {
+                // Give the rest of the platform a moment to finish booting
+                // (DB pools warm, notification providers loaded). A 5-minute
+                // delay is imperceptible at a 24h cadence.
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+                loop {
+                    tick.tick().await;
+                    match sweep_service.run_health_checks_for_all().await {
+                        Ok(outcomes) => {
+                            tracing::info!(
+                                checked = outcomes.len(),
+                                transitions = outcomes.iter().filter(|o| o.transitioned).count(),
+                                "Daily git connection health sweep complete"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "Daily git connection health sweep failed; will retry next tick"
+                            );
+                        }
+                    }
+                }
+            });
+
             // Register the GitAppState for route handlers
             let git_app_state = crate::handlers::types::create_git_app_state(
                 repository_service,
@@ -121,6 +172,7 @@ impl TempsPlugin for GitPlugin {
                 audit_service,
                 github_service,
                 cache_manager,
+                connection_health_service,
             );
             context.register_plugin_state("git", git_app_state);
 

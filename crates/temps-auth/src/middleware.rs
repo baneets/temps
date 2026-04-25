@@ -8,15 +8,12 @@ use axum::{
     middleware::Next,
 };
 use cookie::Cookie;
-use sea_orm::EntityTrait;
 use std::sync::Arc;
-use temps_core::{AppSettings, CookieCrypto, RequestMetadata};
+use temps_core::{CookieCrypto, RequestMetadata};
 
 // Cookie names from proxy
 const SESSION_ID_COOKIE_NAME: &str = "_temps_sid";
 const VISITOR_ID_COOKIE_NAME: &str = "_temps_visitor_id";
-// Cookie for demo mode user selection (stores encrypted user_id)
-const DEMO_USER_COOKIE_NAME: &str = "_temps_demo_uid";
 
 pub async fn auth_middleware(
     State(app_state): State<Arc<AuthState>>,
@@ -44,7 +41,7 @@ pub async fn auth_middleware(
     let session_id_cookie = extract_session_id_cookie(&req, &app_state.cookie_crypto);
 
     // Create base URL from request headers
-    let host = req
+    let raw_host = req
         .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
@@ -63,7 +60,11 @@ pub async fn auth_middleware(
         "http"
     };
     let is_secure = scheme == "https";
-    let base_url = format!("{}://{}", scheme, host);
+    // `base_url` keeps the port so generated links point back at the same
+    // listener the client reached us on. `host` is port-stripped so it can be
+    // used directly as a route-table key (the proxy normalizes the same way).
+    let base_url = format!("{}://{}", scheme, raw_host);
+    let host = temps_core::host_without_port(&raw_host).to_string();
 
     // Create RequestMetadata
     let metadata = RequestMetadata {
@@ -110,47 +111,6 @@ pub async fn extract_auth_from_request(
     let user_service = &auth_state.user_service;
     let api_key_service = &auth_state.api_key_service;
     let deployment_token_service = &auth_state.deployment_token_service;
-
-    // 0. Check for demo mode via X-Temps-Demo-Mode header (set by proxy) or host matching demo.<preview_domain>
-    // This auto-authenticates requests without requiring login
-    let demo_mode_header = req
-        .headers()
-        .get("x-temps-demo-mode")
-        .and_then(|h| h.to_str().ok())
-        .map(|v| v == "true")
-        .unwrap_or(false);
-
-    let host = req
-        .headers()
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let host_without_port = host.split(':').next().unwrap_or(host);
-
-    // Debug: Log all headers to see what the auth middleware receives
-    tracing::info!(
-        "Auth middleware check: host={}, host_without_port={}, demo_mode_header={}, path={}",
-        host,
-        host_without_port,
-        demo_mode_header,
-        req.uri().path()
-    );
-
-    // Check demo mode either via header from proxy or via host subdomain
-    if demo_mode_header || host_without_port.starts_with("demo.") {
-        // Get preview_domain from database settings for host validation (if checking by host)
-        if let Some(demo_context) = check_demo_mode(
-            req,
-            auth_state,
-            host_without_port,
-            user_service,
-            demo_mode_header,
-        )
-        .await
-        {
-            return Ok(demo_context);
-        }
-    }
 
     // 1. Check for Authorization header (API Key, Deployment Token, or CLI Token)
     if let Some(auth_header) = req.headers().get("authorization") {
@@ -314,135 +274,6 @@ async fn determine_user_role(
     // For now, return User as default
     // In the future, you might want to check the user_roles table
     Ok(Role::User)
-}
-
-/// Check if the request is in demo mode and return the appropriate auth context
-/// Demo mode is detected by the X-Temps-Demo-Mode header (set by proxy) or matching the host against demo.<preview_domain>
-async fn check_demo_mode(
-    req: &Request,
-    auth_state: &Arc<AuthState>,
-    host_without_port: &str,
-    user_service: &UserService,
-    demo_mode_header: bool,
-) -> Option<AuthContext> {
-    // Always load settings to check if demo mode is enabled
-    let settings_record = temps_entities::settings::Entity::find_by_id(1)
-        .one(auth_state.db.as_ref())
-        .await
-        .ok()
-        .flatten();
-
-    let settings = settings_record
-        .map(|r| AppSettings::from_json(r.data))
-        .unwrap_or_default();
-
-    // Demo mode must be explicitly enabled in settings
-    if !settings.demo_mode.enabled {
-        tracing::debug!(
-            "Demo mode is disabled in settings, rejecting demo request for host: {}",
-            host_without_port
-        );
-        return None;
-    }
-
-    // If demo mode header is set by proxy, skip host validation (proxy already validated)
-    if demo_mode_header {
-        tracing::info!(
-            "Demo mode detected via X-Temps-Demo-Mode header (host: {})",
-            host_without_port
-        );
-    } else {
-        // Validate host against preview_domain
-        let preview_domain = settings.preview_domain.trim_start_matches("*.");
-        let expected_demo_host = format!("demo.{}", preview_domain);
-
-        tracing::debug!(
-            "Demo check: host_without_port={}, expected_demo_host={}, preview_domain={}",
-            host_without_port,
-            expected_demo_host,
-            preview_domain
-        );
-
-        if host_without_port != expected_demo_host {
-            return None;
-        }
-
-        tracing::info!(
-            "Demo mode detected: host {} matches demo.{}",
-            host_without_port,
-            preview_domain
-        );
-    }
-
-    // Check if there's a demo user cookie specifying which user to impersonate
-    let selected_user_id =
-        extract_demo_user_cookie(req.headers(), auth_state.cookie_crypto.as_ref());
-
-    if let Some(user_id) = selected_user_id {
-        // User has selected a specific user to view as in demo mode
-        match user_service.get_user_by_id(user_id).await {
-            Ok(user) => {
-                // SECURITY: Always use Role::Demo for demo sessions regardless of the
-                // selected user's actual role. This prevents privilege escalation where
-                // a demo visitor could select an admin user and gain admin permissions.
-                tracing::info!(
-                    "Demo mode: viewing as selected user (id={}, email={}) with Demo role",
-                    user.id,
-                    user.email,
-                );
-                return Some(AuthContext::new_demo_session(user, Role::Demo));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Demo mode: failed to load selected user {}: {:?}, falling back to demo user",
-                    user_id,
-                    e
-                );
-            }
-        }
-    }
-
-    // Default: Find or create demo user
-    match user_service.find_or_create_demo_user().await {
-        Ok(demo_user) => {
-            tracing::info!(
-                "Demo mode: auto-authenticated as demo user (id={}, email={})",
-                demo_user.id,
-                demo_user.email
-            );
-            Some(AuthContext::new_demo_session(demo_user, Role::Demo))
-        }
-        Err(e) => {
-            tracing::error!("Demo mode: failed to find/create demo user: {:?}", e);
-            None
-        }
-    }
-}
-
-/// Extract the demo user ID from the demo user cookie
-fn extract_demo_user_cookie(headers: &HeaderMap, crypto: &CookieCrypto) -> Option<i32> {
-    for cookie_header in headers.get_all("cookie") {
-        if let Ok(cookie_str) = cookie_header.to_str() {
-            for cookie in Cookie::split_parse(cookie_str).filter_map(Result::ok) {
-                if cookie.name() == DEMO_USER_COOKIE_NAME {
-                    // Decrypt the cookie value
-                    match crypto.decrypt(cookie.value()) {
-                        Ok(decrypted) => {
-                            // Parse the user_id
-                            if let Ok(user_id) = decrypted.parse::<i32>() {
-                                return Some(user_id);
-                            }
-                        }
-                        Err(_) => {
-                            // If decryption fails, no valid demo user selection
-                            return None;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 #[derive(Debug)]

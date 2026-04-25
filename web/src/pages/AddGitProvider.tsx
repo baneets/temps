@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { GitProviderFlow } from '@/components/git-providers/GitProviderFlow'
 import { ArrowLeft } from 'lucide-react'
@@ -16,7 +15,7 @@ export function AddGitProvider() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Git Providers', href: '/settings/git-providers' },
+      { label: 'Git Providers', href: '/git-providers' },
       { label: 'Add Provider' },
     ])
   }, [setBreadcrumbs])
@@ -26,12 +25,12 @@ export function AddGitProvider() {
   const handleSuccess = () => {
     showSuccess('Git provider added successfully!')
     setTimeout(() => {
-      navigate('/settings/git-providers')
+      navigate('/git-providers')
     }, 1500)
   }
 
   const handleCancel = () => {
-    navigate('/settings/git-providers')
+    navigate('/git-providers')
   }
 
   return (
@@ -41,7 +40,7 @@ export function AddGitProvider() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate('/settings/git-providers')}
+            onClick={() => navigate('/git-providers')}
             className="shrink-0"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -57,18 +56,11 @@ export function AddGitProvider() {
         {/* Feedback Alert */}
         <FeedbackAlert feedback={feedback} onDismiss={clearFeedback} />
 
-        <Card className="w-full">
-          <CardHeader className="px-4 sm:px-6">
-            <CardTitle>Select and Connect Provider</CardTitle>
-          </CardHeader>
-          <CardContent className="px-4 sm:px-6">
-            <GitProviderFlow
-              onSuccess={handleSuccess}
-              onCancel={handleCancel}
-              mode="settings"
-            />
-          </CardContent>
-        </Card>
+        <GitProviderFlow
+          onSuccess={handleSuccess}
+          onCancel={handleCancel}
+          mode="settings"
+        />
       </div>
     </div>
   )

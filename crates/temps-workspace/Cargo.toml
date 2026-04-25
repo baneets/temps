@@ -1,0 +1,68 @@
+[package]
+name = "temps-workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal crates
+temps-core = { path = "../temps-core" }
+temps-auth = { path = "../temps-auth" }
+temps-entities = { path = "../temps-entities" }
+temps-agents = { path = "../temps-agents" }
+temps-pty-agent = { path = "../temps-pty-agent" }
+temps-projects = { path = "../temps-projects" }
+temps-git = { path = "../temps-git" }
+temps-deployments = { path = "../temps-deployments" }
+temps-providers = { path = "../temps-providers" }
+temps-config = { path = "../temps-config" }
+
+# Async runtime
+tokio.workspace = true
+tokio-util = { workspace = true }
+async-trait.workspace = true
+
+# Web framework
+axum.workspace = true
+http.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling & logging
+thiserror.workspace = true
+tracing.workspace = true
+
+# Date/Time
+chrono.workspace = true
+
+# Database
+sea-orm.workspace = true
+
+# API Documentation
+utoipa.workspace = true
+
+# URL parsing for preview URL parts
+url = { workspace = true }
+
+# Streaming
+futures.workspace = true
+async-stream.workspace = true
+
+# Docker (for PTY terminal websocket)
+bollard = { workspace = true }
+bytes = { workspace = true }
+
+# Password hashing for workspace preview auth
+argon2 = { workspace = true }
+rand = "0.8"
+
+# Image paste: base64 decoding + tar streaming into Docker container
+base64 = { workspace = true }
+tar = "0.4"
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

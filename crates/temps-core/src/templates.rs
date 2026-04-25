@@ -385,7 +385,7 @@ impl TemplateService {
     pub async fn list_templates(&self) -> Vec<ProjectTemplate> {
         let config = self.config.read().await;
         let mut templates: Vec<_> = config.public_templates().into_iter().cloned().collect();
-        templates.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
+        templates.sort_by_key(|a| a.sort_order);
         templates
     }
 
@@ -393,7 +393,7 @@ impl TemplateService {
     pub async fn list_featured_templates(&self) -> Vec<ProjectTemplate> {
         let config = self.config.read().await;
         let mut templates: Vec<_> = config.featured_templates().into_iter().cloned().collect();
-        templates.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
+        templates.sort_by_key(|a| a.sort_order);
         templates
     }
 
@@ -401,7 +401,7 @@ impl TemplateService {
     pub async fn list_templates_by_tag(&self, tag: &str) -> Vec<ProjectTemplate> {
         let config = self.config.read().await;
         let mut templates: Vec<_> = config.templates_by_tag(tag).into_iter().cloned().collect();
-        templates.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
+        templates.sort_by_key(|a| a.sort_order);
         templates
     }
 

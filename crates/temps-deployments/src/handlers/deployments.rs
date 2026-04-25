@@ -1388,7 +1388,9 @@ pub async fn get_container_detail(
         .get_container_env_variables(project_id, environment_id, container_id.clone())
         .await
     {
-        let sensitive_keys = ["password", "secret", "token", "key", "auth", "api_key"];
+        let sensitive_keys = [
+            "password", "secret", "token", "key", "auth", "api_key", "npm_rc",
+        ];
         for (key, value) in vars {
             let is_masked = sensitive_keys
                 .iter()
@@ -2018,6 +2020,32 @@ mod tests {
             _archive_path: &std::path::Path,
         ) -> Result<(), temps_git::GitProviderManagerError> {
             unimplemented!("mock")
+        }
+
+        async fn push_files_and_create_pr(
+            &self,
+            _connection_id: i32,
+            _owner: &str,
+            _repo: &str,
+            _branch: &str,
+            _base_branch: &str,
+            _files: Vec<(String, Vec<u8>)>,
+            _commit_message: &str,
+            _pr_title: &str,
+            _pr_body: &str,
+        ) -> Result<temps_git::PullRequest, temps_git::GitProviderManagerError> {
+            Err(temps_git::GitProviderManagerError::Other(
+                "not implemented in test".into(),
+            ))
+        }
+
+        async fn get_connection_access_token(
+            &self,
+            _connection_id: i32,
+        ) -> Result<(String, String), temps_git::GitProviderManagerError> {
+            Err(temps_git::GitProviderManagerError::Other(
+                "not implemented in test".into(),
+            ))
         }
     }
 
@@ -2980,6 +3008,7 @@ mod tests {
                 as Arc<dyn temps_deployer::static_deployer::StaticDeployer>,
             log_service.clone(),
             Arc::new(MockCronConfigService) as Arc<dyn crate::jobs::CronConfigService>,
+            Arc::new(crate::jobs::NoOpAgentSyncService) as Arc<dyn crate::jobs::AgentSyncService>,
             Arc::new(ConfigService::new(
                 Arc::new(
                     temps_config::ServerConfig::new(

@@ -9,8 +9,10 @@ import {
   NodeInfoResponse,
   ServiceTypeRoute,
 } from '@/api/client/types.gen'
+import { usePageTitle } from '@/hooks/usePageTitle'
 import { Button } from '@/components/ui/button'
 import { JsonSchemaForm } from '@/components/forms/JsonSchemaForm'
+import { useServiceTypePreset } from '@/components/forms/ServiceTypePresets'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -23,7 +25,7 @@ import {
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { customAlphabet } from 'nanoid'
-import { ArrowLeft, Plus, Server, Trash2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Plus, Server, Trash2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -247,6 +249,7 @@ function ClusterMemberConfig({
 }
 
 export function CreateService() {
+  usePageTitle('Create Service')
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const serviceType = searchParams.get('type') as ServiceTypeRoute | null
@@ -270,6 +273,8 @@ export function CreateService() {
   const [clusterMembers, setClusterMembers] = useState<ClusterMemberRequest[]>(
     []
   )
+
+  const preset = useServiceTypePreset(serviceType)
 
   // Fetch available nodes to determine if cluster topology can be offered
   const { data: nodesResponse } = useQuery({
@@ -309,8 +314,8 @@ export function CreateService() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Storage', href: '/settings/storage' },
-      { label: 'Create Service', href: '/settings/storage/create' },
+      { label: 'Storage', href: '/storage' },
+      { label: 'Create Service', href: '/storage/create' },
     ])
   }, [setBreadcrumbs])
 
@@ -345,7 +350,7 @@ export function CreateService() {
       } else {
         toast.success('Service created successfully')
       }
-      navigate(`/settings/storage/${data.id}`)
+      navigate(`/storage/${data.id}`)
     },
   })
 
@@ -398,7 +403,7 @@ export function CreateService() {
               Please select a service type from the URL parameter.
             </p>
           </div>
-          <Link to="/settings/storage">
+          <Link to="/storage">
             <Button variant="outline">
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back to Storage
@@ -438,7 +443,7 @@ export function CreateService() {
       <div className="sm:p-4 space-y-6 md:p-6 max-w-4xl mx-auto">
         {/* Header with provider info */}
         <div className="space-y-4">
-          <Link to="/settings/storage">
+          <Link to="/storage">
             <Button variant="ghost" size="sm" className="gap-2">
               <ArrowLeft className="h-4 w-4" />
               Back to Storage
@@ -551,19 +556,114 @@ export function CreateService() {
           </div>
         )}
 
+        {/* Preview summary */}
+        <ServicePreviewCard
+          serviceName={serviceName}
+          serviceType={serviceType}
+          topology={supportsCluster ? topology : 'standalone'}
+          schema={jsonSchema as any}
+          dockerImageOverride={preset.overrides.docker_image}
+          presetOwnsImage={preset.ownedFields.includes('docker_image')}
+        />
+
+        {/* Type-specific preset (version/engine pills) */}
+        {topology === 'standalone' && preset.ui}
+
         {/* JSON Schema Form for Parameters */}
         <JsonSchemaForm
           schema={jsonSchema as any}
           onSubmit={handleSubmit}
-          onCancel={() => navigate('/settings/storage')}
-          submitText="Create Service"
+          onCancel={() => navigate('/storage')}
+          submitText={
+            serviceName.trim()
+              ? `Create ${serviceName.trim()}`
+              : 'Create Service'
+          }
           isSubmitting={createServiceMut.isPending}
+          serviceType={serviceType}
+          managedByTemps
+          fieldOverrides={
+            topology === 'standalone' ? preset.overrides : undefined
+          }
+          presetOwnedFields={
+            topology === 'standalone' ? preset.ownedFields : undefined
+          }
           hiddenFields={
             topology === 'cluster'
               ? ['host', 'port', 'docker_image']
               : []
           }
         />
+      </div>
+    </div>
+  )
+}
+
+interface ServicePreviewCardProps {
+  serviceName: string
+  serviceType: ServiceTypeRoute
+  topology: 'standalone' | 'cluster'
+  schema: {
+    properties: Record<string, { default?: string | null }>
+  } | null
+  dockerImageOverride?: string
+  presetOwnsImage?: boolean
+}
+
+function ServicePreviewCard({
+  serviceName,
+  serviceType,
+  topology,
+  schema,
+  dockerImageOverride,
+  presetOwnsImage,
+}: ServicePreviewCardProps) {
+  const displayName = serviceName.trim() || `<unnamed>`
+  let dockerImage: string | null
+  if (topology === 'cluster' && serviceType === 'postgres') {
+    dockerImage = 'gotempsh/postgres-ha:18-bookworm'
+  } else if (presetOwnsImage) {
+    // Preset owns the field — show what it resolved to, or a placeholder.
+    dockerImage = dockerImageOverride || 'Custom (not set)'
+  } else {
+    dockerImage = schema?.properties?.docker_image?.default ?? null
+  }
+
+  const highlights: { label: string; value: string }[] = []
+  if (topology === 'cluster') {
+    highlights.push({ label: 'Topology', value: 'Cluster (HA)' })
+  }
+  if (dockerImage) {
+    highlights.push({ label: 'Image', value: dockerImage })
+  }
+  highlights.push({ label: 'Port', value: 'Auto-assigned' })
+  highlights.push({ label: 'Password', value: 'Auto-generated if empty' })
+
+  return (
+    <div className="rounded-lg border bg-muted/30 p-4">
+      <div className="flex items-start gap-3">
+        <CheckCircle2 className="h-5 w-5 text-emerald-500 flex-shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0 space-y-2">
+          <div>
+            <p className="text-sm">
+              Will create{' '}
+              <span className="font-mono font-medium">{displayName}</span>
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Defaults are filled in — click Create to provision.
+            </p>
+          </div>
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+            {highlights.map((h) => (
+              <div key={h.label} className="flex gap-1.5">
+                <dt className="text-muted-foreground">{h.label}:</dt>
+                <dd className="font-mono truncate" title={h.value}>
+                  {h.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
       </div>
     </div>
   )

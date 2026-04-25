@@ -32,6 +32,64 @@ pub struct DockerRuntime {
 }
 
 impl DockerRuntime {
+    /// Per-container directory that holds plaintext secret files for bind-mounting
+    /// into `/run/secrets`. Lives outside `TempDir` because Docker keeps the
+    /// directory open for the container lifetime; cleanup happens in
+    /// `remove_container`.
+    fn secrets_host_dir(&self, container_name: &str) -> PathBuf {
+        // Use std::env::temp_dir() so the path matches what the Docker daemon
+        // can see — both daemon and us run on the same host in the local
+        // (non-remote) deployer path.
+        std::env::temp_dir()
+            .join("temps-secrets")
+            .join(container_name)
+    }
+
+    /// Resolves the numeric (uid, gid) that the container will run as,
+    /// by inspecting the image's `Config.User`. Used to `chown` the
+    /// bind-mounted secrets directory so the app can read its secret
+    /// files even when the image runs as a non-root user (e.g. distroless
+    /// nonroot = 65532:65532).
+    ///
+    /// Falls back to `(0, 0)` — matching Docker's default when no USER is
+    /// set — on inspect failure or when the USER is a named user we can't
+    /// resolve without reading `/etc/passwd` from inside the image. Named
+    /// users are logged as a warning so it's obvious why secrets might be
+    /// unreadable for images like `node:alpine` (USER=node).
+    async fn resolve_image_user(&self, image_name: &str) -> (u32, u32) {
+        let inspect = match self.docker.inspect_image(image_name).await {
+            Ok(i) => i,
+            Err(e) => {
+                warn!(
+                    "Failed to inspect image '{}' for secrets chown; defaulting to root: {}",
+                    image_name, e
+                );
+                return (0, 0);
+            }
+        };
+
+        let user_spec = inspect
+            .config
+            .as_ref()
+            .and_then(|c| c.user.as_ref())
+            .map(|u| u.as_str())
+            .unwrap_or("");
+
+        match parse_numeric_user_spec(user_spec) {
+            Some(pair) => pair,
+            None => {
+                warn!(
+                    "Image '{}' declares USER='{}' which is not numeric; \
+                     secrets will be owned by root and may be unreadable. \
+                     Use numeric UIDs (e.g. USER 1000:1000) for secrets \
+                     to work with this image.",
+                    image_name, user_spec
+                );
+                (0, 0)
+            }
+        }
+    }
+
     pub fn new(docker: Arc<Docker>, use_buildkit: bool, network_name: String) -> Self {
         Self {
             docker,
@@ -952,6 +1010,35 @@ impl ContainerDeployer for DockerRuntime {
             .as_ref()
             .map(|lc| lc.to_bollard_log_config());
 
+        // When secrets are present, materialize them as files in a per-container
+        // host directory (mode 0700) and bind-mount that directory into the
+        // container at /run/secrets (read-only). This matches how Docker Swarm
+        // delivers secrets: directory is created by the mount itself, so it
+        // works with any image (no requirement that /run/secrets pre-exist),
+        // and files are visible from container start (no race with start).
+        //
+        // Trade-off vs tmpfs: plaintext lives on the host filesystem under
+        // SecretsHostDir until the container is removed. The directory is
+        // mode 0700 root-owned; individual files are mode 0400. Cleanup is
+        // handled in `remove_container`.
+        let secrets_bind = if request.secrets.is_empty() {
+            None
+        } else {
+            let host_dir = self.secrets_host_dir(&request.container_name);
+            // Resolve the image's USER so we can chown the secret files to
+            // the uid that the container will actually run as — otherwise
+            // mode-0400 root-owned files are unreadable by nonroot images.
+            let owner = self.resolve_image_user(&request.image_name).await;
+            write_secrets_to_host_dir(&host_dir, &request.secrets, Some(owner)).map_err(|e| {
+                DeployerError::SecretMountFailed {
+                    container_name: request.container_name.clone(),
+                    reason: format!("write host dir {}: {}", host_dir.display(), e),
+                }
+            })?;
+            // Docker bind-mount syntax: "<host_path>:<container_path>:<options>"
+            Some(format!("{}:/run/secrets:ro", host_dir.display()))
+        };
+
         let host_config = bollard::models::HostConfig {
             port_bindings: Some(port_bindings),
             network_mode: Some(self.network_name.clone()),
@@ -976,6 +1063,7 @@ impl ContainerDeployer for DockerRuntime {
             pids_limit: Some(512),
             // Security hardening: use init process for proper signal handling and zombie reaping
             init: Some(true),
+            binds: secrets_bind.map(|b| vec![b]),
             ..Default::default()
         };
 
@@ -1116,6 +1204,18 @@ impl ContainerDeployer for DockerRuntime {
     }
 
     async fn remove_container(&self, container_id: &str) -> Result<(), DeployerError> {
+        // Look up the container name before removal so we can clean up its
+        // per-container secrets host directory (if any). Inspect failures are
+        // non-fatal: we still try to remove the container.
+        let container_name = self
+            .docker
+            .inspect_container(container_id, None::<InspectContainerOptions>)
+            .await
+            .ok()
+            .and_then(|c| c.name)
+            // Docker prefixes inspect names with a leading '/'.
+            .map(|n| n.trim_start_matches('/').to_string());
+
         self.docker
             .remove_container(
                 container_id,
@@ -1126,6 +1226,20 @@ impl ContainerDeployer for DockerRuntime {
             )
             .await
             .map_err(|e| DeployerError::Other(format!("Failed to remove container: {}", e)))?;
+
+        if let Some(name) = container_name {
+            let dir = self.secrets_host_dir(&name);
+            if dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                    warn!(
+                        "Failed to clean up secrets host dir {}: {}",
+                        dir.display(),
+                        e
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1418,6 +1532,154 @@ impl ContainerRuntime for DockerRuntime {
     }
 }
 
+/// Writes secrets as files into a per-container host directory for Docker
+/// to bind-mount into `/run/secrets`. The directory is created (or recreated)
+/// fresh on each call so stale entries from a previous deployment of the same
+/// container name don't leak through. Directory mode 0700, file mode 0400.
+///
+/// When `owner` is provided, the directory and every file inside are
+/// `chown`ed to that (uid, gid). Combined with 0700/0400 this means only
+/// that UID inside the container can read the secrets — matching the
+/// image's declared `USER` so distroless/nonroot images work without
+/// world-readable files.
+///
+/// Rejects keys that would escape the directory (path separators, `.`, `..`)
+/// to defend against a maliciously-crafted secret name.
+fn write_secrets_to_host_dir(
+    dir: &Path,
+    secrets: &HashMap<String, String>,
+    owner: Option<(u32, u32)>,
+) -> std::io::Result<()> {
+    use std::fs;
+    use std::io::Write;
+
+    // Recreate fresh — wipes any stale files from a previous container with
+    // the same name (rolling deploys, retries after failure, etc.).
+    if dir.exists() {
+        fs::remove_dir_all(dir)?;
+    }
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+
+    for (key, value) in secrets {
+        // Keys must be plain identifiers — defense-in-depth even though
+        // SecretService::validate_secret_key already enforces this.
+        if key.is_empty()
+            || key == "."
+            || key == ".."
+            || key.contains('/')
+            || key.contains('\\')
+            || key.contains('\0')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid secret key '{}': contains path-separator characters",
+                    key
+                ),
+            ));
+        }
+        let path = dir.join(key);
+        let mut f = fs::File::create(&path)?;
+        f.write_all(value.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o400))?;
+        }
+    }
+
+    // Chown after files are written so we don't have to re-chown on every
+    // write. Dir chown happens last so we still have permission to create
+    // files in it while writing (when running as non-root, chown-to-self
+    // is a no-op; when running as root we own it either way).
+    //
+    // chown(2) requires root on every sensible OS, or chown-to-self. When
+    // Temps itself runs unprivileged (local macOS dev is the common case)
+    // and the image runs as a non-root uid like 1000, the chown will fail
+    // with EPERM. Rather than breaking the deploy, fall back to
+    // world-readable permissions (0755 dir, 0444 files) so the container
+    // can read its secrets. The container still has `cap_drop: ALL` and
+    // `no-new-privileges`, and the bind mount is read-only — the trust
+    // boundary is still the container itself.
+    #[cfg(unix)]
+    if let Some((uid, gid)) = owner {
+        use std::os::unix::fs::{chown, PermissionsExt};
+
+        let chown_result: std::io::Result<()> = (|| {
+            for key in secrets.keys() {
+                chown(dir.join(key), Some(uid), Some(gid))?;
+            }
+            chown(dir, Some(uid), Some(gid))?;
+            Ok(())
+        })();
+
+        if let Err(e) = chown_result {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                warn!(
+                    "chown of secrets dir {} to {}:{} denied (Temps is not root); \
+                     falling back to world-readable mode so nonroot containers can read. \
+                     Run Temps as root for strict per-uid ownership.",
+                    dir.display(),
+                    uid,
+                    gid
+                );
+                // World-readable fallback. Parent dir already restricts
+                // access on the host side (only the Temps user can traverse
+                // into /tmp/temps-secrets); these bits are what the
+                // container sees.
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+                for key in secrets.keys() {
+                    fs::set_permissions(dir.join(key), fs::Permissions::from_mode(0o444))?;
+                }
+            } else {
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Parses a Docker image `USER` spec into a numeric `(uid, gid)` pair.
+///
+/// Handles the forms Docker accepts in a Dockerfile `USER` directive and
+/// in `Config.User`: `""` (root), `"0"`, `"1000"`, `"1000:1000"`,
+/// `"1000:gname"`, `":1000"`. Named users/groups cannot be resolved
+/// without consulting the image's `/etc/passwd` — those return `None`
+/// so the caller can decide whether to look them up or fall back.
+///
+/// When only a uid is given, gid defaults to the same value (matches
+/// Docker's behavior: `USER 1000` runs as uid=1000, gid=1000).
+fn parse_numeric_user_spec(spec: &str) -> Option<(u32, u32)> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec == "root" {
+        return Some((0, 0));
+    }
+
+    let (user_part, group_part) = match spec.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (spec, None),
+    };
+
+    let uid = if user_part.is_empty() {
+        0
+    } else {
+        user_part.parse::<u32>().ok()?
+    };
+
+    let gid = match group_part {
+        Some(g) if !g.is_empty() => g.parse::<u32>().ok()?,
+        _ => uid,
+    };
+
+    Some((uid, gid))
+}
+
 #[cfg(test)]
 mod docker_tests {
     use super::*;
@@ -1439,6 +1701,189 @@ mod docker_tests {
             false,
             "test-network".to_string(),
         ))
+    }
+
+    #[test]
+    fn test_write_secrets_to_host_dir_creates_files_with_correct_perms() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("c1");
+
+        let mut secrets = HashMap::new();
+        secrets.insert("DB_PASSWORD".to_string(), "s3cret".to_string());
+        secrets.insert("API_KEY".to_string(), "abc\ndef".to_string());
+
+        write_secrets_to_host_dir(&dir, &secrets, None).expect("write");
+
+        let db = std::fs::read_to_string(dir.join("DB_PASSWORD")).unwrap();
+        assert_eq!(db, "s3cret");
+        let api = std::fs::read_to_string(dir.join("API_KEY")).unwrap();
+        assert_eq!(api, "abc\ndef");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            let file_mode = std::fs::metadata(dir.join("DB_PASSWORD"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o400);
+        }
+    }
+
+    #[test]
+    fn test_write_secrets_to_host_dir_overwrites_stale_dir() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("c2");
+
+        let mut first = HashMap::new();
+        first.insert("OLD".to_string(), "old".to_string());
+        write_secrets_to_host_dir(&dir, &first, None).unwrap();
+        assert!(dir.join("OLD").exists());
+
+        let mut second = HashMap::new();
+        second.insert("NEW".to_string(), "new".to_string());
+        write_secrets_to_host_dir(&dir, &second, None).unwrap();
+        // Stale file from first call must be gone
+        assert!(!dir.join("OLD").exists());
+        assert!(dir.join("NEW").exists());
+    }
+
+    #[test]
+    fn test_write_secrets_to_host_dir_rejects_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("c3");
+
+        for bad in ["..", ".", "../escape", "a/b", "a\\b", "with\0null"] {
+            let mut secrets = HashMap::new();
+            secrets.insert(bad.to_string(), "v".to_string());
+            let err = write_secrets_to_host_dir(&dir, &secrets, None).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "key={}", bad);
+        }
+    }
+
+    #[test]
+    fn test_write_secrets_to_host_dir_empty_creates_empty_dir() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("c4");
+        let secrets: HashMap<String, String> = HashMap::new();
+        write_secrets_to_host_dir(&dir, &secrets, None).unwrap();
+        assert!(dir.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn test_parse_numeric_user_spec() {
+        // Empty / root → (0, 0)
+        assert_eq!(parse_numeric_user_spec(""), Some((0, 0)));
+        assert_eq!(parse_numeric_user_spec("  "), Some((0, 0)));
+        assert_eq!(parse_numeric_user_spec("root"), Some((0, 0)));
+        assert_eq!(parse_numeric_user_spec("0"), Some((0, 0)));
+
+        // Uid only → gid defaults to uid (Docker's behavior)
+        assert_eq!(parse_numeric_user_spec("1000"), Some((1000, 1000)));
+        assert_eq!(parse_numeric_user_spec("65532"), Some((65532, 65532)));
+
+        // uid:gid
+        assert_eq!(parse_numeric_user_spec("1000:2000"), Some((1000, 2000)));
+        assert_eq!(parse_numeric_user_spec("65532:65532"), Some((65532, 65532)));
+
+        // :gid (uid defaults to 0 — matches Docker)
+        assert_eq!(parse_numeric_user_spec(":1000"), Some((0, 1000)));
+
+        // uid: (trailing colon → gid falls back to uid)
+        assert_eq!(parse_numeric_user_spec("1000:"), Some((1000, 1000)));
+
+        // Named users/groups are not numeric — caller falls back
+        assert_eq!(parse_numeric_user_spec("node"), None);
+        assert_eq!(parse_numeric_user_spec("node:node"), None);
+        assert_eq!(parse_numeric_user_spec("1000:node"), None);
+        assert_eq!(parse_numeric_user_spec("node:1000"), None);
+
+        // Malformed
+        assert_eq!(parse_numeric_user_spec("abc"), None);
+        assert_eq!(parse_numeric_user_spec("-1"), None);
+        assert_eq!(parse_numeric_user_spec("1:2:3"), None);
+    }
+
+    #[test]
+    fn test_write_secrets_to_host_dir_chown_to_self_is_noop() {
+        // chown(2) only succeeds when chown-ing to yourself (unless root).
+        // We verify the happy path by chown-ing to our own uid/gid: the
+        // function must succeed and leave the mode bits intact. This guards
+        // against the chown being accidentally reordered before the file
+        // writes (which would fail) or changing the permission bits.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::PermissionsExt;
+
+            let tmp = TempDir::new().unwrap();
+            let dir = tmp.path().join("c5");
+
+            let mut secrets = HashMap::new();
+            secrets.insert("DB_PASSWORD".to_string(), "s3cret".to_string());
+
+            let my_uid = std::fs::metadata(tmp.path()).unwrap().uid();
+            let my_gid = std::fs::metadata(tmp.path()).unwrap().gid();
+
+            write_secrets_to_host_dir(&dir, &secrets, Some((my_uid, my_gid))).unwrap();
+
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            let file_mode = std::fs::metadata(dir.join("DB_PASSWORD"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o400);
+        }
+    }
+
+    #[test]
+    fn test_write_secrets_to_host_dir_falls_back_to_world_readable_on_eperm() {
+        // When Temps runs unprivileged and is asked to chown to a uid that
+        // isn't its own, chown returns EPERM. The function must not fail
+        // the deploy — it must downgrade permissions so the container can
+        // still read its secrets. Only runs as non-root (skipped under sudo).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::PermissionsExt;
+
+            let tmp = TempDir::new().unwrap();
+            let my_uid = std::fs::metadata(tmp.path()).unwrap().uid();
+            if my_uid == 0 {
+                eprintln!("running as root; skipping EPERM fallback test");
+                return;
+            }
+
+            let dir = tmp.path().join("c6");
+            let mut secrets = HashMap::new();
+            secrets.insert("DB_PASSWORD".to_string(), "s3cret".to_string());
+
+            // Ask for a uid/gid we definitely don't own — forces EPERM.
+            write_secrets_to_host_dir(&dir, &secrets, Some((65532, 65532)))
+                .expect("fallback must succeed, not error");
+
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o755, "dir must be world-traversable on fallback");
+
+            let file_mode = std::fs::metadata(dir.join("DB_PASSWORD"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(file_mode, 0o444, "file must be world-readable on fallback");
+
+            // Content still intact.
+            assert_eq!(
+                std::fs::read_to_string(dir.join("DB_PASSWORD")).unwrap(),
+                "s3cret"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1574,6 +2019,7 @@ CMD ["cat", "/hello.txt"]
                         env.insert("TEST_VAR".to_string(), "test_value".to_string());
                         env
                     },
+                    secrets: HashMap::new(),
                     port_mappings: vec![],
                     network_name: None,
                     resource_limits: ResourceLimits {

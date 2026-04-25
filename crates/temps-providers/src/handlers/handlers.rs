@@ -12,7 +12,7 @@ use axum::{
 use temps_auth::permission_guard;
 use temps_auth::RequireAuth;
 use temps_core::{
-    error_builder::{bad_request, forbidden, internal_server_error, not_found},
+    error_builder::{bad_request, forbidden, internal_server_error, not_found, ErrorBuilder},
     problemdetails::Problem,
 };
 use tracing::{error, info};
@@ -20,13 +20,15 @@ use utoipa::OpenApi;
 
 use super::audit::{
     ExternalServiceCreatedAudit, ExternalServiceDeletedAudit, ExternalServiceStatusChangedAudit,
-    ExternalServiceUpdatedAudit,
+    ExternalServiceUpdatedAudit, ServiceHealthChecked,
 };
 use crate::handlers::types::{
     AvailableContainerInfo, CreateExternalServiceRequest, EnvironmentVariableInfo,
-    ExternalServiceDetails, ExternalServiceInfo, ImportExternalServiceRequest, LinkServiceRequest,
-    ProjectServiceInfo, ProviderMetadata, RetryClusterRequest, ServiceParameter, ServiceTypeInfo,
-    ServiceTypeRoute, UpdateExternalServiceRequest, UpgradeExternalServiceRequest,
+    ExternalServiceDetails, ExternalServiceInfo, HealthCheckEntryResponse,
+    ImportExternalServiceRequest, LinkServiceRequest, ProjectServiceInfo, ProviderMetadata,
+    RetryClusterRequest, ServiceHealthResponse, ServiceHealthStatusBatchResponse,
+    ServiceHealthStatusEntryResponse, ServiceParameter, ServiceTypeInfo, ServiceTypeRoute,
+    UpdateExternalServiceRequest, UpgradeExternalServiceRequest,
 };
 use crate::services::EnvironmentVariableOptions;
 use temps_core::AuditContext;
@@ -239,6 +241,18 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/external-services/{id}", put(update_service))
         .route("/external-services/{id}", delete(delete_service))
         .route("/external-services/{id}/health", get(check_health))
+        .route(
+            "/external-services/{id}/health-status",
+            get(get_service_health_status),
+        )
+        .route(
+            "/external-services/{id}/health-check",
+            post(trigger_service_health_check),
+        )
+        .route(
+            "/external-services/health-status-batch",
+            get(list_service_health_statuses),
+        )
         .route("/external-services/{id}/start", post(start_service))
         .route("/external-services/{id}/stop", post(stop_service))
         .route("/external-services/{id}/retry", post(retry_cluster))
@@ -724,6 +738,198 @@ async fn check_health(
                 .detail(format!("Health check failed: {}", e))
                 .build()),
         },
+    }
+}
+
+/// Persisted health status for an external service
+///
+/// Returns the latest health probe result recorded by
+/// `ExternalServiceHealthMonitor`, plus recent check history for sparklines
+/// and a 24-hour uptime percentage. Safe to poll from the UI every 30s.
+#[utoipa::path(
+    get,
+    path = "/external-services/{id}/health-status",
+    tag = "External Services",
+    responses(
+        (status = 200, description = "Current health + recent history", body = ServiceHealthResponse),
+        (status = 404, description = "Service not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    params(
+        ("id" = i32, Path, description = "External service ID"),
+        ("limit" = Option<u64>, Query, description = "Max number of recent checks (default 50, max 200)"),
+    )
+)]
+async fn get_service_health_status(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i32>,
+    Query(params): Query<HashMap<String, String>>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesRead);
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(50);
+
+    match app_state
+        .external_service_manager
+        .get_health_snapshot(id, limit)
+        .await
+    {
+        Ok(snap) => Ok((StatusCode::OK, Json(ServiceHealthResponse::from(snap)))),
+        Err(crate::services::ExternalServiceError::ServiceNotFound { .. }) => {
+            Err(not_found().detail("Service not found").build())
+        }
+        Err(e) => Err(internal_server_error()
+            .detail(format!("Failed to load service health: {}", e))
+            .build()),
+    }
+}
+
+/// Run a health check for one service right now
+///
+/// Triggers the same engine-specific probe as the background monitor, writes
+/// a history row, updates the denormalized fields on `external_services`, and
+/// fires alerts on the Nth consecutive failure (so consecutive-failure state
+/// stays honest). Returns the fresh snapshot the UI can display immediately.
+#[utoipa::path(
+    post,
+    path = "/external-services/{id}/health-check",
+    tag = "External Services",
+    responses(
+        (status = 200, description = "Fresh health snapshot after probing", body = ServiceHealthResponse),
+        (status = 404, description = "Service not found"),
+        (status = 503, description = "Health monitor not running on this node"),
+        (status = 500, description = "Internal server error"),
+    ),
+    params(
+        ("id" = i32, Path, description = "External service ID"),
+    )
+)]
+async fn trigger_service_health_check(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesWrite);
+
+    let Some(monitor) = app_state.health_monitor.as_ref() else {
+        return Err(ErrorBuilder::new(StatusCode::SERVICE_UNAVAILABLE)
+            .title("Health Monitor Unavailable")
+            .detail(
+                "Health monitor is not running on this node. Manual checks are only \
+                 available on the control plane.",
+            )
+            .build());
+    };
+
+    match monitor.run_check_for(id).await {
+        Ok(()) => {}
+        Err(crate::health_monitor::HealthMonitorError::ServiceNotFound { .. }) => {
+            return Err(not_found().detail("Service not found").build());
+        }
+        Err(e) => {
+            return Err(internal_server_error()
+                .detail(format!("Manual health check failed: {}", e))
+                .build());
+        }
+    }
+
+    // Audit — manual probes are a write action. Log failure, don't propagate.
+    let audit = ServiceHealthChecked {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        service_id: id,
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log for manual health check: {}", e);
+    }
+
+    // Return the fresh snapshot (same shape as GET /health-status).
+    match app_state
+        .external_service_manager
+        .get_health_snapshot(id, 50)
+        .await
+    {
+        Ok(snap) => Ok((StatusCode::OK, Json(ServiceHealthResponse::from(snap)))),
+        Err(crate::services::ExternalServiceError::ServiceNotFound { .. }) => {
+            Err(not_found().detail("Service not found").build())
+        }
+        Err(e) => Err(internal_server_error()
+            .detail(format!("Failed to load service health: {}", e))
+            .build()),
+    }
+}
+
+/// Current health status for many services at once
+///
+/// Powers the status dot on the Storage list page. Pass a comma-separated
+/// list of service IDs via `?ids=1,2,3`. Omit to get every service.
+#[utoipa::path(
+    get,
+    path = "/external-services/health-status-batch",
+    tag = "External Services",
+    responses(
+        (status = 200, description = "Batch of current health statuses", body = ServiceHealthStatusBatchResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    params(
+        ("ids" = Option<String>, Query, description = "Comma-separated service IDs. Omit for all services."),
+    )
+)]
+async fn list_service_health_statuses(
+    State(app_state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesRead);
+
+    let ids: Vec<i32> = params
+        .get("ids")
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // When `ids` is omitted, fall back to every service the user can see.
+    let ids = if ids.is_empty() {
+        match app_state.external_service_manager.list_services().await {
+            Ok(svcs) => svcs.into_iter().map(|s| s.id).collect::<Vec<_>>(),
+            Err(e) => {
+                return Err(internal_server_error()
+                    .detail(format!("Failed to list services: {}", e))
+                    .build())
+            }
+        }
+    } else {
+        ids
+    };
+
+    match app_state
+        .external_service_manager
+        .list_health_statuses(&ids)
+        .await
+    {
+        Ok(entries) => Ok((
+            StatusCode::OK,
+            Json(ServiceHealthStatusBatchResponse {
+                statuses: entries
+                    .into_iter()
+                    .map(ServiceHealthStatusEntryResponse::from)
+                    .collect(),
+            }),
+        )),
+        Err(e) => Err(internal_server_error()
+            .detail(format!("Failed to load health statuses: {}", e))
+            .build()),
     }
 }
 
@@ -1396,6 +1602,9 @@ async fn get_service_preview_environment_variables_masked(
         get_service_preview_environment_variable_names,
         get_service_preview_environment_variables_masked,
         get_service_by_slug,
+        get_service_health_status,
+        trigger_service_health_check,
+        list_service_health_statuses,
         super::query_handlers::check_explorer_support,
         super::query_handlers::list_root_containers,
         super::query_handlers::list_containers_at_path,
@@ -1421,6 +1630,10 @@ async fn get_service_preview_environment_variables_masked(
         LinkServiceRequest,
         ProjectServiceInfo,
         EnvironmentVariableInfo,
+        ServiceHealthResponse,
+        HealthCheckEntryResponse,
+        ServiceHealthStatusBatchResponse,
+        ServiceHealthStatusEntryResponse,
         super::query_handlers::ExplorerSupportResponse,
         super::query_handlers::ContainerResponse,
         super::query_handlers::EntityResponse,

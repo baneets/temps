@@ -14,6 +14,7 @@ use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use temps_agents::AgentsPlugin;
 use temps_analytics::AnalyticsPlugin;
 use temps_analytics_events::EventsPlugin;
 use temps_analytics_funnels::FunnelsPlugin;
@@ -54,11 +55,14 @@ use temps_projects::ProjectsPlugin;
 use temps_providers::ProvidersPlugin;
 use temps_proxy::ProxyPlugin;
 use temps_queue::QueuePlugin;
+use temps_revenue::RevenuePlugin;
+use temps_sandbox::plugin::SandboxPlugin;
 use temps_screenshots::ScreenshotsPlugin;
 use temps_static_files::StaticFilesPlugin;
 use temps_status_page::StatusPagePlugin;
 use temps_vulnerability_scanner::VulnerabilityScannerPlugin;
 use temps_webhooks::WebhooksPlugin;
+use temps_workspace::plugin::WorkspacePlugin;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 
@@ -787,10 +791,30 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let vulnerability_scanner_plugin = Box::new(VulnerabilityScannerPlugin::new());
     plugin_manager.register_plugin(vulnerability_scanner_plugin);
 
+    // 8.6. AgentsPlugin - MUST be registered before DeploymentsPlugin so DeploymentsPlugin can
+    // resolve AgentSyncService via the plugin context. If registered after, DeploymentsPlugin
+    // falls back to NoOpAgentSyncService and agent sync is silently skipped on every deployment.
+    debug!("Registering AgentsPlugin");
+    let agents_plugin = Box::new(AgentsPlugin::new());
+    plugin_manager.register_plugin(agents_plugin);
+
     // 9. DeploymentsPlugin - provides deployment orchestration (depends on deployer, screenshots, and vulnerability scanner)
+    // Must be registered before WorkspacePlugin so WorkspacePlugin can resolve DeploymentTokenService in phase 1.
     debug!("Registering DeploymentsPlugin");
     let deployments_plugin = Box::new(DeploymentsPlugin::new());
     plugin_manager.register_plugin(deployments_plugin);
+
+    // 8.7. WorkspacePlugin - interactive AI workspace sessions.
+    // Registered after AgentsPlugin (sandbox provider) and DeploymentsPlugin (deployment token service).
+    debug!("Registering WorkspacePlugin");
+    let workspace_plugin = Box::new(WorkspacePlugin::new());
+    plugin_manager.register_plugin(workspace_plugin);
+
+    // 8.8. SandboxPlugin - Vercel-compatible `/v1/sandbox/*` API.
+    // Consumes the shared SandboxProvider registered by AgentsPlugin.
+    debug!("Registering SandboxPlugin");
+    let sandbox_plugin = Box::new(SandboxPlugin::new());
+    plugin_manager.register_plugin(sandbox_plugin);
 
     // 9.1. LogAggregatorPlugin - structured log collection, storage, search, and streaming
     // Depends on database, Docker (from DeployerPlugin), and AuditLogger (from AuditPlugin)
@@ -847,6 +871,12 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     debug!("Registering BackupPlugin");
     let backup_plugin = Box::new(BackupPlugin::new());
     plugin_manager.register_plugin(backup_plugin);
+
+    // 11a. RevenuePlugin - per-project revenue tracking via inbound webhooks
+    // (depends on database + encryption service only — no outbound API calls)
+    debug!("Registering RevenuePlugin");
+    let revenue_plugin = Box::new(RevenuePlugin::new());
+    plugin_manager.register_plugin(revenue_plugin);
 
     // AI Gateway Plugin - provides AI provider key management and OpenAI-compatible API
     debug!("Registering AiGatewayPlugin");
@@ -1028,12 +1058,13 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             queue_service.clone(),
         ));
 
-        // Start event-driven outage detection (listens to StatusCheckCompleted jobs)
-        let outage_service = Arc::new(OutageDetectionService::new(
-            db.clone(),
-            notification_service,
-            alarm_service.clone(),
-        ));
+        // Start event-driven outage detection (listens to StatusCheckCompleted jobs).
+        // The job queue is attached so monitoring.downtime workflows can be fired
+        // automatically when an outage is detected.
+        let outage_service = Arc::new(
+            OutageDetectionService::new(db.clone(), notification_service, alarm_service.clone())
+                .with_job_queue(queue_service.clone()),
+        );
 
         let job_receiver = queue_service.subscribe();
         tokio::spawn(async move {
@@ -1067,6 +1098,37 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         );
     }
 
+    // Start external service health monitoring (Postgres/Redis/MongoDB/RustFS TCP probes)
+    if let (Some(notification_service), Some(external_service_manager)) = (
+        service_context.get_service::<dyn temps_core::notifications::NotificationService>(),
+        service_context.get_service::<temps_providers::ExternalServiceManager>(),
+    ) {
+        use temps_providers::health_monitor::{
+            ExternalServiceHealthConfig, ExternalServiceHealthMonitor,
+        };
+        let health_monitor = Arc::new(ExternalServiceHealthMonitor::new(
+            db.clone(),
+            external_service_manager,
+            notification_service,
+            ExternalServiceHealthConfig::default(),
+        ));
+
+        // Register so the providers plugin can pick it up and expose a
+        // manual-trigger endpoint that reuses the monitor's check logic.
+        service_context.register_service(health_monitor.clone());
+
+        let loop_handle = health_monitor.clone();
+        tokio::spawn(async move {
+            loop_handle.start().await;
+        });
+
+        debug!("External service health monitor started (poll interval: 30s)");
+    } else {
+        tracing::warn!(
+            "NotificationService or ExternalServiceManager not available - external service health monitoring disabled."
+        );
+    }
+
     // OTel background tasks: anomaly detection and health computation require
     // iterating over active project IDs, which will be wired up when project
     // discovery is integrated. The rate limiter is self-cleaning (evicts on check).
@@ -1078,13 +1140,10 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     }
 
     // Multi-node: create NodeService, register node routes, and start health check
-    let config_service_for_nodes = service_context
-        .get_service::<temps_config::ConfigService>()
-        .expect("ConfigService must be available for node registration");
+    let config_service_for_nodes = service_context.require_service::<temps_config::ConfigService>();
     let node_service = Arc::new(NodeService::new(db.clone()));
-    let encryption_service_for_nodes = service_context
-        .get_service::<temps_core::EncryptionService>()
-        .expect("EncryptionService must be available for node registration");
+    let encryption_service_for_nodes =
+        service_context.require_service::<temps_core::EncryptionService>();
     let node_app_state = Arc::new(NodeAppState {
         node_service: node_service.clone(),
         db: db.clone(),
@@ -1153,16 +1212,22 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let external_plugins_service = plugin_manager
         .service_context()
         .get_service::<temps_external_plugins::ExternalPluginsService>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("Console API received shutdown signal, stopping external plugins...");
-            if let Some(service) = external_plugins_service {
-                service.shutdown_all().await;
-                info!("External plugins shut down");
-            }
-        })
-        .await?;
+    // Use into_make_service_with_connect_info so handlers/middleware can read
+    // the immediate peer SocketAddr — required by rate-limiter to decide if
+    // X-Forwarded-For headers should be trusted (only from loopback proxies).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Console API received shutdown signal, stopping external plugins...");
+        if let Some(service) = external_plugins_service {
+            service.shutdown_all().await;
+            info!("External plugins shut down");
+        }
+    })
+    .await?;
     info!("Console API server exited");
     Ok(())
 }

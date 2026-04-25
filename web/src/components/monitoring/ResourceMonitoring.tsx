@@ -1,14 +1,9 @@
 import {
-  getEnvironmentsOptions,
   getProjectsOptions,
   getTimeBucketStatsOptions,
-  listContainersOptions,
+  getProjectsHealthOptions,
 } from '@/api/client/@tanstack/react-query.gen'
-import {
-  ContainerInfoResponse,
-  EnvironmentResponse,
-  ProjectResponse,
-} from '@/api/client/types.gen'
+import { ProjectResponse } from '@/api/client/types.gen'
 import {
   Card,
   CardContent,
@@ -26,12 +21,10 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import { format, subHours } from 'date-fns'
-import { useCallback, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import type { DateRange } from 'react-day-picker'
+import { DateRangePicker } from '@/components/ui/date-range-picker'
 import { Line, LineChart, XAxis, YAxis, CartesianGrid } from 'recharts'
-import {
-  EnvironmentMetricsCharts,
-  type AggregatedMetrics,
-} from './EnvironmentMetricsCard'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -40,8 +33,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Activity, Wifi, WifiOff } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
+import {
+  ArrowUpRight,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  HelpCircle,
+} from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { cn } from '@/lib/utils'
 
 // ── Chart configs ────────────────────────────────────────────────────
 
@@ -65,78 +65,185 @@ const responseTimeChartConfig = {
 
 // ── Types ────────────────────────────────────────────────────────────
 
-type TimeRange = '1h' | '6h' | '24h'
+type TimeRange = '1h' | '6h' | '24h' | 'custom'
 
-type StatusCodeFilter = 'all' | '2xx' | '3xx' | '4xx' | '5xx' | string
+interface ResolvedRange {
+  start: Date
+  end: Date
+  /** Short, user-facing label like "last 1h" or "Apr 10–16". */
+  label: string
+  /** TimescaleDB bucket interval matching the window size. */
+  bucketInterval: string
+}
 
-const STATUS_CODE_OPTIONS: { value: StatusCodeFilter; label: string }[] = [
-  { value: 'all', label: 'All status codes' },
-  { value: '2xx', label: '2xx Success' },
-  { value: '3xx', label: '3xx Redirect' },
-  { value: '4xx', label: '4xx Client Error' },
-  { value: '5xx', label: '5xx Server Error' },
-  { value: '200', label: '200 OK' },
-  { value: '201', label: '201 Created' },
-  { value: '301', label: '301 Moved' },
-  { value: '302', label: '302 Found' },
-  { value: '304', label: '304 Not Modified' },
-  { value: '400', label: '400 Bad Request' },
-  { value: '401', label: '401 Unauthorized' },
-  { value: '403', label: '403 Forbidden' },
-  { value: '404', label: '404 Not Found' },
-  { value: '429', label: '429 Too Many Requests' },
-  { value: '500', label: '500 Internal Server Error' },
-  { value: '502', label: '502 Bad Gateway' },
-  { value: '503', label: '503 Service Unavailable' },
-]
+const PRESET_LABEL: Record<Exclude<TimeRange, 'custom'>, string> = {
+  '1h': 'last 1h',
+  '6h': 'last 6h',
+  '24h': 'last 24h',
+}
 
-// ── Requests Line Chart ──────────────────────────────────────────────
+function pickBucketInterval(hours: number): string {
+  if (hours <= 1) return '5 minutes'
+  if (hours <= 6) return '30 minutes'
+  if (hours <= 48) return '1 hour'
+  if (hours <= 24 * 14) return '6 hours'
+  return '1 day'
+}
 
-function RequestsLineChart({
+function resolveRange(
+  timeRange: TimeRange,
+  custom: DateRange | undefined,
+  now: Date
+): ResolvedRange {
+  if (timeRange === 'custom' && custom?.from && custom?.to) {
+    const hours = (custom.to.getTime() - custom.from.getTime()) / 3_600_000
+    const sameDay =
+      custom.from.toDateString() === custom.to.toDateString()
+    const label = sameDay
+      ? `${format(custom.from, 'MMM d, HH:mm')}–${format(custom.to, 'HH:mm')}`
+      : `${format(custom.from, 'MMM d')}–${format(custom.to, 'MMM d')}`
+    return {
+      start: custom.from,
+      end: custom.to,
+      label,
+      bucketInterval: pickBucketInterval(Math.max(hours, 0.25)),
+    }
+  }
+  const preset: Exclude<TimeRange, 'custom'> =
+    timeRange === 'custom' ? '24h' : timeRange
+  const hours = preset === '1h' ? 1 : preset === '6h' ? 6 : 24
+  return {
+    start: subHours(now, hours),
+    end: now,
+    label: PRESET_LABEL[preset],
+    bucketInterval: pickBucketInterval(hours),
+  }
+}
+
+// ── Health status helpers ────────────────────────────────────────────
+
+function getStatusConfig(status: string) {
+  switch (status) {
+    case 'healthy':
+      return {
+        icon: CheckCircle2,
+        color: 'text-green-600',
+        label: 'Healthy',
+      }
+    case 'degraded':
+      return {
+        icon: AlertTriangle,
+        color: 'text-yellow-600',
+        label: 'Degraded',
+      }
+    case 'down':
+      return {
+        icon: XCircle,
+        color: 'text-red-600',
+        label: 'Down',
+      }
+    default:
+      return {
+        icon: HelpCircle,
+        color: 'text-muted-foreground',
+        label: 'Unknown',
+      }
+  }
+}
+
+// ── Project Health Row ──────────────────────────────────────────────
+
+function ProjectHealthRow({
+  project,
+  health,
+}: {
+  project: ProjectResponse
+  health?: {
+    status: string
+    total_requests: number
+    total_errors: number
+    error_rate: number
+    avg_response_time_ms: number
+  }
+}) {
+  const status = health?.status ?? 'unknown'
+  const config = getStatusConfig(status)
+  const StatusIcon = config.icon
+  const hasTraffic = health && health.status !== 'unknown'
+
+  return (
+    <Link
+      to={`/projects/${project.slug}/logs`}
+      className="group flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/50"
+    >
+      <StatusIcon className={cn('size-4 shrink-0', config.color)} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{project.name}</p>
+        {project.preset && (
+          <p className="truncate text-xs text-muted-foreground">
+            {project.preset}
+          </p>
+        )}
+      </div>
+      {hasTraffic ? (
+        <div className="flex shrink-0 items-center gap-4 text-xs tabular-nums">
+          <span>
+            <span className="font-semibold">
+              {health.total_requests.toLocaleString()}
+            </span>{' '}
+            <span className="text-muted-foreground">req</span>
+          </span>
+          <span
+            className={cn(
+              'font-semibold',
+              health.error_rate > 5
+                ? 'text-red-600'
+                : health.error_rate > 1
+                  ? 'text-yellow-600'
+                  : ''
+            )}
+          >
+            {health.error_rate.toFixed(1)}%
+          </span>
+          <span>
+            <span className="font-semibold">
+              {health.avg_response_time_ms.toFixed(0)}
+            </span>
+            <span className="text-muted-foreground">ms</span>
+          </span>
+        </div>
+      ) : (
+        <span className="shrink-0 text-xs text-muted-foreground">
+          No traffic
+        </span>
+      )}
+      <ArrowUpRight className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+    </Link>
+  )
+}
+
+// ── Simplified Trend Charts ─────────────────────────────────────────
+
+function TrendCharts({
   projectId,
-  timeRange,
-  statusCodeFilter,
+  range,
+  hideBots,
 }: {
   projectId?: number
-  timeRange: TimeRange
-  statusCodeFilter: StatusCodeFilter
+  range: ResolvedRange
+  hideBots: boolean
 }) {
-  const { startDate, endDate, bucketInterval } = useMemo(() => {
-    const end = new Date()
-    const hours = timeRange === '1h' ? 1 : timeRange === '6h' ? 6 : 24
-    const start = subHours(end, hours)
-    const interval =
-      timeRange === '1h'
-        ? '5 minutes'
-        : timeRange === '6h'
-          ? '30 minutes'
-          : '1 hour'
-    return {
-      startDate: start.toISOString(),
-      endDate: end.toISOString(),
-      bucketInterval: interval,
-    }
-  }, [timeRange])
-
-  const statusCodeQuery = useMemo(() => {
-    if (statusCodeFilter === 'all') return {}
-    if (/^\d{3}$/.test(statusCodeFilter)) {
-      return { status_code: parseInt(statusCodeFilter, 10) }
-    }
-    if (/^\dxx$/.test(statusCodeFilter)) {
-      return { status_code_class: statusCodeFilter }
-    }
-    return {}
-  }, [statusCodeFilter])
-
   const { data, isLoading } = useQuery({
     ...getTimeBucketStatsOptions({
       query: {
-        start_time: startDate,
-        end_time: endDate,
-        bucket_interval: bucketInterval,
+        start_time: range.start.toISOString(),
+        end_time: range.end.toISOString(),
+        bucket_interval: range.bucketInterval,
         project_id: projectId,
-        ...statusCodeQuery,
+        // When no project is selected, match the summary cards which only
+        // aggregate project-routed requests (project_id IS NOT NULL).
+        has_project: projectId === undefined ? true : undefined,
+        is_bot: hideBots ? false : undefined,
       },
     }),
     refetchInterval: 30000,
@@ -178,12 +285,12 @@ function RequestsLineChart({
     return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
-          <CardContent className="flex items-center justify-center h-[300px] text-sm text-muted-foreground">
+          <CardContent className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
             No request data for this period
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="flex items-center justify-center h-[300px] text-sm text-muted-foreground">
+          <CardContent className="flex h-[300px] items-center justify-center text-sm text-muted-foreground">
             No response time data for this period
           </CardContent>
         </Card>
@@ -193,21 +300,21 @@ function RequestsLineChart({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      {/* Requests over time */}
+      {/* Requests & Errors */}
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">Requests</CardTitle>
+            <CardTitle className="text-base">Requests & Errors</CardTitle>
             <div className="flex items-center gap-3 text-sm">
               <span>
-                <span className="font-semibold">
+                <span className="font-semibold tabular-nums">
                   {totals.requests.toLocaleString()}
                 </span>{' '}
                 <span className="text-muted-foreground">total</span>
               </span>
               {totals.errors > 0 && (
                 <span>
-                  <span className="font-semibold text-destructive">
+                  <span className="font-semibold text-destructive tabular-nums">
                     {totals.errors.toLocaleString()}
                   </span>{' '}
                   <span className="text-muted-foreground">errors</span>
@@ -269,13 +376,13 @@ function RequestsLineChart({
         </CardContent>
       </Card>
 
-      {/* Response time */}
+      {/* Response Time */}
       <Card>
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">Response Time</CardTitle>
             <span className="text-sm">
-              <span className="font-semibold">
+              <span className="font-semibold tabular-nums">
                 {totals.avgResponse.toFixed(0)}
               </span>{' '}
               <span className="text-muted-foreground">ms avg</span>
@@ -338,184 +445,81 @@ function RequestsLineChart({
   )
 }
 
-// ── Per-environment CPU/Memory charts ────────────────────────────────
-
-function EnvironmentSection({
-  project,
-  environment,
-}: {
-  project: ProjectResponse
-  environment: EnvironmentResponse
-}) {
-  const { data: containerList } = useQuery({
-    ...listContainersOptions({
-      path: {
-        project_id: project.id,
-        environment_id: environment.id,
-      },
-    }),
-    enabled: project.preset !== 'static',
-  })
-
-  const containers: ContainerInfoResponse[] = containerList?.containers ?? []
-
-  const [liveMetrics, setLiveMetrics] = useState<AggregatedMetrics | null>(
-    null
-  )
-
-  const handleMetricsUpdate = useCallback(
-    (metrics: AggregatedMetrics | null) => {
-      setLiveMetrics(metrics)
-    },
-    []
-  )
-
-  const hasRunningContainers = containers.some((c) => c.status === 'running')
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle className="text-base">
-              {project.name}{' '}
-              <span className="text-muted-foreground font-normal">
-                / {environment.name}
-              </span>
-            </CardTitle>
-          </div>
-          <div className="flex items-center gap-3">
-            {liveMetrics && (
-              <div className="flex items-center gap-3 text-sm">
-                <span>
-                  CPU{' '}
-                  <span className="font-semibold">
-                    {liveMetrics.cpu.toFixed(1)}%
-                  </span>
-                </span>
-                <span>
-                  Mem{' '}
-                  <span className="font-semibold">
-                    {liveMetrics.memoryMb.toFixed(0)} MB
-                  </span>
-                  <span className="text-muted-foreground ml-1">
-                    ({liveMetrics.memoryPercent.toFixed(0)}%)
-                  </span>
-                </span>
-              </div>
-            )}
-            {hasRunningContainers ? (
-              <Badge
-                variant="outline"
-                className="text-green-600 border-green-600/30 gap-1"
-              >
-                <Wifi className="h-3 w-3" />
-                Live
-              </Badge>
-            ) : (
-              <Badge variant="secondary" className="gap-1">
-                <WifiOff className="h-3 w-3" />
-                Offline
-              </Badge>
-            )}
-          </div>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {project.preset === 'static' ? (
-          <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-            Static projects don't have container metrics
-          </div>
-        ) : (
-          <EnvironmentMetricsCharts
-            projectId={project.id}
-            environment={environment}
-            containers={containers}
-            onMetricsUpdate={handleMetricsUpdate}
-          />
-        )}
-      </CardContent>
-    </Card>
-  )
-}
-
-function ProjectEnvironments({ project }: { project: ProjectResponse }) {
-  const { data: environments, isLoading } = useQuery({
-    ...getEnvironmentsOptions({
-      path: { project_id: project.id },
-    }),
-  })
-
-  if (isLoading) {
-    return <Skeleton className="h-[300px] w-full" />
-  }
-
-  if (!environments || environments.length === 0) {
-    return null
-  }
-
-  const activeEnvs = environments.filter(
-    (env) => env.current_deployment_id != null
-  )
-
-  if (activeEnvs.length === 0) {
-    return null
-  }
-
-  return (
-    <>
-      {activeEnvs.map((env) => (
-        <EnvironmentSection
-          key={env.id}
-          project={project}
-          environment={env}
-        />
-      ))}
-    </>
-  )
-}
-
 // ── Main page ────────────────────────────────────────────────────────
 
 export function ResourceMonitoring() {
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h')
+  const [timeRange, setTimeRange] = useState<TimeRange>('24h')
+  const [customRange, setCustomRange] = useState<DateRange | undefined>(() => {
+    const end = new Date()
+    const start = subHours(end, 24)
+    return { from: start, to: end }
+  })
   const [selectedProjectId, setSelectedProjectId] = useState<string>('all')
-  const [statusCodeFilter, setStatusCodeFilter] =
-    useState<StatusCodeFilter>('all')
+  const [hideBots, setHideBots] = useState<boolean>(true)
+
+  const now = useMemo(
+    () => {
+      const d = new Date()
+      d.setSeconds(Math.floor(d.getSeconds() / 30) * 30, 0)
+      return d
+    },
+    [timeRange]
+  )
+
+  const range = useMemo(
+    () => resolveRange(timeRange, customRange, now),
+    [timeRange, customRange, now]
+  )
 
   const { data: projectsData, isLoading: projectsLoading } = useQuery({
     ...getProjectsOptions({ query: { page: 1, per_page: 100 } }),
   })
 
   const projects = projectsData?.projects ?? []
-  const serverProjects = useMemo(
-    () => projects.filter((p) => p.preset !== 'static'),
-    [projects]
-  )
+  const projectIds = useMemo(() => projects.map((p) => p.id), [projects])
 
-  const filteredProjects = useMemo(() => {
-    if (selectedProjectId === 'all') return serverProjects
-    return serverProjects.filter(
-      (p) => p.id.toString() === selectedProjectId
-    )
-  }, [serverProjects, selectedProjectId])
+  const { data: healthData } = useQuery({
+    ...getProjectsHealthOptions({
+      query: {
+        project_ids: projectIds.join(','),
+        start_time: range.start.toISOString(),
+        end_time: range.end.toISOString(),
+        is_bot: hideBots ? false : undefined,
+      },
+    }),
+    enabled: projectIds.length > 0,
+    refetchInterval: timeRange === 'custom' ? false : 30000,
+  })
+
+  const healthMap = healthData?.projects ?? {}
+
+  const visibleProjects = useMemo(
+    () =>
+      projects.filter(
+        (p) =>
+          selectedProjectId === 'all' ||
+          p.id.toString() === selectedProjectId
+      ),
+    [projects, selectedProjectId]
+  )
 
   return (
     <div className="space-y-6">
-      {/* Header + Controls */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h3 className="text-lg font-medium">Resource Monitoring</h3>
-          <p className="text-sm text-muted-foreground">
-            Requests, CPU, and memory across projects and environments
-          </p>
-        </div>
+      {/* Filter bar */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <p className="text-sm text-muted-foreground">
+          Showing {range.label}
+          {selectedProjectId !== 'all' && (
+            <> · 1 project</>
+          )}
+          {hideBots && <> · bots hidden</>}
+        </p>
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={selectedProjectId}
             onValueChange={setSelectedProjectId}
           >
-            <SelectTrigger className="w-[180px]">
+            <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs">
               <SelectValue placeholder="All projects" />
             </SelectTrigger>
             <SelectContent>
@@ -527,69 +531,81 @@ export function ResourceMonitoring() {
               ))}
             </SelectContent>
           </Select>
-          <Select
-            value={statusCodeFilter}
-            onValueChange={setStatusCodeFilter}
+          <Button
+            variant={hideBots ? 'default' : 'outline'}
+            size="sm"
+            className="h-8 px-3 text-xs"
+            onClick={() => setHideBots((v) => !v)}
           >
-            <SelectTrigger className="w-[200px]">
-              <SelectValue placeholder="All status codes" />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_CODE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            {hideBots ? 'Hide bots' : 'Show bots'}
+          </Button>
           <div className="flex items-center gap-1 rounded-md border p-0.5">
-            {(['1h', '6h', '24h'] as const).map((range) => (
+            {(['1h', '6h', '24h'] as const).map((preset) => (
               <Button
-                key={range}
-                variant={timeRange === range ? 'default' : 'ghost'}
+                key={preset}
+                variant={timeRange === preset ? 'default' : 'ghost'}
                 size="sm"
                 className="h-7 px-3 text-xs"
-                onClick={() => setTimeRange(range)}
+                onClick={() => setTimeRange(preset)}
               >
-                {range}
+                {preset}
               </Button>
             ))}
+            <Button
+              variant={timeRange === 'custom' ? 'default' : 'ghost'}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={() => setTimeRange('custom')}
+            >
+              Custom
+            </Button>
           </div>
+          {timeRange === 'custom' && (
+            <DateRangePicker
+              date={customRange}
+              onDateChange={setCustomRange}
+              showTime
+              className="w-full sm:w-[300px]"
+            />
+          )}
         </div>
       </div>
 
       {projectsLoading ? (
         <div className="space-y-6">
-          <Skeleton className="h-[340px] w-full" />
-          <Skeleton className="h-[240px] w-full" />
-          <Skeleton className="h-[500px] w-full" />
+          <Skeleton className="h-[160px] w-full" />
+          <Skeleton className="h-[300px] w-full" />
         </div>
       ) : projects.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-16">
-            <Activity className="h-10 w-10 text-muted-foreground mb-4" />
-            <p className="text-sm text-muted-foreground">
-              No projects found. Create a project to start monitoring.
-            </p>
-          </CardContent>
-        </Card>
+        <p className="rounded-md border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+          No projects found. Create a project to start monitoring.
+        </p>
       ) : (
         <div className="space-y-6">
-          {/* ── HTTP Requests Charts ── */}
-          <RequestsLineChart
+          {/* ── Project Health Rows ── */}
+          <Card>
+            <ul role="list" className="divide-y divide-gray-950/5">
+              {visibleProjects.map((project) => (
+                <li key={project.id}>
+                  <ProjectHealthRow
+                    project={project}
+                    health={healthMap[project.id.toString()]}
+                  />
+                </li>
+              ))}
+            </ul>
+          </Card>
+
+          {/* ── Trend Charts ── */}
+          <TrendCharts
             projectId={
               selectedProjectId !== 'all'
                 ? parseInt(selectedProjectId, 10)
                 : undefined
             }
-            timeRange={timeRange}
-            statusCodeFilter={statusCodeFilter}
+            range={range}
+            hideBots={hideBots}
           />
-
-          {/* ── CPU / Memory per project-environment ── */}
-          {filteredProjects.map((project) => (
-            <ProjectEnvironments key={project.id} project={project} />
-          ))}
         </div>
       )}
     </div>

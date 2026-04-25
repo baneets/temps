@@ -48,6 +48,22 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { SmartCell } from '@/components/storage/SmartCell'
+import {
+  DataBrowserCommandBar,
+  type CommandTarget,
+} from '@/components/storage/DataBrowserCommandBar'
+import {
+  DataBrowserTabs,
+  type BrowserTab,
+} from '@/components/storage/DataBrowserTabs'
+import {
+  decodeTabs,
+  encodeTabs,
+  makeTabId,
+} from '@/lib/data-browser-tabs'
+import { useSavedViews } from '@/hooks/useSavedViews'
+import type { SavedView } from '@/lib/data-browser-views'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -55,10 +71,13 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowUpDown,
+  Bookmark,
   Box,
   Calendar,
+  Check,
   ChevronDown,
   ChevronRight,
+  Command as CommandIcon,
   Download,
   Eye,
   Database,
@@ -69,6 +88,7 @@ import {
   HardDrive,
   Hash,
   Layers,
+  Link as LinkIcon,
   Loader2,
   Menu,
   Package,
@@ -80,7 +100,7 @@ import {
   Type,
   X,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 interface TreeNode {
@@ -138,16 +158,81 @@ export function ServiceDataBrowser() {
   const [dataSortField, setDataSortField] = useState<string>('')
   const [dataSortOrder, setDataSortOrder] = useState<'asc' | 'desc'>('asc')
 
+  // Command bar
+  const [commandOpen, setCommandOpen] = useState(false)
+
+  // Saved views
+  const { views, save: saveView, touch: touchView } = useSavedViews(id ?? '')
+
+  // Tabs
+  const [tabs, setTabs] = useState<BrowserTab[]>(() => {
+    const raw = searchParams.get('tabs')
+    const decoded = decodeTabs(raw)
+    if (decoded.length > 0) return decoded
+    return [
+      {
+        id: makeTabId(),
+        path: searchParams.get('path') ?? '',
+        entity: searchParams.get('entity') ?? undefined,
+      },
+    ]
+  })
+  const [activeTabId, setActiveTabId] = useState<string>(
+    () => tabs[0]?.id ?? makeTabId()
+  )
+  const [copyLinkFeedback, setCopyLinkFeedback] = useState(false)
+
+  // Track whether we've already warmed the tree so the command palette and
+  // tree always show every table, not just the ones the user has expanded.
+  const didWarmTreeRef = useRef(false)
+
+  // ⌘. / Ctrl-. to open the *data browser* quick-jump palette.
+  // ⌘K is already taken by the global CommandPalette (components/command/CommandPalette.tsx),
+  // so we use period to avoid collision.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === '.') {
+        e.preventDefault()
+        setCommandOpen((prev) => !prev)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  // Persist tabs to URL whenever they change (without adding history entries)
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams)
+    if (tabs.length > 1) {
+      next.set('tabs', encodeTabs(tabs))
+    } else {
+      next.delete('tabs')
+    }
+    const same = next.toString() === searchParams.toString()
+    if (!same) setSearchParams(next, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs])
+
+  // Write the current active-tab state back to the tab record. Called
+  // explicitly from user interaction points (sort/filter/page/navigate)
+  // rather than via an effect, because an effect would race with tab
+  // switches — you'd see the outgoing tab's state briefly overwrite the
+  // incoming tab's record before the URL+state caught up.
+  const commitActiveTab = (patch: Partial<BrowserTab>) => {
+    setTabs((prev) =>
+      prev.map((t) => (t.id === activeTabId ? { ...t, ...patch } : t))
+    )
+  }
+
   // Apply filter handler
   const handleApplyFilter = () => {
     // If we have filter_schema, send the form data as JSON object
-    if (explorerSupport?.filter_schema) {
-      setDataFilter(filterFormData)
-    } else {
-      // For SQL capability, send as text (or wrap in object if backend expects it)
-      setDataFilter(dataFilterInput || undefined)
-    }
+    const nextFilter = explorerSupport?.filter_schema
+      ? filterFormData
+      : dataFilterInput || undefined
+    setDataFilter(nextFilter)
     setPage(1) // Reset to first page when filter changes
+    commitActiveTab({ filter: nextFilter, page: 1 })
   }
 
   // Clear filter handler
@@ -156,7 +241,174 @@ export function ServiceDataBrowser() {
     setDataFilter(undefined)
     setFilterFormData({})
     setPage(1)
+    commitActiveTab({ filter: undefined, page: 1 })
   }
+
+  // Navigate the main state (path/entity). If `commitToActiveTab` is true
+  // (the default), also persist the resulting snapshot into the active tab.
+  // Tab-switch paths pass `false` — the tab already has the target state.
+  const navigateTo = (
+    path: string,
+    entity?: string,
+    opts?: {
+      filter?: unknown
+      sortField?: string
+      sortOrder?: 'asc' | 'desc'
+      page?: number
+      commitToActiveTab?: boolean
+    }
+  ) => {
+    const next = new URLSearchParams(searchParams)
+    if (path) next.set('path', path)
+    else next.delete('path')
+    if (entity) next.set('entity', entity)
+    else next.delete('entity')
+    setSearchParams(next, { replace: true })
+
+    const nextFilter = opts?.filter
+    const nextFilterInput =
+      typeof opts?.filter === 'string' ? (opts.filter as string) : ''
+    const nextSortField = opts?.sortField ?? ''
+    const nextSortOrder = opts?.sortOrder ?? 'asc'
+    const nextPage = opts?.page ?? 1
+
+    setDataFilter(nextFilter)
+    setDataFilterInput(nextFilterInput)
+    setDataSortField(nextSortField)
+    setDataSortOrder(nextSortOrder)
+    setPage(nextPage)
+
+    if (opts?.commitToActiveTab !== false) {
+      commitActiveTab({
+        path,
+        entity: entity || undefined,
+        filter: nextFilter,
+        sortField: nextSortField || undefined,
+        sortOrder: nextSortField ? nextSortOrder : undefined,
+        page: nextPage,
+      })
+    }
+  }
+
+  // Tab handlers. We pass `commitToActiveTab: false` so navigateTo does not
+  // clobber the target tab with the (still reconciling) outgoing state.
+  const handleActivateTab = (tabId: string) => {
+    const tab = tabs.find((t) => t.id === tabId)
+    if (!tab) return
+    setActiveTabId(tabId)
+    navigateTo(tab.path, tab.entity, {
+      filter: tab.filter,
+      sortField: tab.sortField,
+      sortOrder: tab.sortOrder,
+      page: tab.page,
+      commitToActiveTab: false,
+    })
+  }
+  const handleCloseTab = (tabId: string) => {
+    const idx = tabs.findIndex((t) => t.id === tabId)
+    if (idx === -1) return
+    const next = tabs.filter((t) => t.id !== tabId)
+    if (next.length === 0) {
+      const fresh: BrowserTab = { id: makeTabId(), path: '' }
+      setTabs([fresh])
+      setActiveTabId(fresh.id)
+      navigateTo('', undefined, { commitToActiveTab: false })
+      return
+    }
+    setTabs(next)
+    if (tabId === activeTabId) {
+      const fallback = next[Math.max(0, idx - 1)]
+      setActiveTabId(fallback.id)
+      navigateTo(fallback.path, fallback.entity, {
+        filter: fallback.filter,
+        sortField: fallback.sortField,
+        sortOrder: fallback.sortOrder,
+        page: fallback.page,
+        commitToActiveTab: false,
+      })
+    }
+  }
+  const handleNewTab = () => {
+    const fresh: BrowserTab = { id: makeTabId(), path: '' }
+    setTabs((prev) => [...prev, fresh])
+    setActiveTabId(fresh.id)
+    navigateTo('', undefined, { commitToActiveTab: false })
+  }
+  const handleOpenInNewTab = (path: string, entity?: string) => {
+    const fresh: BrowserTab = { id: makeTabId(), path, entity }
+    setTabs((prev) => [...prev, fresh])
+    setActiveTabId(fresh.id)
+    navigateTo(path, entity, { commitToActiveTab: false })
+  }
+
+  // Saved-view handlers
+  const handlePinCurrentView = () => {
+    if (!id) return
+    const name = window.prompt(
+      'Name this view',
+      selectedEntity || selectedPath || 'Untitled'
+    )
+    if (!name) return
+    const created = saveView({
+      name,
+      path: selectedPath,
+      entity: selectedEntity || undefined,
+      filter: dataFilter,
+      sortField: dataSortField || undefined,
+      sortOrder: dataSortField ? dataSortOrder : undefined,
+      pinned: true,
+    })
+    touchView(created.id)
+  }
+  const handleOpenView = (view: SavedView) => {
+    touchView(view.id)
+    navigateTo(view.path, view.entity, {
+      filter: view.filter,
+      sortField: view.sortField,
+      sortOrder: view.sortOrder,
+      page: 1,
+    })
+  }
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      setCopyLinkFeedback(true)
+      setTimeout(() => setCopyLinkFeedback(false), 1400)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // Flatten tree into command-bar targets
+  const commandTargets = useMemo<CommandTarget[]>(() => {
+    const out: CommandTarget[] = []
+    const walk = (nodes: TreeNode[]) => {
+      for (const n of nodes) {
+        if (n.type === 'entity') {
+          const parent = n.path.split('/').slice(0, -1).join('/')
+          out.push({
+            id: `e:${n.path}`,
+            kind: 'entity',
+            name: n.name,
+            path: parent,
+            entity: n.name,
+            label: n.entityType,
+          })
+        } else {
+          out.push({
+            id: `c:${n.path}`,
+            kind: 'container',
+            name: n.name,
+            path: n.path,
+            label: n.containerType,
+          })
+          if (n.children && n.children.length > 0) walk(n.children)
+        }
+      }
+    }
+    walk(treeNodes)
+    return out
+  }, [treeNodes])
 
   // Get service details
   const {
@@ -334,6 +586,64 @@ export function ServiceDataBrowser() {
     }
   }, [rootContainers, treeNodes.length, explorerSupport])
 
+  // Warm the tree once so the command palette (⌘.) can fuzzy-find every
+  // table without requiring the user to manually expand each schema. We
+  // expand each root (depth 1), then each child container that *can*
+  // contain entities (depth 2, e.g. PostgreSQL schemas), capped at a
+  // reasonable fan-out to avoid stampeding services with thousands of
+  // schemas.
+  useEffect(() => {
+    if (didWarmTreeRef.current) return
+    if (!id || treeNodes.length === 0) return
+    didWarmTreeRef.current = true
+
+    const WARM_CONTAINER_CAP = 40 // don't fire off hundreds of requests
+
+    const warm = async () => {
+      // Level 1 roots (e.g. databases)
+      const roots = treeNodes.slice(0, WARM_CONTAINER_CAP)
+      for (const root of roots) {
+        if (root.type !== 'container') continue
+        if (root.entityCountHint === 'large') continue
+        if (!root.canContainContainers && !root.canContainEntities) continue
+        await loadNodeChildren(root.path)
+      }
+
+      // Level 2 (e.g. schemas inside a database) — load children of any
+      // container that itself can contain entities, so tables become
+      // visible to the palette.
+      // Read the latest treeNodes via a setter trick.
+      let snapshot: TreeNode[] = []
+      setTreeNodes((prev) => {
+        snapshot = prev
+        return prev
+      })
+      const queue: TreeNode[] = []
+      const collect = (nodes: TreeNode[]) => {
+        for (const n of nodes) {
+          if (
+            n.type === 'container' &&
+            n.isLoaded !== true &&
+            (n.canContainEntities || n.canContainContainers) &&
+            n.entityCountHint !== 'large'
+          ) {
+            queue.push(n)
+          }
+          if (n.children) collect(n.children)
+        }
+      }
+      collect(snapshot)
+      for (const node of queue.slice(0, WARM_CONTAINER_CAP)) {
+        await loadNodeChildren(node.path)
+      }
+    }
+
+    // Fire and forget; failures are non-fatal and already logged in
+    // loadNodeChildren.
+    warm()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, treeNodes.length])
+
   // Sync tree expansion with selected path from URL
   useEffect(() => {
     if (!selectedPath || treeNodes.length === 0) return
@@ -462,7 +772,7 @@ export function ServiceDataBrowser() {
   // Update breadcrumbs
   useEffect(() => {
     const crumbs = [
-      { label: 'Storage', href: '/settings/storage' },
+      { label: 'Storage', href: '/storage' },
       {
         label: service?.service?.name || 'Service',
         href: `/storage/${id}`,
@@ -733,6 +1043,7 @@ export function ServiceDataBrowser() {
         // Update URL params - use replace to avoid page reload
         setSearchParams({ path: node.path }, { replace: true })
         setPage(1)
+        commitActiveTab({ path: node.path, entity: undefined, page: 1 })
 
         // Don't expand in tree, just select it
         // The main content area will show the entities table via ContainerEntitiesView
@@ -777,6 +1088,7 @@ export function ServiceDataBrowser() {
           // Different container - select it and expand if not already expanded
           setSearchParams({ path: node.path }, { replace: true })
           setPage(1)
+          commitActiveTab({ path: node.path, entity: undefined, page: 1 })
 
           // If not currently expanded, expand it
           if (!isCurrentlyExpanded) {
@@ -814,6 +1126,7 @@ export function ServiceDataBrowser() {
         { replace: true }
       )
       setPage(1)
+      commitActiveTab({ path: parentPath, entity: node.name, page: 1 })
 
       // Close sidebar on mobile when selecting an entity
       if (window.innerWidth < 768) {
@@ -956,12 +1269,144 @@ export function ServiceDataBrowser() {
     )
   }
 
-  // Loading state
+  // Loading state — skeleton that mirrors the real layout so the page
+  // doesn't flash a lone spinner on an empty canvas.
   if (serviceLoading || rootLoading || explorerSupportLoading) {
     return (
-      <div className="flex-1 overflow-auto">
-        <div className="p-6">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      <div className="flex-1 overflow-hidden flex flex-col">
+        {/* Header */}
+        <div className="p-4 md:p-6 pb-0">
+          <div className="flex items-center gap-3 mb-4">
+            <Skeleton className="h-9 w-9 rounded-md" />
+            <Skeleton className="h-8 w-8 rounded-full" />
+            <div className="flex flex-col gap-2 flex-1 min-w-0">
+              <Skeleton className="h-6 w-64 max-w-full" />
+              <Skeleton className="h-4 w-48 max-w-full hidden sm:block" />
+            </div>
+            <div className="hidden md:flex items-center gap-2">
+              <Skeleton className="h-8 w-20" />
+              <Skeleton className="h-8 w-16" />
+              <Skeleton className="h-8 w-16" />
+            </div>
+          </div>
+        </div>
+
+        {/* Main content area with sidebar */}
+        <div className="flex-1 flex gap-0 md:gap-6 px-0 md:px-6 pb-0 md:pb-6 min-h-0 overflow-hidden">
+          {/* Sidebar skeleton */}
+          <div className="hidden md:block w-80 flex-shrink-0">
+            <Card className="h-full flex flex-col">
+              <CardHeader className="pb-3">
+                <div className="flex items-center gap-2">
+                  <Skeleton className="h-4 w-4" />
+                  <Skeleton className="h-5 w-24" />
+                </div>
+                <Skeleton className="h-3 w-40 mt-2" />
+              </CardHeader>
+              <div className="px-4 pb-3">
+                <Skeleton className="h-8 w-full rounded-md" />
+              </div>
+              <CardContent className="flex-1 p-0 overflow-hidden border-t">
+                <div className="p-4 space-y-2">
+                  {Array.from({ length: 8 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-2"
+                      style={{
+                        paddingLeft: `${(i % 3) * 16}px`,
+                        opacity: 1 - i * 0.08,
+                      }}
+                    >
+                      <Skeleton className="h-3.5 w-3.5 flex-shrink-0" />
+                      <Skeleton className="h-4 w-4 flex-shrink-0" />
+                      <Skeleton
+                        className="h-4"
+                        style={{ width: `${60 + ((i * 13) % 40)}%` }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Main content skeleton */}
+          <div
+            className="flex-1 flex flex-col min-w-0 px-4 md:px-0"
+            style={{ height: 'calc(100vh - 180px)' }}
+          >
+            <div className="flex-1 overflow-y-auto space-y-6 pt-2">
+              {/* Entity info card */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex-1 space-y-2 min-w-0">
+                      <Skeleton className="h-6 w-48 max-w-full" />
+                      <Skeleton className="h-4 w-64 max-w-full" />
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <Skeleton className="h-8 w-28" />
+                      <Skeleton className="h-8 w-20" />
+                    </div>
+                  </div>
+                </CardHeader>
+              </Card>
+
+              {/* Data card */}
+              <Card>
+                <CardHeader>
+                  <div className="space-y-2">
+                    <Skeleton className="h-6 w-24" />
+                    <Skeleton className="h-4 w-80 max-w-full" />
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <Skeleton className="h-5 w-12 rounded-full" />
+                    <Skeleton className="h-5 w-16 rounded-full" />
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="rounded-md border overflow-hidden">
+                    {/* Table header row */}
+                    <div className="border-b bg-muted/50 flex gap-4 p-3">
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <Skeleton
+                          key={i}
+                          className="h-4"
+                          style={{ width: `${14 + ((i * 7) % 12)}%` }}
+                        />
+                      ))}
+                    </div>
+                    {/* Table body rows */}
+                    {Array.from({ length: 8 }).map((_, row) => (
+                      <div
+                        key={row}
+                        className="border-b last:border-0 flex gap-4 p-3"
+                      >
+                        {Array.from({ length: 5 }).map((_, col) => (
+                          <Skeleton
+                            key={col}
+                            className="h-4"
+                            style={{
+                              width: `${14 + (((row + col) * 11) % 12)}%`,
+                              opacity: 1 - row * 0.05,
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  {/* Pagination row */}
+                  <div className="flex items-center justify-between mt-4">
+                    <Skeleton className="h-4 w-40" />
+                    <div className="flex items-center gap-2">
+                      <Skeleton className="h-8 w-20" />
+                      <Skeleton className="h-8 w-16" />
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          </div>
         </div>
       </div>
     )
@@ -999,7 +1444,7 @@ export function ServiceDataBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate(`/settings/storage/${id}`)}
+              onClick={() => navigate(`/storage/${id}`)}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -1043,7 +1488,7 @@ export function ServiceDataBrowser() {
                   Retry
                 </Button>
                 <Button
-                  onClick={() => navigate(`/settings/storage/${id}`)}
+                  onClick={() => navigate(`/storage/${id}`)}
                   variant="outline"
                   className="gap-2"
                 >
@@ -1068,7 +1513,7 @@ export function ServiceDataBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => navigate(`/settings/storage/${id}`)}
+              onClick={() => navigate(`/storage/${id}`)}
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
@@ -1115,7 +1560,7 @@ export function ServiceDataBrowser() {
             )}
             <CardContent className="text-center pt-0">
               <Button
-                onClick={() => navigate(`/settings/storage/${id}`)}
+                onClick={() => navigate(`/storage/${id}`)}
                 variant="outline"
                 className="gap-2"
               >
@@ -1137,7 +1582,7 @@ export function ServiceDataBrowser() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => navigate(`/settings/storage/${id}`)}
+            onClick={() => navigate(`/storage/${id}`)}
           >
             <ArrowLeft className="h-4 w-4" />
           </Button>
@@ -1154,13 +1599,56 @@ export function ServiceDataBrowser() {
             service={service.service.service_type}
             className="h-8 w-8"
           />
-          <div className="flex flex-col">
-            <h1 className="text-xl md:text-2xl font-semibold">
+          <div className="flex flex-col flex-1 min-w-0">
+            <h1 className="text-xl md:text-2xl font-semibold truncate">
               {service.service.name} - Data Browser
             </h1>
             <p className="text-xs md:text-sm text-muted-foreground hidden sm:block">
               Explore containers and browse data
             </p>
+          </div>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCommandOpen(true)}
+              className="gap-2"
+              title="Quick jump (⌘.)"
+            >
+              <CommandIcon className="h-3.5 w-3.5" />
+              <span className="hidden md:inline text-xs">Jump</span>
+              <kbd className="hidden md:inline-flex items-center gap-0.5 px-1 h-4 text-[10px] bg-muted border rounded font-mono">
+                ⌘.
+              </kbd>
+            </Button>
+            {selectedPath && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handlePinCurrentView}
+                className="gap-2"
+                title="Pin this view"
+              >
+                <Bookmark className="h-3.5 w-3.5" />
+                <span className="hidden md:inline text-xs">Pin</span>
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleCopyLink}
+              className="gap-2"
+              title="Copy shareable link"
+            >
+              {copyLinkFeedback ? (
+                <Check className="h-3.5 w-3.5 text-green-500" />
+              ) : (
+                <LinkIcon className="h-3.5 w-3.5" />
+              )}
+              <span className="hidden md:inline text-xs">
+                {copyLinkFeedback ? 'Copied' : 'Link'}
+              </span>
+            </Button>
           </div>
         </div>
       </div>
@@ -1245,6 +1733,17 @@ export function ServiceDataBrowser() {
                     nodes={getProcessedNodes()}
                     onToggle={toggleNode}
                     onNodeClick={handleNodeClick}
+                    onOpenInNewTab={(node) => {
+                      if (node.type === 'entity') {
+                        const parent = node.path
+                          .split('/')
+                          .slice(0, -1)
+                          .join('/')
+                        handleOpenInNewTab(parent, node.name)
+                      } else {
+                        handleOpenInNewTab(node.path)
+                      }
+                    }}
                     selectedPath={selectedPath}
                     selectedEntity={selectedEntity}
                     getContainerIcon={getContainerIcon}
@@ -1270,9 +1769,17 @@ export function ServiceDataBrowser() {
 
         {/* Main content */}
         <div
-          className="flex-1 overflow-y-auto px-4 md:px-0"
+          className="flex-1 flex flex-col min-w-0 px-4 md:px-0"
           style={{ height: 'calc(100vh - 180px)' }}
         >
+          <DataBrowserTabs
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onActivate={handleActivateTab}
+            onClose={handleCloseTab}
+            onNewTab={handleNewTab}
+          />
+          <div className="flex-1 overflow-y-auto pt-2">
           {selectedEntity ? (
             // Show entity data
             <EntityDataView
@@ -1283,7 +1790,10 @@ export function ServiceDataBrowser() {
               queryError={queryEntityData.error}
               page={page}
               pageSize={pageSize}
-              onPageChange={setPage}
+              onPageChange={(p) => {
+                setPage(p)
+                commitActiveTab({ page: p })
+              }}
               dataFilterInput={dataFilterInput}
               onDataFilterInputChange={setDataFilterInput}
               filterFormData={filterFormData}
@@ -1295,15 +1805,23 @@ export function ServiceDataBrowser() {
               dataSortOrder={dataSortOrder}
               explorerSupport={explorerSupport}
               onSort={(field: string) => {
+                let nextField = dataSortField
+                let nextOrder: 'asc' | 'desc' = dataSortOrder
                 if (dataSortField === field) {
-                  // Toggle sort order if same field
-                  setDataSortOrder(dataSortOrder === 'asc' ? 'desc' : 'asc')
+                  nextOrder = dataSortOrder === 'asc' ? 'desc' : 'asc'
+                  setDataSortOrder(nextOrder)
                 } else {
-                  // New field, default to ascending
-                  setDataSortField(field)
-                  setDataSortOrder('asc')
+                  nextField = field
+                  nextOrder = 'asc'
+                  setDataSortField(nextField)
+                  setDataSortOrder(nextOrder)
                 }
                 setPage(1) // Reset to first page when sorting
+                commitActiveTab({
+                  sortField: nextField || undefined,
+                  sortOrder: nextField ? nextOrder : undefined,
+                  page: 1,
+                })
               }}
               onRefresh={() => {
                 if (selectedEntity && selectedPath && id) {
@@ -1350,8 +1868,31 @@ export function ServiceDataBrowser() {
               </CardContent>
             </Card>
           )}
+          </div>
         </div>
       </div>
+
+      <DataBrowserCommandBar
+        open={commandOpen}
+        onOpenChange={setCommandOpen}
+        targets={commandTargets}
+        views={views}
+        currentEntity={selectedEntity || undefined}
+        supportsSql={explorerSupport?.capabilities?.includes('sql')}
+        onJump={(t) => {
+          if (t.kind === 'entity' && t.entity) {
+            navigateTo(t.path, t.entity)
+          } else {
+            navigateTo(t.path)
+          }
+        }}
+        onOpenView={handleOpenView}
+        onRunRawQuery={(raw) => {
+          setDataFilterInput(raw)
+          setDataFilter(raw)
+          setPage(1)
+        }}
+      />
     </div>
   )
 }
@@ -1362,6 +1903,7 @@ function TreeView({
   level = 0,
   onToggle,
   onNodeClick,
+  onOpenInNewTab,
   selectedPath,
   selectedEntity,
   getContainerIcon,
@@ -1371,6 +1913,7 @@ function TreeView({
   level?: number
   onToggle: (path: string) => void
   onNodeClick: (node: TreeNode) => void
+  onOpenInNewTab?: (node: TreeNode) => void
   selectedPath: string
   selectedEntity: string
   getContainerIcon: (
@@ -1388,6 +1931,7 @@ function TreeView({
           level={level}
           onToggle={onToggle}
           onNodeClick={onNodeClick}
+          onOpenInNewTab={onOpenInNewTab}
           selectedPath={selectedPath}
           selectedEntity={selectedEntity}
           getContainerIcon={getContainerIcon}
@@ -1404,6 +1948,7 @@ function TreeNodeComponent({
   level,
   onToggle,
   onNodeClick,
+  onOpenInNewTab,
   selectedPath,
   selectedEntity,
   getContainerIcon,
@@ -1413,6 +1958,7 @@ function TreeNodeComponent({
   level: number
   onToggle: (path: string) => void
   onNodeClick: (node: TreeNode) => void
+  onOpenInNewTab?: (node: TreeNode) => void
   selectedPath: string
   selectedEntity: string
   getContainerIcon: (
@@ -1441,6 +1987,17 @@ function TreeNodeComponent({
         onClick={() => {
           // Only call onNodeClick - it handles the toggle internally
           onNodeClick(node)
+        }}
+        onAuxClick={(e) => {
+          // Middle-click opens in a new tab
+          if (e.button === 1 && onOpenInNewTab) {
+            e.preventDefault()
+            onOpenInNewTab(node)
+          }
+        }}
+        onMouseDown={(e) => {
+          // Prevent browser autoscroll on middle-click
+          if (e.button === 1) e.preventDefault()
         }}
         className={`w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md transition-colors hover:bg-accent ${
           isSelected ? 'bg-accent text-accent-foreground' : ''
@@ -1472,6 +2029,7 @@ function TreeNodeComponent({
           level={level + 1}
           onToggle={onToggle}
           onNodeClick={onNodeClick}
+          onOpenInNewTab={onOpenInNewTab}
           selectedPath={selectedPath}
           selectedEntity={selectedEntity}
           getContainerIcon={getContainerIcon}
@@ -2174,7 +2732,7 @@ function ContainerEntitiesView({
                       entityInfo.size_bytes !== undefined) ||
                     (entityInfo.row_count !== null &&
                       entityInfo.row_count !== undefined) ? (
-                      <div className="grid grid-cols-2 gap-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         {entityInfo.size_bytes !== null &&
                           entityInfo.size_bytes !== undefined && (
                             <div>
@@ -2849,13 +3407,13 @@ function EntityDataView({
                           {queryResult.fields?.map((field: FieldResponse) => (
                             <td
                               key={field.name}
-                              className="p-3 font-mono text-xs max-w-xs truncate"
-                              title={String(row[field.name])}
+                              className="p-3 align-middle"
                             >
-                              {row[field.name] !== null &&
-                              row[field.name] !== undefined
-                                ? String(row[field.name])
-                                : '-'}
+                              <SmartCell
+                                value={row[field.name]}
+                                fieldType={field.field_type}
+                                fieldName={field.name}
+                              />
                             </td>
                           ))}
                         </tr>

@@ -12,6 +12,7 @@ temps-auth = { path = "../temps-auth" }
 temps-core = { path = "../temps-core" }
 temps-database = { path = "../temps-database" }
 temps-entities = { path = "../temps-entities" }
+temps-logs = { path = "../temps-logs" }
 temps-query = { path = "../temps-query" }
 temps-query-postgres = { path = "../temps-query-postgres" }
 temps-query-s3 = { path = "../temps-query-s3" }
@@ -47,6 +48,7 @@ axum = { workspace = true }
 axum-macros = { workspace = true }
 schemars = { workspace = true }
 urlencoding = "2.1"
+tokio-postgres = "0.7"
 
 [features]
 docker-tests = []
@@ -55,4 +57,3 @@ docker-tests = []
 tokio-test = "0.4"
 testcontainers = { workspace = true }
 hyper = { version = "1", features = ["client", "http1", "http2"] }
-tokio-postgres = "0.7"

@@ -151,7 +151,7 @@ export function LiveVisitorsList({ project }: LiveVisitorsListProps) {
                     </div>
 
                     {/* Browser and IP info */}
-                    <div className="grid grid-cols-2 gap-3 pt-2 border-t">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t">
                       <div>
                         <p className="text-xs text-muted-foreground font-medium mb-1">
                           Browser
@@ -192,7 +192,7 @@ export function LiveVisitorsList({ project }: LiveVisitorsListProps) {
                     </div>
 
                     {/* Timezone */}
-                    <div className="pt-2 border-t grid grid-cols-2 gap-3">
+                    <div className="pt-2 border-t grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
                         <p className="text-xs text-muted-foreground font-medium mb-1">
                           Timezone

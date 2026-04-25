@@ -13,9 +13,9 @@ use std::sync::Arc;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::error_builder::ErrorBuilder;
 use temps_core::{
-    problemdetails::Problem, AppSettings, AuditContext, AuditLogger, AuditOperation,
-    ContainerLogSettings, DiskSpaceAlertSettings, LetsEncryptSettings, RateLimitSettings,
-    RequestMetadata, ScreenshotSettings, SecurityHeadersSettings,
+    problemdetails::Problem, AiConfigSettings, AppSettings, AuditContext, AuditLogger,
+    AuditOperation, ContainerLogSettings, DiskSpaceAlertSettings, LetsEncryptSettings,
+    RateLimitSettings, RequestMetadata, ScreenshotSettings, SecurityHeadersSettings,
 };
 use tracing::{error, info};
 use utoipa::{OpenApi, ToSchema};
@@ -71,13 +71,6 @@ pub struct JoinTokenStatusResponse {
     pub has_token: bool,
 }
 
-/// Public settings response containing only non-sensitive feature flags
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct PublicSettingsResponse {
-    /// Whether demo mode is enabled
-    pub demo_enabled: bool,
-}
-
 /// Safe response for application settings that masks sensitive fields
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AppSettingsResponse {
@@ -106,6 +99,66 @@ pub struct AppSettingsResponse {
 
     // Docker container log rotation settings
     pub container_logs: ContainerLogSettings,
+
+    // Agent sandbox settings with masked per-provider credentials
+    pub agent_sandbox: AgentSandboxSettingsMasked,
+
+    // AI config (config repo for skills/MCP/etc)
+    pub ai_config: AiConfigSettings,
+
+    // Workspace preview gateway (shared_secret masked)
+    pub preview_gateway: PreviewGatewaySettingsMasked,
+
+    // Multi-node cluster settings (join_token_hash elided)
+    pub multi_node: MultiNodeSettingsMasked,
+
+    // Outbound TLS verification toggle
+    pub insecure_tls: bool,
+}
+
+/// Agent sandbox settings with masked per-provider credentials.
+/// Each provider entry reports only whether a credential is saved, not
+/// the encrypted blob itself. Non-sensitive fields (auth_type, default_model,
+/// extra) are passed through so the UI can render provider-specific state.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AgentSandboxSettingsMasked {
+    pub default_provider: String,
+    pub providers: std::collections::HashMap<String, ProviderConfigMasked>,
+    // Legacy top-level credential — reported only as a boolean
+    pub api_key_saved: bool,
+    pub auth_type: String,
+    pub enabled: bool,
+    pub runtime: String,
+    pub custom_image: String,
+    pub cpu_limit: f64,
+    pub memory_limit_mb: u64,
+    pub network_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProviderConfigMasked {
+    pub auth_type: String,
+    /// True if a credential is stored for this provider. The encrypted blob
+    /// is never returned over HTTP.
+    pub credential_saved: bool,
+    pub default_model: Option<String>,
+    pub extra: serde_json::Value,
+}
+
+/// Preview gateway settings with `shared_secret` elided.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PreviewGatewaySettingsMasked {
+    pub image: String,
+    pub host_port: u16,
+    pub auto_upgrade: bool,
+    pub shared_secret_set: bool,
+}
+
+/// Multi-node settings with `join_token_hash` elided.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MultiNodeSettingsMasked {
+    pub has_join_token: bool,
+    pub private_address: Option<String>,
 }
 
 /// DNS provider settings with masked sensitive fields
@@ -157,6 +210,45 @@ impl From<AppSettings> for AppSettingsResponse {
             },
             disk_space_alert: settings.disk_space_alert,
             container_logs: settings.container_logs,
+            agent_sandbox: AgentSandboxSettingsMasked {
+                default_provider: settings.agent_sandbox.default_provider,
+                providers: settings
+                    .agent_sandbox
+                    .providers
+                    .into_iter()
+                    .map(|(id, cfg)| {
+                        (
+                            id,
+                            ProviderConfigMasked {
+                                auth_type: cfg.auth_type,
+                                credential_saved: cfg.credentials_encrypted.is_some(),
+                                default_model: cfg.default_model,
+                                extra: cfg.extra,
+                            },
+                        )
+                    })
+                    .collect(),
+                api_key_saved: settings.agent_sandbox.api_key_encrypted.is_some(),
+                auth_type: settings.agent_sandbox.auth_type,
+                enabled: settings.agent_sandbox.enabled,
+                runtime: settings.agent_sandbox.runtime,
+                custom_image: settings.agent_sandbox.custom_image,
+                cpu_limit: settings.agent_sandbox.cpu_limit,
+                memory_limit_mb: settings.agent_sandbox.memory_limit_mb,
+                network_mode: settings.agent_sandbox.network_mode,
+            },
+            ai_config: settings.ai_config,
+            preview_gateway: PreviewGatewaySettingsMasked {
+                image: settings.preview_gateway.image,
+                host_port: settings.preview_gateway.host_port,
+                auto_upgrade: settings.preview_gateway.auto_upgrade,
+                shared_secret_set: !settings.preview_gateway.shared_secret.is_empty(),
+            },
+            multi_node: MultiNodeSettingsMasked {
+                has_join_token: settings.multi_node.join_token_hash.is_some(),
+                private_address: settings.multi_node.private_address,
+            },
+            insecure_tls: settings.insecure_tls,
         }
     }
 }
@@ -164,7 +256,6 @@ impl From<AppSettings> for AppSettingsResponse {
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        get_public_settings,
         get_settings,
         update_settings,
         generate_join_token,
@@ -178,7 +269,10 @@ impl From<AppSettings> for AppSettingsResponse {
         ContainerLogSettings,
         DnsProviderSettingsMasked,
         DockerRegistrySettingsMasked,
-        PublicSettingsResponse,
+        AgentSandboxSettingsMasked,
+        ProviderConfigMasked,
+        PreviewGatewaySettingsMasked,
+        MultiNodeSettingsMasked,
         SettingsUpdateResponse,
         GenerateJoinTokenResponse,
         JoinTokenStatusResponse,
@@ -195,44 +289,12 @@ pub struct SettingsApiDoc;
 
 pub fn configure_routes() -> Router<Arc<SettingsState>> {
     Router::new()
-        .route("/settings/public", get(get_public_settings))
         .route("/settings", get(get_settings))
         .route("/settings", put(update_settings))
         .route("/settings/join-token/generate", post(generate_join_token))
         .route("/settings/join-token", delete(revoke_join_token))
         .route("/settings/join-token/status", get(get_join_token_status))
         .route("/settings/routes/refresh", post(refresh_route_table))
-}
-
-/// Get public settings (no authentication required)
-///
-/// Returns non-sensitive feature flags like demo mode status.
-/// This endpoint is intentionally unauthenticated so the login page can use it.
-#[utoipa::path(
-    tag = "Settings",
-    get,
-    path = "/settings/public",
-    responses(
-        (status = 200, description = "Public settings", body = PublicSettingsResponse),
-        (status = 500, description = "Internal server error")
-    )
-)]
-async fn get_public_settings(
-    State(app_state): State<Arc<SettingsState>>,
-) -> Result<impl IntoResponse, Problem> {
-    match app_state.config_service.get_settings().await {
-        Ok(settings) => Ok(Json(PublicSettingsResponse {
-            demo_enabled: settings.demo_mode.enabled,
-        })),
-        Err(e) => {
-            tracing::error!("Failed to get public settings: {}", e);
-            Err(ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
-                .type_("https://temps.sh/probs/settings-error")
-                .title("Settings Error")
-                .detail("Failed to get public settings".to_string())
-                .build())
-        }
-    }
 }
 
 /// Get application settings
@@ -330,6 +392,66 @@ async fn update_settings(
                     );
                 }
             }
+        }
+    }
+
+    // Merge sensitive sandbox/gateway/multi-node fields back from DB. The GET
+    // endpoint strips encrypted credentials, shared secrets, and token hashes,
+    // so any client round-trip would otherwise wipe them on save. We always
+    // preserve them from the DB unless the incoming payload explicitly sets
+    // them (e.g. a fresh credential save via the AI Providers page).
+    match app_state.config_service.get_settings().await {
+        Ok(current_settings) => {
+            // Per-provider credentials: keep existing unless caller supplied a new one
+            for (id, current_cfg) in current_settings.agent_sandbox.providers.iter() {
+                match settings.agent_sandbox.providers.get_mut(id) {
+                    Some(incoming) => {
+                        // Caller didn't include credentials -> restore from DB
+                        if incoming
+                            .credentials_encrypted
+                            .as_deref()
+                            .map(|s| s.is_empty() || s == "******")
+                            .unwrap_or(true)
+                        {
+                            incoming.credentials_encrypted =
+                                current_cfg.credentials_encrypted.clone();
+                        }
+                    }
+                    None => {
+                        // Caller dropped the provider entry entirely -> put it back
+                        settings
+                            .agent_sandbox
+                            .providers
+                            .insert(id.clone(), current_cfg.clone());
+                    }
+                }
+            }
+            // Legacy flat credential
+            if settings
+                .agent_sandbox
+                .api_key_encrypted
+                .as_deref()
+                .map(|s| s.is_empty() || s == "******")
+                .unwrap_or(true)
+            {
+                settings.agent_sandbox.api_key_encrypted =
+                    current_settings.agent_sandbox.api_key_encrypted;
+            }
+            // Preview gateway shared secret
+            if settings.preview_gateway.shared_secret.is_empty() {
+                settings.preview_gateway.shared_secret =
+                    current_settings.preview_gateway.shared_secret;
+            }
+            // Multi-node join token hash (never comes back from the mask response)
+            if settings.multi_node.join_token_hash.is_none() {
+                settings.multi_node.join_token_hash = current_settings.multi_node.join_token_hash;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Could not fetch current settings to preserve sensitive fields: {}",
+                e
+            );
         }
     }
 
@@ -648,4 +770,93 @@ async fn refresh_route_table(
             route_count
         ),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use temps_core::{AgentSandboxSettings, AppSettings, ProviderConfig};
+
+    // Regression: the GET /api/settings response must surface agent_sandbox,
+    // ai_config, preview_gateway, multi_node, and insecure_tls so the UI can
+    // render (and round-trip) resource/runtime/network settings. An earlier
+    // version silently dropped them, making every save from the Sandbox page
+    // appear not to persist.
+    #[test]
+    fn response_surfaces_all_sandbox_related_settings() {
+        let settings = AppSettings {
+            agent_sandbox: AgentSandboxSettings {
+                default_provider: "claude_cli".into(),
+                providers: [(
+                    "claude_cli".to_string(),
+                    ProviderConfig {
+                        auth_type: "api_key".into(),
+                        credentials_encrypted: Some("super-secret-blob".into()),
+                        default_model: Some("sonnet".into()),
+                        extra: serde_json::Value::Null,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                auth_type: "api_key".into(),
+                api_key_encrypted: Some("legacy-secret".into()),
+                enabled: true,
+                runtime: "python".into(),
+                custom_image: String::new(),
+                cpu_limit: 8.0,
+                memory_limit_mb: 16_384,
+                network_mode: "restricted".into(),
+            },
+            ..Default::default()
+        };
+
+        let response = AppSettingsResponse::from(settings);
+
+        assert_eq!(response.agent_sandbox.cpu_limit, 8.0);
+        assert_eq!(response.agent_sandbox.memory_limit_mb, 16_384);
+        assert_eq!(response.agent_sandbox.runtime, "python");
+        assert_eq!(response.agent_sandbox.network_mode, "restricted");
+        assert!(response.agent_sandbox.enabled);
+        let provider = response
+            .agent_sandbox
+            .providers
+            .get("claude_cli")
+            .expect("provider entry should round-trip");
+        assert!(
+            provider.credential_saved,
+            "credential presence must survive"
+        );
+        assert_eq!(provider.default_model.as_deref(), Some("sonnet"));
+        assert!(response.agent_sandbox.api_key_saved);
+    }
+
+    // Sensitive blobs must never leak through the response type, even though
+    // they're encrypted at rest. The UI asks for booleans, not the real ciphertext.
+    #[test]
+    fn response_never_exposes_encrypted_credentials() {
+        let mut settings = AppSettings::default();
+        settings.agent_sandbox.providers.insert(
+            "claude_cli".into(),
+            ProviderConfig {
+                auth_type: "api_key".into(),
+                credentials_encrypted: Some("super-secret-blob".into()),
+                default_model: None,
+                extra: serde_json::Value::Null,
+            },
+        );
+        settings.agent_sandbox.api_key_encrypted = Some("legacy-secret".into());
+        settings.preview_gateway.shared_secret = "preview-token".into();
+        settings.multi_node.join_token_hash = Some("hash".into());
+
+        let response = AppSettingsResponse::from(settings);
+        let json = serde_json::to_string(&response).expect("serialize response");
+
+        assert!(!json.contains("super-secret-blob"));
+        assert!(!json.contains("legacy-secret"));
+        assert!(!json.contains("preview-token"));
+        assert!(!json.contains("\"hash\""));
+        assert!(json.contains("\"credential_saved\":true"));
+        assert!(json.contains("\"shared_secret_set\":true"));
+        assert!(json.contains("\"has_join_token\":true"));
+    }
 }

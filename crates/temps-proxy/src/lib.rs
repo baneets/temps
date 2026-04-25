@@ -13,6 +13,7 @@ pub mod crawler_detector;
 pub mod handler;
 pub mod on_demand;
 pub mod plugin;
+pub mod preview_auth;
 pub mod proxy;
 pub mod server;
 pub mod service;

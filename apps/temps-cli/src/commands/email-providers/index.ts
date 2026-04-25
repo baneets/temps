@@ -2,10 +2,10 @@ import type { Command } from 'commander'
 import { requireAuth } from '../../config/store.js'
 import { setupClient, client, getErrorMessage } from '../../lib/api-client.js'
 import {
-  listProviders2 as listEmailSmtpProviders,
-  createProvider2 as createEmailSmtpProvider,
-  getProvider2 as getEmailSmtpProvider,
-  deleteProvider2 as deleteEmailSmtpProvider,
+  listEmailProviders as listEmailSmtpProviders,
+  createEmailProvider as createEmailSmtpProvider,
+  getEmailProvider as getEmailSmtpProvider,
+  deleteEmailProvider as deleteEmailSmtpProvider,
   testProvider as testEmailProvider,
 } from '../../api/sdk.gen.js'
 import type { EmailProviderResponse, EmailProviderTypeRoute } from '../../api/types.gen.js'

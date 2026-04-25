@@ -75,7 +75,7 @@ pub struct StatusChangeConfig {
 }
 
 /// Result of alert evaluation — carries rich context for notification rendering
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AlertNotification {
     pub rule_name: String,
     pub trigger_type: String,

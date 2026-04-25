@@ -36,8 +36,10 @@ import {
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
+import { usePageTitle } from '@/hooks/usePageTitle'
 
 export default function ApiKeyCreate() {
+  usePageTitle('Create API Key')
   const navigate = useNavigate()
   const [step, setStep] = useState(1)
   const [keyName, setKeyName] = useState('')
@@ -315,49 +317,57 @@ export default function ApiKeyCreate() {
               expiration date
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="name">API Key Name *</Label>
-              <Input
-                id="name"
-                placeholder="e.g., Production Server Key"
-                value={keyName}
-                onChange={(e) => setKeyName(e.target.value)}
-                className="max-w-md"
-                autoFocus
-              />
-              <p className="text-sm text-muted-foreground">
-                Choose a name that helps you remember what this key is used for
-              </p>
-            </div>
+          <CardContent>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault()
+                if (canProceed()) setStep(2)
+              }}
+              className="space-y-6"
+            >
+              <div className="space-y-2">
+                <Label htmlFor="name">API Key Name *</Label>
+                <Input
+                  id="name"
+                  placeholder="e.g., Production Server Key"
+                  value={keyName}
+                  onChange={(e) => setKeyName(e.target.value)}
+                  className="max-w-md"
+                  autoFocus
+                />
+                <p className="text-sm text-muted-foreground">
+                  Choose a name that helps you remember what this key is used for
+                </p>
+              </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="expires">
-                <Calendar className="inline h-4 w-4 mr-2" />
-                Expiration Date (Optional)
-              </Label>
-              <Input
-                id="expires"
-                type="date"
-                value={expiresAt}
-                onChange={(e) => setExpiresAt(e.target.value)}
-                min={new Date().toISOString().split('T')[0]}
-                className="max-w-md"
-              />
-              <p className="text-sm text-muted-foreground">
-                Keys with expiration dates are more secure. Leave empty for no
-                expiration.
-              </p>
-            </div>
+              <div className="space-y-2">
+                <Label htmlFor="expires">
+                  <Calendar className="inline h-4 w-4 mr-2" />
+                  Expiration Date (Optional)
+                </Label>
+                <Input
+                  id="expires"
+                  type="date"
+                  value={expiresAt}
+                  onChange={(e) => setExpiresAt(e.target.value)}
+                  min={new Date().toISOString().split('T')[0]}
+                  className="max-w-md"
+                />
+                <p className="text-sm text-muted-foreground">
+                  Keys with expiration dates are more secure. Leave empty for no
+                  expiration.
+                </p>
+              </div>
 
-            <div className="flex justify-end gap-3">
-              <Button variant="outline" onClick={() => navigate('/settings/keys')}>
-                Cancel
-              </Button>
-              <Button onClick={() => setStep(2)} disabled={!canProceed()}>
-                Next: Permissions
-              </Button>
-            </div>
+              <div className="flex justify-end gap-3">
+                <Button type="button" variant="outline" onClick={() => navigate('/settings/keys')}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={!canProceed()}>
+                  Next: Permissions
+                </Button>
+              </div>
+            </form>
           </CardContent>
         </Card>
       )}

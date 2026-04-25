@@ -229,6 +229,20 @@ async fn create_provider_key(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, AiGatewayWrite);
 
+    // Verify the key works before persisting it. Fails fast with a 400 so
+    // the UI doesn't end up with a stored-but-broken credential.
+    app_state
+        .gateway_service
+        .test_provider(
+            &request.provider,
+            &request.api_key,
+            request.base_url.as_deref(),
+        )
+        .await
+        .map_err(|e| AiGatewayError::Validation {
+            message: format!("API key verification failed: {}", e),
+        })?;
+
     let key = app_state
         .provider_key_service
         .create(

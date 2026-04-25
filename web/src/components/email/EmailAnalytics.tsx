@@ -38,6 +38,7 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 // Types
 interface EmailEventStats {
@@ -107,10 +108,10 @@ function RateCard({
   title: string
   count: number
   rate: number | null
-  icon: React.ElementType
+  icon: React.ComponentType<{ className?: string }>
   color: string
 }) {
-  const percentage = rate != null ? Math.round(rate * 100) : null
+  const percentage = rate != null ? Math.round(rate) : null
 
   return (
     <Card>
@@ -185,6 +186,7 @@ function parseUserAgent(ua: string): string {
 }
 
 export function EmailAnalytics() {
+  const navigate = useNavigate()
   const [eventType, setEventType] = useState<string | undefined>()
   const [page, setPage] = useState(1)
   const pageSize = 25
@@ -340,7 +342,11 @@ export function EmailAnalytics() {
                   </TableHeader>
                   <TableBody>
                     {events?.events.map((event) => (
-                      <TableRow key={event.id}>
+                      <TableRow
+                        key={event.id}
+                        className="cursor-pointer hover:bg-muted/50"
+                        onClick={() => navigate(`/email/${event.email_id}`)}
+                      >
                         <TableCell>
                           <EventBadge type={event.event_type} />
                         </TableCell>

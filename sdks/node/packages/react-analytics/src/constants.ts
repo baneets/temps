@@ -1,1 +1,1 @@
-export const DEFAULT_BASE_PATH = "/api/_temps";
+export { DEFAULT_BASE_PATH } from "@temps-sdk/analytics-core";

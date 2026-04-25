@@ -33,6 +33,7 @@ pub use super::notification_preferences::Entity as NotificationPreferences;
 pub use super::notification_providers::Entity as NotificationProviders;
 pub use super::notifications::Entity as Notifications;
 pub use super::performance_metrics::Entity as PerformanceMetrics;
+pub use super::postgres_major_upgrades::Entity as PostgresMajorUpgrades;
 pub use super::project_custom_domains::Entity as ProjectCustomDomains;
 pub use super::project_services::Entity as ProjectServices;
 pub use super::projects::Entity as Projects;
@@ -41,6 +42,7 @@ pub use super::repositories::{
     BranchPresetData, Entity as Repositories, PresetInfo, RepositoryPresetCache,
 };
 pub use super::request_sessions::Entity as RequestSessions;
+pub use super::restore_runs::Entity as RestoreRuns;
 pub use super::roles::Entity as Roles;
 pub use super::s3_sources::Entity as S3Sources;
 pub use super::session_replay_events::Entity as SessionReplayEvents;

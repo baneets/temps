@@ -55,8 +55,22 @@ mod m20260326_000003_add_edge_public_key_to_nodes;
 mod m20260327_000001_add_service_name_to_custom_domains;
 mod m20260328_000001_create_email_events;
 mod m20260328_000002_add_check_path_to_status_monitors;
+mod m20260331_000001_create_autopilot_tables;
 mod m20260401_000001_add_tracked_html_body_to_emails;
+mod m20260401_000001_autopilot_to_agents;
+mod m20260401_000002_add_autofixer_columns;
 mod m20260401_000002_add_missing_email_events_columns;
+// Squashes 34 migrations from m20260403 through m20260420 into one.
+// Production (b8d6519) still has the original migrations in seaql_migrations;
+// this replaces them on fresh setups. On local DBs already past b8d6519,
+// insert this migration name into seaql_migrations manually to mark it done.
+mod m20260421_000001_squash_apr_post_v006;
+mod m20260422_000001_external_service_health;
+mod m20260422_000002_add_git_connection_health;
+mod m20260423_000001_create_oauth_states;
+mod m20260423_000002_add_sync_progress_count;
+mod m20260423_000003_fix_gitlab_nested_group_owner;
+mod m20260424_000001_create_secrets;
 
 pub struct Migrator;
 
@@ -119,8 +133,18 @@ impl MigratorTrait for Migrator {
             Box::new(m20260327_000001_add_service_name_to_custom_domains::Migration),
             Box::new(m20260328_000001_create_email_events::Migration),
             Box::new(m20260328_000002_add_check_path_to_status_monitors::Migration),
+            Box::new(m20260331_000001_create_autopilot_tables::Migration),
             Box::new(m20260401_000001_add_tracked_html_body_to_emails::Migration),
+            Box::new(m20260401_000001_autopilot_to_agents::Migration),
+            Box::new(m20260401_000002_add_autofixer_columns::Migration),
             Box::new(m20260401_000002_add_missing_email_events_columns::Migration),
+            Box::new(m20260421_000001_squash_apr_post_v006::Migration),
+            Box::new(m20260422_000001_external_service_health::Migration),
+            Box::new(m20260422_000002_add_git_connection_health::Migration),
+            Box::new(m20260423_000001_create_oauth_states::Migration),
+            Box::new(m20260423_000002_add_sync_progress_count::Migration),
+            Box::new(m20260423_000003_fix_gitlab_nested_group_owner::Migration),
+            Box::new(m20260424_000001_create_secrets::Migration),
         ]
     }
 }

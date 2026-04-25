@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CreateActionButton } from '@/components/ui/create-action-button'
 import {
   Card,
   CardContent,
@@ -101,15 +102,11 @@ export function WebhooksSettings({ project }: WebhooksSettingsProps) {
             in your project
           </p>
         </div>
-        <Button
-          onClick={() =>
-            navigate(`/projects/${project.slug}/settings/webhooks/new`)
-          }
+        <CreateActionButton
+          to={`/projects/${project.slug}/settings/webhooks/new`}
           disabled={isLoading}
-        >
-          <Plus className="h-4 w-4 mr-2" />
-          Add Webhook
-        </Button>
+          label="Add Webhook"
+        />
       </div>
 
       {error && (

@@ -25,7 +25,6 @@ pub struct AuthMiddleware {
     auth_service: Arc<AuthService>,
     user_service: Arc<UserService>,
     cookie_crypto: Arc<CookieCrypto>,
-    db: Arc<sea_orm::DatabaseConnection>,
     deployment_token_service: DeploymentTokenValidationService,
 }
 
@@ -37,13 +36,12 @@ impl AuthMiddleware {
         cookie_crypto: Arc<CookieCrypto>,
         db: Arc<sea_orm::DatabaseConnection>,
     ) -> Self {
-        let deployment_token_service = DeploymentTokenValidationService::new(db.clone());
+        let deployment_token_service = DeploymentTokenValidationService::new(db);
         Self {
             api_key_service,
             auth_service,
             user_service,
             cookie_crypto,
-            db,
             deployment_token_service,
         }
     }
@@ -100,56 +98,6 @@ impl AuthMiddleware {
         next: Next,
     ) -> Result<Response, StatusCode> {
         let mut user = None;
-
-        // 0. Check for demo mode via X-Temps-Demo-Mode header (set by proxy) or host matching demo.*
-        // This auto-authenticates requests without requiring login
-        let demo_mode_header = req
-            .headers()
-            .get("x-temps-demo-mode")
-            .and_then(|h| h.to_str().ok())
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        let host = req
-            .headers()
-            .get("host")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("");
-        let host_without_port = host.split(':').next().unwrap_or(host);
-
-        // Log for debugging
-        tracing::debug!(
-            "Auth middleware: host={}, host_without_port={}, demo_mode_header={}, path={}",
-            host,
-            host_without_port,
-            demo_mode_header,
-            req.uri().path()
-        );
-
-        // Check demo mode either via header from proxy or via host subdomain
-        if demo_mode_header || host_without_port.starts_with("demo.") {
-            // Extract demo user cookie before async call to avoid Send issues
-            let demo_user_id = self.extract_demo_user_cookie(req.headers());
-
-            if let Some((demo_user, demo_auth)) = self
-                .check_demo_mode(host_without_port, demo_mode_header, demo_user_id)
-                .await
-            {
-                tracing::debug!(
-                    "Demo mode: authenticated as user {} (id={})",
-                    demo_user.email,
-                    demo_user.id
-                );
-
-                // Build metadata and insert extensions
-                let metadata = self.build_request_metadata(&req);
-                req.extensions_mut().insert(metadata);
-                req.extensions_mut().insert(demo_user);
-                req.extensions_mut().insert(demo_auth);
-
-                return Ok(next.run(req).await);
-            }
-        }
 
         // Extract auth context - simplified to avoid Send issues
         let auth_context = if let Some(auth_header) = req.headers().get("authorization") {
@@ -235,7 +183,7 @@ impl AuthMiddleware {
             crate::middleware::extract_session_id_cookie(&req, &self.cookie_crypto);
 
         // Create base URL from request headers
-        let host = req
+        let raw_host = req
             .headers()
             .get("host")
             .and_then(|h| h.to_str().ok())
@@ -254,7 +202,11 @@ impl AuthMiddleware {
             "http"
         };
         let is_secure = scheme == "https";
-        let base_url = format!("{}://{}", scheme, host);
+        // `base_url` keeps the port so generated links point back at the same
+        // listener the client reached us on. `host` is port-stripped so it can
+        // be used as a route-table key (the proxy normalizes identically).
+        let base_url = format!("{}://{}", scheme, raw_host);
+        let host = temps_core::host_without_port(&raw_host).to_string();
 
         // Create RequestMetadata
         let metadata = temps_core::RequestMetadata {
@@ -283,30 +235,15 @@ impl AuthMiddleware {
         // Insert extensions
         req.extensions_mut().insert(metadata);
 
-        // If no auth context, check if readonly external access is enabled
-        if auth_context.is_none() {
-            // Check the app settings for allow_readonly_external_access flag
-            if let Ok(allow_readonly) = self.get_readonly_access_setting().await {
-                if allow_readonly {
-                    // Create an anonymous user with read-only permissions
-                    let anonymous_user = self.create_anonymous_user();
-                    let anonymous_auth = crate::context::AuthContext::new_session(
-                        anonymous_user.clone(),
-                        crate::permissions::Role::Reader,
-                    );
-
-                    req.extensions_mut().insert(anonymous_user);
-                    req.extensions_mut().insert(anonymous_auth);
-                }
-            }
-        } else {
-            // Insert authenticated user and context
-            if let Some(user) = user {
-                req.extensions_mut().insert(user);
-            }
-            if let Some(auth_ctx) = auth_context {
-                req.extensions_mut().insert(auth_ctx);
-            }
+        // Insert authenticated user and context. Anonymous requests stay
+        // anonymous: there is no implicit promotion to a Reader role for
+        // unauthenticated callers. Issue an authenticated reader API key
+        // if you want read-only programmatic access.
+        if let Some(user) = user {
+            req.extensions_mut().insert(user);
+        }
+        if let Some(auth_ctx) = auth_context {
+            req.extensions_mut().insert(auth_ctx);
         }
 
         // Run the next middleware/handler
@@ -336,241 +273,5 @@ impl AuthMiddleware {
             }
         }
         None
-    }
-
-    /// Get the readonly access setting from the database
-    async fn get_readonly_access_setting(&self) -> Result<bool, sea_orm::DbErr> {
-        use sea_orm::EntityTrait;
-        use temps_entities::settings;
-
-        let record = settings::Entity::find_by_id(1)
-            .one(self.db.as_ref())
-            .await?;
-
-        Ok(record
-            .and_then(|r| {
-                temps_core::AppSettings::from_json(r.data)
-                    .allow_readonly_external_access
-                    .into()
-            })
-            .unwrap_or(false))
-    }
-
-    /// Create an anonymous user for read-only access
-    fn create_anonymous_user(&self) -> temps_entities::users::Model {
-        use chrono::Utc;
-
-        temps_entities::users::Model {
-            id: 0, // Special ID for anonymous user
-            name: "Anonymous".to_string(),
-            email: "anonymous@temps.local".to_string(),
-            password_hash: None,
-            email_verified: false,
-            email_verification_token: None,
-            email_verification_expires: None,
-            password_reset_token: None,
-            password_reset_expires: None,
-            deleted_at: None,
-            mfa_secret: None,
-            mfa_enabled: false,
-            mfa_recovery_codes: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    /// Check if the request is in demo mode and return the appropriate user and auth context
-    async fn check_demo_mode(
-        &self,
-        host_without_port: &str,
-        demo_mode_header: bool,
-        selected_user_id: Option<i32>,
-    ) -> Option<(temps_entities::users::Model, crate::context::AuthContext)> {
-        use sea_orm::EntityTrait;
-
-        // First, check if demo mode is enabled in settings
-        let settings_record = temps_entities::settings::Entity::find_by_id(1)
-            .one(self.db.as_ref())
-            .await
-            .ok()
-            .flatten();
-
-        let settings = settings_record
-            .map(|r| temps_core::AppSettings::from_json(r.data))
-            .unwrap_or_default();
-
-        // Demo mode must be explicitly enabled
-        if !settings.demo_mode.enabled {
-            tracing::debug!(
-                "Demo mode is disabled in settings, rejecting demo request for host: {}",
-                host_without_port
-            );
-            return None;
-        }
-
-        // Check if demo mode header is set by proxy (proxy already validated the host)
-        if demo_mode_header {
-            tracing::debug!(
-                "Demo mode detected via X-Temps-Demo-Mode header (host: {})",
-                host_without_port
-            );
-        } else {
-            // Validate host against configured demo domain or default pattern
-            let expected_demo_host = if let Some(ref custom_domain) = settings.demo_mode.domain {
-                custom_domain.clone()
-            } else {
-                let preview_domain = settings.preview_domain.trim_start_matches("*.");
-                format!("demo.{}", preview_domain)
-            };
-
-            tracing::debug!(
-                "Demo check: host_without_port={}, expected_demo_host={}",
-                host_without_port,
-                expected_demo_host
-            );
-
-            if host_without_port != expected_demo_host {
-                return None;
-            }
-
-            tracing::debug!(
-                "Demo mode detected: host {} matches expected demo host {}",
-                host_without_port,
-                expected_demo_host
-            );
-        }
-
-        if let Some(user_id) = selected_user_id {
-            // User has selected a specific user to view as in demo mode
-            match self.user_service.get_user_by_id(user_id).await {
-                Ok(user) => {
-                    // SECURITY: Always use Role::Demo for demo sessions regardless of the
-                    // selected user's actual role. This prevents privilege escalation where
-                    // a demo visitor could select an admin user and gain admin permissions.
-                    tracing::debug!(
-                        "Demo mode: viewing as selected user (id={}, email={}) with Demo role",
-                        user.id,
-                        user.email,
-                    );
-                    return Some((
-                        user.clone(),
-                        crate::context::AuthContext::new_demo_session(
-                            user,
-                            crate::permissions::Role::Demo,
-                        ),
-                    ));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Demo mode: failed to load selected user {}: {:?}, falling back to demo user",
-                        user_id,
-                        e
-                    );
-                }
-            }
-        }
-
-        // Default: Find or create demo user
-        match self.user_service.find_or_create_demo_user().await {
-            Ok(demo_user) => {
-                tracing::debug!(
-                    "Demo mode: auto-authenticated as demo user (id={}, email={})",
-                    demo_user.id,
-                    demo_user.email
-                );
-                Some((
-                    demo_user.clone(),
-                    crate::context::AuthContext::new_demo_session(
-                        demo_user,
-                        crate::permissions::Role::Demo,
-                    ),
-                ))
-            }
-            Err(e) => {
-                tracing::error!("Demo mode: failed to find/create demo user: {:?}", e);
-                None
-            }
-        }
-    }
-
-    /// Extract the demo user ID from the demo user cookie
-    fn extract_demo_user_cookie(&self, headers: &axum::http::HeaderMap) -> Option<i32> {
-        use cookie::Cookie;
-
-        const DEMO_USER_COOKIE_NAME: &str = "_temps_demo_uid";
-
-        for cookie_header in headers.get_all("cookie") {
-            if let Ok(cookie_str) = cookie_header.to_str() {
-                for cookie in Cookie::split_parse(cookie_str).filter_map(Result::ok) {
-                    if cookie.name() == DEMO_USER_COOKIE_NAME {
-                        // Decrypt the cookie value
-                        match self.cookie_crypto.decrypt(cookie.value()) {
-                            Ok(decrypted) => {
-                                // Parse the user_id
-                                if let Ok(user_id) = decrypted.parse::<i32>() {
-                                    return Some(user_id);
-                                }
-                            }
-                            Err(_) => {
-                                // If decryption fails, no valid demo user selection
-                                return None;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Build RequestMetadata from request headers
-    fn build_request_metadata(&self, req: &Request) -> temps_core::RequestMetadata {
-        let visitor_id_cookie =
-            crate::middleware::extract_visitor_id_cookie(req, &self.cookie_crypto);
-        let session_id_cookie =
-            crate::middleware::extract_session_id_cookie(req, &self.cookie_crypto);
-
-        let host = req
-            .headers()
-            .get("host")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("localhost")
-            .to_string();
-
-        let scheme = if req
-            .headers()
-            .get("x-forwarded-proto")
-            .and_then(|h| h.to_str().ok())
-            == Some("https")
-        {
-            "https"
-        } else {
-            "http"
-        };
-        let is_secure = scheme == "https";
-        let base_url = format!("{}://{}", scheme, host);
-
-        temps_core::RequestMetadata {
-            ip_address: req
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .unwrap_or("unknown")
-                .to_string(),
-            user_agent: req
-                .headers()
-                .get("user-agent")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("unknown")
-                .to_string(),
-            headers: req.headers().clone(),
-            visitor_id_cookie,
-            session_id_cookie,
-            base_url,
-            scheme: scheme.to_string(),
-            host,
-            is_secure,
-        }
     }
 }

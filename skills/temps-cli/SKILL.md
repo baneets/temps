@@ -1,7 +1,7 @@
 ---
 name: temps-cli
 description: |
-  Complete command-line reference for managing the Temps deployment platform. Covers all 54+ CLI commands including projects, deployments, environments, services, domains, monitoring, backups, security scanning, error tracking, and platform administration. Use when the user wants to: (1) Find CLI command syntax, (2) Manage projects and deployments via CLI, (3) Configure services and infrastructure, (4) Set up monitoring and logging, (5) Automate deployments with CI/CD, (6) Manage domains and DNS, (7) Configure notifications and webhooks. Triggers: "temps cli", "temps command", "how to use temps", "@temps-sdk/cli", "bunx temps", "npx temps", "temps deploy", "temps projects", "temps services".
+  Complete command-line reference for managing the Temps deployment platform. Covers all 56+ CLI commands including projects, deployments, environments, services, domains, monitoring, backups, security scanning, error tracking, analytics, and platform administration. Use when the user wants to: (1) Find CLI command syntax, (2) Manage projects and deployments via CLI, (3) Configure services and infrastructure, (4) Set up monitoring and logging, (5) Automate deployments with CI/CD, (6) Manage domains and DNS, (7) Configure notifications and webhooks, (8) View project analytics and traffic breakdowns. Triggers: "temps cli", "temps command", "how to use temps", "@temps-sdk/cli", "bunx temps", "npx temps", "temps deploy", "temps projects", "temps services", "temps analytics", "temps stats".
 ---
 
 # Temps CLI - Complete Reference
@@ -869,24 +869,34 @@ bunx @temps-sdk/cli incidents bucketed --project-id 5 -i hourly --json
 
 **Alias**: `cts`
 
+**Required for all subcommands**: `-p, --project-id <id>` (numeric).
+**Required for `show`, `start`, `stop`, `restart`, single-container `metrics`**: `-e, --environment-id <id>` and `-c, --container-id <id>`.
+**Optional for `list`**: `-e` — when omitted, lists containers across **all environments** in the project.
+
 ```bash
-# List containers
+# List containers across ALL environments (no -e needed)
+bunx @temps-sdk/cli containers list -p 5
+
+# List containers in a specific environment
 bunx @temps-sdk/cli containers list -p 5 -e 1 --json
 
-# Show container details
+# Show container details (all three IDs required)
 bunx @temps-sdk/cli containers show -p 5 -e 1 -c abc123 --json
 
-# Start/stop/restart
+# Start/stop/restart (all three IDs required)
 bunx @temps-sdk/cli containers start -p 5 -e 1 -c abc123
 bunx @temps-sdk/cli containers stop -p 5 -e 1 -c abc123
 bunx @temps-sdk/cli containers restart -p 5 -e 1 -c abc123
 
-# Force stop
+# Force stop (skip confirmation)
 bunx @temps-sdk/cli containers stop -p 5 -e 1 -c abc123 -f
 
-# Live metrics (auto-refresh)
+# Metrics: single container with watch (-e required)
 bunx @temps-sdk/cli containers metrics -p 5 -e 1 -c abc123 -w -i 2
 bunx @temps-sdk/cli containers metrics -p 5 -e 1 -c abc123 --json
+
+# Metrics: all containers in an env (-c omitted, -e still required)
+bunx @temps-sdk/cli containers metrics -p 5 -e 1 --json
 ```
 
 ---
@@ -1218,6 +1228,60 @@ bunx @temps-sdk/cli funnels remove --project-id 5 --funnel-id 1 -f
 
 ---
 
+## Analytics
+
+**Alias**: `stats`
+
+**Use `analytics` for**: page views, visitors, sessions, top pages, referrers, browsers, countries, cities, events, traffic breakdowns, UTM campaigns — anything about user/visitor behavior and marketing metrics.
+
+View project analytics from the terminal with dashboard overviews and detailed breakdowns.
+
+### Analytics Overview
+
+```bash
+# Show analytics dashboard (key metrics, sparkline, top pages, events, locations)
+bunx @temps-sdk/cli analytics overview -p my-app --period 24h
+bunx @temps-sdk/cli analytics overview -p my-app --period 7d --json
+
+# Short form (overview is the default)
+bunx @temps-sdk/cli analytics -p my-app --period 7d
+bunx @temps-sdk/cli stats -p my-app
+```
+
+**Periods**: `today`, `24h`, `7d`, `30d`, `90d`
+
+### Analytics Top (Breakdowns)
+
+```bash
+# Top pages by visit count
+bunx @temps-sdk/cli analytics top pages -p my-app --period 7d
+
+# Traffic sources
+bunx @temps-sdk/cli analytics top referrers -p my-app --period 30d
+
+# Browser breakdown
+bunx @temps-sdk/cli analytics top browsers -p my-app --json
+
+# Country breakdown
+bunx @temps-sdk/cli analytics top countries -p my-app --period 30d --limit 50
+
+# All events with counts
+bunx @temps-sdk/cli analytics top events -p my-app --period 7d
+
+# Other dimensions
+bunx @temps-sdk/cli analytics top os -p my-app           # Operating systems
+bunx @temps-sdk/cli analytics top devices -p my-app       # Device types
+bunx @temps-sdk/cli analytics top channels -p my-app      # Traffic channels
+bunx @temps-sdk/cli analytics top languages -p my-app     # Visitor languages
+bunx @temps-sdk/cli analytics top utm_source -p my-app    # UTM sources
+bunx @temps-sdk/cli analytics top utm_medium -p my-app    # UTM mediums
+bunx @temps-sdk/cli analytics top utm_campaign -p my-app  # UTM campaigns
+```
+
+**Available dimensions**: `pages`, `referrers`, `browsers`, `os`, `devices`, `countries`, `channels`, `events`, `languages`, `utm_source`, `utm_medium`, `utm_campaign`
+
+---
+
 ## Email
 
 ### Email Providers
@@ -1290,6 +1354,262 @@ bunx @temps-sdk/cli emails stats --json
 # Validate email address
 bunx @temps-sdk/cli emails validate --email user@example.com --json
 ```
+
+### Sending email from application code
+
+**Default rule for any app deployed on Temps**: send transactional email
+through Temps, not via Resend / SendGrid / Mailgun / Postmark / SES SDK
+directly. Temps already brokers email through configured providers and
+domains, tracks delivery, and exposes a single typed SDK — using a
+third-party SDK in app code duplicates infrastructure and bypasses
+Temps tracking, retries, and the project's verified domains.
+
+#### ALWAYS fetch verified domains first — do not hardcode
+
+The set of verified email domains is **dynamic**: an operator may add or
+remove domains at any time, and a sandbox started before a domain
+existed must still be able to use it once it appears. Never bake a
+domain list into a CLAUDE.md, env file, or generated code. Instead,
+**always fetch the current list at the moment you're about to send**:
+
+```bash
+# Returns every domain known to this Temps instance, including status.
+# Filter to status=="verified" — those are the only ones POST /emails accepts.
+bunx @temps-sdk/cli email-domains list --json
+```
+
+Or via raw HTTP from inside the sandbox / from any deployed app:
+
+```bash
+curl -sS "$TEMPS_API_URL/email-domains" \
+  -H "Authorization: Bearer $TEMPS_DEPLOYMENT_TOKEN" \
+  | jq '[.[] | select(.status == "verified") | .domain]'
+```
+
+Procedure when the user asks the agent (or the running app) to send email:
+
+1. Call `GET /email-domains` and filter to `status == "verified"`.
+2. **If the list is empty**: stop. Tell the user no sender domain is
+   verified yet and that an operator must run
+   `bunx @temps-sdk/cli email-domains create -d <domain> --provider-id <id> -y`
+   followed by `... email-domains verify --id <id>`. Do NOT generate
+   application code that calls `POST /emails` — it will 400 at runtime.
+3. **If the user named a `from` address**: confirm its domain is in the
+   verified list. If not, refuse and surface the available domains.
+4. **If the user did not specify a sender**: default to
+   `noreply@<first-verified-domain>` (or ask if multiple are equally
+   plausible).
+5. Then call `POST /emails` with the chosen `from`.
+
+Application code that runs in long-lived containers should fetch the
+domain list at startup (or per-request, cached briefly) rather than
+hardcoding — same reason. A startup-time fetch is enough for most apps;
+re-fetch on `400 Domain not verified` to recover from a domain that was
+removed mid-process.
+
+**Node / TypeScript** — use `@temps-sdk/node-sdk`:
+
+```bash
+bun add @temps-sdk/node-sdk    # or: npm i / pnpm add / yarn add
+```
+
+```ts
+import { TempsClient } from '@temps-sdk/node-sdk';
+
+const temps = new TempsClient({
+  baseUrl: process.env.TEMPS_API_URL!,        // injected into the sandbox automatically
+  apiKey: process.env.TEMPS_DEPLOYMENT_TOKEN!, // session/deployment token, also auto-injected
+});
+
+await temps.email.send({
+  body: {
+    from: 'noreply@example.com',  // domain MUST be a verified email-domain in this project
+    from_name: 'Acme',
+    to: ['user@example.com'],
+    subject: 'Welcome',
+    html: '<p>Hello</p>',
+    text: 'Hello',
+    // optional: cc, bcc, reply_to, headers, tags
+  },
+});
+```
+
+`SendEmailRequestBody` fields (from the typed SDK): `from` (required),
+`subject` (required), `to` (required), `from_name`, `cc`, `bcc`,
+`reply_to`, `html`, `text`, `headers`, `tags`. The sender domain is
+auto-extracted from `from` and looked up against the project's verified
+email domains — sending will 400 if the domain isn't verified, so make
+sure `email-domains create` + `verify` has been run for it first.
+
+**Do NOT** add `resend`, `@sendgrid/mail`, `mailgun.js`, `postmark`,
+`@aws-sdk/client-ses`, or `nodemailer` to a Temps-hosted project unless
+the user explicitly says they want to bypass Temps email. If you see one
+of those packages already in `package.json`, suggest migrating to
+`@temps-sdk/node-sdk` and explain why.
+
+**Other languages — HTTP API**
+
+There's no first-party SDK for Python, Go, Ruby, PHP, Rust, etc. yet,
+so call the REST endpoint directly. Same JSON body shape as the Node
+SDK, same auth header.
+
+- **Endpoint**: `POST {TEMPS_API_URL}/emails`
+- **Auth**: `Authorization: Bearer ${TEMPS_DEPLOYMENT_TOKEN}`
+- **Content-Type**: `application/json`
+- **Success**: `201 Created` with the sent email's id + status
+- **Errors**: `400` (unverified domain / invalid request), `401`
+  (missing/invalid token), `403` (insufficient permission — token needs
+  `emails:send`), `500` (provider failure). Error body is RFC 7807
+  Problem Details JSON.
+
+`curl`:
+
+```bash
+curl -X POST "$TEMPS_API_URL/emails" \
+  -H "Authorization: Bearer $TEMPS_DEPLOYMENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "noreply@example.com",
+    "from_name": "Acme",
+    "to": ["user@example.com"],
+    "subject": "Welcome",
+    "html": "<p>Hello</p>",
+    "text": "Hello",
+    "tags": ["welcome", "onboarding"]
+  }'
+```
+
+**Python** (`requests`):
+
+```python
+import os, requests
+
+resp = requests.post(
+    f"{os.environ['TEMPS_API_URL']}/emails",
+    headers={
+        "Authorization": f"Bearer {os.environ['TEMPS_DEPLOYMENT_TOKEN']}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "from": "noreply@example.com",
+        "to": ["user@example.com"],
+        "subject": "Welcome",
+        "html": "<p>Hello</p>",
+        "text": "Hello",
+    },
+    timeout=10,
+)
+resp.raise_for_status()
+print(resp.json())
+```
+
+**Go** (`net/http`):
+
+```go
+package main
+
+import (
+    "bytes"
+    "encoding/json"
+    "net/http"
+    "os"
+)
+
+func sendEmail() error {
+    body, _ := json.Marshal(map[string]any{
+        "from":    "noreply@example.com",
+        "to":      []string{"user@example.com"},
+        "subject": "Welcome",
+        "html":    "<p>Hello</p>",
+        "text":    "Hello",
+    })
+    req, _ := http.NewRequest("POST", os.Getenv("TEMPS_API_URL")+"/emails", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer "+os.Getenv("TEMPS_DEPLOYMENT_TOKEN"))
+    req.Header.Set("Content-Type", "application/json")
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil { return err }
+    defer resp.Body.Close()
+    if resp.StatusCode >= 300 {
+        return &http.ProtocolError{ErrorString: "temps email failed: " + resp.Status}
+    }
+    return nil
+}
+```
+
+**Ruby** (`net/http`):
+
+```ruby
+require 'net/http'
+require 'json'
+require 'uri'
+
+uri = URI("#{ENV.fetch('TEMPS_API_URL')}/emails")
+req = Net::HTTP::Post.new(uri, {
+  'Authorization' => "Bearer #{ENV.fetch('TEMPS_DEPLOYMENT_TOKEN')}",
+  'Content-Type'  => 'application/json',
+})
+req.body = {
+  from: 'noreply@example.com',
+  to: ['user@example.com'],
+  subject: 'Welcome',
+  html: '<p>Hello</p>',
+  text: 'Hello',
+}.to_json
+res = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https') { |h| h.request(req) }
+raise "temps email failed: #{res.code} #{res.body}" unless res.is_a?(Net::HTTPSuccess)
+```
+
+**PHP** (`curl`):
+
+```php
+<?php
+$ch = curl_init(getenv('TEMPS_API_URL') . '/emails');
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        'Authorization: Bearer ' . getenv('TEMPS_DEPLOYMENT_TOKEN'),
+        'Content-Type: application/json',
+    ],
+    CURLOPT_POSTFIELDS => json_encode([
+        'from' => 'noreply@example.com',
+        'to' => ['user@example.com'],
+        'subject' => 'Welcome',
+        'html' => '<p>Hello</p>',
+        'text' => 'Hello',
+    ]),
+]);
+$response = curl_exec($ch);
+$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+curl_close($ch);
+if ($status >= 300) { throw new RuntimeException("temps email failed: $status $response"); }
+```
+
+**Rust** (`reqwest`):
+
+```rust
+use serde_json::json;
+
+let client = reqwest::Client::new();
+let resp = client
+    .post(format!("{}/emails", std::env::var("TEMPS_API_URL")?))
+    .bearer_auth(std::env::var("TEMPS_DEPLOYMENT_TOKEN")?)
+    .json(&json!({
+        "from": "noreply@example.com",
+        "to": ["user@example.com"],
+        "subject": "Welcome",
+        "html": "<p>Hello</p>",
+        "text": "Hello",
+    }))
+    .send()
+    .await?
+    .error_for_status()?;
+```
+
+In every case the deployed application reads `TEMPS_API_URL` and
+`TEMPS_DEPLOYMENT_TOKEN` from its environment — Temps injects both
+automatically into deployment containers and workspace sandboxes, so
+the app code itself never needs to hold a long-lived API key.
 
 ---
 
@@ -1373,6 +1693,8 @@ bunx @temps-sdk/cli audit show --id 1 --json
 ## Proxy Logs
 
 **Alias**: `plogs`
+
+**Use `proxy-logs` only for**: raw HTTP request/response logs, status codes, response times, debugging specific requests. NOT for page views, visitors, or analytics — use `analytics` instead.
 
 ```bash
 # List proxy logs
@@ -2045,6 +2367,7 @@ bunx @temps-sdk/cli deployments status -p my-app -d 42 --json | jq '.status'
 | `bunx @temps-sdk/cli platform` | `bunx @temps-sdk/cli plat` |
 | `bunx @temps-sdk/cli scans` | `bunx @temps-sdk/cli scan` |
 | `bunx @temps-sdk/cli errors` | `bunx @temps-sdk/cli error` |
+| `bunx @temps-sdk/cli analytics` | `bunx @temps-sdk/cli stats` |
 | `bunx @temps-sdk/cli funnels` | `bunx @temps-sdk/cli funnel` |
 | `bunx @temps-sdk/cli incidents` | `bunx @temps-sdk/cli incident` |
 | `bunx @temps-sdk/cli emails` | `bunx @temps-sdk/cli email` |

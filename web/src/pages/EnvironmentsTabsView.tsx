@@ -3,12 +3,15 @@ import {
   createEnvironmentMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
+import { Route, Routes } from 'react-router-dom'
 import { EnvironmentDashboard } from './EnvironmentDashboard'
+import { ContainerDetailPage } from './ContainerDetailPage'
 import { ProjectResponse } from '@/api/client'
 import { CreateEnvironmentDialog } from '@/components/project/settings/environments/CreateEnvironmentDialog'
+import { Button } from '@/components/ui/button'
+import { Plus } from 'lucide-react'
 import { toast } from 'sonner'
 
 export function EnvironmentsTabsView({
@@ -21,7 +24,6 @@ export function EnvironmentsTabsView({
   )
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
 
-  // Then get environments
   const {
     data: environments,
     isLoading: isEnvironmentsLoading,
@@ -35,7 +37,6 @@ export function EnvironmentsTabsView({
     enabled: !!project?.id,
   })
 
-  // Create environment mutation
   const createEnv = useMutation({
     ...createEnvironmentMutation(),
     onSuccess: () => {
@@ -48,22 +49,16 @@ export function EnvironmentsTabsView({
     },
   })
 
-  const isLoading = isEnvironmentsLoading
-
-  // Use the selected environment or default to first one
   const activeEnvId = selectedEnvId ?? environments?.[0]?.id
 
-  if (isLoading) {
+  if (isEnvironmentsLoading) {
     return (
       <div className="flex flex-col h-full">
         <div className="p-6 border-b bg-background">
-          <div>
-            <Skeleton className="h-8 w-48 mb-2" />
-            <Skeleton className="h-4 w-64" />
-          </div>
+          <Skeleton className="h-8 w-48 mb-2" />
+          <Skeleton className="h-4 w-64" />
         </div>
         <div className="flex-1 p-6">
-          <Skeleton className="h-12 w-full mb-6" />
           <Skeleton className="h-96 w-full" />
         </div>
       </div>
@@ -81,124 +76,71 @@ export function EnvironmentsTabsView({
                 Manage and monitor your environments
               </p>
             </div>
-            <CreateEnvironmentDialog
-              open={isCreateDialogOpen}
-              onOpenChange={setIsCreateDialogOpen}
-              project={project}
-              onSubmit={async (values) => {
-                await createEnv.mutateAsync({
-                  path: { project_id: project.id || 0 },
-                  body: values,
-                })
-              }}
-            />
+            <Button onClick={() => setIsCreateDialogOpen(true)}>
+              <Plus className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Add Environment</span>
+            </Button>
           </div>
         </div>
         <div className="flex-1 flex items-center justify-center">
           <p className="text-muted-foreground">No environments found</p>
         </div>
+        <CreateEnvironmentDialog
+          open={isCreateDialogOpen}
+          onOpenChange={setIsCreateDialogOpen}
+          project={project}
+          onSubmit={async (values) => {
+            await createEnv.mutateAsync({
+              path: { project_id: project.id || 0 },
+              body: values,
+            })
+          }}
+        />
       </div>
     )
   }
 
+  if (!activeEnvId) return null
+
+  const handleDelete = async (deletedId: number) => {
+    const remaining = environments.filter((e) => e.id !== deletedId)
+    await refetchEnvironments()
+    setSelectedEnvId(remaining.length > 0 ? remaining[0].id : undefined)
+  }
+
   return (
     <div className="flex flex-col h-full">
-      <Tabs
-        value={activeEnvId?.toString() || ''}
-        onValueChange={(value) => setSelectedEnvId(parseInt(value))}
-        className="flex flex-col h-full"
-      >
-        <div className="border-b bg-background sm:sticky sm:top-0 sm:z-10">
-          <div className="px-2 py-0">
-            <div className="hidden sm:flex items-center justify-between gap-2 mb-4">
-              <h1 className="text-3xl font-bold truncate">Environments</h1>
-              <CreateEnvironmentDialog
-                open={isCreateDialogOpen}
-                onOpenChange={setIsCreateDialogOpen}
-                project={project}
-                onSubmit={async (values) => {
-                  await createEnv.mutateAsync({
-                    path: { project_id: project.id || 0 },
-                    body: values,
-                  })
-                }}
-              />
-            </div>
-            <div className="flex items-center justify-between gap-2 sm:hidden py-1.5">
-              <TabsList className="justify-start overflow-x-auto h-auto p-0 bg-transparent border-b-0 rounded-none">
-                {environments.map((env) => (
-                  <TabsTrigger
-                    key={env.id}
-                    value={env.id.toString()}
-                    className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-3 py-1.5"
-                  >
-                    <span className="font-medium text-sm">{env.name}</span>
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-              <CreateEnvironmentDialog
-                open={isCreateDialogOpen}
-                onOpenChange={setIsCreateDialogOpen}
-                project={project}
-                onSubmit={async (values) => {
-                  await createEnv.mutateAsync({
-                    path: { project_id: project.id || 0 },
-                    body: values,
-                  })
-                }}
-              />
-            </div>
-            <TabsList className="hidden sm:flex w-full justify-start overflow-x-auto h-auto p-0 bg-transparent border-b rounded-none">
-              {environments.map((env) => (
-                <TabsTrigger
-                  key={env.id}
-                  value={env.id.toString()}
-                  className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 py-3"
-                >
-                  <div className="flex flex-col items-start gap-1">
-                    <span className="font-medium">{env.name}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {env.branch}
-                    </span>
-                  </div>
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-hidden">
-          {environments.map((env) => (
-            <TabsContent
-              key={env.id}
-              value={env.id.toString()}
-              className="m-0 h-full overflow-auto"
-            >
-              <EnvironmentDashboard
-                project={project}
-                environmentId={env.id}
-                onDelete={async () => {
-                  // Find another environment to switch to
-                  const remainingEnvs = environments.filter(
-                    (e) => e.id !== env.id
-                  )
-
-                  // Refresh the environments list
-                  await refetchEnvironments()
-
-                  if (remainingEnvs.length > 0) {
-                    // Switch to the first remaining environment
-                    setSelectedEnvId(remainingEnvs[0].id)
-                  } else {
-                    // No more environments, clear the selection
-                    setSelectedEnvId(undefined)
-                  }
-                }}
-              />
-            </TabsContent>
-          ))}
-        </div>
-      </Tabs>
+      <Routes>
+        <Route
+          path="containers/:containerId"
+          element={<ContainerDetailPage project={project} />}
+        />
+        <Route
+          path="*"
+          element={
+            <EnvironmentDashboard
+              key={activeEnvId}
+              project={project}
+              environmentId={activeEnvId}
+              environments={environments}
+              onEnvironmentChange={(id) => setSelectedEnvId(id)}
+              onCreateEnvironment={() => setIsCreateDialogOpen(true)}
+              onDelete={() => handleDelete(activeEnvId)}
+            />
+          }
+        />
+      </Routes>
+      <CreateEnvironmentDialog
+        open={isCreateDialogOpen}
+        onOpenChange={setIsCreateDialogOpen}
+        project={project}
+        onSubmit={async (values) => {
+          await createEnv.mutateAsync({
+            path: { project_id: project.id || 0 },
+            body: values,
+          })
+        }}
+      />
     </div>
   )
 }

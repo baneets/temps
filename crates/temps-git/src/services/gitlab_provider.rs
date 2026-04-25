@@ -1,6 +1,6 @@
 use super::git_provider::{
     AuthMethod, Branch, Commit, FileContent, GitProviderError, GitProviderService, GitProviderTag,
-    GitProviderType, Repository, User, WebhookConfig,
+    GitProviderType, PullRequest, Repository, RepositoryPage, User, WebhookConfig,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -411,25 +411,78 @@ impl GitProviderService for GitLabProvider {
         access_token: &str,
         organization: Option<&str>,
     ) -> Result<Vec<Repository>, GitProviderError> {
+        // Thin wrapper around `list_repositories_page`. Kept for callers that
+        // don't care about streaming (e.g. `list_repositories_by_connection`
+        // which just wants a snapshot). Large syncs should use the paged API
+        // directly so they can flush per page.
+        const MAX_PAGES: u32 = 200;
+        let mut all = Vec::new();
+        let mut page: u32 = 1;
+        loop {
+            let RepositoryPage { items, next_page } = self
+                .list_repositories_page(access_token, organization, page)
+                .await?;
+            all.extend(items);
+            match next_page {
+                Some(next) if next > page && page < MAX_PAGES => page = next,
+                _ => break,
+            }
+        }
+        Ok(all)
+    }
+
+    async fn list_repositories_page(
+        &self,
+        access_token: &str,
+        organization: Option<&str>,
+        page: u32,
+    ) -> Result<RepositoryPage, GitProviderError> {
         let client = self.get_client();
         let headers = self.get_headers(access_token);
 
-        let url = if let Some(org) = organization {
-            format!("{}/api/v4/groups/{}/projects", self.base_url, org)
+        // GitLab caps per_page at 100. The silent default of 20 was the reason
+        // nested-group users lost repos past the first page.
+        const PER_PAGE: u32 = 100;
+        let page = page.max(1);
+
+        // Group paths can include slashes (nested groups like `foo/bar`).
+        // GitLab's REST API requires them to be URL-encoded as a single path
+        // segment. include_subgroups=true: without this, projects in
+        // descendant groups are not returned. archived=false skips stale
+        // archived projects. The /projects?membership=true endpoint doesn't
+        // accept include_subgroups — membership already spans subgroups.
+        let base_url = if let Some(org) = organization {
+            let encoded = urlencoding::encode(org);
+            format!(
+                "{}/api/v4/groups/{}/projects?include_subgroups=true&archived=false",
+                self.base_url, encoded
+            )
         } else {
-            format!("{}/api/v4/projects?membership=true", self.base_url)
+            format!(
+                "{}/api/v4/projects?membership=true&archived=false",
+                self.base_url
+            )
         };
+        let paged_url = format!("{}&per_page={}&page={}", base_url, PER_PAGE, page);
 
         let response = self
-            .send_with_retry(|| client.get(&url).headers(headers.clone()))
+            .send_with_retry(|| client.get(&paged_url).headers(headers.clone()))
             .await?;
 
         if !response.status().is_success() {
             return Err(GitProviderError::ApiError(format!(
-                "Failed to list repositories: {}",
+                "Failed to list repositories (page {}): {}",
+                page,
                 response.status()
             )));
         }
+
+        // Capture pagination hints BEFORE consuming the body.
+        let next_page_header = response
+            .headers()
+            .get("x-next-page")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u32>().ok());
 
         #[derive(Deserialize)]
         struct GitLabProject {
@@ -453,11 +506,18 @@ impl GitProviderService for GitLabProvider {
             .await
             .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
 
-        let repositories = projects
+        let received = projects.len();
+        let items: Vec<Repository> = projects
             .into_iter()
             .map(|p| {
-                let parts: Vec<&str> = p.path_with_namespace.split('/').collect();
-                let owner = parts[0].to_string();
+                // GitLab supports nested groups. `path_with_namespace` is the full
+                // project path (e.g. "group/subgroup/repo-slug"); `path` is the
+                // repo slug. Owner is everything before the last slash.
+                let owner = p
+                    .path_with_namespace
+                    .rsplit_once('/')
+                    .map(|(ns, _)| ns.to_string())
+                    .unwrap_or_default();
 
                 Repository {
                     id: p.id.to_string(),
@@ -470,8 +530,8 @@ impl GitProviderService for GitLabProvider {
                     clone_url: p.http_url_to_repo,
                     ssh_url: p.ssh_url_to_repo,
                     web_url: p.web_url,
-                    language: None, // GitLab API requires separate call for languages
-                    size: 0,        // Would need separate API call
+                    language: None,
+                    size: 0,
                     stars: p.star_count,
                     forks: p.forks_count,
                     created_at: chrono::DateTime::parse_from_rfc3339(&p.created_at)
@@ -485,7 +545,15 @@ impl GitProviderService for GitLabProvider {
             })
             .collect();
 
-        Ok(repositories)
+        // Only advertise a next page when GitLab says so AND the current page
+        // was full. If either signal is missing we're done — some self-hosted
+        // instances omit the X-Next-Page header entirely.
+        let next_page = match next_page_header {
+            Some(next) if next > page && (received as u32) == PER_PAGE => Some(next),
+            _ => None,
+        };
+
+        Ok(RepositoryPage { items, next_page })
     }
 
     async fn get_repository(
@@ -516,7 +584,7 @@ impl GitProviderService for GitLabProvider {
         #[derive(Deserialize)]
         struct GitLabProject {
             id: i64,
-            name: String,
+            path: String,
             path_with_namespace: String,
             description: Option<String>,
             visibility: String,
@@ -535,11 +603,19 @@ impl GitProviderService for GitLabProvider {
             .await
             .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
 
+        // Recompute owner from path_with_namespace to handle nested groups,
+        // since the caller's `owner` may be a stale or partial value.
+        let owner = project
+            .path_with_namespace
+            .rsplit_once('/')
+            .map(|(ns, _)| ns.to_string())
+            .unwrap_or_else(|| owner.to_string());
+
         Ok(Repository {
             id: project.id.to_string(),
-            name: project.name,
+            name: project.path,
             full_name: project.path_with_namespace,
-            owner: owner.to_string(),
+            owner,
             description: project.description,
             private: project.visibility != "public",
             default_branch: project.default_branch.unwrap_or_else(|| "main".to_string()),
@@ -690,7 +766,7 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_path, file_path
         );
         if let Some(ref_name) = branch {
-            url.push_str(&format!("?ref={}", ref_name));
+            url.push_str(&format!("?ref={}", urlencoding::encode(ref_name)));
         }
 
         let response = self
@@ -833,9 +909,10 @@ impl GitProviderService for GitLabProvider {
 
         let project_path = format!("{}/{}", owner, repo);
         let encoded_path = urlencoding::encode(&project_path);
+        let encoded_branch = urlencoding::encode(branch);
         let url = format!(
             "{}/api/v4/projects/{}/repository/commits/{}",
-            self.base_url, encoded_path, branch
+            self.base_url, encoded_path, encoded_branch
         );
 
         let response = self
@@ -964,11 +1041,12 @@ impl GitProviderService for GitLabProvider {
         // URL encode the project path (owner/repo)
         let project_path = format!("{}/{}", owner, repo);
         let encoded_project = urlencoding::encode(&project_path);
+        let encoded_reference = urlencoding::encode(reference);
 
         // GitLab API endpoint for getting a commit
         let url = format!(
             "{}/api/v4/projects/{}/repository/commits/{}",
-            self.base_url, encoded_project, reference
+            self.base_url, encoded_project, encoded_reference
         );
 
         let response = self
@@ -1127,11 +1205,12 @@ impl GitProviderService for GitLabProvider {
         // URL encode the project path (owner/repo)
         let project_path = format!("{}/{}", owner, repo);
         let encoded_project = urlencoding::encode(&project_path);
+        let encoded_ref = urlencoding::encode(ref_spec);
 
         // Build the URL for downloading the archive (GitLab uses tar.gz by default)
         let url = format!(
             "{}/api/v4/projects/{}/repository/archive.tar.gz?sha={}",
-            self.base_url, encoded_project, ref_spec
+            self.base_url, encoded_project, encoded_ref
         );
 
         let client = self.get_client();
@@ -1294,7 +1373,7 @@ impl GitProviderService for GitLabProvider {
         #[derive(Deserialize)]
         struct GitLabProject {
             id: i64,
-            name: String,
+            path: String,
             path_with_namespace: String,
             description: Option<String>,
             visibility: String,
@@ -1313,8 +1392,12 @@ impl GitProviderService for GitLabProvider {
             .await
             .map_err(|e| GitProviderError::ApiError(format!("Failed to parse response: {}", e)))?;
 
-        let parts: Vec<&str> = project.path_with_namespace.split('/').collect();
-        let owner = parts.first().map(|s| s.to_string()).unwrap_or_default();
+        // Owner is everything in path_with_namespace except the trailing slug.
+        let owner = project
+            .path_with_namespace
+            .rsplit_once('/')
+            .map(|(ns, _)| ns.to_string())
+            .unwrap_or_default();
 
         info!(
             "Successfully created GitLab repository: {}",
@@ -1323,7 +1406,7 @@ impl GitProviderService for GitLabProvider {
 
         Ok(Repository {
             id: project.id.to_string(),
-            name: project.name,
+            name: project.path,
             full_name: project.path_with_namespace,
             owner,
             description: project.description,
@@ -1457,6 +1540,102 @@ impl GitProviderService for GitLabProvider {
             date: chrono::DateTime::parse_from_rfc3339(&commit_response.created_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
+        })
+    }
+
+    async fn create_pull_request(
+        &self,
+        access_token: &str,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        head_branch: &str,
+        base_branch: &str,
+    ) -> Result<PullRequest, GitProviderError> {
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
+
+        // URL encode the project path (owner/repo)
+        let project_path = format!("{}/{}", owner, repo);
+        let encoded_path = urlencoding::encode(&project_path);
+
+        let url = format!(
+            "{}/api/v4/projects/{}/merge_requests",
+            self.base_url, encoded_path
+        );
+
+        #[derive(Serialize)]
+        struct CreateMergeRequestBody<'a> {
+            title: &'a str,
+            description: &'a str,
+            source_branch: &'a str,
+            target_branch: &'a str,
+        }
+
+        let request_body = CreateMergeRequestBody {
+            title,
+            description: body,
+            source_branch: head_branch,
+            target_branch: base_branch,
+        };
+
+        info!(
+            "Creating merge request '{}' in {}/{}: {} -> {}",
+            title, owner, repo, head_branch, base_branch
+        );
+
+        let response = self
+            .send_with_retry(|| {
+                client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&request_body)
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            error!(
+                "Failed to create merge request in {}/{}: {} - {}",
+                owner, repo, status, error_text
+            );
+            return Err(GitProviderError::ApiError(format!(
+                "Failed to create merge request in {}/{}: {} - {}",
+                owner, repo, status, error_text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct GitLabMergeRequest {
+            iid: i32,
+            web_url: String,
+            title: String,
+            source_branch: String,
+            target_branch: String,
+            sha: Option<String>,
+        }
+
+        let mr: GitLabMergeRequest = response.json().await.map_err(|e| {
+            GitProviderError::ApiError(format!("Failed to parse merge request response: {}", e))
+        })?;
+
+        info!(
+            "Successfully created merge request !{} in {}/{}",
+            mr.iid, owner, repo
+        );
+
+        Ok(PullRequest {
+            number: mr.iid,
+            url: mr.web_url,
+            title: mr.title,
+            head_branch: mr.source_branch,
+            base_branch: mr.target_branch,
+            head_sha: mr.sha,
         })
     }
 }

@@ -84,7 +84,7 @@ export function SentryListItem({
         )}
 
         {/* Context Information Grid */}
-        <div className="grid grid-cols-2 gap-2 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
           {/* Environment */}
           {sentryData.environment && (
             <div className="flex items-center gap-1.5">

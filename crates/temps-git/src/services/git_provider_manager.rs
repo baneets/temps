@@ -87,11 +87,84 @@ pub enum GitProviderManagerError {
     #[error("Sync already in progress")]
     SyncInProgress,
 
+    #[error(
+        "Sync for connection {connection_id} exceeded hard deadline of {deadline_secs}s and was aborted"
+    )]
+    SyncTimeout {
+        connection_id: i32,
+        deadline_secs: u64,
+    },
+
     #[error("Connection token expired for connection ID {connection_id}. Please update your access token.")]
     ConnectionTokenExpired { connection_id: i32 },
 
     #[error("Queue error: {0}")]
     QueueError(String),
+
+    #[error("OAuth state not found or expired: {0}")]
+    OAuthStateInvalid(String),
+}
+
+/// Hard ceiling on a single sync run. If we haven't finished within this
+/// window something has gone badly wrong (stuck HTTPS connection, provider
+/// outage with retries spinning, etc) and we'd rather abort and release
+/// the `syncing` flag than hold it indefinitely. 30 minutes is well above
+/// a healthy 20,000-repo sync's wall time and well below "the user has
+/// given up and restarted the server."
+const SYNC_HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Drop guard that resets `syncing=false` on a connection when it leaves
+/// scope. Covers every exit path — Ok, Err, panic, task cancel, deadline
+/// timeout — so the flag never gets stuck in the `true` state.
+///
+/// The guard owns an `Arc<GitProviderManager>` so the write is issued
+/// against the live DB handle. Because `Drop` is synchronous, we spawn a
+/// detached tokio task to perform the update. If the runtime is shutting
+/// down and can't accept new tasks we log and move on — the startup
+/// reset in `plugin.rs` will clean up on the next boot.
+struct SyncFlagGuard {
+    manager: Option<Arc<GitProviderManager>>,
+    connection_id: i32,
+}
+
+impl SyncFlagGuard {
+    fn new(manager: Arc<GitProviderManager>, connection_id: i32) -> Self {
+        Self {
+            manager: Some(manager),
+            connection_id,
+        }
+    }
+}
+
+impl Drop for SyncFlagGuard {
+    fn drop(&mut self) {
+        let Some(manager) = self.manager.take() else {
+            return;
+        };
+        let connection_id = self.connection_id;
+        // Best-effort: if we're mid-tokio-shutdown, `spawn` will panic.
+        // Catch that so a panicking Drop doesn't bring down the process.
+        let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::spawn(async move {
+                if let Err(e) = manager
+                    .set_connection_syncing_status(connection_id, false)
+                    .await
+                {
+                    tracing::error!(
+                        connection_id,
+                        error = %e,
+                        "Failed to reset syncing flag from SyncFlagGuard"
+                    );
+                }
+            });
+        }));
+        if spawn_result.is_err() {
+            tracing::warn!(
+                connection_id,
+                "Could not spawn syncing-flag reset during Drop (runtime likely shutting down); startup reset will handle it"
+            );
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -761,6 +834,23 @@ impl GitProviderManager {
         };
 
         let connection = new_connection.insert(self.db.as_ref()).await?;
+
+        // Probe the upstream immediately so the connection's health_status
+        // reflects reality without waiting for the scheduled sweep. We never
+        // let a probe failure break connection creation — an unreachable
+        // provider is recorded as unhealthy with a reason and the caller gets
+        // their connection row back.
+        if let Err(e) = self.probe_and_record_connection_health(connection.id).await {
+            tracing::warn!(
+                connection_id = connection.id,
+                error = %e,
+                "Initial connection health probe failed to record; row stays at default status"
+            );
+        }
+
+        // Re-fetch so callers see the updated health_status/last_health_check_at
+        // instead of the pre-probe defaults.
+        let connection = self.get_connection(connection.id).await?;
         Ok(connection)
     }
 
@@ -866,23 +956,16 @@ impl GitProviderManager {
             )
             .await?;
 
-        // Synchronously sync repositories after creating the connection
-        match self.sync_repositories(connection.id).await {
-            Ok(repos) => {
-                tracing::info!(
-                    "Successfully synced {} repositories for GitHub PAT connection {}",
-                    repos.len(),
-                    connection.id
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to sync repositories for GitHub PAT connection {}: {}",
-                    connection.id,
-                    e
-                );
-                // Don't fail the provider creation if sync fails
-            }
+        // Kick off sync in the background so creating the provider returns
+        // quickly. The sync's own guard resets `syncing` on any exit path.
+        let manager = Arc::new(self.clone());
+        if let Err(e) = manager.spawn_sync_repositories(connection.id).await {
+            tracing::warn!(
+                "Failed to start background sync for GitHub PAT connection {}: {}",
+                connection.id,
+                e
+            );
+            // Don't fail the provider creation if sync can't be kicked off.
         }
 
         Ok(provider)
@@ -946,23 +1029,16 @@ impl GitProviderManager {
             )
             .await?;
 
-        // Optionally sync repositories immediately
-        match self.sync_repositories(connection.id).await {
-            Ok(repos) => {
-                tracing::info!(
-                    "Successfully synced {} repositories for GitLab PAT connection {}",
-                    repos.len(),
-                    connection.id
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to sync repositories for GitLab PAT connection {}: {}",
-                    connection.id,
-                    e
-                );
-                // Don't fail the provider creation if sync fails
-            }
+        // Kick off sync in the background so creating the provider returns
+        // quickly. The sync's own guard resets `syncing` on any exit path.
+        let manager = Arc::new(self.clone());
+        if let Err(e) = manager.spawn_sync_repositories(connection.id).await {
+            tracing::warn!(
+                "Failed to start background sync for GitLab PAT connection {}: {}",
+                connection.id,
+                e
+            );
+            // Don't fail the provider creation if sync can't be kicked off.
         }
 
         Ok(provider)
@@ -1110,7 +1186,9 @@ impl GitProviderManager {
         Ok(connection)
     }
 
-    /// Set syncing status for a connection
+    /// Set syncing status for a connection. When flipping to `true`, we also
+    /// reset `synced_repository_count` to 0 so the UI's running progress
+    /// starts fresh for this sync.
     async fn set_connection_syncing_status(
         &self,
         connection_id: i32,
@@ -1119,6 +1197,9 @@ impl GitProviderManager {
         let connection = self.get_connection(connection_id).await?;
         let mut active_model: git_provider_connections::ActiveModel = connection.into();
         active_model.syncing = Set(syncing);
+        if syncing {
+            active_model.synced_repository_count = Set(0);
+        }
         active_model.update(self.db.as_ref()).await?;
         Ok(())
     }
@@ -1303,69 +1384,133 @@ impl GitProviderManager {
     }
 
     /// Sync repositories from a connection
-    pub async fn sync_repositories(
-        &self,
+    /// Mark a connection as syncing and spawn the sync loop as a detached
+    /// background task.
+    ///
+    /// Returns as soon as `syncing=true` has been persisted, so the HTTP
+    /// caller can close the connection without interrupting the sync. The
+    /// spawned task owns a drop-guard that flips `syncing=false` on *any*
+    /// exit path — normal completion, error, timeout, or drop. The whole
+    /// inner sync is wrapped in a generous deadline to guarantee the flag
+    /// cannot get stuck forever even if the provider hangs mid-request.
+    ///
+    /// Returns `SyncInProgress` if the connection is already syncing.
+    pub async fn spawn_sync_repositories(
+        self: Arc<Self>,
         connection_id: i32,
-    ) -> Result<Vec<repositories::Model>, GitProviderManagerError> {
-        // Get connection and check if already syncing
+    ) -> Result<(), GitProviderManagerError> {
         let connection = self.get_connection(connection_id).await?;
-
         if connection.syncing {
             return Err(GitProviderManagerError::SyncInProgress);
         }
 
-        // Set syncing status to true
+        // Flip to syncing=true before returning so the client's immediate
+        // follow-up read observes the fresh state.
         self.set_connection_syncing_status(connection_id, true)
             .await?;
 
-        // Perform sync with cleanup on completion
-        let sync_result = self.sync_repositories_internal(connection_id).await;
+        let manager = self.clone();
+        tokio::spawn(async move {
+            manager.run_sync_guarded(connection_id).await;
+        });
 
-        // Always reset syncing status to false
-        if let Err(e) = self
-            .set_connection_syncing_status(connection_id, false)
-            .await
-        {
-            error!(
-                "Failed to reset syncing status for connection {}: {}",
-                connection_id, e
-            );
+        Ok(())
+    }
+
+    /// Synchronous variant of `spawn_sync_repositories` for callers that
+    /// need to block until the sync finishes (tests, CLI flows). Everyday
+    /// code paths should prefer `spawn_sync_repositories` so the sync
+    /// survives HTTP client disconnects.
+    pub async fn sync_repositories(
+        &self,
+        connection_id: i32,
+    ) -> Result<Vec<repositories::Model>, GitProviderManagerError> {
+        let connection = self.get_connection(connection_id).await?;
+        if connection.syncing {
+            return Err(GitProviderManagerError::SyncInProgress);
         }
-        match sync_result {
-            Ok(_) => {
+
+        self.set_connection_syncing_status(connection_id, true)
+            .await?;
+
+        // Hold the guard on the stack so even a panic inside the inner
+        // call unwinds through the Drop impl and resets the flag.
+        let guard = SyncFlagGuard::new(self.clone_arc(), connection_id);
+        let result = tokio::time::timeout(
+            SYNC_HARD_DEADLINE,
+            self.sync_repositories_internal(connection_id),
+        )
+        .await;
+        drop(guard);
+
+        match result {
+            Ok(Ok(())) => {
                 let repos = repositories::Entity::find()
                     .filter(repositories::Column::GitProviderConnectionId.eq(connection_id))
                     .order_by_desc(repositories::Column::PushedAt)
                     .all(self.db.as_ref())
                     .await?;
-                // Fire background jobs for preset calculation per repository
-                for repository in repos.clone() {
-                    let manager = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = manager
-                            .queue_service
-                            .send(temps_core::Job::CalculateRepositoryPreset(
-                                temps_core::CalculateRepositoryPresetJob {
-                                    repository_id: repository.id,
-                                },
-                            ))
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to queue preset calculation for repository {}: {}",
-                                repository.id,
-                                e
-                            );
-                        }
-                    });
-                }
                 Ok(repos)
             }
-            Err(e) => {
-                error!("Failed to sync repositories: {}", e);
+            Ok(Err(e)) => {
+                error!(
+                    connection_id,
+                    error = %e,
+                    "Repository sync failed"
+                );
                 Err(e)
             }
+            Err(_elapsed) => {
+                error!(
+                    connection_id,
+                    deadline_secs = SYNC_HARD_DEADLINE.as_secs(),
+                    "Repository sync exceeded hard deadline and was aborted"
+                );
+                Err(GitProviderManagerError::SyncTimeout {
+                    connection_id,
+                    deadline_secs: SYNC_HARD_DEADLINE.as_secs(),
+                })
+            }
         }
+    }
+
+    /// Runs the inner sync loop behind a drop-guard and a hard deadline.
+    /// Meant to be invoked from a detached `tokio::spawn` — never returns
+    /// errors to a caller, only logs them.
+    async fn run_sync_guarded(self: Arc<Self>, connection_id: i32) {
+        let guard = SyncFlagGuard::new(self.clone(), connection_id);
+        let outcome = tokio::time::timeout(
+            SYNC_HARD_DEADLINE,
+            self.sync_repositories_internal(connection_id),
+        )
+        .await;
+        drop(guard);
+
+        match outcome {
+            Ok(Ok(())) => {
+                tracing::info!(connection_id, "Repository sync completed");
+            }
+            Ok(Err(e)) => {
+                tracing::error!(
+                    connection_id,
+                    error = %e,
+                    "Repository sync failed; syncing flag has been reset"
+                );
+            }
+            Err(_elapsed) => {
+                tracing::error!(
+                    connection_id,
+                    deadline_secs = SYNC_HARD_DEADLINE.as_secs(),
+                    "Repository sync exceeded hard deadline and was aborted"
+                );
+            }
+        }
+    }
+
+    /// Wrap `&self` in an `Arc` copy of the manager. Used to hand the
+    /// manager into a `Drop` guard that needs owned access.
+    fn clone_arc(&self) -> Arc<Self> {
+        Arc::new(self.clone())
     }
 
     async fn sync_repositories_internal(
@@ -1519,136 +1664,224 @@ impl GitProviderManager {
             None
         };
 
-        // For GitHub Apps, use the access_token directly (already generated above)
-        // For OAuth providers, use execute_with_refresh for automatic token refresh
-        let repos = if provider.provider_type == "github" && provider.auth_method == "github_app" {
-            provider_service
-                .list_repositories(&access_token, organization.as_deref())
-                .await?
-        } else {
-            // Use automatic token refresh for OAuth-based connections
-            self.execute_with_refresh(connection_id, |token| {
-                let org = organization.clone();
-                let svc = provider_service.clone();
-                async move { svc.list_repositories(&token, org.as_deref()).await }
-            })
-            .await?
-        };
+        // Streaming sync: we flush each page to the database as soon as it
+        // arrives from the provider. This matters for tenants with thousands
+        // of repos: buffering everything in memory before writing was the old
+        // design and it doesn't scale past ~a few thousand projects, plus a
+        // failure on page N threw away pages 1..N-1 of work.
+        //
+        // Deletion detection still works: we track every full_name we've seen
+        // across pages, then at the end any existing row whose full_name
+        // wasn't seen is considered stale. We only run that sweep on clean
+        // completion — a partial sync must NOT delete rows we simply haven't
+        // observed yet.
+        let mut seen_full_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut total_inserted: usize = 0;
+        let mut total_updated: usize = 0;
+        let mut page: u32 = 1;
+        // Hard ceiling so a broken cursor can't loop forever. 200 pages of
+        // 100 repos = 20,000 — enough for realistic syncs; if you need more,
+        // bump it here.
+        const MAX_PAGES: u32 = 200;
 
-        tracing::info!(
-            "Starting bulk sync of {} repositories for connection {}",
-            repos.len(),
-            connection_id
-        );
+        let is_github_app =
+            provider.provider_type == "github" && provider.auth_method == "github_app";
 
-        // PERFORMANCE OPTIMIZATION: Use bulk operations instead of individual database queries
-        // 1. Fetch ALL existing repositories for this connection in a single query
-        let existing_repos = repositories::Entity::find()
-            .filter(repositories::Column::GitProviderConnectionId.eq(connection_id))
-            .order_by_desc(repositories::Column::PushedAt)
-            .all(self.db.as_ref())
-            .await?;
-
-        // Create a HashMap for fast lookups by full_name
-        let mut existing_map: std::collections::HashMap<String, repositories::Model> =
-            existing_repos
-                .into_iter()
-                .map(|repo| (repo.full_name.clone(), repo))
-                .collect();
-
-        // Separate repositories into updates and inserts for bulk operations
-        let mut repos_to_update = Vec::new();
-        let mut repos_to_insert = Vec::new();
-
-        for repo in repos {
-            if let Some(existing) = existing_map.remove(&repo.full_name) {
-                // Repository exists - prepare for bulk update
-                let mut active_model: repositories::ActiveModel = existing.into();
-                active_model.description = Set(repo.description.clone());
-                active_model.default_branch = Set(repo.default_branch.clone());
-                active_model.language = Set(repo.language.clone());
-                active_model.size = Set(repo.size as i32);
-                active_model.stargazers_count = Set(repo.stars);
-                active_model.pushed_at = Set(repo.pushed_at.unwrap_or(repo.updated_at));
-                active_model.clone_url = Set(Some(repo.clone_url.clone()));
-                active_model.ssh_url = Set(Some(repo.ssh_url.clone()));
-                active_model.created_at = Set(repo.created_at);
-                active_model.updated_at = Set(repo.updated_at);
-
-                repos_to_update.push(active_model);
+        loop {
+            // Fetch one page. For GitHub Apps we already have a fresh
+            // installation token; for OAuth we route through
+            // execute_with_refresh so the token refreshes mid-sync if needed.
+            let page_result = if is_github_app {
+                provider_service
+                    .list_repositories_page(&access_token, organization.as_deref(), page)
+                    .await?
             } else {
-                // New repository - prepare for bulk insert
-                let new_repo = repositories::ActiveModel {
-                    git_provider_connection_id: Set(connection_id),
-                    owner: Set(repo.owner.clone()),
-                    name: Set(repo.name.clone()),
-                    full_name: Set(repo.full_name.clone()),
-                    description: Set(repo.description.clone()),
-                    private: Set(repo.private),
-                    fork: Set(false),
-                    size: Set(repo.size as i32),
-                    stargazers_count: Set(repo.stars),
-                    watchers_count: Set(repo.forks),
-                    language: Set(repo.language.clone()),
-                    default_branch: Set(repo.default_branch.clone()),
-                    open_issues_count: Set(0),
-                    topics: Set("".to_string()),
-                    repo_object: Set(json!(repo).to_string()),
-                    created_at: Set(repo.created_at),
-                    updated_at: Set(repo.updated_at),
-                    pushed_at: Set(repo.pushed_at.unwrap_or(repo.updated_at)),
-                    clone_url: Set(Some(repo.clone_url.clone())),
-                    ssh_url: Set(Some(repo.ssh_url.clone())),
-                    installation_id: Set(None),
-                    preset: Set(None),
+                self.execute_with_refresh(connection_id, |token| {
+                    let org = organization.clone();
+                    let svc = provider_service.clone();
+                    async move {
+                        svc.list_repositories_page(&token, org.as_deref(), page)
+                            .await
+                    }
+                })
+                .await?
+            };
+
+            let page_items = page_result.items;
+            let next_page = page_result.next_page;
+
+            if page_items.is_empty() && page == 1 {
+                tracing::info!(
+                    "Sync for connection {} returned zero repositories on page 1",
+                    connection_id
+                );
+            }
+
+            if !page_items.is_empty() {
+                // Flush this page: diff against existing rows and upsert.
+                // Each page is an independent transaction from the DB's POV —
+                // if page N+1 fails, pages 1..N are already persisted.
+                let full_names: Vec<String> =
+                    page_items.iter().map(|r| r.full_name.clone()).collect();
+
+                let existing_rows = repositories::Entity::find()
+                    .filter(repositories::Column::GitProviderConnectionId.eq(connection_id))
+                    .filter(repositories::Column::FullName.is_in(full_names.clone()))
+                    .all(self.db.as_ref())
+                    .await?;
+
+                let mut existing_map: std::collections::HashMap<String, repositories::Model> =
+                    existing_rows
+                        .into_iter()
+                        .map(|r| (r.full_name.clone(), r))
+                        .collect();
+
+                let mut to_insert: Vec<repositories::ActiveModel> = Vec::new();
+                let mut to_update: Vec<repositories::ActiveModel> = Vec::new();
+
+                for repo in page_items {
+                    seen_full_names.insert(repo.full_name.clone());
+                    if let Some(existing) = existing_map.remove(&repo.full_name) {
+                        let mut active: repositories::ActiveModel = existing.into();
+                        active.description = Set(repo.description.clone());
+                        active.default_branch = Set(repo.default_branch.clone());
+                        active.language = Set(repo.language.clone());
+                        active.size = Set(repo.size as i32);
+                        active.stargazers_count = Set(repo.stars);
+                        active.pushed_at = Set(repo.pushed_at.unwrap_or(repo.updated_at));
+                        active.clone_url = Set(Some(repo.clone_url.clone()));
+                        active.ssh_url = Set(Some(repo.ssh_url.clone()));
+                        active.created_at = Set(repo.created_at);
+                        active.updated_at = Set(repo.updated_at);
+                        to_update.push(active);
+                    } else {
+                        let new_row = repositories::ActiveModel {
+                            git_provider_connection_id: Set(connection_id),
+                            owner: Set(repo.owner.clone()),
+                            name: Set(repo.name.clone()),
+                            full_name: Set(repo.full_name.clone()),
+                            description: Set(repo.description.clone()),
+                            private: Set(repo.private),
+                            fork: Set(false),
+                            size: Set(repo.size as i32),
+                            stargazers_count: Set(repo.stars),
+                            watchers_count: Set(repo.forks),
+                            language: Set(repo.language.clone()),
+                            default_branch: Set(repo.default_branch.clone()),
+                            open_issues_count: Set(0),
+                            topics: Set("".to_string()),
+                            repo_object: Set(json!(repo).to_string()),
+                            created_at: Set(repo.created_at),
+                            updated_at: Set(repo.updated_at),
+                            pushed_at: Set(repo.pushed_at.unwrap_or(repo.updated_at)),
+                            clone_url: Set(Some(repo.clone_url.clone())),
+                            ssh_url: Set(Some(repo.ssh_url.clone())),
+                            installation_id: Set(None),
+                            preset: Set(None),
+                            ..Default::default()
+                        };
+                        to_insert.push(new_row);
+                    }
+                }
+
+                let page_update_count = to_update.len();
+                let page_insert_count = to_insert.len();
+
+                for row in to_update {
+                    row.update(self.db.as_ref()).await?;
+                }
+                if !to_insert.is_empty() {
+                    repositories::Entity::insert_many(to_insert)
+                        .exec(self.db.as_ref())
+                        .await?;
+                }
+
+                total_updated += page_update_count;
+                total_inserted += page_insert_count;
+
+                tracing::info!(
+                    connection_id,
+                    page,
+                    updates = page_update_count,
+                    inserts = page_insert_count,
+                    running_total_updated = total_updated,
+                    running_total_inserted = total_inserted,
+                    "Flushed repository sync page"
+                );
+
+                // Touch last_synced_at and the running progress count on
+                // every page so the UI can show a long-running sync
+                // advancing — a stale "last synced 1 day ago" on a
+                // 20,000-repo tenant is worse than a frequently-bumped
+                // timestamp, and the count lets the UI display
+                // "Synced 1,400 repos…" live.
+                let touch = git_provider_connections::ActiveModel {
+                    id: Set(connection_id),
+                    last_synced_at: Set(Some(chrono::Utc::now())),
+                    synced_repository_count: Set((total_inserted + total_updated) as i32),
                     ..Default::default()
                 };
+                touch.update(self.db.as_ref()).await?;
+            }
 
-                repos_to_insert.push(new_repo);
+            match next_page {
+                Some(next) if next > page && page < MAX_PAGES => page = next,
+                _ => break,
             }
         }
 
         tracing::info!(
-            "Bulk operations: {} updates, {} inserts for connection {}",
-            repos_to_update.len(),
-            repos_to_insert.len(),
-            connection_id
+            connection_id,
+            total_updated,
+            total_inserted,
+            pages_scanned = page,
+            "Sync complete"
         );
 
-        // BULK UPDATE: Process all updates in batches of 100
-        if !repos_to_update.is_empty() {
-            const BATCH_SIZE: usize = 100;
-            for chunk in repos_to_update.chunks(BATCH_SIZE) {
-                for repo in chunk {
-                    repo.clone().update(self.db.as_ref()).await?;
-                }
-            }
-            tracing::info!(
-                "Updated {} repositories in batches of {}",
-                repos_to_update.len(),
-                BATCH_SIZE
-            );
-        }
+        // Deletion sweep: any existing row we didn't see across ALL pages is
+        // stale (repo deleted/transferred/unshared on the provider). We only
+        // run this after a clean completion — if the loop errored out, we'd
+        // delete rows we just hadn't fetched yet, which would be worse than a
+        // stale row.
+        if !seen_full_names.is_empty() {
+            let existing_full_names: Vec<String> = repositories::Entity::find()
+                .select_only()
+                .column(repositories::Column::FullName)
+                .filter(repositories::Column::GitProviderConnectionId.eq(connection_id))
+                .into_tuple::<String>()
+                .all(self.db.as_ref())
+                .await?;
 
-        // BULK INSERT: Use Sea-ORM's insert_many for new repositories in batches of 100
-        if !repos_to_insert.is_empty() {
-            const BATCH_SIZE: usize = 100;
-            for chunk in repos_to_insert.chunks(BATCH_SIZE) {
-                repositories::Entity::insert_many(chunk.to_vec())
+            let stale: Vec<String> = existing_full_names
+                .into_iter()
+                .filter(|name| !seen_full_names.contains(name))
+                .collect();
+
+            if !stale.is_empty() {
+                tracing::info!(
+                    connection_id,
+                    stale_count = stale.len(),
+                    "Deleting repositories no longer present upstream"
+                );
+                repositories::Entity::delete_many()
+                    .filter(repositories::Column::GitProviderConnectionId.eq(connection_id))
+                    .filter(repositories::Column::FullName.is_in(stale))
                     .exec(self.db.as_ref())
                     .await?;
             }
-            tracing::info!(
-                "Inserted {} new repositories in batches of {}",
-                repos_to_insert.len(),
-                BATCH_SIZE
-            );
         }
 
-        // Update last synced time
-        let mut active_connection: git_provider_connections::ActiveModel = connection.into();
-        active_connection.last_synced_at = Set(Some(chrono::Utc::now()));
-        active_connection.update(self.db.as_ref()).await?;
+        // Final last_synced_at and progress-count update (redundant with
+        // per-page touches but makes the completion instant precise and
+        // guarantees the count matches the exact final total).
+        let final_touch = git_provider_connections::ActiveModel {
+            id: Set(connection_id),
+            last_synced_at: Set(Some(chrono::Utc::now())),
+            synced_repository_count: Set((total_inserted + total_updated) as i32),
+            ..Default::default()
+        };
+        final_touch.update(self.db.as_ref()).await?;
 
         Ok(())
     }
@@ -1680,10 +1913,74 @@ impl GitProviderManager {
         Ok(())
     }
 
+    /// Persist an OAuth state token tied to the user and provider that started the flow.
+    /// Used so the unauthenticated OAuth callback can recover the user identity.
+    async fn persist_oauth_state(
+        &self,
+        state: &str,
+        user_id: i32,
+        provider_id: i32,
+    ) -> Result<(), GitProviderManagerError> {
+        use temps_entities::oauth_states;
+
+        let expires_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        oauth_states::ActiveModel {
+            state: sea_orm::ActiveValue::Set(state.to_string()),
+            user_id: sea_orm::ActiveValue::Set(user_id),
+            provider_id: sea_orm::ActiveValue::Set(provider_id),
+            expires_at: sea_orm::ActiveValue::Set(expires_at),
+            ..Default::default()
+        }
+        .insert(self.db.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    /// Look up and consume a previously issued OAuth state token.
+    /// Returns the (user_id, provider_id) that started the flow. Deletes the row so
+    /// states are single-use, and rejects expired tokens.
+    pub async fn consume_oauth_state(
+        &self,
+        state: &str,
+    ) -> Result<(i32, i32), GitProviderManagerError> {
+        use temps_entities::oauth_states;
+
+        let row = oauth_states::Entity::find()
+            .filter(oauth_states::Column::State.eq(state))
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| {
+                GitProviderManagerError::OAuthStateInvalid(format!(
+                    "State token not found: {}",
+                    state
+                ))
+            })?;
+
+        let now = chrono::Utc::now();
+        let user_id = row.user_id;
+        let provider_id = row.provider_id;
+        let expired = row.expires_at < now;
+
+        // Single-use: always delete the row after lookup.
+        oauth_states::Entity::delete_by_id(row.id)
+            .exec(self.db.as_ref())
+            .await?;
+
+        if expired {
+            return Err(GitProviderManagerError::OAuthStateInvalid(format!(
+                "State token expired: {}",
+                state
+            )));
+        }
+
+        Ok((user_id, provider_id))
+    }
+
     /// Start OAuth flow for a git provider
     pub async fn start_oauth_flow(
         &self,
         provider_id: i32,
+        user_id: i32,
         host_override: Option<String>,
     ) -> Result<(String, String), GitProviderManagerError> {
         let provider = self.get_provider(provider_id).await?;
@@ -1700,6 +1997,8 @@ impl GitProviderManager {
 
                 // Generate state token for CSRF protection
                 let state = uuid::Uuid::new_v4().to_string();
+                self.persist_oauth_state(&state, user_id, provider_id)
+                    .await?;
 
                 // Calculate redirect URI based on host
                 let redirect_uri = if let Some(host) = host_override {
@@ -1730,6 +2029,8 @@ impl GitProviderManager {
 
                 // Generate state token for CSRF protection
                 let state = uuid::Uuid::new_v4().to_string();
+                self.persist_oauth_state(&state, user_id, provider_id)
+                    .await?;
 
                 // Get external URL from config service
                 let external_url = self
@@ -2183,6 +2484,97 @@ impl GitProviderManager {
             AuthMethod::BasicAuth { .. } => "basic".to_string(),
             AuthMethod::SSHKey { .. } => "ssh".to_string(),
         }
+    }
+
+    /// Partial credential update for an existing provider. Each `Option::Some`
+    /// replaces the corresponding field; `None` keeps the stored value.
+    /// Variant-matching is enforced against the provider's existing auth_method:
+    /// you can't turn a PAT provider into a GitHub App here — delete and recreate.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_provider_credentials(
+        &self,
+        provider_id: i32,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        app_id: Option<String>,
+        app_secret: Option<String>,
+        private_key: Option<String>,
+        webhook_secret: Option<String>,
+        redirect_uri: Option<String>,
+        token: Option<String>,
+    ) -> Result<git_providers::Model, GitProviderManagerError> {
+        let provider = self.get_provider(provider_id).await?;
+
+        // Decrypt current auth config and parse to enum so we can merge per-variant.
+        let current_json = self.decrypt_sensitive_data(&provider.auth_config).await?;
+        let current_method: AuthMethod = serde_json::from_value(current_json)?;
+
+        let updated_method = match current_method {
+            AuthMethod::GitHubApp {
+                app_id: existing_app_id,
+                client_id: existing_client_id,
+                client_secret: existing_client_secret,
+                private_key: existing_private_key,
+                webhook_secret: existing_webhook_secret,
+            } => {
+                let new_app_id = match app_id {
+                    Some(v) => v.parse::<i32>().map_err(|_| {
+                        GitProviderManagerError::InvalidConfiguration(
+                            "app_id must be a valid integer for GitHub App".to_string(),
+                        )
+                    })?,
+                    None => existing_app_id,
+                };
+                AuthMethod::GitHubApp {
+                    app_id: new_app_id,
+                    client_id: client_id.unwrap_or(existing_client_id),
+                    client_secret: client_secret.unwrap_or(existing_client_secret),
+                    private_key: private_key.unwrap_or(existing_private_key),
+                    webhook_secret: webhook_secret.unwrap_or(existing_webhook_secret),
+                }
+            }
+            AuthMethod::GitLabApp {
+                app_id: existing_app_id,
+                app_secret: existing_app_secret,
+                redirect_uri: existing_redirect_uri,
+            } => AuthMethod::GitLabApp {
+                app_id: app_id.unwrap_or(existing_app_id),
+                app_secret: app_secret.unwrap_or(existing_app_secret),
+                redirect_uri: redirect_uri.unwrap_or(existing_redirect_uri),
+            },
+            AuthMethod::OAuth {
+                client_id: existing_client_id,
+                client_secret: existing_client_secret,
+                redirect_uri: existing_redirect_uri,
+            } => AuthMethod::OAuth {
+                client_id: client_id.unwrap_or(existing_client_id),
+                client_secret: client_secret.unwrap_or(existing_client_secret),
+                redirect_uri: redirect_uri.unwrap_or(existing_redirect_uri),
+            },
+            AuthMethod::PersonalAccessToken {
+                token: existing_token,
+            } => AuthMethod::PersonalAccessToken {
+                token: token.unwrap_or(existing_token),
+            },
+            AuthMethod::BasicAuth { .. } | AuthMethod::SSHKey { .. } => {
+                return Err(GitProviderManagerError::InvalidConfiguration(
+                    "Credential editing is not supported for this auth method".to_string(),
+                ));
+            }
+        };
+
+        let auth_config_json = serde_json::to_value(&updated_method)?;
+        let encrypted_config = self.encrypt_sensitive_data(&auth_config_json).await?;
+
+        let mut active_model: git_providers::ActiveModel = provider.into();
+        active_model.auth_config = Set(encrypted_config);
+        active_model.auth_method = Set(self.get_auth_method_type(&updated_method));
+        let updated = active_model.update(self.db.as_ref()).await?;
+
+        // Clear cache so new credentials take effect on next provider_service request.
+        self.providers_cache.write().await.clear();
+
+        Ok(updated)
     }
 
     async fn unset_default_providers(&self) -> Result<(), GitProviderManagerError> {
@@ -2844,6 +3236,101 @@ impl GitProviderManager {
                 Ok(false)
             }
         }
+    }
+
+    /// Run an immediate token probe against the upstream provider and persist
+    /// `health_status` / `health_message` / `last_health_check_at` on the
+    /// connection row. Intended to be called right after a connection is
+    /// created (PAT or OAuth flows) so the UI reflects reality without waiting
+    /// for the daily sweep.
+    ///
+    /// GitHub App installations are out of scope: they're probed via a
+    /// different path (installation ID against the App API), which the
+    /// `ConnectionHealthService` handles. For those, callers should invoke
+    /// `connection_health_service.check_connection_health` instead.
+    ///
+    /// This method never errors on upstream failures — an unreachable or
+    /// rejecting provider is simply recorded as `unhealthy`. It only returns
+    /// `Err` for local issues (DB failure, missing connection, decrypt error).
+    pub async fn probe_and_record_connection_health(
+        &self,
+        connection_id: i32,
+    ) -> Result<(), GitProviderManagerError> {
+        use crate::services::connection_health::{HEALTH_STATUS_HEALTHY, HEALTH_STATUS_UNHEALTHY};
+
+        let connection = self.get_connection(connection_id).await?;
+
+        // GitHub App installations need installation-based probing, not token
+        // validation. Skip here and let the scheduled sweep / explicit endpoint
+        // handle them.
+        if connection.installation_id.is_some() {
+            return Ok(());
+        }
+
+        let access_token = match connection.access_token.as_deref() {
+            Some(encrypted) => self.decrypt_string(encrypted).await?,
+            None => {
+                // No token to validate; mark unknown-but-unhealthy with reason.
+                self.persist_health_status(
+                    connection_id,
+                    HEALTH_STATUS_UNHEALTHY,
+                    Some("Connection has no access token".to_string()),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        let provider_service = self.get_provider_service(connection.provider_id).await?;
+
+        let (status, message) = match provider_service.validate_token(&access_token).await {
+            Ok(true) => (HEALTH_STATUS_HEALTHY, None),
+            Ok(false) => (
+                HEALTH_STATUS_UNHEALTHY,
+                Some("Access token rejected by provider (revoked or invalid)".to_string()),
+            ),
+            Err(GitProviderError::AuthenticationFailed(msg)) => (
+                HEALTH_STATUS_UNHEALTHY,
+                Some(format!("Authentication failed: {}", msg)),
+            ),
+            Err(e) => (
+                HEALTH_STATUS_UNHEALTHY,
+                Some(format!("Provider error: {}", e)),
+            ),
+        };
+
+        self.persist_health_status(connection_id, status, message)
+            .await?;
+        Ok(())
+    }
+
+    /// Write the health result onto the connection row. Shared helper used by
+    /// `probe_and_record_connection_health` so both the healthy and unhealthy
+    /// branches go through the same update path.
+    async fn persist_health_status(
+        &self,
+        connection_id: i32,
+        status: &str,
+        message: Option<String>,
+    ) -> Result<(), GitProviderManagerError> {
+        use crate::services::connection_health::HEALTH_STATUS_UNHEALTHY;
+
+        let connection = self.get_connection(connection_id).await?;
+        let now = chrono::Utc::now();
+        let new_failures = if status == HEALTH_STATUS_UNHEALTHY {
+            connection.consecutive_health_failures.saturating_add(1)
+        } else {
+            0
+        };
+
+        let mut active: git_provider_connections::ActiveModel = connection.into();
+        active.health_status = Set(status.to_string());
+        active.health_message = Set(message);
+        active.last_health_check_at = Set(Some(now));
+        active.consecutive_health_failures = Set(new_failures);
+        active.updated_at = Set(now);
+        active.update(self.db.as_ref()).await?;
+        Ok(())
     }
 
     /// Find git provider by GitHub App ID
@@ -3990,6 +4477,30 @@ impl GitProviderManagerTrait for GitProviderManager {
         Ok(())
     }
 
+    async fn get_connection_access_token(
+        &self,
+        connection_id: i32,
+    ) -> Result<(String, String), super::git_provider_manager_trait::GitProviderManagerError> {
+        use super::git_provider_manager_trait::GitProviderManagerError as TraitError;
+
+        let connection = self
+            .get_connection(connection_id)
+            .await
+            .map_err(|_| TraitError::ConnectionNotFound(connection_id))?;
+
+        let provider = self
+            .get_provider(connection.provider_id)
+            .await
+            .map_err(|_| TraitError::ProviderNotFound(connection.provider_id))?;
+
+        let token = self
+            .get_connection_token(connection_id)
+            .await
+            .map_err(|e| TraitError::DecryptionError(e.to_string()))?;
+
+        Ok((token, provider.provider_type))
+    }
+
     async fn get_repository_info(
         &self,
         connection_id: i32,
@@ -4063,6 +4574,71 @@ impl GitProviderManagerTrait for GitProviderManager {
             .map_err(|e| TraitError::Other(format!("Failed to download archive: {}", e)))?;
 
         Ok(())
+    }
+
+    async fn push_files_and_create_pr(
+        &self,
+        connection_id: i32,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        base_branch: &str,
+        files: Vec<(String, Vec<u8>)>,
+        commit_message: &str,
+        pr_title: &str,
+        pr_body: &str,
+    ) -> Result<
+        super::git_provider_manager_trait::PullRequest,
+        super::git_provider_manager_trait::GitProviderManagerError,
+    > {
+        use super::git_provider_manager_trait::GitProviderManagerError as TraitError;
+
+        let connection = self
+            .get_connection(connection_id)
+            .await
+            .map_err(|_| TraitError::ConnectionNotFound(connection_id))?;
+
+        let provider_service = self
+            .get_provider_service(connection.provider_id)
+            .await
+            .map_err(|_| TraitError::ProviderNotFound(connection.provider_id))?;
+
+        let access_token = self
+            .validate_and_refresh_connection_token(connection_id)
+            .await
+            .map_err(|e| TraitError::DecryptionError(e.to_string()))?;
+
+        // Push files to the branch (creates the branch + commit)
+        provider_service
+            .push_files_to_repository(&access_token, owner, repo, branch, files, commit_message)
+            .await
+            .map_err(|e| {
+                TraitError::Other(format!(
+                    "Failed to push files to {}/{} branch {}: {}",
+                    owner, repo, branch, e
+                ))
+            })?;
+
+        // Create the pull request
+        let pr = provider_service
+            .create_pull_request(
+                &access_token,
+                owner,
+                repo,
+                pr_title,
+                pr_body,
+                branch,
+                base_branch,
+            )
+            .await
+            .map_err(|e| {
+                TraitError::Other(format!(
+                    "Failed to create pull request in {}/{} ({}->{}): {}",
+                    owner, repo, branch, base_branch, e
+                ))
+            })?;
+
+        Ok(pr)
     }
 }
 

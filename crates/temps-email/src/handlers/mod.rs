@@ -35,19 +35,19 @@ pub fn configure_public_routes() -> Router<Arc<AppState>> {
 #[openapi(
     paths(
         // Providers
-        providers::create_provider,
-        providers::list_providers,
-        providers::get_provider,
-        providers::delete_provider,
+        providers::create_email_provider,
+        providers::list_email_providers,
+        providers::get_email_provider,
+        providers::delete_email_provider,
         providers::test_provider,
         // Domains
-        domains::create_domain,
-        domains::list_domains,
+        domains::create_email_domain,
+        domains::list_email_domains,
         domains::get_domain,
         domains::get_domain_by_name,
         domains::get_domain_dns_records,
         domains::verify_domain,
-        domains::delete_domain,
+        domains::delete_email_domain,
         domains::setup_dns,
         // Emails
         emails::send_email,

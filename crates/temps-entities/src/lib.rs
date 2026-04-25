@@ -4,8 +4,20 @@ pub mod ai_gateway_config;
 pub mod ai_provider_keys;
 pub mod ai_usage_logs;
 pub mod alarms;
+// Agent entities (renamed from autopilot)
+pub mod agent_run_logs;
+pub mod agent_runs;
+pub mod agent_secrets;
+pub mod project_agents;
+pub mod project_mcp_definitions;
+pub mod project_secrets;
+pub mod project_skill_definitions;
+// Legacy autopilot entities (kept for migration compatibility)
 pub mod api_keys;
 pub mod audit_logs;
+pub mod autopilot_configs;
+pub mod autopilot_run_logs;
+pub mod autopilot_runs;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;
@@ -32,6 +44,7 @@ pub mod environment_domains;
 pub mod environments;
 pub mod external_images;
 pub mod external_service_backups;
+pub mod external_service_health_checks;
 pub mod external_services;
 pub mod funnel_steps;
 pub mod funnels;
@@ -43,7 +56,9 @@ pub mod nodes;
 pub mod notification_preferences;
 pub mod notification_providers;
 pub mod notifications;
+pub mod oauth_states;
 pub mod performance_metrics;
+pub mod postgres_major_upgrades;
 pub mod preset;
 pub mod project_custom_domains;
 pub mod project_services;
@@ -51,8 +66,11 @@ pub mod projects;
 pub mod proxy_logs;
 pub mod repositories;
 pub mod request_sessions;
+pub mod restore_runs;
 pub mod roles;
 pub mod s3_sources;
+pub mod secret_environments;
+pub mod secrets;
 pub mod service_members;
 pub mod sessions;
 pub mod source_type;
@@ -92,6 +110,12 @@ pub mod status_monitors;
 pub mod webhook_deliveries;
 pub mod webhooks;
 
+// Revenue tracking entities
+pub mod revenue_customers_state;
+pub mod revenue_events;
+pub mod revenue_integrations;
+pub mod revenue_subscriptions_state;
+
 // Vulnerability scanner entities
 pub mod vulnerabilities;
 pub mod vulnerability_scans;
@@ -99,5 +123,15 @@ pub mod vulnerability_scans;
 // Log aggregator entities
 pub mod log_chunks;
 pub mod log_events;
+
+// Standalone sandbox API (Vercel-compatible)
+pub mod sandboxes;
+
+// Workspace entities
+pub mod workspace_messages;
+pub mod workspace_sessions;
+
+// Workflow memory
+pub mod workflow_memory;
 
 pub mod prelude;

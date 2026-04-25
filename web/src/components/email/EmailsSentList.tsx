@@ -1,5 +1,13 @@
 'use client'
 
+import {
+  getEmailStats,
+  listEmailDomains as listDomains2,
+  listEmails,
+  type EmailDomainResponse,
+  type EmailStatsResponse,
+  type PaginatedEmailsResponse,
+} from '@/api/client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,92 +47,50 @@ import {
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-// Types
-interface Email {
-  id: string
-  domain_id: number
-  project_id: number | null
-  from_address: string
-  from_name: string | null
-  to_addresses: string[]
-  cc_addresses: string[] | null
-  bcc_addresses: string[] | null
-  reply_to: string | null
-  subject: string
-  html_body: string | null
-  text_body: string | null
-  headers: Record<string, string> | null
-  tags: string[] | null
-  status: string
-  provider_message_id: string | null
-  error_message: string | null
-  sent_at: string | null
-  created_at: string
-  track_opens: boolean
-  track_clicks: boolean
-  open_count: number
-  click_count: number
-  first_opened_at: string | null
-  first_clicked_at: string | null
+// Types (aliases over SDK)
+type PaginatedEmails = PaginatedEmailsResponse
+type EmailStats = EmailStatsResponse
+type EmailDomain = EmailDomainResponse
+
+function problemMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'detail' in error) {
+    const detail = (error as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.length > 0) {
+      return detail
+    }
+  }
+  return fallback
 }
 
-interface PaginatedEmails {
-  data: Email[]
-  total: number
-  page: number
-  page_size: number
-}
-
-interface EmailStats {
-  total: number
-  sent: number
-  failed: number
-  queued: number
-  captured: number
-}
-
-interface EmailDomain {
-  id: number
-  domain: string
-}
-
-// API functions
-async function listEmails(params: {
+async function fetchEmails(params: {
   domain_id?: number
   status?: string
   page?: number
   page_size?: number
 }): Promise<PaginatedEmails> {
-  const searchParams = new URLSearchParams()
-  if (params.domain_id) searchParams.set('domain_id', params.domain_id.toString())
-  if (params.status) searchParams.set('status', params.status)
-  if (params.page) searchParams.set('page', params.page.toString())
-  if (params.page_size) searchParams.set('page_size', params.page_size.toString())
-
-  const response = await fetch(`/api/emails?${searchParams}`)
-  if (!response.ok) {
-    throw new Error('Failed to fetch emails')
+  const response = await listEmails({ query: params })
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch emails'))
   }
-  return response.json()
+  return response.data
 }
 
-async function getEmailStats(domainId?: number): Promise<EmailStats> {
-  const url = domainId
-    ? `/api/emails/stats?domain_id=${domainId}`
-    : '/api/emails/stats'
-  const response = await fetch(url)
-  if (!response.ok) {
-    throw new Error('Failed to fetch email stats')
+async function fetchEmailStats(domainId?: number): Promise<EmailStats> {
+  const response = await getEmailStats(
+    domainId !== undefined ? { query: { domain_id: domainId } } : undefined
+  )
+  if (response.error || !response.data) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email stats'))
   }
-  return response.json()
+  return response.data
 }
 
 async function listEmailDomains(): Promise<EmailDomain[]> {
-  const response = await fetch('/api/email-domains')
-  if (!response.ok) {
-    throw new Error('Failed to fetch email domains')
+  const response = await listDomains2()
+  if (response.error) {
+    throw new Error(problemMessage(response.error, 'Failed to fetch email domains'))
   }
-  return response.json()
+  return response.data ?? []
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -170,7 +136,7 @@ function StatsCard({
 }: {
   title: string
   value: number
-  icon: React.ElementType
+  icon: React.ComponentType<{ className?: string }>
   description?: string
 }) {
   return (
@@ -225,12 +191,12 @@ export function EmailsSentList() {
 
   const { data: stats, isLoading: isLoadingStats } = useQuery({
     queryKey: ['email-stats', filters.domain_id],
-    queryFn: () => getEmailStats(filters.domain_id),
+    queryFn: () => fetchEmailStats(filters.domain_id),
   })
 
   const { data: emails, isLoading: isLoadingEmails } = useQuery({
     queryKey: ['emails', filters],
-    queryFn: () => listEmails(filters),
+    queryFn: () => fetchEmails(filters),
   })
 
   const { data: domains } = useQuery({
@@ -374,7 +340,7 @@ export function EmailsSentList() {
                   <TableRow
                     key={email.id}
                     className="cursor-pointer hover:bg-muted/50"
-                    onClick={() => navigate(`/settings/email/${email.id}`)}
+                    onClick={() => navigate(`/email/${email.id}`)}
                   >
                     <TableCell className="max-w-[300px]">
                       <div className="font-medium truncate">{email.subject}</div>

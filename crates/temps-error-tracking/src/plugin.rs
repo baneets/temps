@@ -147,6 +147,35 @@ impl TempsPlugin for ErrorTrackingPlugin {
                 tracing::warn!("Error tracking: NotificationService not found — alert notifications will be disabled");
             }
 
+            // Wire up autopilot callback if JobQueue is available
+            if let Some(queue) = context.get_service::<dyn JobQueue>() {
+                tracing::info!("Error tracking: autopilot callback wired successfully");
+                let q = queue.clone();
+                error_tracking_service.set_autopilot_callback(Arc::new(move |alert| {
+                    let q = q.clone();
+                    Box::pin(async move {
+                        if let Err(e) = q
+                            .send(Job::AutopilotTrigger(
+                                temps_core::jobs::AutopilotTriggerJob {
+                                    project_id: alert.project_id,
+                                    trigger_type: alert.trigger_type.clone(),
+                                    trigger_source_id: Some(alert.group_id),
+                                    trigger_source_type: Some("error_group".to_string()),
+                                    error_group_id: Some(alert.group_id),
+                                },
+                            ))
+                            .await
+                        {
+                            tracing::error!("Failed to send autopilot trigger: {}", e);
+                        }
+                    })
+                }));
+            } else {
+                tracing::warn!(
+                    "Error tracking: JobQueue not found — autopilot triggers will be disabled"
+                );
+            }
+
             context.register_service(error_tracking_service.clone());
 
             // Register Sentry-specific services

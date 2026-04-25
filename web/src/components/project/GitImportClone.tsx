@@ -24,8 +24,20 @@ import { ProjectConfigurator } from '@/components/project/ProjectConfigurator'
 import { RepositoryList } from '@/components/repositories/RepositoryList'
 import { TemplateList, TemplateConfigurator } from '@/components/templates'
 import { ManualProjectConfigurator } from '@/components/project/ManualProjectConfigurator'
-import type { RepositoryResponse, TemplateResponse } from '@/api/client/types.gen'
-import { GitBranch, ChevronLeft, Link as LinkIcon, Loader2, Gitlab, LayoutTemplate, Container, FolderGit2 } from 'lucide-react'
+import type {
+  RepositoryResponse,
+  TemplateResponse,
+} from '@/api/client/types.gen'
+import {
+  GitBranch,
+  ChevronLeft,
+  Link as LinkIcon,
+  Loader2,
+  Gitlab,
+  LayoutTemplate,
+  Container,
+  FolderGit2,
+} from 'lucide-react'
 import Github from '@/icons/Github'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
@@ -99,16 +111,21 @@ export function GitImportClone({
   mode = 'navigation',
   onProjectCreated,
 }: GitImportCloneProps) {
-  const [selectedSource, setSelectedSource] = useState<ProjectSource | null>(null)
+  const [selectedSource, setSelectedSource] = useState<ProjectSource | null>(
+    null
+  )
   const [selectedConnection, setSelectedConnection] = useState<
     string | undefined
   >()
   const [selectedRepository, setSelectedRepository] =
     useState<RepositoryResponse | null>(null)
-  const [selectedTemplate, setSelectedTemplate] = useState<TemplateResponse | null>(null)
+  const [selectedTemplate, setSelectedTemplate] =
+    useState<TemplateResponse | null>(null)
   const [gitUrl, setGitUrl] = useState('')
   const [useGitUrl, setUseGitUrl] = useState(false)
-  const [parsedPublicRepo, setParsedPublicRepo] = useState<ParsedGitUrl | null>(null)
+  const [parsedPublicRepo, setParsedPublicRepo] = useState<ParsedGitUrl | null>(
+    null
+  )
   const [isValidatingUrl, setIsValidatingUrl] = useState(false)
   const navigate = useNavigate()
   const [isInitialLoad, setIsInitialLoad] = useState(true)
@@ -148,7 +165,12 @@ export function GitImportClone({
         connection_id: Number(selectedConnection),
       },
     }),
-    enabled: !useGitUrl && !!selectedRepository && !!selectedConnection && !!owner && !!repo,
+    enabled:
+      !useGitUrl &&
+      !!selectedRepository &&
+      !!selectedConnection &&
+      !!owner &&
+      !!repo,
   })
 
   // Query for branches from public repository
@@ -193,7 +215,7 @@ export function GitImportClone({
 
   // Transform public preset data to match ProjectPresetResponse format (camelCase)
   const presetData = useGitUrl
-    ? publicPresetData?.presets?.map(p => ({
+    ? publicPresetData?.presets?.map((p) => ({
         preset: p.preset,
         presetLabel: p.preset_label,
         exposedPort: p.exposed_port,
@@ -219,9 +241,11 @@ export function GitImportClone({
   const handleRepositoryClick = (repo: RepositoryResponse) => {
     if (mode === 'navigation') {
       // Navigation mode: navigate to import page
-      navigate(
-        `/projects/import/${repo.full_name}${selectedConnection ? `?connection_id=${selectedConnection}` : ''}`
-      )
+      if (!repo.id) {
+        toast.error('Repository is missing an id; cannot import')
+        return
+      }
+      navigate(`/projects/import/${repo.id}`)
     } else {
       // Inline mode: show configurator
       setSelectedRepository(repo)
@@ -295,6 +319,10 @@ export function GitImportClone({
             pushed_at: selectedRepository.pushed_at || new Date().toISOString(),
             updated_at:
               selectedRepository.updated_at || new Date().toISOString(),
+            git_provider_connection_id:
+              selectedRepository.git_provider_connection_id ??
+              Number(selectedConnection) ??
+              0,
           }}
           connectionId={useGitUrl ? undefined : Number(selectedConnection)}
           presetData={presetData}
@@ -323,11 +351,19 @@ export function GitImportClone({
                   ),
                   preset_config:
                     data.preset === 'dockerfile' && data.dockerfilePath
-                      ? { preset: 'dockerfile', dockerfilePath: data.dockerfilePath }
+                      ? {
+                          preset: 'dockerfile',
+                          dockerfilePath: data.dockerfilePath,
+                        }
                       : data.preset === 'docker-compose'
-                        ? { preset: 'docker-compose', composePath: (data as any).composePath || 'docker-compose.yml' }
+                        ? {
+                            preset: 'docker-compose',
+                            composePath:
+                              (data as any).composePath || 'docker-compose.yml',
+                          }
                         : undefined,
-                  exposed_port: data.preset === 'docker-compose' ? undefined : data.port,
+                  exposed_port:
+                    data.preset === 'docker-compose' ? undefined : data.port,
                 },
               })
             } catch (error) {
@@ -349,7 +385,9 @@ export function GitImportClone({
     // Parse the git URL
     const parsed = parseGitUrl(gitUrl)
     if (!parsed) {
-      toast.error('Invalid git URL. Please use a GitHub or GitLab repository URL.')
+      toast.error(
+        'Invalid git URL. Please use a GitHub or GitLab repository URL.'
+      )
       return
     }
 
@@ -411,6 +449,47 @@ export function GitImportClone({
 
   // Source selection step
   if (!selectedSource) {
+    const sources: Array<{
+      key: ProjectSource
+      icon: typeof FolderGit2
+      title: string
+      tagline: string
+      detail: string
+    }> = [
+      {
+        key: 'browse',
+        icon: FolderGit2,
+        title: 'Import Repository',
+        tagline: 'Browse your private and public repos',
+        detail:
+          'Select a repository from your connected Git accounts. Auto-detects framework, build settings, and sets up webhooks for automatic deploys on push.',
+      },
+      {
+        key: 'templates',
+        icon: LayoutTemplate,
+        title: 'Template',
+        tagline: 'Start from a pre-configured starter kit',
+        detail:
+          'Pick from curated templates like Next.js, SaaS starters, and documentation sites. Includes build settings, environment variables, and recommended services.',
+      },
+      {
+        key: 'git-url',
+        icon: LinkIcon,
+        title: 'Git URL',
+        tagline: 'Clone from a public repository URL',
+        detail:
+          'Paste a public GitHub or GitLab URL to import any open-source repository. No account connection required — great for trying out open-source projects.',
+      },
+      {
+        key: 'manual',
+        icon: Container,
+        title: 'Manual Deploy',
+        tagline: 'No Git repository needed',
+        detail:
+          'Deploy a pre-built Docker image from any registry (DockerHub, GHCR, etc.) or upload a static files bundle. Ideal for CI/CD pipelines or pre-built artifacts.',
+      },
+    ]
+
     return (
       <Card className="flex-1">
         <CardHeader className="flex items-center gap-2 pb-3">
@@ -424,92 +503,54 @@ export function GitImportClone({
             Choose how you want to set up your project
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <button
-              onClick={() => setSelectedSource('browse')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <FolderGit2 className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Import Repository</p>
-                  <p className="text-xs text-muted-foreground">Browse your private and public repos</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Select a repository from your connected Git accounts. Auto-detects framework, build settings, and sets up webhooks for automatic deploys on push.
-              </p>
-              {connections && connections.connections.length > 0 && (
-                <div className="flex items-center gap-2 pl-[52px] flex-wrap">
-                  {connections.connections.map((conn) => (
-                    <div key={conn.id} className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1">
-                      <Github className="h-3 w-3" />
-                      <span>{conn.account_name}</span>
+            {sources.map((s) => {
+              const Icon = s.icon
+              return (
+                <button
+                  key={s.key}
+                  onClick={() => setSelectedSource(s.key)}
+                  className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
+                      <Icon className="h-5 w-5 text-primary" />
                     </div>
-                  ))}
-                </div>
-              )}
-              {(!connections || connections.connections.length === 0) && (
-                <p className="text-xs text-amber-500 pl-[52px]">
-                  No Git connections yet — you can add one after selecting this option.
-                </p>
-              )}
-            </button>
-
-            <button
-              onClick={() => setSelectedSource('templates')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <LayoutTemplate className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Template</p>
-                  <p className="text-xs text-muted-foreground">Start from a pre-configured starter kit</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Pick from curated templates like Next.js, SaaS starters, and documentation sites. Includes build settings, environment variables, and recommended services.
-              </p>
-            </button>
-
-            <button
-              onClick={() => setSelectedSource('git-url')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <LinkIcon className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Git URL</p>
-                  <p className="text-xs text-muted-foreground">Clone from a public repository URL</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Paste a public GitHub or GitLab URL to import any open-source repository. No account connection required — great for trying out open-source projects.
-              </p>
-            </button>
-
-            <button
-              onClick={() => setSelectedSource('manual')}
-              className="group flex flex-col gap-3 p-5 rounded-lg border bg-card hover:border-primary hover:bg-accent/50 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 p-2.5 group-hover:bg-primary/20 transition-colors">
-                  <Container className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="font-semibold">Manual Deploy</p>
-                  <p className="text-xs text-muted-foreground">No Git repository needed</p>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
-                Deploy a pre-built Docker image from any registry (DockerHub, GHCR, etc.) or upload a static files bundle. Ideal for CI/CD pipelines or pre-built artifacts.
-              </p>
-            </button>
+                    <div>
+                      <p className="font-semibold">{s.title}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {s.tagline}
+                      </p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed pl-[52px]">
+                    {s.detail}
+                  </p>
+                  {s.key === 'browse' &&
+                    connections &&
+                    connections.connections.length > 0 && (
+                      <div className="flex items-center gap-2 pl-[52px] flex-wrap">
+                        {connections.connections.map((conn) => (
+                          <div
+                            key={conn.id}
+                            className="flex items-center gap-1.5 text-xs text-muted-foreground bg-muted/60 rounded-full px-2.5 py-1"
+                          >
+                            <Github className="h-3 w-3" />
+                            <span>{conn.account_name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  {s.key === 'browse' &&
+                    (!connections ||
+                      connections.connections.length === 0) && (
+                      <p className="text-xs text-amber-500 pl-[52px]">
+                        No Git connections yet — you can add one after
+                        selecting this option.
+                      </p>
+                    )}
+                </button>
+              )
+            })}
           </div>
         </CardContent>
       </Card>
@@ -657,27 +698,31 @@ export function GitImportClone({
             </Button>
 
             {/* Show parsed URL preview */}
-            {gitUrl && !isValidatingUrl && (() => {
-              const parsed = parseGitUrl(gitUrl)
-              if (parsed) {
-                return (
-                  <div className="p-3 bg-muted/50 rounded-md text-sm">
-                    <div className="flex items-center gap-2">
-                      {parsed.provider === 'github' ? (
-                        <Github className="h-4 w-4" />
-                      ) : (
-                        <Gitlab className="h-4 w-4" />
-                      )}
-                      <span className="font-medium">{parsed.owner}/{parsed.repo}</span>
-                      <Badge variant="secondary" className="text-xs">
-                        {parsed.provider}
-                      </Badge>
+            {gitUrl &&
+              !isValidatingUrl &&
+              (() => {
+                const parsed = parseGitUrl(gitUrl)
+                if (parsed) {
+                  return (
+                    <div className="p-3 bg-muted/50 rounded-md text-sm">
+                      <div className="flex items-center gap-2">
+                        {parsed.provider === 'github' ? (
+                          <Github className="h-4 w-4" />
+                        ) : (
+                          <Gitlab className="h-4 w-4" />
+                        )}
+                        <span className="font-medium">
+                          {parsed.owner}/{parsed.repo}
+                        </span>
+                        <Badge variant="secondary" className="text-xs">
+                          {parsed.provider}
+                        </Badge>
+                      </div>
                     </div>
-                  </div>
-                )
-              }
-              return null
-            })()}
+                  )
+                }
+                return null
+              })()}
           </div>
         )}
 

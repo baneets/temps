@@ -23,6 +23,10 @@ import {
   BookOpen,
   Settings2,
   ExternalLink,
+  Zap,
+  Lock,
+  Clock,
+  Hash,
 } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { CopyButton } from '@/components/ui/copy-button'
@@ -35,22 +39,20 @@ interface KvServiceProps {
 export function KvService({ project: _project }: KvServiceProps) {
   const { setBreadcrumbs } = useBreadcrumbs()
 
-  // Fetch KV status
   const { data: status, isLoading } = useQuery({
     ...kvStatusOptions(),
-    refetchInterval: 10000, // Refetch every 10 seconds
+    refetchInterval: 10000,
   })
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: 'Services', href: `../services` },
+      { label: 'Databases', href: `../storage` },
       { label: 'KV Store' },
     ])
   }, [setBreadcrumbs])
 
   const isEnabled = status?.enabled ?? false
 
-  // Show loading skeleton while fetching status
   if (isLoading) {
     return (
       <div className="space-y-6">
@@ -62,7 +64,7 @@ export function KvService({ project: _project }: KvServiceProps) {
             <div>
               <h1 className="text-xl font-semibold sm:text-2xl">KV Store</h1>
               <p className="text-muted-foreground text-sm">
-                Redis-backed key-value storage
+                Serverless key-value store backed by Redis
               </p>
             </div>
           </div>
@@ -84,21 +86,21 @@ export function KvService({ project: _project }: KvServiceProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-primary/10">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="p-2 rounded-lg bg-primary/10 shrink-0">
             <Database className="h-6 w-6 text-primary" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h1 className="text-xl font-semibold sm:text-2xl">KV Store</h1>
             <p className="text-muted-foreground text-sm">
-              Redis-backed key-value storage
+              Serverless key-value store backed by Redis — no infrastructure to manage
             </p>
           </div>
         </div>
         <Badge
           variant={isEnabled ? 'default' : 'secondary'}
-          className="h-7 px-3"
+          className="h-7 px-3 self-start sm:self-auto shrink-0"
         >
           {isEnabled ? (
             <>
@@ -131,12 +133,11 @@ export function KvService({ project: _project }: KvServiceProps) {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
-          {/* Status Card */}
           <Card>
             <CardHeader>
               <CardTitle>Service Status</CardTitle>
               <CardDescription>
-                View your KV Store service status
+                Cluster-wide status of the KV service. Once enabled, every project on this instance can use it through the SDK below.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -145,24 +146,28 @@ export function KvService({ project: _project }: KvServiceProps) {
                   <div className="grid gap-4 sm:grid-cols-3">
                     <div className="p-4 rounded-lg border bg-muted/30">
                       <p className="text-sm text-muted-foreground">Status</p>
-                      <p className="font-medium text-green-600 flex items-center gap-1.5 mt-1">
-                        <CheckCircle2 className="h-4 w-4" />
+                      <p className={`font-medium flex items-center gap-1.5 mt-1 ${status?.healthy ? 'text-green-600' : 'text-red-600'}`}>
+                        {status?.healthy ? (
+                          <CheckCircle2 className="h-4 w-4" />
+                        ) : (
+                          <XCircle className="h-4 w-4" />
+                        )}
                         {status?.healthy ? 'Healthy' : 'Unhealthy'}
                       </p>
                     </div>
                     <div className="p-4 rounded-lg border bg-muted/30">
-                      <p className="text-sm text-muted-foreground">Version</p>
-                      <p className="font-medium mt-1">{status?.version || 'Unknown'}</p>
+                      <p className="text-sm text-muted-foreground">Engine</p>
+                      <p className="font-medium mt-1">Redis {status?.version || 'unknown'}</p>
                     </div>
                     <div className="p-4 rounded-lg border bg-muted/30">
                       <p className="text-sm text-muted-foreground">Docker Image</p>
-                      <p className="font-medium mt-1 font-mono text-sm">
+                      <p className="font-medium mt-1 font-mono text-xs break-all">
                         {status?.docker_image || 'Unknown'}
                       </p>
                     </div>
                   </div>
                   <Button variant="outline" asChild>
-                    <Link to="/settings/storage?tab=platform" className="gap-2">
+                    <Link to="/storage?tab=platform" className="gap-2">
                       <ExternalLink className="h-4 w-4" />
                       Manage in Storage Settings
                     </Link>
@@ -174,12 +179,11 @@ export function KvService({ project: _project }: KvServiceProps) {
                     <Info className="h-4 w-4" />
                     <AlertTitle>KV Store is not enabled</AlertTitle>
                     <AlertDescription>
-                      The KV Store service needs to be enabled by a system administrator.
-                      Once enabled, you can use the SDK below to interact with it.
+                      An administrator must enable the KV service from <strong>Storage Settings → Platform Services</strong>. Once enabled, the SDK on the Documentation tab works out of the box — no further per-project setup needed.
                     </AlertDescription>
                   </Alert>
                   <Button asChild>
-                    <Link to="/settings/storage?tab=platform" className="gap-2">
+                    <Link to="/storage?tab=platform" className="gap-2">
                       <ExternalLink className="h-4 w-4" />
                       Enable in Storage Settings
                     </Link>
@@ -188,6 +192,29 @@ export function KvService({ project: _project }: KvServiceProps) {
               )}
             </CardContent>
           </Card>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <FeatureCard
+              icon={Zap}
+              title="In-memory speed"
+              description="Sub-millisecond reads and writes for the hot path of your application — caching, sessions, counters, feature flags."
+            />
+            <FeatureCard
+              icon={Clock}
+              title="TTL & expiration"
+              description="Set a per-key TTL in seconds or milliseconds. Keys disappear automatically — no cleanup jobs to write."
+            />
+            <FeatureCard
+              icon={Hash}
+              title="Atomic counters"
+              description="INCR is atomic across concurrent callers. Build rate limiters, view counters, and quotas without races."
+            />
+            <FeatureCard
+              icon={Lock}
+              title="Distributed locks"
+              description="Combine SET NX with TTL to coordinate work across replicas. The SDK returns null when a lock is already held."
+            />
+          </div>
         </TabsContent>
 
         <TabsContent value="docs" className="space-y-6">
@@ -195,143 +222,188 @@ export function KvService({ project: _project }: KvServiceProps) {
             <CardHeader>
               <CardTitle>TypeScript SDK</CardTitle>
               <CardDescription>
-                Install and use the Temps KV package in your TypeScript/JavaScript application
+                The <code className="bg-muted px-1.5 py-0.5 rounded text-xs">@temps-sdk/kv</code> package
+                gives you a typed client for KV operations from any Node.js or Bun runtime.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {/* Installation */}
               <div className="space-y-3">
                 <h3 className="font-medium">Installation</h3>
-                <div className="relative">
-                  <pre className="bg-muted rounded-lg p-4 text-sm font-mono overflow-x-auto">
-                    <code>npm install @temps-sdk/kv</code>
-                  </pre>
-                  <CopyButton
-                    value="npm install @temps-sdk/kv"
-                    className="absolute top-2 right-2 h-8 w-8 p-0 hover:bg-accent hover:text-accent-foreground rounded-md"
-                  />
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  Or using other package managers:
-                </p>
-                <div className="grid gap-2 sm:grid-cols-3">
-                  <CodeBlock code="yarn add @temps-sdk/kv" />
-                  <CodeBlock code="pnpm add @temps-sdk/kv" />
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <CodeBlock code="npm install @temps-sdk/kv" />
                   <CodeBlock code="bun add @temps-sdk/kv" />
+                  <CodeBlock code="pnpm add @temps-sdk/kv" />
+                  <CodeBlock code="yarn add @temps-sdk/kv" />
                 </div>
               </div>
 
-              {/* Configuration */}
+              <div className="space-y-3">
+                <h3 className="font-medium">Quick start</h3>
+                <p className="text-sm text-muted-foreground">
+                  The default <code className="bg-muted px-1.5 py-0.5 rounded text-xs">kv</code> singleton
+                  reads its config from environment variables — no extra wiring required when running
+                  on Temps.
+                </p>
+                <CodeBlock
+                  code={`import { kv } from '@temps-sdk/kv'
+
+await kv.set('user:123', { name: 'Alice', plan: 'pro' })
+
+const user = await kv.get<{ name: string; plan: string }>('user:123')
+// { name: 'Alice', plan: 'pro' }
+
+await kv.del('user:123')`}
+                  language="typescript"
+                />
+              </div>
+
               <div className="space-y-3">
                 <h3 className="font-medium">Configuration</h3>
                 <p className="text-sm text-muted-foreground">
-                  The KV client automatically reads the <code className="bg-muted px-1.5 py-0.5 rounded text-xs">TEMPS_KV_URL</code> environment
-                  variable which is injected into your project's runtime.
+                  These environment variables are injected automatically into deployments running on
+                  this instance. Set them yourself only when running locally or outside of Temps.
                 </p>
                 <CodeBlock
-                  code={`import { createKvClient } from '@temps-sdk/kv'
+                  code={`# Required
+TEMPS_API_URL=https://your-instance.temps.dev   # API endpoint
+TEMPS_TOKEN=your-token                          # API key or deployment token
 
-// Automatically uses TEMPS_KV_URL from environment
-const kv = createKvClient()
+# Required for API keys (deployment tokens embed the project ID)
+TEMPS_PROJECT_ID=42`}
+                  language="bash"
+                />
+                <p className="text-sm text-muted-foreground">
+                  Need an isolated client (multiple projects, custom timeouts, testing)? Use{' '}
+                  <code className="bg-muted px-1.5 py-0.5 rounded text-xs">createClient</code>:
+                </p>
+                <CodeBlock
+                  code={`import { createClient } from '@temps-sdk/kv'
 
-// Or configure manually
-const kv = createKvClient({
-  url: process.env.TEMPS_KV_URL,
-  token: process.env.TEMPS_PROJECT_TOKEN,
+const kv = createClient({
+  apiUrl: 'https://your-instance.temps.dev',
+  token: process.env.TEMPS_TOKEN,
+  projectId: 42, // optional with deployment tokens
 })`}
                   language="typescript"
                 />
               </div>
 
-              {/* API Reference */}
               <div className="space-y-4">
                 <h3 className="font-medium">API Reference</h3>
 
                 <ApiMethod
                   name="get"
-                  description="Get a value by key"
-                  signature="kv.get<T>(key: string): Promise<T | null>"
-                  example={`const user = await kv.get<User>('user:123')
-if (user) {
-  console.log(user.name)
+                  description="Retrieve a value by key. Returns null if the key does not exist."
+                  signature="get<T = unknown>(key: string): Promise<T | null>"
+                  example={`const session = await kv.get<{ userId: string; expiresAt: number }>('session:abc')
+
+if (session) {
+  console.log(session.userId)
 }`}
                 />
 
                 <ApiMethod
                   name="set"
-                  description="Set a value with optional expiration"
-                  signature="kv.set(key: string, value: any, options?: SetOptions): Promise<void>"
+                  description="Store a JSON-serializable value. Returns 'OK' on success, or null when a conditional write (nx / xx) was rejected."
+                  signature={`set(
+  key: string,
+  value: unknown,
+  options?: {
+    ex?: number   // expire after N seconds
+    px?: number   // expire after N milliseconds
+    nx?: boolean  // only set if key does NOT exist
+    xx?: boolean  // only set if key already exists
+  },
+): Promise<'OK' | null>`}
                   example={`// Simple set
-await kv.set('user:123', { name: 'John', email: 'john@example.com' })
+await kv.set('config:theme', 'dark')
 
-// With expiration (TTL in seconds)
-await kv.set('session:abc', sessionData, { ex: 3600 })
+// Expire after 5 minutes
+await kv.set('cache:homepage', html, { ex: 300 })
 
-// Set only if key doesn't exist (NX)
-await kv.set('lock:resource', '1', { nx: true, ex: 30 })`}
+// Create-if-missing (returns null if key already exists)
+const acquired = await kv.set('lock:deploy', '1', { nx: true, ex: 30 })
+if (acquired === null) console.log('Lock already held')
+
+// Update-if-exists
+await kv.set('user:123:status', 'active', { xx: true })`}
                 />
 
                 <ApiMethod
                   name="del"
-                  description="Delete one or more keys"
-                  signature="kv.del(...keys: string[]): Promise<number>"
-                  example={`// Delete single key
-await kv.del('user:123')
-
-// Delete multiple keys
-const deleted = await kv.del('cache:a', 'cache:b', 'cache:c')
-console.log(\`Deleted \${deleted} keys\`)`}
+                  description="Delete one or more keys. Returns the number of keys that were actually removed."
+                  signature="del(...keys: string[]): Promise<number>"
+                  example={`const removed = await kv.del('temp:a', 'temp:b', 'temp:c')
+console.log(\`Removed \${removed} keys\`)`}
                 />
 
                 <ApiMethod
-                  name="incr / incrby"
-                  description="Increment a numeric value atomically"
-                  signature="kv.incr(key: string): Promise<number>
-kv.incrby(key: string, amount: number): Promise<number>"
-                  example={`// Increment by 1
-const views = await kv.incr('page:views:home')
-
-// Increment by specific amount
-const score = await kv.incrby('user:123:score', 10)`}
+                  name="incr"
+                  description="Atomically increment a numeric value by 1. Initializes the key to 0 first if it does not exist."
+                  signature="incr(key: string): Promise<number>"
+                  example={`const views = await kv.incr('page:views:/pricing')
+console.log(\`Page views: \${views}\`)`}
                 />
 
                 <ApiMethod
                   name="expire"
-                  description="Set expiration time on an existing key"
-                  signature="kv.expire(key: string, seconds: number): Promise<boolean>"
-                  example={`// Set key to expire in 1 hour
-const success = await kv.expire('session:abc', 3600)`}
+                  description="Set a TTL on an existing key. Returns 1 if the timeout was set, 0 if the key does not exist."
+                  signature="expire(key: string, seconds: number): Promise<number>"
+                  example={`await kv.set('session:xyz', data)
+await kv.expire('session:xyz', 3600) // expire in 1 hour`}
                 />
 
                 <ApiMethod
                   name="ttl"
-                  description="Get remaining time-to-live for a key"
-                  signature="kv.ttl(key: string): Promise<number>"
-                  example={`const ttl = await kv.ttl('session:abc')
-if (ttl < 300) {
-  // Less than 5 minutes remaining, refresh
-  await kv.expire('session:abc', 3600)
+                  description={`Get the remaining time-to-live for a key in seconds.
+
+Returns:
+  >= 0  – seconds remaining
+  -1    – key exists but has no expiration
+  -2    – key does not exist`}
+                  signature="ttl(key: string): Promise<number>"
+                  example={`const remaining = await kv.ttl('session:xyz')
+
+if (remaining === -2) {
+  console.log('Session expired or never existed')
+} else if (remaining === -1) {
+  console.log('Session has no expiration')
+} else {
+  console.log(\`Session expires in \${remaining}s\`)
 }`}
                 />
 
                 <ApiMethod
                   name="keys"
-                  description="Find keys matching a pattern"
-                  signature="kv.keys(pattern: string): Promise<string[]>"
-                  example={`// Find all user keys
-const userKeys = await kv.keys('user:*')
-
-// Find all session keys for a user
-const sessions = await kv.keys('session:user:123:*')`}
+                  description="Find all keys matching a glob-style pattern. Use sparingly in production — prefer direct key access for hot paths."
+                  signature="keys(pattern: string): Promise<string[]>"
+                  example={`const userKeys = await kv.keys('user:*')
+// ['user:123', 'user:456', 'user:789']`}
                 />
+              </div>
 
-                <ApiMethod
-                  name="exists"
-                  description="Check if a key exists"
-                  signature="kv.exists(key: string): Promise<boolean>"
-                  example={`if (await kv.exists('user:123')) {
-  console.log('User exists')
+              <div className="space-y-3">
+                <h3 className="font-medium">Error handling</h3>
+                <p className="text-sm text-muted-foreground">
+                  Every error thrown by the SDK is an instance of{' '}
+                  <code className="bg-muted px-1.5 py-0.5 rounded text-xs">KVError</code> with
+                  structured fields you can branch on.
+                </p>
+                <CodeBlock
+                  code={`import { kv, KVError } from '@temps-sdk/kv'
+
+try {
+  await kv.get('my-key')
+} catch (error) {
+  if (error instanceof KVError) {
+    console.error(error.message) // human-readable
+    console.error(error.code)    // 'MISSING_CONFIG' | 'NETWORK_ERROR' | http status
+    console.error(error.status)  // HTTP status (when applicable)
+    console.error(error.title)   // RFC 7807 problem title
+    console.error(error.detail)  // RFC 7807 problem detail
+  }
 }`}
+                  language="typescript"
                 />
               </div>
             </CardContent>
@@ -341,18 +413,78 @@ const sessions = await kv.keys('session:user:123:*')`}
         <TabsContent value="examples" className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>Usage Examples</CardTitle>
+              <CardTitle>Usage Patterns</CardTitle>
               <CardDescription>
-                Common patterns and use cases for the KV Store
+                Battle-tested recipes for the most common KV use cases.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <ExampleSection
-                title="Session Management"
-                description="Store user sessions with automatic expiration"
-                code={`import { createKvClient } from '@temps-sdk/kv'
+                title="Caching expensive lookups"
+                description="Read-through cache: try KV first, fall back to the source of truth, then warm the cache for next time."
+                code={`import { kv } from '@temps-sdk/kv'
 
-const kv = createKvClient()
+async function getProduct(id: string) {
+  const cached = await kv.get<Product>(\`product:\${id}\`)
+  if (cached) return cached
+
+  const product = await db.products.findById(id)
+  await kv.set(\`product:\${id}\`, product, { ex: 600 }) // cache for 10 minutes
+  return product
+}`}
+              />
+
+              <ExampleSection
+                title="Rate limiting"
+                description="Fixed-window rate limiter using INCR + TTL. The first request seeds the counter and the window expiration."
+                code={`import { kv } from '@temps-sdk/kv'
+
+async function checkRateLimit(userId: string): Promise<boolean> {
+  const key = \`ratelimit:\${userId}\`
+  const count = await kv.incr(key)
+
+  // First request in the window — set the expiration
+  if (count === 1) {
+    await kv.expire(key, 60)
+  }
+
+  return count <= 100 // 100 requests per 60-second window
+}`}
+              />
+
+              <ExampleSection
+                title="Distributed locks"
+                description="Use SET NX with a TTL so a crashed worker can never deadlock the system."
+                code={`import { kv } from '@temps-sdk/kv'
+
+async function withLock<T>(
+  name: string,
+  fn: () => Promise<T>,
+): Promise<T | null> {
+  const acquired = await kv.set(\`lock:\${name}\`, Date.now(), {
+    nx: true,
+    ex: 30,
+  })
+
+  if (acquired === null) return null // lock held by another process
+
+  try {
+    return await fn()
+  } finally {
+    await kv.del(\`lock:\${name}\`)
+  }
+}
+
+// Usage
+await withLock('nightly-report', async () => {
+  await generateReport()
+})`}
+              />
+
+              <ExampleSection
+                title="Sessions with rolling TTL"
+                description="Issue session IDs in your auth flow, refresh the TTL on every authenticated request, and delete on logout."
+                code={`import { kv } from '@temps-sdk/kv'
 
 interface Session {
   userId: string
@@ -360,159 +492,51 @@ interface Session {
   createdAt: string
 }
 
-// Create session (expires in 24 hours)
-async function createSession(userId: string, email: string): Promise<string> {
-  const sessionId = crypto.randomUUID()
-  const session: Session = {
-    userId,
-    email,
-    createdAt: new Date().toISOString(),
-  }
+const SESSION_TTL = 86400 // 24 hours
 
-  await kv.set(\`session:\${sessionId}\`, session, { ex: 86400 })
+export async function createSession(userId: string, email: string) {
+  const sessionId = crypto.randomUUID()
+  await kv.set<Session>(
+    \`session:\${sessionId}\`,
+    { userId, email, createdAt: new Date().toISOString() },
+    { ex: SESSION_TTL },
+  )
   return sessionId
 }
 
-// Get session
-async function getSession(sessionId: string): Promise<Session | null> {
-  return kv.get<Session>(\`session:\${sessionId}\`)
+export async function getSession(sessionId: string) {
+  const session = await kv.get<Session>(\`session:\${sessionId}\`)
+  if (session) {
+    // Roll the TTL forward on every successful read
+    await kv.expire(\`session:\${sessionId}\`, SESSION_TTL)
+  }
+  return session
 }
 
-// Refresh session TTL
-async function refreshSession(sessionId: string): Promise<boolean> {
-  return kv.expire(\`session:\${sessionId}\`, 86400)
-}
-
-// Delete session (logout)
-async function deleteSession(sessionId: string): Promise<void> {
+export async function destroySession(sessionId: string) {
   await kv.del(\`session:\${sessionId}\`)
 }`}
               />
 
               <ExampleSection
-                title="Rate Limiting"
-                description="Implement API rate limiting with sliding window"
-                code={`import { createKvClient } from '@temps-sdk/kv'
+                title="Feature flags"
+                description="Store feature configuration in a single key and roll out gradually."
+                code={`import { kv } from '@temps-sdk/kv'
 
-const kv = createKvClient()
-
-interface RateLimitResult {
-  allowed: boolean
-  remaining: number
-  resetAt: number
+interface FeatureFlag {
+  enabled: boolean
+  rollout: number // 0..1
 }
 
-async function checkRateLimit(
-  identifier: string,
-  limit: number = 100,
-  windowSeconds: number = 60
-): Promise<RateLimitResult> {
-  const key = \`ratelimit:\${identifier}\`
+await kv.set<FeatureFlag>('feature:dark-mode', {
+  enabled: true,
+  rollout: 0.5,
+})
 
-  // Increment counter
-  const count = await kv.incr(key)
-
-  // Set expiration on first request
-  if (count === 1) {
-    await kv.expire(key, windowSeconds)
-  }
-
-  const ttl = await kv.ttl(key)
-
-  return {
-    allowed: count <= limit,
-    remaining: Math.max(0, limit - count),
-    resetAt: Date.now() + ttl * 1000,
-  }
-}
-
-// Usage in API route
-export async function POST(request: Request) {
-  const ip = request.headers.get('x-forwarded-for') || 'unknown'
-  const result = await checkRateLimit(ip)
-
-  if (!result.allowed) {
-    return new Response('Too many requests', {
-      status: 429,
-      headers: {
-        'X-RateLimit-Remaining': result.remaining.toString(),
-        'X-RateLimit-Reset': result.resetAt.toString(),
-      }
-    })
-  }
-
-  // Process request...
-}`}
-              />
-
-              <ExampleSection
-                title="Caching"
-                description="Cache expensive computations or API responses"
-                code={`import { createKvClient } from '@temps-sdk/kv'
-
-const kv = createKvClient()
-
-async function cachedFetch<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  ttlSeconds: number = 300
-): Promise<T> {
-  // Try to get from cache
-  const cached = await kv.get<T>(key)
-  if (cached !== null) {
-    return cached
-  }
-
-  // Fetch fresh data
-  const data = await fetcher()
-
-  // Store in cache
-  await kv.set(key, data, { ex: ttlSeconds })
-
-  return data
-}
-
-// Usage
-const user = await cachedFetch(
-  \`user:\${userId}\`,
-  () => fetchUserFromDatabase(userId),
-  600 // Cache for 10 minutes
-)`}
-              />
-
-              <ExampleSection
-                title="Real-time Counters"
-                description="Track page views, likes, or other metrics in real-time"
-                code={`import { createKvClient } from '@temps-sdk/kv'
-
-const kv = createKvClient()
-
-// Track page view
-async function trackPageView(pageSlug: string): Promise<number> {
-  const key = \`pageviews:\${pageSlug}\`
-  return kv.incr(key)
-}
-
-// Get view count
-async function getPageViews(pageSlug: string): Promise<number> {
-  const views = await kv.get<number>(\`pageviews:\${pageSlug}\`)
-  return views || 0
-}
-
-// Track daily unique visitors
-async function trackDailyVisitor(pageSlug: string, visitorId: string): Promise<void> {
-  const today = new Date().toISOString().split('T')[0]
-  const key = \`visitors:\${pageSlug}:\${today}:\${visitorId}\`
-
-  // Set with expiration at end of day (24 hours)
-  await kv.set(key, '1', { nx: true, ex: 86400 })
-}
-
-// Get daily unique visitor count
-async function getDailyVisitorCount(pageSlug: string): Promise<number> {
-  const today = new Date().toISOString().split('T')[0]
-  const keys = await kv.keys(\`visitors:\${pageSlug}:\${today}:*\`)
-  return keys.length
+export async function isEnabled(name: string): Promise<boolean> {
+  const flag = await kv.get<FeatureFlag>(\`feature:\${name}\`)
+  if (!flag?.enabled) return false
+  return Math.random() < flag.rollout
 }`}
               />
             </CardContent>
@@ -520,6 +544,32 @@ async function getDailyVisitorCount(pageSlug: string): Promise<number> {
         </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+function FeatureCard({
+  icon: Icon,
+  title,
+  description,
+}: {
+  icon: typeof Zap
+  title: string
+  description: string
+}) {
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 rounded-md bg-primary/10">
+            <Icon className="h-4 w-4 text-primary" />
+          </div>
+          <CardTitle className="text-base">{title}</CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -552,7 +602,9 @@ function ApiMethod({
     <div className="border rounded-lg p-4 space-y-3">
       <div>
         <h4 className="font-medium font-mono text-primary">{name}</h4>
-        <p className="text-sm text-muted-foreground">{description}</p>
+        <p className="text-sm text-muted-foreground whitespace-pre-line mt-1">
+          {description}
+        </p>
       </div>
       <div>
         <p className="text-xs text-muted-foreground mb-1">Signature</p>

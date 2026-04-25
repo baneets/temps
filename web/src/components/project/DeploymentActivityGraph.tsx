@@ -152,20 +152,11 @@ export function DeploymentActivityGraph({ projectId }: DeploymentActivityGraphPr
   }
 
   if (!graphData || graphData.total === 0) {
-    return (
-      <div className="space-y-3 rounded-lg border bg-card p-6">
-        <h3 className="text-lg font-semibold">0 deployments in the last year</h3>
-        <p className="text-sm text-muted-foreground">
-          No deployment activity yet. Deploy your project to see activity here.
-        </p>
-      </div>
-    )
+    return null
   }
 
-  const dayLabels = ['Mon', 'Wed', 'Fri']
-
   return (
-    <div className="space-y-3 rounded-lg border bg-card p-6 w-full lg:w-1/2">
+    <div className="w-full space-y-3 rounded-lg border bg-card p-4 sm:p-6 lg:w-1/2">
       <div className="flex items-baseline justify-between mb-4">
         <h3 className="text-lg font-semibold">
           {graphData.total} deployment{graphData.total !== 1 ? 's' : ''} in the last year

@@ -348,7 +348,7 @@ async fn has_performance_metrics(
     path = "/_temps/speed",
     request_body = SpeedMetricsPayload,
     responses(
-        (status = 200, description = "Metrics recorded successfully"),
+        (status = 204, description = "Metrics recorded successfully"),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 404, description = "Host not found in route table", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -362,39 +362,49 @@ pub async fn record_speed_metrics(
 ) -> impl IntoResponse {
     info!("Recording speed metrics from client");
 
-    // Extract domain from Host header
-    let host = match headers.get("host") {
-        Some(host) => match host.to_str() {
-            Ok(host_str) => host_str.to_string(),
-            Err(_) => {
-                error!("Invalid Host header");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "Invalid Host header"
-                    })),
-                )
-                    .into_response();
-            }
-        },
-        None => {
-            error!("Missing Host header");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Missing Host header"
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Host comes from `RequestMetadata`, which the auth middleware already
+    // normalizes by stripping any ":port" suffix. That matches the proxy's
+    // route-table keying so `get_route` works correctly even on non-default
+    // ports (e.g. the :8080 dev proxy).
+    let host = metadata.host.clone();
+    if host.is_empty() {
+        error!("Missing Host header");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing Host header"
+            })),
+        )
+            .into_response();
+    }
 
     // Look up project/environment/deployment from route table
     let (project_id, environment_id, deployment_id) = match state.route_table.get_route(&host) {
         Some(route_info) => {
-            let project_id = route_info.project.as_ref().map(|p| p.id).unwrap_or(1);
-            let environment_id = route_info.environment.as_ref().map(|e| e.id).unwrap_or(1);
-            let deployment_id = route_info.deployment.as_ref().map(|d| d.id).unwrap_or(1);
+            let Some(project) = route_info.project.as_ref() else {
+                info!(
+                    "Dropping performance event for host {} — no associated project",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+            let Some(environment) = route_info.environment.as_ref() else {
+                info!(
+                    "Dropping performance event for host {} — no associated environment",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+            let Some(deployment) = route_info.deployment.as_ref() else {
+                info!(
+                    "Dropping performance event for host {} — no associated deployment",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+            let project_id = project.id;
+            let environment_id = environment.id;
+            let deployment_id = deployment.id;
 
             info!(
                 "Resolved host {} to project={}, env={}, deploy={}",
@@ -468,7 +478,7 @@ pub async fn record_speed_metrics(
         })
         .await
     {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             error!("Failed to record speed metrics: {:?}", e);
             (
@@ -490,7 +500,7 @@ pub async fn record_speed_metrics(
     path = "/_temps/speed/update",
     request_body = UpdateSpeedMetricsPayload,
     responses(
-        (status = 200, description = "Metrics updated successfully"),
+        (status = 204, description = "Metrics updated successfully"),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 404, description = "Host not found or metrics not found", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -499,44 +509,53 @@ pub async fn record_speed_metrics(
 pub async fn update_speed_metrics(
     State(state): State<Arc<AppState>>,
     Extension(metadata): Extension<temps_core::RequestMetadata>,
-    headers: HeaderMap,
     Json(payload): Json<UpdateSpeedMetricsPayload>,
 ) -> impl IntoResponse {
     info!("Updating late performance metrics from client");
 
-    // Extract domain from Host header
-    let host = match headers.get("host") {
-        Some(host) => match host.to_str() {
-            Ok(host_str) => host_str.to_string(),
-            Err(_) => {
-                error!("Invalid Host header");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "Invalid Host header"
-                    })),
-                )
-                    .into_response();
-            }
-        },
-        None => {
-            error!("Missing Host header");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Missing Host header"
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Host comes from `RequestMetadata`, which the auth middleware already
+    // normalizes by stripping any ":port" suffix. That matches the proxy's
+    // route-table keying so `get_route` works correctly even on non-default
+    // ports (e.g. the :8080 dev proxy).
+    let host = metadata.host.clone();
+    if host.is_empty() {
+        error!("Missing Host header");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Missing Host header"
+            })),
+        )
+            .into_response();
+    }
 
     // Look up project/environment/deployment from route table
     let (project_id, environment_id, deployment_id) = match state.route_table.get_route(&host) {
         Some(route_info) => {
-            let project_id = route_info.project.as_ref().map(|p| p.id).unwrap_or(1);
-            let environment_id = route_info.environment.as_ref().map(|e| e.id).unwrap_or(1);
-            let deployment_id = route_info.deployment.as_ref().map(|d| d.id).unwrap_or(1);
+            let Some(project) = route_info.project.as_ref() else {
+                info!(
+                    "Dropping performance update for host {} — no associated project",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+            let Some(environment) = route_info.environment.as_ref() else {
+                info!(
+                    "Dropping performance update for host {} — no associated environment",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+            let Some(deployment) = route_info.deployment.as_ref() else {
+                info!(
+                    "Dropping performance update for host {} — no associated deployment",
+                    host
+                );
+                return StatusCode::NO_CONTENT.into_response();
+            };
+            let project_id = project.id;
+            let environment_id = environment.id;
+            let deployment_id = deployment.id;
 
             info!(
                 "Resolved host {} to project={}, env={}, deploy={}",
@@ -570,7 +589,7 @@ pub async fn update_speed_metrics(
         })
         .await
     {
-        Ok(_) => StatusCode::OK.into_response(),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             error!("Failed to update speed metrics: {:?}", e);
             (
