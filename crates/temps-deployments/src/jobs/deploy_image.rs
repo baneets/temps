@@ -108,22 +108,29 @@ pub struct ResourceUsage {
 
 impl Default for ResourceUsage {
     fn default() -> Self {
+        // Microcore convention: 1_000_000u = 1 core, 100_000u = 0.1 core.
         Self {
-            cpu_limit: Some("1000m".to_string()),
+            cpu_limit: Some("1000000u".to_string()),
             memory_limit: Some("512Mi".to_string()),
-            cpu_request: Some("100m".to_string()),
+            cpu_request: Some("100000u".to_string()),
             memory_request: Some("128Mi".to_string()),
         }
     }
 }
 
-/// Parse a Kubernetes-style CPU quantity into whole cores (e.g. "1000m" → 1.0,
-/// "2" → 2.0, "500m" → 0.5). Returns None on unrecognized input so the caller
-/// can fall back to "no limit".
+/// Parse a CPU quantity into whole cores. Accepts:
+///   - microcores via `u` suffix: "2000000u" → 2.0 (1_000_000u = 1 core)
+///   - millicores via `m` suffix: "1000m"   → 1.0 (1_000m     = 1 core)
+///   - bare cores:                "2"        → 2.0
+///
+/// Returns None on unrecognized input so the caller can fall back to "no limit".
 pub(crate) fn parse_cpu_cores(s: &str) -> Option<f64> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    if let Some(micro) = trimmed.strip_suffix('u') {
+        return micro.parse::<f64>().ok().map(|v| v / 1_000_000.0);
     }
     if let Some(milli) = trimmed.strip_suffix('m') {
         return milli.parse::<f64>().ok().map(|v| v / 1000.0);
@@ -2004,6 +2011,16 @@ mod tests {
         assert_eq!(parse_cpu_cores("  1500m  "), Some(1.5));
         assert_eq!(parse_cpu_cores(""), None);
         assert_eq!(parse_cpu_cores("garbage"), None);
+    }
+
+    #[test]
+    fn parse_cpu_cores_handles_microcores() {
+        // 1_000_000u = 1 core (the storage convention used by temps DB).
+        assert_eq!(parse_cpu_cores("1000000u"), Some(1.0));
+        assert_eq!(parse_cpu_cores("500000u"), Some(0.5));
+        assert_eq!(parse_cpu_cores("2000000u"), Some(2.0));
+        assert_eq!(parse_cpu_cores("100000u"), Some(0.1));
+        assert_eq!(parse_cpu_cores("  2000000u  "), Some(2.0));
     }
 
     #[test]

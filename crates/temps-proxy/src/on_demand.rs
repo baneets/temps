@@ -2133,6 +2133,11 @@ mod tests {
             ready_at: None,
             deleted_at: None,
             node_id,
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
         }
     }
 

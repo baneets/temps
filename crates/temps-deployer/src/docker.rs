@@ -62,7 +62,7 @@ pub struct DockerRuntime {
 /// Map a POSIX exit code (>= 128 means "killed by signal N - 128") to a human
 /// signal name. Returns None for normal-range exit codes.
 fn signal_name_from_exit_code(code: i64) -> Option<&'static str> {
-    if code < 128 || code > 192 {
+    if !(128..=192).contains(&code) {
         return None;
     }
     match (code - 128) as i32 {

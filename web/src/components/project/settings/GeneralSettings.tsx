@@ -100,8 +100,14 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
   const deploymentForm = useForm<DeploymentConfigFormValues>({
     resolver: zodResolver(deploymentConfigSchema),
     defaultValues: {
-      cpuRequest: project?.deployment_config?.cpuRequest?.toString() ?? '',
-      cpuLimit: project?.deployment_config?.cpuLimit?.toString() ?? '',
+      cpuRequest:
+        project?.deployment_config?.cpuRequest != null
+          ? (project.deployment_config.cpuRequest / 1_000_000).toString()
+          : '',
+      cpuLimit:
+        project?.deployment_config?.cpuLimit != null
+          ? (project.deployment_config.cpuLimit / 1_000_000).toString()
+          : '',
       memoryRequest:
         project?.deployment_config?.memoryRequest?.toString() ?? '',
       memoryLimit: project?.deployment_config?.memoryLimit?.toString() ?? '',
@@ -152,11 +158,11 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
         body: {
           cpuRequest:
             values.cpuRequest && values.cpuRequest.trim() !== ''
-              ? parseInt(values.cpuRequest)
+              ? Math.round(parseFloat(values.cpuRequest) * 1_000_000)
               : null,
           cpuLimit:
             values.cpuLimit && values.cpuLimit.trim() !== ''
-              ? parseInt(values.cpuLimit)
+              ? Math.round(parseFloat(values.cpuLimit) * 1_000_000)
               : null,
           memoryRequest:
             values.memoryRequest && values.memoryRequest.trim() !== ''
@@ -302,17 +308,18 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
                     name="cpuRequest"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>CPU Request (millicores)</FormLabel>
+                        <FormLabel>CPU Request (cores)</FormLabel>
                         <FormControl>
                           <Input
                             {...field}
                             type="number"
-                            min="1"
-                            placeholder="e.g., 100"
+                            step="any"
+                            min="0.01"
+                            placeholder="e.g., 0.1"
                           />
                         </FormControl>
                         <FormDescription className="text-muted-foreground">
-                          Minimum CPU resources (1000m = 1 CPU core)
+                          Minimum CPU cores (e.g., 0.25, 0.5, 1, 2)
                         </FormDescription>
                       </FormItem>
                     )}
@@ -323,17 +330,18 @@ export function GeneralSettings({ project, refetch }: GeneralSettingsProps) {
                     name="cpuLimit"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>CPU Limit (millicores)</FormLabel>
+                        <FormLabel>CPU Limit (cores)</FormLabel>
                         <FormControl>
                           <Input
                             {...field}
                             type="number"
-                            min="1"
-                            placeholder="e.g., 200"
+                            step="any"
+                            min="0.01"
+                            placeholder="e.g., 1"
                           />
                         </FormControl>
                         <FormDescription className="text-muted-foreground">
-                          Maximum CPU resources (1000m = 1 CPU core)
+                          Maximum CPU cores (e.g., 0.5, 1, 2)
                         </FormDescription>
                       </FormItem>
                     )}

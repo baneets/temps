@@ -698,14 +698,17 @@ impl WorkflowExecutionService {
                         .and_then(getter)
                         .or_else(|| proj_cfg.and_then(getter))
                 };
-                let cpu_limit_milli = resolve_i32(|c| c.cpu_limit);
+                // CPU values are stored as microcores in the DB (1_000_000 = 1 core);
+                // memory is stored as MB. Format with explicit suffixes the deployer
+                // understands: `u` for microcores, `Mi` for mebibytes.
+                let cpu_limit_micro = resolve_i32(|c| c.cpu_limit);
                 let memory_limit_mb = resolve_i32(|c| c.memory_limit);
-                let cpu_request_milli = resolve_i32(|c| c.cpu_request);
+                let cpu_request_micro = resolve_i32(|c| c.cpu_request);
                 let memory_request_mb = resolve_i32(|c| c.memory_request);
                 let resources = ResourceUsage {
-                    cpu_limit: cpu_limit_milli.map(|m| format!("{}m", m)),
+                    cpu_limit: cpu_limit_micro.map(|u| format!("{}u", u)),
                     memory_limit: memory_limit_mb.map(|mb| format!("{}Mi", mb)),
-                    cpu_request: cpu_request_milli.map(|m| format!("{}m", m)),
+                    cpu_request: cpu_request_micro.map(|u| format!("{}u", u)),
                     memory_request: memory_request_mb.map(|mb| format!("{}Mi", mb)),
                 };
 
