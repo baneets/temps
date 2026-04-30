@@ -241,6 +241,43 @@ impl MongodbService {
         }
     }
 
+    /// Returns `true` when the desired config wants a replica set but the
+    /// existing container was created without `--replSet`. In that case the
+    /// caller must remove and recreate the container (preserving the data
+    /// volume) so the new flags take effect; a plain `start_container` would
+    /// just bring up the previous standalone process.
+    ///
+    /// Returns `false` (and never recreates) when the container already runs
+    /// in replica-set mode, or when the config is standalone — downgrading
+    /// from replica set back to standalone is intentionally not supported.
+    async fn container_needs_replset_recreate(
+        &self,
+        docker: &Docker,
+        container_name: &str,
+        config: &MongodbRuntimeConfig,
+    ) -> Result<bool> {
+        if config.replica_set.is_none() {
+            return Ok(false);
+        }
+        let inspect = docker
+            .inspect_container(container_name, None::<InspectContainerOptions>)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to inspect MongoDB container '{}' for replica-set drift check: {}",
+                    container_name,
+                    e
+                )
+            })?;
+        let cmd_has_replset = inspect
+            .config
+            .as_ref()
+            .and_then(|c| c.cmd.as_ref())
+            .map(|cmd| cmd.iter().any(|arg| arg.contains("--replSet")))
+            .unwrap_or(false);
+        Ok(!cmd_has_replset)
+    }
+
     fn get_mongodb_config(&self, service_config: ServiceConfig) -> Result<MongodbRuntimeConfig> {
         // After init the persisted parameters carry runtime-only fields like
         // `keyfile_content`. We must NOT round-trip those through the input
@@ -663,8 +700,15 @@ impl MongodbService {
             .ok_or_else(|| anyhow::anyhow!("MongoDB not configured"))?
             .clone();
 
+        // `directConnection=true` keeps the driver pointed at exactly this
+        // host:port instead of doing replica-set topology discovery. In RS
+        // mode `rs.initiate` registers the member as `127.0.0.1:27017`, which
+        // the driver would then try to dial — that address is the container's
+        // loopback and is unreachable from the host or from sibling
+        // containers. Direct connection bypasses discovery and is safe on
+        // standalone too. See ReplicaSetNoPrimary failure mode.
         let connection_string = format!(
-            "mongodb://{}:{}@{}:{}/?authSource=admin",
+            "mongodb://{}:{}@{}:{}/?authSource=admin&directConnection=true",
             urlencoding::encode(&config.username),
             urlencoding::encode(&config.password),
             config.host,
@@ -1444,8 +1488,12 @@ impl ExternalService for MongodbService {
         };
 
         // authSource=admin because that's where we create the root user.
+        // directConnection=true skips replica-set topology discovery so the
+        // probe checks *this* node instead of chasing the member address
+        // advertised by `rs.initiate` (`127.0.0.1:27017`, unreachable from
+        // outside the container). Safe on standalone too.
         let uri = format!(
-            "mongodb://{}:{}@{}:{}/?authSource=admin&serverSelectionTimeoutMS=3000&connectTimeoutMS=3000",
+            "mongodb://{}:{}@{}:{}/?authSource=admin&directConnection=true&serverSelectionTimeoutMS=3000&connectTimeoutMS=3000",
             urlencoding::encode(&cfg.username),
             urlencoding::encode(&cfg.password),
             cfg.host,
@@ -1542,7 +1590,9 @@ impl ExternalService for MongodbService {
                     "username" => false,    // Don't change username after creation
                     "password" => false,    // Password is auto-generated and cannot be changed
                     "docker_image" => true, // Docker image can be upgraded
-                    "replica_set" => false, // Toggling replSet on existing data corrupts state
+                    // One-way: standalone -> replica set is supported in-place.
+                    // The merge_updates strategy rejects unsetting or renaming.
+                    "replica_set" => true,
                     _ => false,
                 };
 
@@ -1571,24 +1621,70 @@ impl ExternalService for MongodbService {
             }))
             .await?;
 
+        let config = self
+            .config
+            .read()
+            .await
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MongoDB configuration not found"))?
+            .clone();
+
         if containers.is_empty() {
-            let config = self
-                .config
-                .read()
-                .await
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("MongoDB configuration not found"))?
-                .clone();
             self.create_container(docker, &config).await?;
         } else {
-            docker
-                .start_container(
-                    &container_name,
-                    None::<bollard::query_parameters::StartContainerOptions>,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to start MongoDB container: {}", e))?;
-            info!("Started existing MongoDB container: {}", container_name);
+            // If the persisted config now requires `--replSet` but the
+            // existing container was created in standalone mode, restarting it
+            // would just bring up the old standalone again. Detect drift by
+            // inspecting the container's Cmd, then recreate (preserving the
+            // data volume — `remove_container` does NOT touch named volumes).
+            if self
+                .container_needs_replset_recreate(docker, &container_name, &config)
+                .await?
+            {
+                info!(
+                    "MongoDB container {} needs recreate to apply replica_set='{}'; \
+                     removing standalone container and recreating in replica-set mode \
+                     (data volume preserved)",
+                    container_name,
+                    config.replica_set.as_deref().unwrap_or("")
+                );
+                let _ = docker
+                    .stop_container(
+                        &container_name,
+                        Some(StopContainerOptions {
+                            t: Some(10),
+                            signal: None,
+                        }),
+                    )
+                    .await;
+                docker
+                    .remove_container(
+                        &container_name,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            v: false, // keep the data volume
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to remove standalone MongoDB container before \
+                             replica-set recreate: {}",
+                            e
+                        )
+                    })?;
+                self.create_container(docker, &config).await?;
+            } else {
+                docker
+                    .start_container(
+                        &container_name,
+                        None::<bollard::query_parameters::StartContainerOptions>,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start MongoDB container: {}", e))?;
+                info!("Started existing MongoDB container: {}", container_name);
+            }
         }
 
         Ok(())
@@ -2402,7 +2498,7 @@ mod tests {
             ("username", false),
             ("password", false),
             ("docker_image", true),
-            ("replica_set", false),
+            ("replica_set", true),
         ];
 
         for (field_name, should_be_editable) in editable_status {

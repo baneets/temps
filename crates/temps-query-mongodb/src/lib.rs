@@ -53,10 +53,19 @@ impl MongoDBSource {
     pub async fn new(url: &str) -> Result<Self> {
         debug!("Creating MongoDB source for URL: {}", url);
 
-        let client_options = ClientOptions::parse(url).await.map_err(|e| {
+        let mut client_options = ClientOptions::parse(url).await.map_err(|e| {
             error!("Failed to parse MongoDB URL: {}", e);
             DataError::ConnectionFailed(format!("Failed to parse MongoDB URL: {}", e))
         })?;
+
+        // Force direct connection so the driver doesn't perform replica-set
+        // topology discovery. In RS mode, `rs.status()` advertises members at
+        // their internal addresses (e.g. `127.0.0.1:27017` from the
+        // container's POV) which are unreachable from the explorer process.
+        // Without this flag, `list_database_names()` hangs on `ReplicaSetNoPrimary`
+        // until server-selection timeout. The explorer is inherently per-node,
+        // not per-cluster, so direct connection is the correct semantic.
+        client_options.direct_connection = Some(true);
 
         let client = Client::with_options(client_options).map_err(|e| {
             error!("Failed to create MongoDB client: {}", e);

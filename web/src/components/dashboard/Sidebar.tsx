@@ -356,7 +356,13 @@ export default function AppSidebar() {
       </SidebarHeader>
       <SidebarContent>
         {showDefault ? (
-          <DefaultNav pluginItems={pluginItems} />
+          <DefaultNav
+            pluginItems={pluginItems}
+            pinnedProjectSlug={
+              forceDefault && projectSlug ? projectSlug : null
+            }
+            onReturnToProject={() => setForceDefault(false)}
+          />
         ) : settingsMode ? (
           <SettingsNav onBack={() => setForceDefault(true)} />
         ) : projectSlug ? (
@@ -541,9 +547,19 @@ function NavUser() {
 
 interface NavProps {
   pluginItems: { title: string; url: string; icon: LucideIcon }[]
+  // Slug of the project the user is currently viewing (URL still
+  // points inside `/projects/:slug/...`) but has temporarily swapped
+  // the sidebar to default via Back. When set, render a pinned row at
+  // the top so they can return to the project sidebar in one click.
+  pinnedProjectSlug?: string | null
+  onReturnToProject?: () => void
 }
 
-function DefaultNav({ pluginItems }: NavProps) {
+function DefaultNav({
+  pluginItems,
+  pinnedProjectSlug,
+  onReturnToProject,
+}: NavProps) {
   const { isMinimal, isMobile } = useSidebar()
   const compact = isMinimal && !isMobile
 
@@ -557,6 +573,12 @@ function DefaultNav({ pluginItems }: NavProps) {
   return (
     <>
       <NavCommandTrigger />
+      {pinnedProjectSlug && onReturnToProject && (
+        <CurrentProjectPin
+          slug={pinnedProjectSlug}
+          onReturn={onReturnToProject}
+        />
+      )}
       <NavSection label="Platform" items={flatItems} />
       {grouped.map((group) => (
         <NavSection
@@ -867,6 +889,56 @@ function ProjectNav({
         </SidebarMenu>
       </SidebarGroup>
     </>
+  )
+}
+
+// Inverse of SwapHeader: shown at the top of DefaultNav when the user
+// pressed Back from a project sidebar but the URL is still inside that
+// project. One click restores the project sidebar without navigating.
+function CurrentProjectPin({
+  slug,
+  onReturn,
+}: {
+  slug: string
+  onReturn: () => void
+}) {
+  const { isMinimal, isMobile } = useSidebar()
+  const compact = isMinimal && !isMobile
+  const { data: project } = useQuery({
+    ...getProjectBySlugOptions({ path: { slug } }),
+  })
+  const label = project?.name ?? slug
+  if (compact) {
+    return (
+      <SidebarGroup className="pb-0">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip={`Open ${label}`}
+              onClick={onReturn}
+              className="justify-center"
+            >
+              <Folder />
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
+    )
+  }
+  return (
+    <SidebarGroup className="pb-0">
+      <button
+        type="button"
+        onClick={onReturn}
+        className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors hover:bg-sidebar-accent"
+      >
+        <Folder className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+          {label}
+        </span>
+        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+      </button>
+    </SidebarGroup>
   )
 }
 

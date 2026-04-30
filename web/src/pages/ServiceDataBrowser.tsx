@@ -44,7 +44,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { ServiceLogo } from '@/components/ui/service-logo'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
@@ -1727,7 +1726,7 @@ export function ServiceDataBrowser() {
                   </Button>
                 </div>
               )}
-              <ScrollArea className="h-full px-4 pb-4 pt-2">
+              <div className="h-full overflow-auto px-4 pb-4 pt-2">
                 {getProcessedNodes().length > 0 ? (
                   <TreeView
                     nodes={getProcessedNodes()}
@@ -1754,7 +1753,7 @@ export function ServiceDataBrowser() {
                     {filterText ? 'No matches found' : 'No containers'}
                   </div>
                 )}
-              </ScrollArea>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -1999,7 +1998,7 @@ function TreeNodeComponent({
           // Prevent browser autoscroll on middle-click
           if (e.button === 1) e.preventDefault()
         }}
-        className={`w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md transition-colors hover:bg-accent ${
+        className={`min-w-full w-max flex items-center gap-2 px-2 py-1.5 text-sm rounded-md transition-colors hover:bg-accent whitespace-nowrap ${
           isSelected ? 'bg-accent text-accent-foreground' : ''
         }`}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
@@ -2016,9 +2015,9 @@ function TreeNodeComponent({
         {node.type === 'container'
           ? getContainerIcon(node.containerType, node.isExpanded || false)
           : getEntityIcon(node.entityType)}
-        <span className="truncate flex-1 text-left">{node.name}</span>
+        <span className="text-left">{node.name}</span>
         {node.containerType && (
-          <Badge variant="outline" className="text-xs flex-shrink-0">
+          <Badge variant="outline" className="text-xs flex-shrink-0 ml-auto">
             {node.containerType}
           </Badge>
         )}

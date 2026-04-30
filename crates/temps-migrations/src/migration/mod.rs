@@ -79,6 +79,7 @@ mod m20260428_000001_unique_member_ordinal;
 mod m20260428_000002_dns_owner_kind_deployment;
 mod m20260428_000003_create_node_route_state;
 mod m20260430_000001_add_deployment_container_exit_info;
+mod m20260430_000002_add_deployment_container_runtime_info;
 
 pub struct Migrator;
 
@@ -161,6 +162,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260428_000002_dns_owner_kind_deployment::Migration),
             Box::new(m20260428_000003_create_node_route_state::Migration),
             Box::new(m20260430_000001_add_deployment_container_exit_info::Migration),
+            Box::new(m20260430_000002_add_deployment_container_runtime_info::Migration),
         ]
     }
 }

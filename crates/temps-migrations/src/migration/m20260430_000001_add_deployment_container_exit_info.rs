@@ -39,16 +39,6 @@ impl MigrationTrait for Migration {
                             .timestamp_with_time_zone()
                             .null(),
                     )
-                    .add_column(
-                        ColumnDef::new(DeploymentContainers::StartedAt)
-                            .timestamp_with_time_zone()
-                            .null(),
-                    )
-                    .add_column(
-                        ColumnDef::new(DeploymentContainers::CpuLimitCores)
-                            .double()
-                            .null(),
-                    )
                     .to_owned(),
             )
             .await
@@ -64,8 +54,6 @@ impl MigrationTrait for Migration {
                     .drop_column(DeploymentContainers::OomKilled)
                     .drop_column(DeploymentContainers::ErrorMessage)
                     .drop_column(DeploymentContainers::FinishedAt)
-                    .drop_column(DeploymentContainers::StartedAt)
-                    .drop_column(DeploymentContainers::CpuLimitCores)
                     .to_owned(),
             )
             .await
@@ -80,6 +68,4 @@ enum DeploymentContainers {
     OomKilled,
     ErrorMessage,
     FinishedAt,
-    StartedAt,
-    CpuLimitCores,
 }

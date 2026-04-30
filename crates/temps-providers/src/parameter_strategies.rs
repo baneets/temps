@@ -850,7 +850,7 @@ impl ParameterStrategy for MongodbParameterStrategy {
     }
 
     fn updateable_keys(&self) -> Vec<&'static str> {
-        vec!["port", "docker_image"]
+        vec!["port", "docker_image", "replica_set"]
     }
 
     fn readonly_keys(&self) -> Vec<&'static str> {
@@ -863,6 +863,24 @@ impl ParameterStrategy for MongodbParameterStrategy {
         updates: HashMap<String, JsonValue>,
     ) -> Result<(), String> {
         self.validate_for_update(&updates)?;
+
+        // replica_set is one-way: a standalone (None or empty) can be promoted
+        // to a replica set, but unsetting or renaming an existing one would
+        // strand the keyfile and orphan the local.system.replset config.
+        if let Some(new_rs) = updates.get("replica_set") {
+            let new_name = new_rs.as_str().unwrap_or("").trim();
+            let existing_name = existing
+                .get("replica_set")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if !existing_name.is_empty() && new_name != existing_name {
+                return Err(format!(
+                    "Cannot change 'replica_set' from '{}' to '{}': renaming or unsetting an existing replica set is not supported",
+                    existing_name, new_name
+                ));
+            }
+        }
 
         for (key, value) in updates {
             existing.insert(key, value);
