@@ -119,22 +119,38 @@ export function ContainerHeaderBar({
                   <span>{selectedContainer.node_name}</span>
                 </div>
               )}
-              {selectedContainer?.created_at && (
-                <UptimeInline createdAt={selectedContainer.created_at} />
+              {(metrics?.started_at || selectedContainer?.created_at) && (
+                <UptimeInline
+                  startedAt={
+                    metrics?.started_at || selectedContainer?.created_at || null
+                  }
+                />
+              )}
+              {(metrics?.restart_count ?? 0) > 0 && (
+                <RestartCountChip count={metrics?.restart_count ?? 0} />
               )}
               {isRunning && metrics && (
                 <>
                   <div className="inline-flex items-center gap-1.5 tabular-nums">
                     <Cpu className="size-3.5" aria-hidden="true" />
-                    <span>CPU {metrics.cpu_percent.toFixed(1)}%</span>
+                    <span>
+                      CPU {metrics.cpu_percent.toFixed(1)}%
+                      {metrics.cpu_limit_cores != null &&
+                        ` / ${formatCores(metrics.cpu_limit_cores)}`}
+                    </span>
                   </div>
                   <div className="inline-flex items-center gap-1.5 tabular-nums">
                     <HardDrive className="size-3.5" aria-hidden="true" />
                     <span>
                       Mem {formatBytes(metrics.memory_bytes)}
-                      {(metrics.memory_limit_bytes ?? 0) > 0 &&
-                        metrics.memory_percent != null &&
-                        ` / ${metrics.memory_percent.toFixed(0)}%`}
+                      {hasRealMemoryLimit(metrics.memory_limit_bytes) ? (
+                        <>
+                          {' / '}
+                          {formatBytes(metrics.memory_limit_bytes!)}
+                          {metrics.memory_percent != null &&
+                            ` (${metrics.memory_percent.toFixed(0)}%)`}
+                        </>
+                      ) : null}
                     </span>
                   </div>
                   <div className="inline-flex items-center gap-1.5 tabular-nums">
@@ -265,7 +281,8 @@ function ContainerSwitcher({
   onSelect,
 }: ContainerSwitcherProps) {
   const canSwitch = allCount > 1
-  const label = selected?.service_name || selected?.container_name || 'Select container'
+  const label =
+    selected?.service_name || selected?.container_name || 'Select container'
 
   if (!canSwitch) {
     return (
@@ -397,13 +414,19 @@ function StatusPill({ status }: { status?: ContainerStatus }) {
   )
 }
 
-function UptimeInline({ createdAt }: { createdAt: string }) {
-  const [label, setLabel] = useState(() => formatUptime(createdAt))
+function UptimeInline({ startedAt }: { startedAt: string | null }) {
+  // The label is a pure derivation of `startedAt` + wall clock. We only need
+  // an interval to *recompute* — no need to write derived state in an effect.
+  const [tick, setTick] = useState(0)
   useEffect(() => {
-    setLabel(formatUptime(createdAt))
-    const id = setInterval(() => setLabel(formatUptime(createdAt)), 30_000)
+    const id = setInterval(() => setTick((t) => t + 1), 30_000)
     return () => clearInterval(id)
-  }, [createdAt])
+  }, [])
+  // `tick` is intentional — it forces the label to recompute against the
+  // current wall clock every 30s without persisting derived state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const label = useMemo(() => formatUptime(startedAt), [startedAt, tick])
+  if (!label) return null
   return (
     <div className="inline-flex items-center gap-1.5 tabular-nums">
       <span>{label} uptime</span>
@@ -411,8 +434,12 @@ function UptimeInline({ createdAt }: { createdAt: string }) {
   )
 }
 
-function formatUptime(createdAt: string): string {
-  const elapsedMs = Date.now() - new Date(createdAt).getTime()
+function formatUptime(startedAt: string | null): string {
+  if (!startedAt) return ''
+  const t = new Date(startedAt).getTime()
+  if (!Number.isFinite(t)) return ''
+  const elapsedMs = Date.now() - t
+  if (elapsedMs < 0) return ''
   const s = Math.max(0, Math.floor(elapsedMs / 1000))
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
@@ -421,6 +448,43 @@ function formatUptime(createdAt: string): string {
   if (h < 24) return `${h}h ${m % 60}m`
   const d = Math.floor(h / 24)
   return `${d}d ${h % 24}h`
+}
+
+function RestartCountChip({ count }: { count: number }) {
+  // 1 restart is noteworthy, > 3 is alarming. Tone the chip accordingly so
+  // a crash loop is visible from a distance without making a single planned
+  // restart look like an emergency.
+  const tone =
+    count >= 3
+      ? 'bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/30'
+      : 'bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/30'
+  return (
+    <span
+      title={`Container has restarted ${count} time${count === 1 ? '' : 's'} since creation`}
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset tabular-nums ${tone}`}
+    >
+      <RotateCw className="size-3" aria-hidden="true" />
+      Restarted {count}×
+    </span>
+  )
+}
+
+/** Docker reports the host's total memory as the "limit" when no explicit
+ * limit was set on the container. Treat anything above 100 GiB as no-limit
+ * to avoid showing nonsense numbers like "Mem 126 MB / 128 GB". */
+function hasRealMemoryLimit(bytes: number | null | undefined): boolean {
+  if (bytes == null || bytes <= 0) return false
+  const HUNDRED_GIB = 100 * 1024 * 1024 * 1024
+  return bytes < HUNDRED_GIB
+}
+
+function formatCores(cores: number): string {
+  if (cores >= 1) {
+    const rounded = Math.round(cores * 100) / 100
+    return `${rounded} ${rounded === 1 ? 'core' : 'cores'}`
+  }
+  // Sub-core: render in millicores so "0.5" doesn't look ambiguous.
+  return `${Math.round(cores * 1000)}m`
 }
 
 function formatBytes(bytes: number): string {

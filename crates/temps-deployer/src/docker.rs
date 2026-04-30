@@ -1551,6 +1551,9 @@ impl ContainerDeployer for DockerRuntime {
             .await
             .map_err(|e| DeployerError::ContainerNotFound(format!("Container not found: {}", e)))?;
 
+        // Pull host_config out before state/config so we can read the CPU
+        // limit (nano_cpus) without re-borrowing the moved container value.
+        let host_config = container.host_config.clone();
         let state = container.state.unwrap_or_default();
         let config = container.config.unwrap_or_default();
         let container_labels = config.labels.clone().unwrap_or_default();
@@ -1622,7 +1625,7 @@ impl ContainerDeployer for DockerRuntime {
         });
         // FinishedAt comes back as RFC3339; "0001-01-01T00:00:00Z" means
         // never-finished, which we treat as None.
-        let finished_at = state.finished_at.as_deref().and_then(|s| {
+        let parse_docker_ts = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
             if s.is_empty() || s.starts_with("0001-01-01") {
                 None
             } else {
@@ -1630,7 +1633,18 @@ impl ContainerDeployer for DockerRuntime {
                     .ok()
                     .map(|dt| dt.with_timezone(&chrono::Utc))
             }
-        });
+        };
+        let finished_at = state.finished_at.as_deref().and_then(parse_docker_ts);
+        let started_at = state.started_at.as_deref().and_then(parse_docker_ts);
+
+        // Translate Docker's nano_cpus to whole-core units so the UI can
+        // render "0.5 / 1.0 cores" without doing the divide. None when no
+        // limit was set on the container (host_config absent or nano_cpus 0).
+        let cpu_limit_cores = host_config
+            .as_ref()
+            .and_then(|hc| hc.nano_cpus)
+            .filter(|nc| *nc > 0)
+            .map(|nc| nc as f64 / 1_000_000_000.0);
 
         let exit_reason =
             build_exit_reason(&status, oom_killed, exit_code_i64, error_message.as_deref());
@@ -1659,6 +1673,8 @@ impl ContainerDeployer for DockerRuntime {
             oom_killed,
             error_message,
             finished_at,
+            started_at,
+            cpu_limit_cores,
         })
     }
 
@@ -1759,11 +1775,14 @@ impl ContainerDeployer for DockerRuntime {
             container_id: container_info.container_id,
             container_name: container_info.container_name,
             cpu_percent,
+            cpu_limit_cores: container_info.cpu_limit_cores,
             memory_bytes,
             memory_limit_bytes,
             memory_percent,
             network_rx_bytes,
             network_tx_bytes,
+            restart_count: container_info.restart_count,
+            started_at: container_info.started_at,
             timestamp: chrono::Utc::now(),
         })
     }

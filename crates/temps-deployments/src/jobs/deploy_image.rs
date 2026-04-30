@@ -2125,6 +2125,7 @@ mod tests {
                 network_rx_bytes: 2048000,
                 network_tx_bytes: 1024000,
                 timestamp: chrono::Utc::now(),
+                ..Default::default()
             })
         }
 

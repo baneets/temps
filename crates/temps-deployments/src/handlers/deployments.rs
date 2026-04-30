@@ -1785,11 +1785,14 @@ pub async fn stream_container_metrics(
                             "container_id": stats.container_id,
                             "container_name": stats.container_name,
                             "cpu_percent": stats.cpu_percent,
+                            "cpu_limit_cores": stats.cpu_limit_cores,
                             "memory_bytes": stats.memory_bytes,
                             "memory_limit_bytes": stats.memory_limit_bytes,
                             "memory_percent": stats.memory_percent,
                             "network_rx_bytes": stats.network_rx_bytes,
                             "network_tx_bytes": stats.network_tx_bytes,
+                            "restart_count": stats.restart_count,
+                            "started_at": stats.started_at.map(|t| t.to_rfc3339()),
                             "timestamp": stats.timestamp.to_rfc3339(),
                         });
 

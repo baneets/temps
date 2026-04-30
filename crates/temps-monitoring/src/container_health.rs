@@ -633,6 +633,7 @@ mod tests {
                     network_rx_bytes: 0,
                     network_tx_bytes: 0,
                     timestamp: chrono::Utc::now(),
+                    ..Default::default()
                 }),
             }
         }
