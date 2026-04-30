@@ -18,10 +18,10 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { AlertCircle, ChevronDown, ChevronUp, Search } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FilterBar } from './filter-bar'
 import { LogLine } from './log-line'
 
@@ -106,14 +106,36 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
       return element?.getBoundingClientRect().height ?? 0
     },
   })
+  // Poll the environments list. `current_deployment_id` on the entry whose
+  // id == selectedTarget is the per-environment "what's running right now"
+  // pointer; we watch it below to detect redeploys for the env the user
+  // is actually looking at. Polling here is fine because it's a single
+  // small query and avoids a separate per-env endpoint.
   const { data: environments } = useQuery({
     ...getEnvironmentsOptions({
       path: { project_id: project.id },
     }),
+    refetchInterval: 3000,
+    refetchOnWindowFocus: true,
   })
 
-  // Fetch containers for selected environment
-  // IMPORTANT: Always refresh, never use cache
+  const queryClient = useQueryClient()
+
+  // Fetch containers for the selected environment. The list itself doesn't
+  // need polling — instead we watch the project's last-deployment id below
+  // and invalidate this query when it flips, which is a far cheaper and
+  // more deterministic signal than blind polling.
+  const containersQueryKey = useMemo(
+    () =>
+      listContainersOptions({
+        path: {
+          project_id: project.id,
+          environment_id: selectedTarget || 0,
+        },
+      }).queryKey,
+    [project.id, selectedTarget],
+  )
+
   const { data: containersData } = useQuery({
     ...listContainersOptions({
       path: {
@@ -122,11 +144,35 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
       },
     }),
     enabled: !!selectedTarget,
-    staleTime: 0, // Data is immediately stale
-    gcTime: 0, // Don't cache data (React Query v5)
-    refetchOnMount: 'always', // Always refetch on mount
-    refetchOnWindowFocus: true, // Refetch when window gains focus
+    staleTime: 0,
+    gcTime: 0,
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: true,
   })
+
+  // The per-environment `current_deployment_id` is the canonical "what is
+  // running right now" pointer. Watching this (rather than the project-wide
+  // last deployment) means a redeploy in *another* environment won't make
+  // us drop logs we're tailing here.
+  const currentEnv = environments?.find((e) => e.id === selectedTarget)
+  const currentDeploymentId = currentEnv?.current_deployment_id ?? null
+
+  // When the env's current deployment id flips, refresh the container list
+  // so the reconciliation effect can pick up the new containers. Crucially
+  // we DO NOT clear `selectedContainer` here — that creates a window where
+  // the WS effect bails out (no container) and then races with the new
+  // list arriving. Instead we let the reconciliation effect atomically
+  // swap selectedContainer once the new container is visible in the list,
+  // which keeps the WS lifecycle to a single clean reconnect.
+  const previousDeploymentIdRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (currentDeploymentId == null) return
+    const prev = previousDeploymentIdRef.current
+    previousDeploymentIdRef.current = currentDeploymentId
+    if (prev != null && prev !== currentDeploymentId) {
+      queryClient.invalidateQueries({ queryKey: containersQueryKey })
+    }
+  }, [currentDeploymentId, queryClient, containersQueryKey])
 
   // Auto-select first environment when environments are loaded
   useEffect(() => {
@@ -135,12 +181,22 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     }
   }, [environments, selectedTarget])
 
-  // Auto-select first container when containers are loaded
+  // Reconcile selectedContainer with the latest container list:
+  //   - if nothing is selected, pick the first container
+  //   - if the previously-selected container is no longer present (e.g. it
+  //     was destroyed by a redeploy), fall back to the first available
+  // Only acts when the list has at least one container, so a transient
+  // empty-list response during the redeploy window won't yank an
+  // already-good selection out from under the WS.
   useEffect(() => {
-    if (containersData?.containers && containersData.containers.length > 0) {
-      if (!selectedContainer) {
-        setSelectedContainer(containersData.containers[0].container_id)
-      }
+    const containers = containersData?.containers ?? []
+    if (containers.length === 0) return
+
+    const stillExists = containers.some(
+      (c) => c.container_id === selectedContainer,
+    )
+    if (!selectedContainer || !stillExists) {
+      setSelectedContainer(containers[0].container_id)
     }
   }, [containersData, selectedContainer])
 
@@ -151,20 +207,20 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     // Wait for container to be selected - don't connect without a specific container
     if (!selectedContainer) return
 
-    // Prevent multiple simultaneous connections
-    if (isConnectingRef.current) {
-      return
-    }
-
+    // Capture the container this effect-instance is tailing. Used by the
+    // socket handlers below to reject any late frames from a previous
+    // socket whose handlers may still fire while React is unwinding.
+    const targetContainer = selectedContainer
     setLogs([])
     setRetryCount(0)
     setErrorMessage('')
+    isConnectingRef.current = false
 
     let isCleaningUp = false
     let currentRetryCount = 0
 
     const connectWS = () => {
-      if (isConnectingRef.current || isCleaningUp) {
+      if (isCleaningUp) {
         return
       }
 
@@ -190,18 +246,33 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
 
       // Use container-specific endpoint (selectedContainer is guaranteed by the guard above)
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${window.location.host}/api/projects/${project.id}/environments/${selectedTarget}/containers/${selectedContainer}/logs?${params.toString()}`
+      const wsUrl = `${protocol}//${window.location.host}/api/projects/${project.id}/environments/${selectedTarget}/containers/${targetContainer}/logs?${params.toString()}`
 
-      // Close existing connection if any
+      // Close any prior socket and detach its handlers so its in-flight
+      // frames or close events can't bleed into this connection's state.
       if (wsRef.current) {
-        wsRef.current.close(1000, 'Reconnecting')
+        const prev = wsRef.current
+        prev.onopen = null
+        prev.onmessage = null
+        prev.onerror = null
+        prev.onclose = null
+        try {
+          prev.close(1000, 'Reconnecting')
+        } catch {
+          // best-effort
+        }
+        wsRef.current = null
       }
 
       try {
-        wsRef.current = new WebSocket(wsUrl)
+        const ws = new WebSocket(wsUrl)
+        wsRef.current = ws
         setConnectionStatus('connecting')
 
-        wsRef.current.onopen = () => {
+        ws.onopen = () => {
+          // Stale-socket guard: if React already swapped us out before the
+          // open event fired, do nothing.
+          if (ws !== wsRef.current || isCleaningUp) return
           setConnectionStatus('connected')
           currentRetryCount = 0
           setRetryCount(0)
@@ -215,7 +286,11 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
           }
         }
 
-        wsRef.current.onmessage = (event) => {
+        ws.onmessage = (event) => {
+          // Drop frames from any socket that's no longer the active one —
+          // prevents old-deployment "Deployment not found" frames from
+          // bleeding into the freshly-connected container's log buffer.
+          if (ws !== wsRef.current || isCleaningUp) return
           try {
             // Try to parse as JSON first
             const parsed = JSON.parse(event.data)
@@ -246,13 +321,16 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
           }
         }
 
-        wsRef.current.onerror = (error) => {
+        ws.onerror = (error) => {
+          if (ws !== wsRef.current || isCleaningUp) return
           console.error('WebSocket error:', error)
           setErrorMessage('Connection failed')
           isConnectingRef.current = false
         }
 
-        wsRef.current.onclose = (event) => {
+        ws.onclose = (event) => {
+          // Late close from a replaced socket — ignore.
+          if (ws !== wsRef.current) return
           isConnectingRef.current = false
 
           // Don't reconnect if cleaning up or normal closure
@@ -304,17 +382,36 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
         retryTimeoutRef.current = null
       }
 
-      if (wsRef.current) {
-        wsRef.current.close(1000, 'Component unmounting')
+      // Detach handlers before closing so any late events from the closing
+      // socket can't write to React state on the next mounted instance.
+      const ws = wsRef.current
+      if (ws) {
+        ws.onopen = null
+        ws.onmessage = null
+        ws.onerror = null
+        ws.onclose = null
+        try {
+          ws.close(1000, 'Component unmounting')
+        } catch {
+          // best-effort
+        }
         wsRef.current = null
       }
     }
+    // `containersData` is intentionally NOT in this dep array. The polling
+    // refetch (every 3s) updates that object on every tick; if it were a
+    // dep, we would tear down and re-open the WebSocket every 3s and the
+    // user would see the "Connection lost" banner flap forever. The
+    // reconciliation effect above already swaps `selectedContainer` when
+    // the active container disappears, which *does* re-trigger this effect
+    // via the selectedContainer dep — that's the only legitimate reason
+    // to reconnect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     project.id,
     project.slug,
     selectedTarget,
     selectedContainer,
-    containersData,
     startDate,
     endDate,
     tail,
