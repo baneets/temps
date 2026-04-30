@@ -4,7 +4,9 @@ use sea_orm::{ActiveValue::Set, ConnectionTrait, DbErr};
 use serde::{Deserialize, Serialize};
 use temps_core::DBDateTime;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
+// Eq dropped because cpu_limit_cores is f64 (NaN-safe equality isn't a thing).
+// PartialEq is enough for the few diff checks the monitoring loop does.
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "deployment_containers")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -38,6 +40,13 @@ pub struct Model {
     pub error_message: Option<String>,
     /// When the container exited (FinishedAt from Docker inspect).
     pub finished_at: Option<DBDateTime>,
+    /// When the container's main process most recently started (Docker's
+    /// StartedAt). Distinct from `created_at` because the container may
+    /// restart in place after a crash.
+    pub started_at: Option<DBDateTime>,
+    /// CPU limit applied to the container, in whole cores (e.g. 1.0 = 1 vCPU).
+    /// NULL if no limit is configured.
+    pub cpu_limit_cores: Option<f64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

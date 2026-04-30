@@ -173,6 +173,11 @@ impl ContainerHealthMonitor {
         self.check_restart_count(container, &deployment, &info)
             .await;
 
+        // Persist runtime metadata (started_at, cpu_limit_cores) once they're
+        // observed. These don't change while a container is running, so the
+        // diff check in persist_runtime_info skips writes after the first hit.
+        self.persist_runtime_info(container, &info).await;
+
         // Check container status (exited, dead, OOM)
         self.check_container_status(container, &deployment, &info)
             .await;
@@ -181,6 +186,36 @@ impl ContainerHealthMonitor {
         self.check_resource_usage(container, &deployment).await;
 
         Ok(())
+    }
+
+    /// Capture started_at and cpu_limit_cores onto the row so the UI can show
+    /// uptime + configured limits even when the container is stopped (the
+    /// live SSE stream isn't running in that state).
+    async fn persist_runtime_info(
+        &self,
+        container: &deployment_containers::Model,
+        info: &temps_deployer::ContainerInfo,
+    ) {
+        let unchanged = container.started_at == info.started_at
+            && container.cpu_limit_cores == info.cpu_limit_cores;
+        if unchanged {
+            return;
+        }
+        let active = deployment_containers::ActiveModel {
+            id: Set(container.id),
+            started_at: Set(info.started_at),
+            cpu_limit_cores: Set(info.cpu_limit_cores),
+            ..Default::default()
+        };
+        if let Err(e) = deployment_containers::Entity::update(active)
+            .exec(self.db.as_ref())
+            .await
+        {
+            error!(
+                "Failed to persist runtime info for container {} ({}): {}",
+                container.id, container.container_name, e
+            );
+        }
     }
 
     /// Detect restart count increases and fire alarms
@@ -719,6 +754,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
         }
     }
 

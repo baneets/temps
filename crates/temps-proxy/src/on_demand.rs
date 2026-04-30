@@ -1230,6 +1230,8 @@ mod tests {
                 oom_killed: None,
                 error_message: None,
                 finished_at: None,
+                started_at: None,
+                cpu_limit_cores: None,
             }]])
             // NOTIFY
             .append_exec_results(vec![MockExecResult {
@@ -1302,6 +1304,8 @@ mod tests {
                 oom_killed: None,
                 error_message: None,
                 finished_at: None,
+                started_at: None,
+                cpu_limit_cores: None,
             }]])
             // Revert UPDATE sleeping=true
             .append_exec_results(vec![MockExecResult {
@@ -1447,6 +1451,8 @@ mod tests {
                     oom_killed: None,
                     error_message: None,
                     finished_at: None,
+                    started_at: None,
+                    cpu_limit_cores: None,
                 },
                 deployment_containers::Model {
                     id: 2,
@@ -1467,7 +1473,9 @@ mod tests {
                     exit_reason: None,
                     oom_killed: None,
                     error_message: None,
-                    finished_at: None, // Remote node
+                    finished_at: None,
+                    started_at: None,
+                    cpu_limit_cores: None, // Remote node
                 },
                 deployment_containers::Model {
                     id: 3,
@@ -1488,7 +1496,9 @@ mod tests {
                     exit_reason: None,
                     oom_killed: None,
                     error_message: None,
-                    finished_at: None, // Another remote node
+                    finished_at: None,
+                    started_at: None,
+                    cpu_limit_cores: None, // Another remote node
                 },
             ]])
             // NOTIFY
@@ -1816,6 +1826,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -1918,6 +1930,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -1939,6 +1953,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -2030,6 +2046,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -2138,6 +2156,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
         }
     }
 

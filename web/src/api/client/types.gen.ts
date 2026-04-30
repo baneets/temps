@@ -1071,9 +1071,46 @@ export type ChatMessage = {
     tool_calls?: Array<unknown> | null;
 };
 
+export type CliLoginPasswordRequest = {
+    /**
+     * Friendly device name shown to the user when they audit API keys.
+     * Defaults to `cli` when omitted.
+     */
+    device_name?: string | null;
+    /**
+     * User email.
+     */
+    email: string;
+    /**
+     * Six-digit TOTP code. Required only when the user has MFA enabled.
+     */
+    mfa_code?: string | null;
+    /**
+     * Opaque session token returned by a prior `/auth/cli/login` call when
+     * MFA was required. Must be passed back together with `mfa_code`.
+     */
+    mfa_session_token?: string | null;
+    /**
+     * User password.
+     */
+    password: string;
+};
+
 export type CliLoginRequest = {
     password: string;
     username: string;
+};
+
+export type CliLoginResponse = {
+    mfa_required: boolean;
+    mfa_session_token: string;
+} | {
+    api_key: string;
+    email: string;
+    expires_at?: string | null;
+    key_prefix: string;
+    role: string;
+    user_id: number;
 };
 
 /**
@@ -1369,11 +1406,31 @@ export type ContainerDetailResponse = {
      */
     environment_variables: Array<EnvVarResponse>;
     /**
+     * Free-form error string from Docker's container state on exit.
+     */
+    error_message?: string | null;
+    /**
+     * Process exit code reported by Docker. None while still running.
+     */
+    exit_code?: number | null;
+    /**
+     * Human-readable reason the container exited.
+     */
+    exit_reason?: string | null;
+    /**
+     * When the container exited (Docker's FinishedAt). None while running.
+     */
+    finished_at?: string | null;
+    /**
      * Port on the host machine
      */
     host_port?: number | null;
     id: number;
     image_name: string;
+    /**
+     * True when Docker's OOM killer terminated the container.
+     */
+    oom_killed?: boolean | null;
     ready_at?: string | null;
     resource_limits?: null | ResourceLimitsResponse;
     /**
@@ -1395,11 +1452,32 @@ export type ContainerInfoResponse = {
     container_id: string;
     container_name: string;
     created_at: string;
+    /**
+     * Free-form error string from Docker's container state on exit.
+     */
+    error_message?: string | null;
+    /**
+     * Process exit code reported by Docker. None while still running.
+     */
+    exit_code?: number | null;
+    /**
+     * Human-readable reason the container exited (e.g. "OOMKilled",
+     * "Killed by SIGKILL (exit code 137)", "Exit code 1"). None while running.
+     */
+    exit_reason?: string | null;
+    /**
+     * When the container exited (Docker's FinishedAt). None while running.
+     */
+    finished_at?: string | null;
     image_name: string;
     /**
      * Node name where this container is running. None for local (single-node) deployments.
      */
     node_name?: string | null;
+    /**
+     * True when Docker's OOM killer terminated the container.
+     */
+    oom_killed?: boolean | null;
     /**
      * Compose service name (e.g. "web", "redis"). None for single-container deployments.
      */
@@ -15947,6 +16025,68 @@ export type DeactivateApiKeyResponses = {
 };
 
 export type DeactivateApiKeyResponse = DeactivateApiKeyResponses[keyof DeactivateApiKeyResponses];
+
+export type CliLoginData = {
+    body: CliLoginPasswordRequest;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/login';
+};
+
+export type CliLoginErrors = {
+    /**
+     * Invalid credentials or MFA code
+     */
+    401: unknown;
+    /**
+     * User has no role assigned
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliLoginResponses = {
+    /**
+     * Login successful or MFA challenge issued
+     */
+    200: CliLoginResponse;
+};
+
+export type CliLoginResponse2 = CliLoginResponses[keyof CliLoginResponses];
+
+export type CliLogoutData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/logout';
+};
+
+export type CliLogoutErrors = {
+    /**
+     * Not authenticated
+     */
+    401: unknown;
+    /**
+     * Endpoint requires API key authentication
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliLogoutResponses = {
+    /**
+     * API key revoked
+     */
+    204: void;
+};
+
+export type CliLogoutResponse = CliLogoutResponses[keyof CliLogoutResponses];
 
 export type EmailStatusData = {
     body?: never;

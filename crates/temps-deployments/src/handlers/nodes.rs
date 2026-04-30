@@ -2328,6 +2328,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
         };
         let c2 = deployment_containers::Model {
             id: 2,
@@ -2349,6 +2351,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
         };
         let mut c2_updated = c2.clone();
         c2_updated.status = Some("removed".to_string());
@@ -2459,6 +2463,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
         };
         let mut c1_updated = c1.clone();
         c1_updated.status = Some("removed".to_string());

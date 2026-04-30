@@ -1426,6 +1426,48 @@ pub async fn get_container_detail(
         .get_container_restart_count(&container.container_id)
         .await;
 
+    // Resolve configured resource limits the same way the workflow does:
+    // env override first, then project default. This is what was actually
+    // applied to the container at deploy time, modulo Docker honoring it.
+    let resource_limits: Option<crate::handlers::types::ResourceLimitsResponse> = {
+        let env = temps_entities::environments::Entity::find_by_id(environment_id)
+            .one(state.db.as_ref())
+            .await
+            .ok()
+            .flatten();
+        let proj = temps_entities::projects::Entity::find_by_id(project_id)
+            .one(state.db.as_ref())
+            .await
+            .ok()
+            .flatten();
+        let env_cfg = env.as_ref().and_then(|e| e.deployment_config.as_ref());
+        let proj_cfg = proj.as_ref().and_then(|p| p.deployment_config.as_ref());
+        let resolve = |g: fn(
+            &temps_entities::deployment_config::DeploymentConfig,
+        ) -> Option<i32>|
+         -> Option<i32> {
+            env_cfg.and_then(g).or_else(|| proj_cfg.and_then(g))
+        };
+        let cpu_request = resolve(|c| c.cpu_request);
+        let cpu_limit = resolve(|c| c.cpu_limit);
+        let memory_request = resolve(|c| c.memory_request);
+        let memory_limit = resolve(|c| c.memory_limit);
+        if cpu_request.is_some()
+            || cpu_limit.is_some()
+            || memory_request.is_some()
+            || memory_limit.is_some()
+        {
+            Some(crate::handlers::types::ResourceLimitsResponse {
+                cpu_request,
+                cpu_limit,
+                memory_request,
+                memory_limit,
+            })
+        } else {
+            None
+        }
+    };
+
     // Resolve per-service URL only for ports marked as public in preset_config
     let service_url = if let Some(ref svc_name) = container.service_name {
         // Check if this service has a public port
@@ -1495,7 +1537,7 @@ pub async fn get_container_detail(
         host_port: container.host_port,
         environment_variables: env_vars,
         restart_count,
-        resource_limits: None,
+        resource_limits,
         service_name: container.service_name,
         service_url,
         exit_code: container.exit_code,
@@ -1503,6 +1545,8 @@ pub async fn get_container_detail(
         oom_killed: container.oom_killed,
         error_message: container.error_message,
         finished_at: container.finished_at.map(|dt| dt.to_rfc3339()),
+        started_at: container.started_at.map(|dt| dt.to_rfc3339()),
+        cpu_limit_cores: container.cpu_limit_cores,
     };
 
     Ok(Json(response).into_response())

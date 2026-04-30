@@ -717,6 +717,8 @@ mod tests {
             oom_killed: None,
             error_message: None,
             finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
         }
     }
 
