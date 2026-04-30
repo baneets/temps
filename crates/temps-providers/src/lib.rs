@@ -13,9 +13,17 @@ pub use services::*;
 pub mod plugin;
 mod types;
 mod utils;
+pub use externalsvc::ClusterRole;
+pub use externalsvc::PgAutoFailoverState;
 pub use externalsvc::S3Credentials;
 pub use externalsvc::ServiceType;
 pub use query_service::QueryService;
+
+// Re-export `DnsRegistry` so downstream callers that construct
+// `ExternalServiceManager` don't need a separate `temps-dns` dependency.
+// The registry is required by `ExternalServiceManager::new`.
+pub use temps_dns::DnsRegistry;
+
 pub mod handlers;
 
 // Export plugin

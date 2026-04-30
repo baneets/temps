@@ -54,6 +54,12 @@ pub struct RemoteServiceCreateResponse {
     pub container_id: String,
     pub container_name: String,
     pub host_port: u16,
+    /// Container's `temps-overlay` IP, when the container is attached to
+    /// it. `None` from single-host clusters and from agents that haven't
+    /// been upgraded yet (the field is `serde(default)`-able so older
+    /// servers' responses still parse). See ADR-011.
+    #[serde(default)]
+    pub compute_ip: Option<String>,
 }
 
 /// Status of a service on a remote node.
@@ -63,6 +69,28 @@ pub struct RemoteServiceStatus {
     pub container_id: Option<String>,
     pub running: bool,
     pub health: Option<String>,
+}
+
+/// Request body for `exec_in_service`. Mirrors `temps_agent::ServiceExecRequest`
+/// but kept local to avoid a cross-crate dep.
+#[derive(Debug, serde::Serialize)]
+pub struct RemoteExecParams {
+    pub container_name: String,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub environment: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub detach: bool,
+}
+
+/// Response from a remote container exec.
+#[derive(Debug, Deserialize)]
+pub struct RemoteExecResult {
+    pub exit_code: i64,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 impl RemoteServiceClient {
@@ -148,6 +176,22 @@ impl RemoteServiceClient {
     ) -> Result<RemoteServiceStatus, ExternalServiceError> {
         self.agent_get(&format!("/agent/services/{}/status", container_name))
             .await
+    }
+
+    /// Run a command inside a service container on the remote node.
+    /// Used for cluster admin operations (e.g. `pg_autoctl perform
+    /// promotion`) that have to run from the container's perspective.
+    /// Bounded admin commands only — never user input — see the
+    /// CLAUDE.md note on docker exec safety.
+    pub async fn exec_in_service(
+        &self,
+        params: RemoteExecParams,
+    ) -> Result<RemoteExecResult, ExternalServiceError> {
+        info!(
+            "Exec in '{}' on remote node '{}': {:?}",
+            params.container_name, self.node_name, params.command
+        );
+        self.agent_post("/agent/services/exec", &params).await
     }
 
     // -----------------------------------------------------------------------

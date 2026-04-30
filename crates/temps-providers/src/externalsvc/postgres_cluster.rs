@@ -13,7 +13,7 @@ use super::{
 };
 
 /// Default Docker image for pg_auto_failover cluster nodes.
-const DEFAULT_CLUSTER_IMAGE: &str = "gotempsh/postgres-ha:18-bookworm";
+pub(crate) const DEFAULT_CLUSTER_IMAGE: &str = "gotempsh/postgres-ha:18-bookworm-walg";
 
 /// PostgreSQL HA cluster service using pg_auto_failover.
 ///
@@ -225,10 +225,87 @@ impl PostgresClusterService {
                 "        echo 'host all pgautofailover_replicator ::/0 trust' >> \"$HBA\"",
                 "        gosu postgres pg_ctl reload -D \"$PGDATA\" 2>/dev/null || true",
                 "      fi",
+                // Application + tooling user access (ADR-011 follow-up):
+                // pg_auto_failover only auto-generates pg_hba rules for
+                // its infrastructure users (pgautofailover_replicator,
+                // pgautofailover_monitor) and a `<self>:<self> trust`
+                // line that lets a node connect to itself. Every other
+                // caller — sibling cluster members, control-plane health
+                // probes, the Browse Data UI, app containers on the
+                // overlay, the auto-provisioned `temps_explorer`
+                // read-only user, any future per-tenant role we add —
+                // gets "no pg_hba.conf entry for host X, user Y" until
+                // we open it explicitly.
+                //
+                // We add ONE catch-all md5 rule rather than a per-user
+                // entry so future roles work without a code change.
+                // Auth is still password-protected; the rule just
+                // says "if the role exists and the password matches,
+                // let it in from anywhere on the network the cluster
+                // already trusts".
+                //
+                // Order matters in pg_hba — the trust rules above this
+                // block (replicator + auto-generated monitor) match
+                // first, so infrastructure users skip md5 and keep
+                // their cert/trust auth.
+                "      if ! grep -q '^host all all 0\\.0\\.0\\.0/0 md5' \"$HBA\" 2>/dev/null; then",
+                "        echo 'hostssl all all 0.0.0.0/0 md5' >> \"$HBA\"",
+                "        echo 'hostssl all all ::/0 md5' >> \"$HBA\"",
+                "        echo 'host all all 0.0.0.0/0 md5' >> \"$HBA\"",
+                "        echo 'host all all ::/0 md5' >> \"$HBA\"",
+                "        gosu postgres pg_ctl reload -D \"$PGDATA\" 2>/dev/null || true",
+                "      fi",
                 "      break",
                 "    fi",
                 "    sleep 0.5",
                 "  done",
+                ") &",
+                // Separate background loop: ensure the configured app user
+                // exists with the configured password, idempotently.
+                //
+                // Why a separate loop: pg_auto_failover invokes initdb with
+                // `--auth trust` which leaves the superuser without a
+                // password, so external md5 auth always fails until we
+                // ALTER it. We can't run this synchronously at script
+                // top because Postgres isn't listening yet; we can't
+                // batch it with the HBA patcher (which exits on first
+                // patch) because Postgres might come up *after* the HBA
+                // patcher finishes. So this is its own loop that retries
+                // every 2s until the ALTER succeeds, then exits.
+                //
+                // The script writes the SQL to a tempfile rather than
+                // -c'ing it inline so embedded $$ and quotes don't need
+                // round-trip escaping through the bash heredoc. We
+                // chmod the file 644 so `gosu postgres psql` (which
+                // drops to the postgres user) can read it — without
+                // this it lives as 600 root:root, every retry hits
+                // EACCES, the loop times out and the password never
+                // gets ALTERed, breaking auth for every external
+                // caller including Browse Data.
+                "(",
+                "  SQL_FILE=$(mktemp /tmp/temps-app-user-XXXX.sql)",
+                "  cat > \"$SQL_FILE\" <<SQL_EOF",
+                "DO \\$\\$",
+                "BEGIN",
+                "  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${POSTGRES_USER}') THEN",
+                "    CREATE ROLE \"${POSTGRES_USER}\" LOGIN SUPERUSER PASSWORD '${POSTGRES_PASSWORD}';",
+                "  ELSE",
+                "    ALTER ROLE \"${POSTGRES_USER}\" WITH LOGIN SUPERUSER PASSWORD '${POSTGRES_PASSWORD}';",
+                "  END IF;",
+                "END",
+                "\\$\\$;",
+                "SELECT 'CREATE DATABASE \"${POSTGRES_DB}\" OWNER \"${POSTGRES_USER}\"'",
+                "WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${POSTGRES_DB}')\\gexec",
+                "SQL_EOF",
+                "  chmod 644 \"$SQL_FILE\"",
+                "  for _ in $(seq 1 60); do",
+                "    if gosu postgres psql -p \"$NODE_PORT\" -d postgres -v ON_ERROR_STOP=1 -f \"$SQL_FILE\" >/dev/null 2>&1; then",
+                "      rm -f \"$SQL_FILE\"",
+                "      exit 0",
+                "    fi",
+                "    sleep 2",
+                "  done",
+                "  rm -f \"$SQL_FILE\"",
                 ") &",
                 "if [ ! -f \"$PGDATA/pg_autoctl.cfg\" ]; then",
                 "  gosu postgres pg_autoctl create postgres \\",
@@ -376,7 +453,13 @@ impl ExternalService for PostgresClusterService {
     }
 
     fn valid_cluster_roles(&self) -> Vec<&'static str> {
-        vec!["monitor", "primary", "replica"]
+        // Source of truth: the ClusterRole enum. Order matches insertion
+        // order callers expect (monitor first, then data nodes).
+        vec![
+            super::ClusterRole::Monitor.as_str(),
+            super::ClusterRole::Primary.as_str(),
+            super::ClusterRole::Replica.as_str(),
+        ]
     }
 
     async fn init_cluster(
@@ -464,8 +547,6 @@ impl ExternalService for PostgresClusterService {
     ) -> Result<String> {
         let cluster_config = Self::parse_config(config)?;
 
-        // Build multi-host libpq connection string
-        // Only include data nodes (not monitor) in the connection string
         let data_nodes: Vec<&ClusterMemberInfo> = members
             .iter()
             .filter(|m| m.role != "monitor" && m.status == "running")
@@ -475,22 +556,49 @@ impl ExternalService for PostgresClusterService {
             return Err(anyhow::anyhow!("No running data nodes in cluster"));
         }
 
-        let hosts: Vec<String> = data_nodes
-            .iter()
-            .map(|n| format!("{}:{}", n.hostname, n.port))
-            .collect();
-
         let password = cluster_config.password.unwrap_or_default();
         let encoded_password = urlencoding::encode(&password);
 
-        // Multi-host connection string with target_session_attrs for failover
-        let connection_string = format!(
-            "postgresql://{}:{}@{}/{}?target_session_attrs=read-write",
-            cluster_config.username,
-            encoded_password,
-            hosts.join(","),
-            cluster_config.database,
-        );
+        // ADR-011: when every data node carries an FQDN that resolves via
+        // the per-node DNS resolver (`*.temps.local`), collapse the multi-host
+        // libpq workaround into a single VIP. Failover then becomes
+        // a DNS-records flip — apps' next connection (or libpq's automatic
+        // retry) lands on whatever the current primary is, with no
+        // redeploy. The records are owned by the per-cluster reconciler
+        // (Phase 4) and refreshed every few seconds.
+        let all_fqdn = data_nodes
+            .iter()
+            .all(|m| m.hostname.ends_with(".temps.local"));
+
+        let connection_string = if all_fqdn {
+            // Use the per-service VIP. Picks any healthy data node by
+            // multi-A round-robin; libpq + target_session_attrs lands
+            // writes on the primary.
+            //
+            // Port: every data node listens on the same container port, so
+            // we read it off the first member.
+            let port = data_nodes[0].port;
+            format!(
+                "postgresql://{}:{}@{}.temps.local:{}/{}?target_session_attrs=read-write",
+                cluster_config.username, encoded_password, self.name, port, cluster_config.database,
+            )
+        } else {
+            // Legacy / single-host fallback: emit the explicit multi-host
+            // libpq string. Used when DNS isn't wired (no `temps.local`
+            // suffix on member hostnames) — typically integration tests
+            // or pre-DNS deployments.
+            let hosts: Vec<String> = data_nodes
+                .iter()
+                .map(|n| format!("{}:{}", n.hostname, n.port))
+                .collect();
+            format!(
+                "postgresql://{}:{}@{}/{}?target_session_attrs=read-write",
+                cluster_config.username,
+                encoded_password,
+                hosts.join(","),
+                cluster_config.database,
+            )
+        };
 
         Ok(connection_string)
     }
@@ -503,6 +611,7 @@ impl ExternalService for PostgresClusterService {
 /// Build `RemoteServiceCreateParams`-compatible data for a cluster member.
 /// This is called by `ExternalServiceManager` when dispatching member creation
 /// to remote worker nodes via the agent API.
+#[derive(Clone)]
 pub struct ClusterMemberCreateParams {
     pub container_name: String,
     pub image: String,
@@ -528,8 +637,13 @@ impl PostgresClusterService {
         monitor_port: u16,
         member_port: u16,
     ) -> ClusterMemberCreateParams {
-        match member.role.as_str() {
-            "monitor" => ClusterMemberCreateParams {
+        use std::str::FromStr;
+        // Unknown roles fall through the wildcard arm (treated as a data
+        // node) — matches old behaviour. Validation at the create-service
+        // boundary is what actually rejects garbage roles.
+        let role = super::ClusterRole::from_str(&member.role).ok();
+        match role {
+            Some(super::ClusterRole::Monitor) => ClusterMemberCreateParams {
                 container_name: self.monitor_container_name(),
                 // Always use the HA image — parameter_strategies may fill in the
                 // standalone postgres-walg image which lacks pg_autoctl.
@@ -539,11 +653,20 @@ impl PostgresClusterService {
                 container_port: member_port,
                 volume_path: "/var/lib/postgresql".to_string(),
             },
+            // primary | replica | unknown → data-node setup; pg_auto_failover
+            // elects which is which at runtime, so we only need one branch.
             _ => {
-                // primary or replica — same setup, pg_auto_failover assigns roles
                 let fallback_hostname = self.node_container_name(member.ordinal);
                 let node_hostname = member.hostname.as_deref().unwrap_or(&fallback_hostname);
-                let node_name = format!("node-{}", member.ordinal);
+                // Register the pg_autoctl node under the same name as the
+                // docker container, so the Cluster Health view (which is
+                // populated from pg_autoctl) matches the Cluster Members
+                // view (populated from `service_members.container_name`)
+                // line-for-line. The previous `node-{ordinal}` scheme
+                // collided when an ordinal was reused after a delete: the
+                // monitor kept the old "node-2" identity while temps was
+                // already calling the new container "postgres-e3m4-N".
+                let node_name = self.node_container_name(member.ordinal);
 
                 ClusterMemberCreateParams {
                     container_name: self.node_container_name(member.ordinal),

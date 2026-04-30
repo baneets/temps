@@ -61,6 +61,34 @@ pub struct ServiceHealthChecked {
     pub service_id: i32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalServiceClusterMemberAddedAudit {
+    pub context: AuditContext,
+    pub service_id: i32,
+    pub service_name: String,
+    pub member_id: i32,
+    pub role: String,
+    pub ordinal: i32,
+    pub node_id: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalServiceClusterMemberRemovedAudit {
+    pub context: AuditContext,
+    pub service_id: i32,
+    pub service_name: String,
+    pub member_id: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExternalServiceClusterMemberPromotedAudit {
+    pub context: AuditContext,
+    pub service_id: i32,
+    pub service_name: String,
+    pub member_id: i32,
+    pub container_name: String,
+}
+
 impl AuditOperation for ExternalServiceCreatedAudit {
     fn operation_type(&self) -> String {
         "EXTERNAL_SERVICE_CREATED".to_string()
@@ -202,6 +230,75 @@ impl AuditOperation for ExternalServiceProjectUnlinkedAudit {
 impl AuditOperation for ServiceHealthChecked {
     fn operation_type(&self) -> String {
         "EXTERNAL_SERVICE_HEALTH_CHECK_TRIGGERED".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+impl AuditOperation for ExternalServiceClusterMemberAddedAudit {
+    fn operation_type(&self) -> String {
+        "EXTERNAL_SERVICE_CLUSTER_MEMBER_ADDED".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+impl AuditOperation for ExternalServiceClusterMemberRemovedAudit {
+    fn operation_type(&self) -> String {
+        "EXTERNAL_SERVICE_CLUSTER_MEMBER_REMOVED".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+impl AuditOperation for ExternalServiceClusterMemberPromotedAudit {
+    fn operation_type(&self) -> String {
+        "EXTERNAL_SERVICE_CLUSTER_MEMBER_PROMOTED".to_string()
     }
 
     fn user_id(&self) -> i32 {

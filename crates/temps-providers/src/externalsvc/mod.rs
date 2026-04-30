@@ -4,9 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
+pub mod cluster_role;
 pub mod mongodb;
 pub mod postgres;
 pub mod postgres_cluster;
+pub mod postgres_role_reconciler;
 pub mod postgres_upgrade;
 pub mod redis;
 pub mod rustfs;
@@ -27,6 +29,7 @@ mod cluster_integration_tests;
 pub(crate) static DEPLOYMENT_MODE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Re-export services for easier access
+pub use cluster_role::{ClusterRole, PgAutoFailoverState};
 pub use mongodb::MongodbService;
 pub use postgres::PostgresService;
 pub use postgres_cluster::PostgresClusterService;

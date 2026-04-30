@@ -199,6 +199,67 @@ pub struct ServiceMemberInfo {
     pub port: Option<i32>,
     pub status: String,
     pub ordinal: i32,
+    /// Container's IP on the `temps-overlay` multi-host network. Populated
+    /// by the lifecycle hook (ADR-011 Phase 3); `None` on single-host
+    /// clusters where the overlay isn't attached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_ip: Option<String>,
+    /// Last-attempted phase of the async `add_cluster_member` background
+    /// task (e.g. `validating`, `provisioning_container`, `done`,
+    /// `failed`). `None` for members not created through that flow —
+    /// the UI falls back to the `status` column for those.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisioning_step: Option<String>,
+    /// Most recent provisioning failure message, when `status='failed'`.
+    /// Set by the background task so the UI can show *why* the new
+    /// replica didn't come up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisioning_error: Option<String>,
+    /// Live FSM state from the pg_auto_failover monitor (`primary`,
+    /// `secondary`, `catchingup`, `report_lsn`, …). `None` when the
+    /// monitor is unreachable, the service is not a cluster, or the row
+    /// is the monitor itself.
+    ///
+    /// **The UI must render the role badge from this field**, falling
+    /// back to `role` only when `live_state` is null. `role` is now
+    /// config-only (`monitor` or `replica`); flipping the badge to
+    /// "primary" when the monitor elects a new one used to require a
+    /// reconciler that lagged ~5s behind real failovers — and during
+    /// that window the UI showed two primaries. `live_state` is read
+    /// directly from the monitor on every list, so it can never lag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_state: Option<String>,
+}
+
+impl From<crate::services::ServiceMemberInfo> for ServiceMemberInfo {
+    fn from(m: crate::services::ServiceMemberInfo) -> Self {
+        Self {
+            id: m.id,
+            role: m.role,
+            node_id: m.node_id,
+            container_name: m.container_name,
+            hostname: m.hostname,
+            port: m.port,
+            status: m.status,
+            ordinal: m.ordinal,
+            compute_ip: m.compute_ip,
+            provisioning_step: m.provisioning_step,
+            provisioning_error: m.provisioning_error,
+            live_state: m.live_state,
+        }
+    }
+}
+
+/// Request body for adding a single member to a running cluster.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AddClusterMemberRequest {
+    /// Member role. Currently only `replica` is accepted at runtime —
+    /// monitor is a singleton, primary is elected by pg_auto_failover.
+    #[schema(example = "replica")]
+    pub role: String,
+    /// Target worker node ID. Omit or null to run on the control plane.
+    #[serde(default)]
+    pub node_id: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -502,4 +563,71 @@ pub struct EnvironmentVariableInfo {
     /// Whether this variable contains sensitive data (passwords, keys, tokens)
     #[schema(example = false)]
     pub sensitive: bool,
+}
+
+/// One row in the cluster Members table — see `GET /external-services/{id}/cluster-health`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ClusterMemberHealthResponse {
+    pub nodename: String,
+    pub nodehost: String,
+    pub nodeport: i32,
+    /// What the node *last told the monitor* it was. Stale during outages.
+    pub reported_state: String,
+    /// What the monitor *wants* the node to be. Differs from
+    /// `reported_state` mid-transition (failover, demotion, etc.).
+    pub goal_state: String,
+    /// pg_auto_failover liveness signal: `1` healthy, `0` unknown
+    /// (no recent report), `-1` unhealthy.
+    pub health: i32,
+    /// Wall-clock seconds since the node last reported in.
+    pub seconds_since_report: i64,
+    pub candidate_priority: i32,
+    pub replication_quorum: bool,
+    /// `sync` / `quorum` / `async` for secondaries; `null` for the primary.
+    pub sync_state: Option<String>,
+    /// `replay_lag` from `pg_stat_replication`, in milliseconds.
+    pub replay_lag_ms: Option<i64>,
+}
+
+impl From<crate::services::ClusterMemberHealth> for ClusterMemberHealthResponse {
+    fn from(m: crate::services::ClusterMemberHealth) -> Self {
+        Self {
+            nodename: m.nodename,
+            nodehost: m.nodehost,
+            nodeport: m.nodeport,
+            reported_state: m.reported_state,
+            goal_state: m.goal_state,
+            health: m.health,
+            seconds_since_report: m.seconds_since_report,
+            candidate_priority: m.candidate_priority,
+            replication_quorum: m.replication_quorum,
+            sync_state: m.sync_state,
+            replay_lag_ms: m.replay_lag_ms,
+        }
+    }
+}
+
+/// Response body for `GET /external-services/{id}/cluster-health`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ClusterHealthReportResponse {
+    /// ISO-8601 wall-clock when the report was generated.
+    #[schema(example = "2025-10-12T12:15:47.609192Z")]
+    pub checked_at: String,
+    /// Round-trip to query the monitor (ms).
+    pub monitor_response_ms: i64,
+    pub members: Vec<ClusterMemberHealthResponse>,
+    /// Set when the monitor itself was unreachable. UI shows a banner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_error: Option<String>,
+}
+
+impl From<crate::services::ClusterHealthReport> for ClusterHealthReportResponse {
+    fn from(r: crate::services::ClusterHealthReport) -> Self {
+        Self {
+            checked_at: r.checked_at.to_rfc3339(),
+            monitor_response_ms: r.monitor_response_ms,
+            members: r.members.into_iter().map(Into::into).collect(),
+            monitor_error: r.monitor_error,
+        }
+    }
 }

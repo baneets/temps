@@ -142,10 +142,29 @@ pub async fn create_service(
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
 
+    // Wire the per-node Hickory resolver into the container's resolv.conf
+    // so it can resolve `*.temps.local` natively (ADR-011). Falls back to
+    // Docker's default DNS when the overlay isn't bootstrapped yet
+    // (single-host setups). Read from the agent's shared slot — published
+    // by `network_sync` once the bridge gateway is up.
+    let dns_servers: Option<Vec<String>> = state
+        .overlay_bridge_address
+        .read()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|ip| vec![ip.to_string()]));
+    if let Some(ref dns) = dns_servers {
+        tracing::debug!(
+            container = %container_name,
+            dns = ?dns,
+            "Wiring temps DNS into container resolv.conf"
+        );
+    }
+
     let host_config = bollard::models::HostConfig {
         binds: Some(binds),
         port_bindings: Some(port_bindings),
         network_mode: request.network.clone(),
+        dns: dns_servers,
         restart_policy: Some(bollard::models::RestartPolicy {
             name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
             maximum_retry_count: None,
@@ -210,6 +229,21 @@ pub async fn create_service(
         .await
     {
         Ok(response) => {
+            // Best-effort dual-attach to the multi-host overlay (ADR-011).
+            // The container is already on `request.network` (typically
+            // temps-app-network) for legacy single-host routing; this also
+            // attaches it to the temps-overlay bridge so the container has
+            // a routable cross-node IP and can be reached by name from any
+            // worker. Skipped silently if the overlay isn't bootstrapped on
+            // this host yet (single-host mode).
+            if let Err(e) = attach_to_overlay_if_present(docker, &response.id).await {
+                tracing::warn!(
+                    container = %container_name,
+                    error = %e,
+                    "Failed to attach service container to overlay; continuing single-host"
+                );
+            }
+
             // Start the container
             if let Err(e) = docker
                 .start_container(&container_name, None::<StartContainerOptions>)
@@ -227,39 +261,59 @@ pub async fn create_service(
                 .into_response();
             }
 
-            // If any port was auto-assigned, inspect the container to get the actual port
-            if has_auto_assign && first_host_port == 0 {
-                match docker
-                    .inspect_container(&container_name, None::<InspectContainerOptions>)
-                    .await
-                {
-                    Ok(info) => {
+            // Install per-peer overlay routes inside the container's netns
+            // *after* it's running. Without these, traffic destined for
+            // other workers' overlay /24s falls through the container's
+            // default route on the primary network and gets dropped.
+            // Best-effort: failures are logged and don't fail the deploy.
+            if let Err(e) = install_overlay_peer_routes_after_start(
+                docker,
+                &container_name,
+                &state.overlay_peers,
+            )
+            .await
+            {
+                tracing::warn!(
+                    container = %container_name,
+                    error = %e,
+                    "Failed to install overlay peer routes; cross-worker traffic to other CIDRs will fail"
+                );
+            }
+
+            // Inspect once to (a) discover an auto-assigned host port if needed,
+            // and (b) read the temps-overlay IP for the DNS registry (ADR-011).
+            // We always inspect now because the overlay IP is independent of the
+            // auto-assign port path.
+            let mut compute_ip: Option<String> = None;
+            match docker
+                .inspect_container(&container_name, None::<InspectContainerOptions>)
+                .await
+            {
+                Ok(info) => {
+                    if has_auto_assign && first_host_port == 0 {
                         if let Some(network_settings) = &info.network_settings {
                             if let Some(ports) = &network_settings.ports {
-                                // Find the first mapped port
-                                for bindings in ports.values().flatten() {
+                                'find: for bindings in ports.values().flatten() {
                                     for binding in bindings {
                                         if let Some(hp) = &binding.host_port {
                                             if let Ok(port) = hp.parse::<u16>() {
                                                 first_host_port = port;
-                                                break;
+                                                break 'find;
                                             }
                                         }
-                                    }
-                                    if first_host_port > 0 {
-                                        break;
                                     }
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            container = %container_name,
-                            "Failed to inspect container for auto-assigned port: {}",
-                            e
-                        );
-                    }
+                    compute_ip = extract_overlay_ip(&info);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        container = %container_name,
+                        "Failed to inspect container after start: {}",
+                        e
+                    );
                 }
             }
 
@@ -267,6 +321,7 @@ pub async fn create_service(
                 container = %container_name,
                 container_id = %response.id,
                 host_port = first_host_port,
+                compute_ip = ?compute_ip,
                 "Service container created and started"
             );
 
@@ -274,6 +329,7 @@ pub async fn create_service(
                 container_id: response.id,
                 container_name,
                 host_port: first_host_port,
+                compute_ip,
             })
             .into_response()
         }
@@ -440,17 +496,52 @@ pub async fn remove_service(
     {
         Ok(()) => {
             tracing::info!(service = %name, "Service container removed");
-            ok_response("removed".to_string()).into_response()
         }
         Err(e) => {
             tracing::error!(service = %name, "Failed to remove service: {}", e);
-            error_response(
+            return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to remove service '{}': {}", name, e),
             )
-            .into_response()
+            .into_response();
         }
     }
+
+    // Also remove the named data volume so that re-adding a service at
+    // the same container name doesn't inherit stale state. Without this,
+    // a deleted-then-re-added pg_auto_failover member silently picks up
+    // the previous member's `pg_autoctl.cfg` and masquerades as the old
+    // identity, which deadlocks the monitor's view of the cluster.
+    //
+    // Best-effort: a "volume in use" failure here usually means another
+    // container still mounts it (shouldn't happen, but harmless to log
+    // and continue).
+    let volume_name = format!("{}_data", name);
+    match docker
+        .remove_volume(
+            &volume_name,
+            None::<bollard::query_parameters::RemoveVolumeOptions>,
+        )
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(volume = %volume_name, "Service data volume removed");
+        }
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {
+            tracing::debug!(volume = %volume_name, "Service data volume already absent");
+        }
+        Err(e) => {
+            tracing::warn!(
+                volume = %volume_name,
+                "Failed to remove service data volume; cluster may inherit stale state on re-add: {}",
+                e
+            );
+        }
+    }
+
+    ok_response("removed".to_string()).into_response()
 }
 
 /// Get service container status.
@@ -1170,4 +1261,207 @@ fn build_s3_restore_env(request: &ServiceRestoreRequest) -> HashMap<String, Stri
         env.insert("AWS_S3_FORCE_PATH_STYLE".to_string(), "true".to_string());
     }
     env
+}
+
+/// Attach a container to the multi-host overlay network (ADR-011) if the
+/// overlay exists on this host. Best-effort: returns `Ok(())` when the
+/// overlay isn't bootstrapped yet (single-host mode) or when the
+/// container is already attached. Only true bollard errors propagate.
+///
+/// The agent calls this between `create_container` and `start_container`
+/// for service members so they come up dual-attached to both the legacy
+/// `temps-app-network` (so existing single-host code paths keep working)
+/// AND `temps-overlay` (so cross-node DNS records can be written and
+/// apps anywhere on the overlay can reach the container by FQDN VIP).
+async fn attach_to_overlay_if_present(
+    docker: &bollard::Docker,
+    container_id: &str,
+) -> std::result::Result<(), bollard::errors::Error> {
+    let overlay_name = temps_network::NetworkConfig::default().docker_network_name;
+
+    // Cheap existence probe — if the overlay isn't here, skip silently.
+    let networks = docker
+        .list_networks(None::<bollard::query_parameters::ListNetworksOptions>)
+        .await?;
+    let exists = networks
+        .iter()
+        .any(|n| n.name.as_deref() == Some(overlay_name.as_str()));
+    if !exists {
+        tracing::debug!(
+            container = %container_id,
+            overlay = %overlay_name,
+            "overlay network not present on this host; skipping attach (single-host mode)"
+        );
+        return Ok(());
+    }
+
+    let req = bollard::models::NetworkConnectRequest {
+        container: container_id.to_string(),
+        ..Default::default()
+    };
+    match docker.connect_network(&overlay_name, req).await {
+        Ok(()) => {
+            tracing::info!(
+                container = %container_id,
+                overlay = %overlay_name,
+                "attached service container to overlay"
+            );
+            Ok(())
+        }
+        // 403 from /networks/<id>/connect = "already connected" — no-op.
+        Err(bollard::errors::Error::DockerResponseServerError {
+            status_code: 403, ..
+        }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Install per-peer overlay routes inside the container's netns. Must
+/// be called **after** start_container — `docker inspect` only reports
+/// a non-zero PID for running containers, and `nsenter -t <pid> -n`
+/// needs that PID to enter the netns.
+///
+/// Best-effort: any failure is logged and swallowed.
+async fn install_overlay_peer_routes_after_start(
+    docker: &bollard::Docker,
+    container_id: &str,
+    shared_peers: &crate::network_sync::SharedPeers,
+) -> std::result::Result<(), String> {
+    let peers = shared_peers
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    if peers.is_empty() {
+        // No peers known yet — common on a freshly-started worker before
+        // the first network/peers poll completes. The next reconcile
+        // tick will re-attach via this same path or the route will be
+        // missing until the container is recreated; either way we don't
+        // block.
+        return Ok(());
+    }
+
+    let inspect = docker
+        .inspect_container(
+            container_id,
+            None::<bollard::query_parameters::InspectContainerOptions>,
+        )
+        .await
+        .map_err(|e| format!("inspect_container: {}", e))?;
+
+    let pid = inspect
+        .state
+        .as_ref()
+        .and_then(|s| s.pid)
+        .filter(|p| *p > 0)
+        .ok_or_else(|| "container PID not yet available".to_string())? as i32;
+
+    let overlay_name = temps_network::NetworkConfig::default().docker_network_name;
+    let gateway = inspect
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref())
+        .and_then(|nets| nets.get(&overlay_name))
+        .and_then(|net| net.gateway.clone())
+        .filter(|g| !g.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "no gateway recorded for overlay '{}' on container",
+                overlay_name
+            )
+        })?;
+
+    // Convention: Docker assigns interface names in attach order,
+    // primary network first. The overlay attach happens last in the
+    // service-create path, so the overlay interface is `eth1`.
+    temps_network::overlay_routes::install_peer_routes_in_container(pid, "eth1", &gateway, &peers)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Pull the container's IP on the multi-host overlay (`temps-overlay`) out
+/// of a `docker inspect` result. Returns `None` when the container isn't
+/// attached to the overlay (single-host clusters), or when the inspect
+/// payload doesn't carry network settings yet (rare, transient post-start).
+///
+/// We deliberately don't hard-code the network name — the agent's overlay
+/// uses `temps_network::NetworkConfig::default().docker_network_name`, so
+/// reading it from there keeps both call sites agreeing on the spelling.
+fn extract_overlay_ip(info: &bollard::models::ContainerInspectResponse) -> Option<String> {
+    let overlay_name = temps_network::NetworkConfig::default().docker_network_name;
+    let networks = info.network_settings.as_ref()?.networks.as_ref()?;
+    let entry = networks.get(&overlay_name)?;
+    let ip = entry.ip_address.as_deref()?.trim();
+    if ip.is_empty() {
+        None
+    } else {
+        Some(ip.to_string())
+    }
+}
+
+#[cfg(test)]
+mod overlay_ip_tests {
+    use super::*;
+    use bollard::models::{ContainerInspectResponse, EndpointSettings, NetworkSettings};
+
+    fn inspect_with_networks(
+        networks: HashMap<String, EndpointSettings>,
+    ) -> ContainerInspectResponse {
+        ContainerInspectResponse {
+            network_settings: Some(NetworkSettings {
+                networks: Some(networks),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn returns_none_when_overlay_absent() {
+        let mut nets = HashMap::new();
+        nets.insert(
+            "temps-app-network".to_string(),
+            EndpointSettings {
+                ip_address: Some("172.18.0.5".into()),
+                ..Default::default()
+            },
+        );
+        assert!(extract_overlay_ip(&inspect_with_networks(nets)).is_none());
+    }
+
+    #[test]
+    fn returns_ip_when_overlay_present() {
+        let overlay_name = temps_network::NetworkConfig::default().docker_network_name;
+        let mut nets = HashMap::new();
+        nets.insert(
+            overlay_name,
+            EndpointSettings {
+                ip_address: Some("172.20.5.42".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            extract_overlay_ip(&inspect_with_networks(nets)).as_deref(),
+            Some("172.20.5.42")
+        );
+    }
+
+    #[test]
+    fn returns_none_for_empty_ip_string() {
+        let overlay_name = temps_network::NetworkConfig::default().docker_network_name;
+        let mut nets = HashMap::new();
+        nets.insert(
+            overlay_name,
+            EndpointSettings {
+                ip_address: Some("".into()),
+                ..Default::default()
+            },
+        );
+        assert!(extract_overlay_ip(&inspect_with_networks(nets)).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_network_settings_missing() {
+        let info = ContainerInspectResponse::default();
+        assert!(extract_overlay_ip(&info).is_none());
+    }
 }

@@ -44,11 +44,16 @@ impl TempsPlugin for ProvidersPlugin {
             // AuditService should already be registered by the audit plugin
             let docker = context.require_service::<bollard::Docker>();
 
-            // Create ExternalServiceManager
+            // Create ExternalServiceManager. The DnsRegistry is constructed
+            // here (not pulled from the registry) because it's a thin wrapper
+            // over the same DatabaseConnection — going through the registry
+            // would force a plugin-init ordering constraint with no benefit.
+            let dns_registry = Arc::new(temps_dns::DnsRegistry::new(db.clone()));
             let external_service_manager = Arc::new(ExternalServiceManager::new(
                 db.clone(),
                 encryption_service.clone(),
                 docker,
+                dns_registry,
             ));
             context.register_service(external_service_manager.clone());
 
@@ -56,9 +61,20 @@ impl TempsPlugin for ProvidersPlugin {
             // plugin can assemble the resolved (manual + integration) env-var view
             // without depending on this crate.
             let env_vars_provider: Arc<dyn temps_core::ProjectEnvVarsProvider> = Arc::new(
-                ExternalServicesEnvProvider::new(external_service_manager, db.clone()),
+                ExternalServicesEnvProvider::new(external_service_manager.clone(), db.clone()),
             );
             context.register_service(env_vars_provider);
+
+            // Spawn role reconcilers for every cluster that's already
+            // running. Without this, after a control-plane restart no
+            // reconciler exists for any pre-existing cluster and the
+            // role records + service_members.role drift from reality.
+            let manager_for_startup = external_service_manager.clone();
+            tokio::spawn(async move {
+                manager_for_startup
+                    .spawn_reconcilers_for_existing_clusters()
+                    .await;
+            });
 
             tracing::debug!("Providers plugin services registered successfully");
             Ok(())

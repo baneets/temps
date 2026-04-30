@@ -1685,6 +1685,7 @@ mod tests {
             db.clone(),
             encryption_service.clone(),
             docker,
+            Arc::new(temps_providers::DnsRegistry::new(db.clone())),
         ));
 
         // Create GitProviderManager

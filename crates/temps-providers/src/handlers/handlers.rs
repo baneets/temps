@@ -19,16 +19,19 @@ use tracing::{error, info};
 use utoipa::OpenApi;
 
 use super::audit::{
-    ExternalServiceCreatedAudit, ExternalServiceDeletedAudit, ExternalServiceStatusChangedAudit,
-    ExternalServiceUpdatedAudit, ServiceHealthChecked,
+    ExternalServiceClusterMemberAddedAudit, ExternalServiceClusterMemberPromotedAudit,
+    ExternalServiceClusterMemberRemovedAudit, ExternalServiceCreatedAudit,
+    ExternalServiceDeletedAudit, ExternalServiceStatusChangedAudit, ExternalServiceUpdatedAudit,
+    ServiceHealthChecked,
 };
 use crate::handlers::types::{
-    AvailableContainerInfo, CreateExternalServiceRequest, EnvironmentVariableInfo,
+    AddClusterMemberRequest, AvailableContainerInfo, ClusterHealthReportResponse,
+    ClusterMemberHealthResponse, CreateExternalServiceRequest, EnvironmentVariableInfo,
     ExternalServiceDetails, ExternalServiceInfo, HealthCheckEntryResponse,
     ImportExternalServiceRequest, LinkServiceRequest, ProjectServiceInfo, ProviderMetadata,
     RetryClusterRequest, ServiceHealthResponse, ServiceHealthStatusBatchResponse,
-    ServiceHealthStatusEntryResponse, ServiceParameter, ServiceTypeInfo, ServiceTypeRoute,
-    UpdateExternalServiceRequest, UpgradeExternalServiceRequest,
+    ServiceHealthStatusEntryResponse, ServiceMemberInfo, ServiceParameter, ServiceTypeInfo,
+    ServiceTypeRoute, UpdateExternalServiceRequest, UpgradeExternalServiceRequest,
 };
 use crate::services::EnvironmentVariableOptions;
 use temps_core::AuditContext;
@@ -242,6 +245,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/external-services/{id}", delete(delete_service))
         .route("/external-services/{id}/health", get(check_health))
         .route(
+            "/external-services/{id}/cluster-health",
+            get(get_cluster_health),
+        )
+        .route(
             "/external-services/{id}/health-status",
             get(get_service_health_status),
         )
@@ -256,6 +263,15 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         .route("/external-services/{id}/start", post(start_service))
         .route("/external-services/{id}/stop", post(stop_service))
         .route("/external-services/{id}/retry", post(retry_cluster))
+        .route("/external-services/{id}/members", post(add_cluster_member))
+        .route(
+            "/external-services/{id}/members/{member_id}",
+            get(get_cluster_member).delete(remove_cluster_member),
+        )
+        .route(
+            "/external-services/{id}/members/{member_id}/promote",
+            post(promote_cluster_member),
+        )
         .route("/external-services/{id}/upgrade", post(upgrade_service))
         .route(
             "/external-services/{id}/projects",
@@ -741,6 +757,74 @@ async fn check_health(
     }
 }
 
+/// Per-member health for a Postgres HA cluster.
+///
+/// Reads pg_auto_failover's `pgautofailover.node` table from the cluster's
+/// monitor (TLS, autoctl_node) and joins each member with its
+/// `pg_stat_replication` row from the current primary. Returns one row per
+/// data member with role/state, sync state, and replay lag.
+///
+/// Returns `200` with `monitor_error` set when the monitor is briefly
+/// unreachable (UI surfaces it as a banner above the table); the table
+/// itself is empty in that case. Returns `400` for non-cluster services.
+#[utoipa::path(
+    get,
+    path = "/external-services/{id}/cluster-health",
+    tag = "External Services",
+    responses(
+        (status = 200, description = "Per-member cluster health report", body = ClusterHealthReportResponse),
+        (status = 400, description = "Service is not a cluster"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "Service not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("id" = i32, Path, description = "External service ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn get_cluster_health(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesRead);
+
+    // Fetch the underlying row to (a) confirm existence, (b) check topology.
+    let service = match app_state.external_service_manager.get_service(id).await {
+        Ok(s) => s,
+        Err(e) => match e.to_string().as_str() {
+            "Service not found" => {
+                return Err(not_found()
+                    .detail(format!("External service {} not found", id))
+                    .build())
+            }
+            _ => {
+                return Err(internal_server_error()
+                    .detail(format!("Failed to load service {}: {}", id, e))
+                    .build())
+            }
+        },
+    };
+
+    if service.topology != "cluster" {
+        return Err(bad_request()
+            .detail(format!(
+                "Service {} is not a cluster (topology = {:?}); cluster-health is only \
+                 defined for HA clusters",
+                id, service.topology
+            ))
+            .build());
+    }
+
+    let report = app_state
+        .external_service_manager
+        .cluster_health(&service)
+        .await;
+    let body: ClusterHealthReportResponse = report.into();
+    Ok((StatusCode::OK, Json(body)))
+}
+
 /// Persisted health status for an external service
 ///
 /// Returns the latest health probe result recorded by
@@ -1073,6 +1157,315 @@ async fn retry_cluster(
             } else {
                 Err(internal_server_error()
                     .detail(format!("Failed to retry cluster: {}", e))
+                    .build())
+            }
+        }
+    }
+}
+
+/// Begin adding a single new member to a running cluster.
+///
+/// Currently only `replica` members can be added at runtime. The
+/// response is **202 Accepted** as soon as the validation passes and
+/// the placeholder `service_members` row is inserted. The actual
+/// container provisioning + DNS registration runs in the background;
+/// poll `GET /external-services/{id}/members/{member_id}` to watch
+/// `provisioning_step` advance through the phases.
+#[utoipa::path(
+    post,
+    path = "/external-services/{id}/members",
+    tag = "External Services",
+    request_body = AddClusterMemberRequest,
+    responses(
+        (status = 202, description = "Cluster member provisioning started", body = ServiceMemberInfo),
+        (status = 400, description = "Validation failed (wrong topology, status, or role)"),
+        (status = 404, description = "Service not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(("id" = i32, Path, description = "External service ID")),
+    security(("bearer_auth" = []))
+)]
+async fn add_cluster_member(
+    State(app_state): State<Arc<AppState>>,
+    Path(id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+    Json(request): Json<AddClusterMemberRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesWrite);
+
+    match app_state
+        .external_service_manager
+        .add_cluster_member(id, &request.role, request.node_id)
+        .await
+    {
+        Ok(member) => {
+            let service = match app_state.external_service_manager.get_service(id).await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    error!("Failed to load service {} for audit: {}", id, e);
+                    None
+                }
+            };
+
+            let audit = ExternalServiceClusterMemberAddedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                service_id: id,
+                service_name: service.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
+                member_id: member.id,
+                role: member.role.clone(),
+                ordinal: member.ordinal,
+                node_id: member.node_id,
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            let wire: ServiceMemberInfo = member.into();
+            Ok((StatusCode::ACCEPTED, Json(wire)))
+        }
+        Err(e) => {
+            error!("Failed to add cluster member to service {}: {}", id, e);
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                Err(not_found()
+                    .detail(format!("Service {} not found", id))
+                    .build())
+            } else if msg.contains("only valid for")
+                || msg.contains("must be in")
+                || msg.contains("only 'replica'")
+                || msg.contains("only supported for Postgres")
+                || msg.contains("Only 'replica'")
+            {
+                Err(bad_request().detail(msg).build())
+            } else {
+                Err(internal_server_error()
+                    .detail(format!("Failed to add cluster member: {}", e))
+                    .build())
+            }
+        }
+    }
+}
+
+/// Get a single cluster member's current state.
+///
+/// Used by the add-member page to poll the row every second while the
+/// background provisioning task walks through its phases. The
+/// `provisioning_step` field advances through `inserting_row` →
+/// `provisioning_container` → `registering_dns` → `done` (or `failed`
+/// with `provisioning_error` set).
+#[utoipa::path(
+    get,
+    path = "/external-services/{id}/members/{member_id}",
+    tag = "External Services",
+    responses(
+        (status = 200, description = "Cluster member details", body = ServiceMemberInfo),
+        (status = 404, description = "Service or member not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("id" = i32, Path, description = "External service ID"),
+        ("member_id" = i32, Path, description = "Cluster member ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn get_cluster_member(
+    State(app_state): State<Arc<AppState>>,
+    Path((id, member_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesRead);
+
+    match app_state
+        .external_service_manager
+        .get_cluster_member(id, member_id)
+        .await
+    {
+        Ok(member) => {
+            let wire: ServiceMemberInfo = member.into();
+            Ok((StatusCode::OK, Json(wire)))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                Err(not_found().detail(msg).build())
+            } else {
+                Err(internal_server_error()
+                    .detail(format!("Failed to load cluster member: {}", e))
+                    .build())
+            }
+        }
+    }
+}
+
+/// Remove a single member from a running cluster.
+///
+/// Refuses to remove the monitor (singleton), the current primary
+/// (failover first), or any member if the cluster would drop below the
+/// 2-data-member quorum required for HA. Stops + removes the container,
+/// deletes the row, and drops the Tier-2 DNS record.
+#[utoipa::path(
+    delete,
+    path = "/external-services/{id}/members/{member_id}",
+    tag = "External Services",
+    responses(
+        (status = 204, description = "Cluster member removed"),
+        (status = 400, description = "Validation failed (monitor, primary, or quorum violation)"),
+        (status = 404, description = "Service or member not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("id" = i32, Path, description = "External service ID"),
+        ("member_id" = i32, Path, description = "Cluster member ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn remove_cluster_member(
+    State(app_state): State<Arc<AppState>>,
+    Path((id, member_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesWrite);
+
+    match app_state
+        .external_service_manager
+        .remove_cluster_member(id, member_id)
+        .await
+    {
+        Ok(()) => {
+            let service_name = match app_state.external_service_manager.get_service(id).await {
+                Ok(s) => s.name,
+                Err(_) => String::new(),
+            };
+
+            let audit = ExternalServiceClusterMemberRemovedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                service_id: id,
+                service_name,
+                member_id,
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(e) => {
+            error!(
+                "Failed to remove cluster member {} from service {}: {}",
+                member_id, id, e
+            );
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                Err(not_found().detail(msg).build())
+            } else if msg.contains("only valid for")
+                || msg.contains("does not belong")
+                || msg.contains("Cannot remove")
+                || msg.contains("Refusing to remove")
+            {
+                Err(bad_request().detail(msg).build())
+            } else {
+                Err(internal_server_error()
+                    .detail(format!("Failed to remove cluster member: {}", e))
+                    .build())
+            }
+        }
+    }
+}
+
+/// Promote a replica to primary by triggering a pg_auto_failover
+/// failover. The monitor demotes the current primary and the chosen
+/// replica transitions to primary; the role reconciler then refreshes
+/// the role-aliased VIPs (≤30s).
+#[utoipa::path(
+    post,
+    path = "/external-services/{id}/members/{member_id}/promote",
+    tag = "External Services",
+    responses(
+        (status = 202, description = "Promotion initiated"),
+        (status = 400, description = "Validation failed (monitor, already primary, not running, etc.)"),
+        (status = 404, description = "Service or member not found"),
+        (status = 500, description = "pg_autoctl perform promotion failed")
+    ),
+    params(
+        ("id" = i32, Path, description = "External service ID"),
+        ("member_id" = i32, Path, description = "Cluster member ID")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn promote_cluster_member(
+    State(app_state): State<Arc<AppState>>,
+    Path((id, member_id)): Path<(i32, i32)>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ExternalServicesWrite);
+
+    match app_state
+        .external_service_manager
+        .promote_cluster_member(id, member_id)
+        .await
+    {
+        Ok(()) => {
+            // Pull the member name for the audit log; failure here is
+            // non-fatal (we already promoted, the audit row just won't
+            // include the container name).
+            let (service_name, container_name) = match (
+                app_state.external_service_manager.get_service(id).await,
+                app_state
+                    .external_service_manager
+                    .get_cluster_member(id, member_id)
+                    .await,
+            ) {
+                (Ok(svc), Ok(m)) => (svc.name, m.container_name),
+                _ => (String::new(), String::new()),
+            };
+
+            let audit = ExternalServiceClusterMemberPromotedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.clone()),
+                    user_agent: metadata.user_agent.clone(),
+                },
+                service_id: id,
+                service_name,
+                member_id,
+                container_name,
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+
+            Ok(StatusCode::ACCEPTED)
+        }
+        Err(e) => {
+            error!(
+                "Failed to promote cluster member {} on service {}: {}",
+                member_id, id, e
+            );
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                Err(not_found().detail(msg).build())
+            } else if msg.contains("only valid for")
+                || msg.contains("only supported for")
+                || msg.contains("does not belong")
+                || msg.contains("Cannot promote")
+                || msg.contains("already the primary")
+                || msg.contains("not running")
+            {
+                Err(bad_request().detail(msg).build())
+            } else {
+                Err(internal_server_error()
+                    .detail(format!("Failed to promote cluster member: {}", e))
                     .build())
             }
         }
@@ -1592,6 +1985,10 @@ async fn get_service_preview_environment_variables_masked(
         start_service,
         stop_service,
         retry_cluster,
+        add_cluster_member,
+        get_cluster_member,
+        remove_cluster_member,
+        promote_cluster_member,
         link_service_to_project,
         unlink_service_from_project,
         list_service_projects,
@@ -1605,6 +2002,7 @@ async fn get_service_preview_environment_variables_masked(
         get_service_health_status,
         trigger_service_health_check,
         list_service_health_statuses,
+        get_cluster_health,
         super::query_handlers::check_explorer_support,
         super::query_handlers::list_root_containers,
         super::query_handlers::list_containers_at_path,
@@ -1625,6 +2023,8 @@ async fn get_service_preview_environment_variables_masked(
         UpdateExternalServiceRequest,
         UpgradeExternalServiceRequest,
         RetryClusterRequest,
+        AddClusterMemberRequest,
+        ServiceMemberInfo,
         ImportExternalServiceRequest,
         AvailableContainerInfo,
         LinkServiceRequest,
@@ -1634,6 +2034,8 @@ async fn get_service_preview_environment_variables_masked(
         HealthCheckEntryResponse,
         ServiceHealthStatusBatchResponse,
         ServiceHealthStatusEntryResponse,
+        ClusterHealthReportResponse,
+        ClusterMemberHealthResponse,
         super::query_handlers::ExplorerSupportResponse,
         super::query_handlers::ContainerResponse,
         super::query_handlers::EntityResponse,

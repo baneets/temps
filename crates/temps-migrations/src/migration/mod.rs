@@ -71,6 +71,13 @@ mod m20260423_000001_create_oauth_states;
 mod m20260423_000002_add_sync_progress_count;
 mod m20260423_000003_fix_gitlab_nested_group_owner;
 mod m20260424_000001_create_secrets;
+mod m20260427_000001_add_compute_network;
+mod m20260427_000002_add_dns_service_endpoints;
+mod m20260427_000003_add_compute_ip_to_service_members;
+mod m20260427_000004_add_provisioning_to_service_members;
+mod m20260428_000001_unique_member_ordinal;
+mod m20260428_000002_dns_owner_kind_deployment;
+mod m20260428_000003_create_node_route_state;
 
 pub struct Migrator;
 
@@ -145,6 +152,13 @@ impl MigratorTrait for Migrator {
             Box::new(m20260423_000002_add_sync_progress_count::Migration),
             Box::new(m20260423_000003_fix_gitlab_nested_group_owner::Migration),
             Box::new(m20260424_000001_create_secrets::Migration),
+            Box::new(m20260427_000001_add_compute_network::Migration),
+            Box::new(m20260427_000002_add_dns_service_endpoints::Migration),
+            Box::new(m20260427_000003_add_compute_ip_to_service_members::Migration),
+            Box::new(m20260427_000004_add_provisioning_to_service_members::Migration),
+            Box::new(m20260428_000001_unique_member_ordinal::Migration),
+            Box::new(m20260428_000002_dns_owner_kind_deployment::Migration),
+            Box::new(m20260428_000003_create_node_route_state::Migration),
         ]
     }
 }

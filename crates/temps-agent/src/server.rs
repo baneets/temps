@@ -22,11 +22,15 @@ pub fn build_router(
     image_builder: Arc<dyn ImageBuilder>,
     docker: Option<bollard::Docker>,
     config: &AgentConfig,
+    overlay_bridge_address: Arc<std::sync::RwLock<Option<std::net::IpAddr>>>,
+    overlay_peers: crate::network_sync::SharedPeers,
 ) -> Router {
     let state = Arc::new(AgentState {
         container_deployer,
         image_builder,
         docker,
+        overlay_bridge_address,
+        overlay_peers,
     });
 
     let auth = Arc::new(AgentAuth::new(&config.token));
@@ -39,10 +43,30 @@ pub fn build_router(
             "/agent/containers/{id}/stop",
             post(handlers::stop_container),
         )
+        .route(
+            "/agent/containers/{id}/start",
+            post(handlers::start_container),
+        )
+        .route(
+            "/agent/containers/{id}/exec",
+            post(handlers::exec_container),
+        )
+        .route(
+            "/agent/containers/{id}/terminal",
+            get(handlers::terminal_container),
+        )
         .route("/agent/containers/{id}", delete(handlers::remove_container))
         .route(
             "/agent/containers/{id}/logs",
             get(handlers::get_container_logs),
+        )
+        .route(
+            "/agent/containers/{id}/logs/stream",
+            get(handlers::stream_container_logs),
+        )
+        .route(
+            "/agent/containers/{id}/stats",
+            get(handlers::get_container_stats),
         )
         .route(
             "/agent/containers/{id}/info",
@@ -318,11 +342,27 @@ pub async fn start_agent_server(
     image_builder: Arc<dyn ImageBuilder>,
     docker: Option<bollard::Docker>,
     config: AgentConfig,
+    overlay_peers: crate::network_sync::SharedPeers,
+    overlay_bridge_address: Arc<std::sync::RwLock<Option<std::net::IpAddr>>>,
 ) -> Result<(), crate::AgentError> {
-    let router = build_router(container_deployer.clone(), image_builder, docker, &config);
+    let router = build_router(
+        container_deployer.clone(),
+        image_builder,
+        docker,
+        &config,
+        overlay_bridge_address.clone(),
+        overlay_peers.clone(),
+    );
 
     // Start heartbeat background loop (with deployer for container inventory on first beat)
     spawn_heartbeat_loop(&config, container_deployer);
+
+    // Start the multi-host network sync loop. Failures here NEVER stop the
+    // agent — when this node has no compute_cidr allocated (single-host
+    // cluster, or simply not yet allocated), the loop is a no-op. When a
+    // compute_cidr is allocated, the loop bootstraps the overlay and keeps
+    // peers reconciled. `temps join` semantics are unchanged either way.
+    crate::network_sync::spawn(&config, overlay_bridge_address.clone(), overlay_peers);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_address)
         .await

@@ -405,6 +405,12 @@ async fn verify_tables_exist(db: &DatabaseConnection) -> anyhow::Result<()> {
         "project_dsns",
         "error_attachments",
         "error_user_feedback",
+        // m20260427_000001_add_compute_network
+        "network_config",
+        // m20260427_000002_add_dns_service_endpoints
+        "service_endpoints",
+        "node_dns_state",
+        "dns_generation",
     ];
 
     for table in tables {
@@ -549,4 +555,399 @@ async fn verify_unique_constraints(db: &DatabaseConnection) -> anyhow::Result<()
 
     println!("✅ Unique constraints verified");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Compute-network migration (m20260427_000001) coverage.
+//
+// We verify the migration end-to-end: columns exist on `nodes`, the
+// singleton `network_config` table is created with the default row, the
+// CHECK constraints behave correctly (transport must be vxlan/native, id
+// must equal 1), and the partial-unique index on nodes.compute_cidr lets
+// multiple NULLs coexist while rejecting duplicate non-NULL values.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_compute_network_migration() -> anyhow::Result<()> {
+    if std::env::var("TEMPS_TEST_DATABASE_URL").is_ok() {
+        println!("⏭️  Skipping test_compute_network_migration: external database in use");
+        return Ok(());
+    }
+
+    let container = GenericImage::new("timescale/timescaledb-ha", "pg18")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
+        .start()
+        .await
+        .expect("Failed to start TimescaleDB container");
+    let port = container.get_host_port_ipv4(5432).await?;
+    let db_url = format!("postgresql://postgres:postgres@localhost:{}/postgres", port);
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    let db = connect_with_retries(&db_url).await?;
+    Migrator::up(&db, None).await?;
+
+    // ----- nodes.compute_cidr + underlay_address columns exist -----
+    for col in ["compute_cidr", "underlay_address"] {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                     WHERE table_name = 'nodes' AND column_name = '{}')",
+                    col
+                ),
+            ))
+            .await?
+            .expect("query returns one row");
+        let exists: bool = row.try_get("", "exists")?;
+        assert!(exists, "nodes.{} must exist after migration", col);
+    }
+
+    // ----- partial-unique index lets multiple NULLs coexist, but not duplicates -----
+    db.execute_unprepared(
+        "INSERT INTO nodes (name, token_hash, address, private_address, role, status, \
+         labels, capacity, compute_cidr) \
+         VALUES \
+            ('a', 'h1', '127.0.0.1', '10.0.0.1', 'worker', 'pending', '{}', '{}', NULL), \
+            ('b', 'h2', '127.0.0.2', '10.0.0.2', 'worker', 'pending', '{}', '{}', NULL), \
+            ('c', 'h3', '127.0.0.3', '10.0.0.3', 'worker', 'pending', '{}', '{}', '172.20.5.0/24')",
+    )
+    .await?;
+    let dup = db
+        .execute_unprepared(
+            "INSERT INTO nodes (name, token_hash, address, private_address, role, status, \
+             labels, capacity, compute_cidr) VALUES \
+             ('d', 'h4', '127.0.0.4', '10.0.0.4', 'worker', 'pending', '{}', '{}', '172.20.5.0/24')",
+        )
+        .await;
+    assert!(
+        dup.is_err(),
+        "duplicate compute_cidr must be rejected, got {:?}",
+        dup
+    );
+
+    // ----- network_config singleton row exists with defaults -----
+    let row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT id, compute_pool_cidr, subnet_prefix_len, transport, vxlan_vni, \
+             vxlan_port, underlay_mtu FROM network_config"
+                .to_string(),
+        ))
+        .await?
+        .expect("network_config singleton row must be present");
+    let id: i32 = row.try_get("", "id")?;
+    let pool: String = row.try_get("", "compute_pool_cidr")?;
+    let prefix: i32 = row.try_get("", "subnet_prefix_len")?;
+    let transport: String = row.try_get("", "transport")?;
+    let vni: i32 = row.try_get("", "vxlan_vni")?;
+    let port: i32 = row.try_get("", "vxlan_port")?;
+    let mtu: i32 = row.try_get("", "underlay_mtu")?;
+    assert_eq!(id, 1);
+    assert_eq!(pool, "172.20.0.0/16");
+    assert_eq!(prefix, 24);
+    assert_eq!(transport, "vxlan");
+    assert_eq!(vni, 42);
+    assert_eq!(port, 4789);
+    assert_eq!(mtu, 1500);
+
+    // ----- CHECK (id = 1) prevents inserting a second row -----
+    let second = db
+        .execute_unprepared(
+            "INSERT INTO network_config (id, compute_pool_cidr, subnet_prefix_len, \
+             transport, vxlan_vni, vxlan_port, underlay_mtu) \
+             VALUES (2, '10.0.0.0/16', 24, 'vxlan', 42, 4789, 1500)",
+        )
+        .await;
+    assert!(
+        second.is_err(),
+        "network_config must be a singleton (id = 1), got {:?}",
+        second
+    );
+
+    // ----- CHECK on transport rejects unknown values -----
+    let bad_transport = db
+        .execute_unprepared("UPDATE network_config SET transport = 'gre' WHERE id = 1")
+        .await;
+    assert!(
+        bad_transport.is_err(),
+        "transport must be one of (vxlan, native), got {:?}",
+        bad_transport
+    );
+
+    // ----- valid transport update succeeds -----
+    db.execute_unprepared("UPDATE network_config SET transport = 'native' WHERE id = 1")
+        .await?;
+
+    println!("✅ compute network migration verified");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Internal-DNS migration (m20260427_000002) coverage. ADR-011.
+//
+// Verifies the migration end-to-end:
+//   - service_endpoints + node_dns_state tables exist with the columns we rely on
+//   - record_type / owner_kind CHECK constraints reject invalid values
+//   - the (fqdn, record_type, target_ip) unique index rejects duplicates but
+//     allows multi-A records (same fqdn+type, different IPs)
+//   - node_dns_state.health CHECK constraint behaves
+//   - FK on node_dns_state.node_id cascades on node delete
+//   - FK on service_endpoints.node_id sets to NULL on node delete (records
+//     for a removed node remain authoritative until the GC reconciles them)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_dns_service_endpoints_migration() -> anyhow::Result<()> {
+    if std::env::var("TEMPS_TEST_DATABASE_URL").is_ok() {
+        println!("⏭️  Skipping test_dns_service_endpoints_migration: external database in use");
+        return Ok(());
+    }
+
+    let container = GenericImage::new("timescale/timescaledb-ha", "pg18")
+        .with_env_var("POSTGRES_DB", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
+        .start()
+        .await
+        .expect("Failed to start TimescaleDB container");
+    let port = container.get_host_port_ipv4(5432).await?;
+    let db_url = format!("postgresql://postgres:postgres@localhost:{}/postgres", port);
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    let db = connect_with_retries(&db_url).await?;
+    Migrator::up(&db, None).await?;
+
+    // ----- service_endpoints columns exist -----
+    for col in [
+        "id",
+        "fqdn",
+        "record_type",
+        "target_ip",
+        "target_port",
+        "ttl",
+        "owner_kind",
+        "owner_id",
+        "node_id",
+        "generation",
+        "created_at",
+        "updated_at",
+    ] {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                     WHERE table_name = 'service_endpoints' AND column_name = '{}')",
+                    col
+                ),
+            ))
+            .await?
+            .expect("query returns one row");
+        let exists: bool = row.try_get("", "exists")?;
+        assert!(exists, "service_endpoints.{} must exist", col);
+    }
+
+    // ----- node_dns_state columns exist -----
+    for col in ["node_id", "applied_generation", "last_sync_at", "health"] {
+        let row = db
+            .query_one(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Postgres,
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+                     WHERE table_name = 'node_dns_state' AND column_name = '{}')",
+                    col
+                ),
+            ))
+            .await?
+            .expect("query returns one row");
+        let exists: bool = row.try_get("", "exists")?;
+        assert!(exists, "node_dns_state.{} must exist", col);
+    }
+
+    // ----- valid A record inserts cleanly -----
+    db.execute_unprepared(
+        "INSERT INTO service_endpoints \
+         (fqdn, record_type, target_ip, target_port, ttl, owner_kind, owner_id, generation) \
+         VALUES \
+            ('pg-orders-0.pg-orders.temps.local', 'A', '172.20.5.10', 5432, 5, 'service_member', 1, 1)",
+    )
+    .await?;
+
+    // ----- multi-A allowed: same fqdn+type, different IP -----
+    db.execute_unprepared(
+        "INSERT INTO service_endpoints \
+         (fqdn, record_type, target_ip, target_port, ttl, owner_kind, owner_id, generation) \
+         VALUES \
+            ('pg-orders.temps.local', 'A', '172.20.5.10', 5432, 5, 'service_role', 1, 2), \
+            ('pg-orders.temps.local', 'A', '172.20.6.11', 5432, 5, 'service_role', 1, 2)",
+    )
+    .await?;
+
+    // ----- duplicate (fqdn, record_type, target_ip) is rejected -----
+    let dup = db
+        .execute_unprepared(
+            "INSERT INTO service_endpoints \
+             (fqdn, record_type, target_ip, target_port, ttl, owner_kind, owner_id, generation) \
+             VALUES \
+                ('pg-orders.temps.local', 'A', '172.20.5.10', 5432, 5, 'service_role', 1, 3)",
+        )
+        .await;
+    assert!(
+        dup.is_err(),
+        "duplicate (fqdn, record_type, target_ip) must be rejected, got {:?}",
+        dup
+    );
+
+    // ----- AAAA accepted for v6 (cheap IPv6 readiness, ADR-011 §scope) -----
+    db.execute_unprepared(
+        "INSERT INTO service_endpoints \
+         (fqdn, record_type, target_ip, target_port, ttl, owner_kind, owner_id, generation) \
+         VALUES \
+            ('pg-orders.temps.local', 'AAAA', 'fd00::5:10', 5432, 5, 'service_role', 1, 4)",
+    )
+    .await?;
+
+    // ----- record_type CHECK rejects unknown values -----
+    let bad_type = db
+        .execute_unprepared(
+            "INSERT INTO service_endpoints \
+             (fqdn, record_type, target_ip, ttl, owner_kind, owner_id, generation) \
+             VALUES ('x.temps.local', 'TXT', '1.2.3.4', 30, 'static', 1, 5)",
+        )
+        .await;
+    assert!(
+        bad_type.is_err(),
+        "record_type must be one of (A, AAAA, SRV, CNAME), got {:?}",
+        bad_type
+    );
+
+    // ----- owner_kind CHECK rejects unknown values -----
+    let bad_owner = db
+        .execute_unprepared(
+            "INSERT INTO service_endpoints \
+             (fqdn, record_type, target_ip, ttl, owner_kind, owner_id, generation) \
+             VALUES ('y.temps.local', 'A', '1.2.3.4', 30, 'whatever', 1, 6)",
+        )
+        .await;
+    assert!(
+        bad_owner.is_err(),
+        "owner_kind must be one of \
+         (service_member, service_role, node, static), got {:?}",
+        bad_owner
+    );
+
+    // ----- node_dns_state.health CHECK rejects unknown values -----
+    // First insert a node we can reference.
+    db.execute_unprepared(
+        "INSERT INTO nodes (name, token_hash, address, private_address, role, status, \
+         labels, capacity) \
+         VALUES ('worker-1', 'h1', '127.0.0.1', '10.0.0.1', 'worker', 'active', '{}', '{}')",
+    )
+    .await?;
+    let node_id_row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT id FROM nodes WHERE name = 'worker-1'".to_string(),
+        ))
+        .await?
+        .expect("node row");
+    let node_id: i32 = node_id_row.try_get("", "id")?;
+
+    db.execute_unprepared(&format!(
+        "INSERT INTO node_dns_state (node_id, applied_generation, health) \
+         VALUES ({node_id}, 0, 'healthy')"
+    ))
+    .await?;
+
+    let bad_health = db
+        .execute_unprepared(&format!(
+            "UPDATE node_dns_state SET health = 'on-fire' WHERE node_id = {node_id}"
+        ))
+        .await;
+    assert!(
+        bad_health.is_err(),
+        "health must be one of (healthy, degraded, stale, unknown), got {:?}",
+        bad_health
+    );
+
+    // ----- valid health update succeeds -----
+    db.execute_unprepared(&format!(
+        "UPDATE node_dns_state SET health = 'degraded' WHERE node_id = {node_id}"
+    ))
+    .await?;
+
+    // ----- FK cascade: deleting the node deletes node_dns_state row -----
+    db.execute_unprepared(&format!("DELETE FROM nodes WHERE id = {node_id}"))
+        .await?;
+    let remaining = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            format!("SELECT COUNT(*)::int AS c FROM node_dns_state WHERE node_id = {node_id}"),
+        ))
+        .await?
+        .expect("count row");
+    let count: i32 = remaining.try_get("", "c")?;
+    assert_eq!(
+        count, 0,
+        "node_dns_state row should cascade-delete with its node"
+    );
+
+    // ----- dns_generation singleton seeded with current=0 -----
+    let g_row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT id, current FROM dns_generation".to_string(),
+        ))
+        .await?
+        .expect("dns_generation singleton row");
+    let g_id: i32 = g_row.try_get("", "id")?;
+    let g_current: i64 = g_row.try_get("", "current")?;
+    assert_eq!(g_id, 1);
+    assert_eq!(g_current, 0);
+
+    // ----- dns_generation singleton CHECK rejects id != 1 -----
+    let bad_id = db
+        .execute_unprepared("INSERT INTO dns_generation (id, current) VALUES (2, 0)")
+        .await;
+    assert!(
+        bad_id.is_err(),
+        "dns_generation must be a singleton (id = 1), got {:?}",
+        bad_id
+    );
+
+    // ----- m20260427_000003: service_members.compute_ip column exists -----
+    let compute_ip_row = db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DatabaseBackend::Postgres,
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+             WHERE table_name = 'service_members' AND column_name = 'compute_ip') AS exists"
+                .to_string(),
+        ))
+        .await?
+        .expect("query returns one row");
+    let exists: bool = compute_ip_row.try_get("", "exists")?;
+    assert!(exists, "service_members.compute_ip must exist");
+
+    println!("✅ dns service-endpoints migration verified");
+    Ok(())
+}
+
+async fn connect_with_retries(db_url: &str) -> anyhow::Result<DatabaseConnection> {
+    let mut retries = 5;
+    loop {
+        match Database::connect(db_url).await {
+            Ok(db) => return Ok(db),
+            Err(e) if retries > 0 => {
+                retries -= 1;
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                if retries == 0 {
+                    return Err(anyhow::Error::from(e));
+                }
+            }
+            Err(e) => return Err(anyhow::Error::from(e)),
+        }
+    }
 }

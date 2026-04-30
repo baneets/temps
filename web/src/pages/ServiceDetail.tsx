@@ -11,6 +11,7 @@ import {
   stopServiceMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import type { SourceBackupEntry } from '@/api/client/types.gen'
+import { ClusterHealthPanel } from '@/components/storage/ClusterHealthPanel'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
 import { MajorUpgradeDialog } from '@/components/storage/MajorUpgradeDialog'
 import {
@@ -96,6 +97,35 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
+/**
+ * Pick the role label to render for a cluster member.
+ *
+ * `live_state` (from the pg_auto_failover monitor) is the source of
+ * truth for "primary" — it flips the moment failover or a manual
+ * promotion lands. `role` (from `service_members.role`) is config
+ * state: `monitor` for the orchestrator, `replica` for every data
+ * node. Showing the stored `role` for primaries was the bug behind
+ * "two primaries" displayed after a failover.
+ *
+ * Rules:
+ *   - monitor row → "monitor" (no live_state ever)
+ *   - live_state in {primary, single} → "primary"
+ *   - live_state set to anything else (secondary, catchingup, …) → "replica"
+ *   - live_state missing (monitor unreachable, just-created) → fall back
+ *     to stored `role` so the UI doesn't suddenly say "replica" for
+ *     every node when the monitor blips
+ */
+function memberDisplayRole(member: {
+  role: string
+  live_state?: string | null
+}): string {
+  if (member.role === 'monitor') return 'monitor'
+  const live = member.live_state
+  if (live === 'primary' || live === 'single') return 'primary'
+  if (live) return 'replica'
+  return member.role
+}
+
 export function ServiceDetail() {
   const { id } = useParams<{ id: string }>()
   const { setBreadcrumbs } = useBreadcrumbs()
@@ -107,6 +137,15 @@ export function ServiceDetail() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [isBackupDialogOpen, setIsBackupDialogOpen] = useState(false)
   const [isStopDialogOpen, setIsStopDialogOpen] = useState(false)
+  const [memberToRemove, setMemberToRemove] = useState<{
+    id: number
+    container_name: string
+    role: string
+  } | null>(null)
+  const [memberToPromote, setMemberToPromote] = useState<{
+    id: number
+    container_name: string
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [prevStatus, setPrevStatus] = useState<string | undefined>(undefined)
   const [visibleParameters, setVisibleParameters] = useState<Set<string>>(
@@ -144,6 +183,7 @@ export function ServiceDetail() {
       return rows.some((u) => !isTerminal(u.status)) ? 3000 : false
     },
   })
+
 
   // Query for environment variables
   const {
@@ -341,6 +381,92 @@ export function ServiceDetail() {
     },
     onError: (error: Error) => {
       toast.error('Failed to retry cluster', {
+        description: error.message,
+      })
+    },
+  })
+
+  // Remove a single member from a running cluster. The backend refuses
+  // monitor / current primary / quorum-violating removals — surface the
+  // detail message verbatim when that happens.
+  const removeMember = useMutation({
+    mutationFn: async (options: {
+      serviceId: number
+      memberId: number
+    }) => {
+      const response = await fetch(
+        `/api/external-services/${options.serviceId}/members/${options.memberId}`,
+        {
+          method: 'DELETE',
+          credentials: 'include',
+        }
+      )
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(err.detail || 'Failed to remove member')
+      }
+    },
+    onSuccess: () => {
+      toast.success('Cluster member removed')
+      setMemberToRemove(null)
+      refetch()
+      queryClient.invalidateQueries({
+        queryKey: ['cluster-health', parseInt(id!)],
+      })
+    },
+    onError: (error: Error) => {
+      toast.error('Failed to remove cluster member', {
+        description: error.message,
+      })
+    },
+  })
+
+  // Promote a replica to primary by triggering a pg_auto_failover
+  // failover. The backend runs `pg_autoctl perform promotion` inside
+  // the chosen container; the monitor demotes the current primary and
+  // the role reconciler refreshes role-aliased VIPs on its next tick.
+  const promoteMember = useMutation({
+    mutationFn: async (options: {
+      serviceId: number
+      memberId: number
+    }) => {
+      const response = await fetch(
+        `/api/external-services/${options.serviceId}/members/${options.memberId}/promote`,
+        {
+          method: 'POST',
+          credentials: 'include',
+        }
+      )
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(err.detail || 'Failed to promote member')
+      }
+    },
+    onSuccess: () => {
+      toast.success('Promotion initiated', {
+        description:
+          'pg_auto_failover is demoting the current primary; the table will update as roles flip.',
+      })
+      setMemberToPromote(null)
+
+      // Refetch immediately so the dialog closes onto fresh data,
+      // then poll a few more times because pg_auto_failover's FSM
+      // takes a beat to transition (wait_primary → primary) and the
+      // reconciler runs every 5s. After ~10s either the table reflects
+      // reality or the promotion failed silently and the existing 5s
+      // poll will catch the next steady state.
+      const ping = () => {
+        refetch()
+        queryClient.invalidateQueries({
+          queryKey: ['cluster-health', parseInt(id!)],
+        })
+      }
+      ping()
+      const delays = [1500, 3500, 6500, 10000]
+      delays.forEach((ms) => setTimeout(ping, ms))
+    },
+    onError: (error: Error) => {
+      toast.error('Failed to promote cluster member', {
         description: error.message,
       })
     },
@@ -743,80 +869,171 @@ export function ServiceDetail() {
             service.service.members.length > 0 && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <span>Cluster Members</span>
-                    <Badge variant="outline">
-                      {service.service.members.length}
-                    </Badge>
-                  </CardTitle>
-                  <CardDescription>
-                    pg_auto_failover cluster nodes
-                  </CardDescription>
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <span>Cluster Members</span>
+                        <Badge variant="outline">
+                          {service.service.members.length}
+                        </Badge>
+                      </CardTitle>
+                      <CardDescription>
+                        pg_auto_failover cluster nodes
+                      </CardDescription>
+                    </div>
+                    {/* Scaling is only safe while the cluster is healthy and
+                        a monitor exists. Hide the button entirely otherwise
+                        rather than opening a dialog that will fail. */}
+                    {service.service.status === 'running' &&
+                      service.service.service_type === 'postgres' &&
+                      service.service.members.some(
+                        (m) => m.role === 'monitor'
+                      ) && (
+                        <Button variant="outline" size="sm" asChild>
+                          <Link to={`/storage/${id}/members/add`}>
+                            <Plus className="h-4 w-4 mr-1" />
+                            Add Replica
+                          </Link>
+                        </Button>
+                      )}
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2">
-                    {service.service.members.map((member) => (
-                      <div
-                        key={member.id}
-                        className="flex items-center justify-between p-3 rounded-md border border-border"
-                      >
-                        <div className="flex items-center gap-3">
-                          {member.status === 'creating' ? (
-                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground flex-shrink-0" />
-                          ) : (
-                            <Server className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                          )}
-                          <div className="flex flex-col">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-sm">
-                                {member.container_name}
-                              </span>
-                              <Badge
-                                variant={
-                                  member.role === 'primary'
-                                    ? 'default'
-                                    : 'secondary'
-                                }
-                                className="capitalize text-xs"
-                              >
-                                {member.role}
-                              </Badge>
-                            </div>
-                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                              {member.hostname && (
-                                <span>{member.hostname}</span>
-                              )}
-                              {member.port && <span>:{member.port}</span>}
-                              {member.node_id && (
-                                <span className="ml-1">
-                                  (node {member.node_id})
+                    {service.service.members.map((member) => {
+                      // The backend rejects removal of monitor + current
+                      // primary + members below quorum; mirror those rules
+                      // here so the UI doesn't show a button that will
+                      // 400. Quorum check uses the wire-side member list:
+                      // 2 data members minimum to keep HA.
+                      const dataMembers = (
+                        service.service.members ?? []
+                      ).filter((m) => m.role !== 'monitor')
+                      const wouldBreakQuorum =
+                        member.role !== 'monitor' && dataMembers.length <= 2
+                      // "Is this currently the primary?" is a runtime
+                      // question — read live_state, not the stored role
+                      // (which is now `replica` for every data node).
+                      const isLivePrimary =
+                        memberDisplayRole(member) === 'primary'
+                      const removable =
+                        member.role !== 'monitor' &&
+                        !isLivePrimary &&
+                        !wouldBreakQuorum &&
+                        service.service.status === 'running'
+                      // Promote: any running data member that isn't
+                      // already the primary or the monitor. Backend
+                      // re-validates so this is purely UI courtesy.
+                      const promotable =
+                        member.role !== 'monitor' &&
+                        !isLivePrimary &&
+                        member.status === 'running' &&
+                        service.service.status === 'running'
+                      return (
+                        <div
+                          key={member.id}
+                          className="flex items-center justify-between gap-2 p-3 rounded-md border border-border"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            {member.status === 'creating' ? (
+                              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground flex-shrink-0" />
+                            ) : (
+                              <Server className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                            )}
+                            <div className="flex flex-col min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-sm truncate">
+                                  {member.container_name}
                                 </span>
-                              )}
+                                <Badge
+                                  variant={
+                                    memberDisplayRole(member) === 'primary'
+                                      ? 'default'
+                                      : 'secondary'
+                                  }
+                                  className="capitalize text-xs"
+                                >
+                                  {memberDisplayRole(member)}
+                                </Badge>
+                              </div>
+                              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                {member.hostname && (
+                                  <span>{member.hostname}</span>
+                                )}
+                                {member.port && <span>:{member.port}</span>}
+                                {member.node_id && (
+                                  <span className="ml-1">
+                                    (node {member.node_id})
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <Badge
+                              variant={
+                                member.status === 'running'
+                                  ? 'default'
+                                  : member.status === 'failed'
+                                    ? 'destructive'
+                                    : member.status === 'creating'
+                                      ? 'outline'
+                                      : 'secondary'
+                              }
+                              className="capitalize"
+                            >
+                              {member.status === 'creating' && (
+                                <Loader2 className="h-3 w-3 animate-spin mr-1" />
+                              )}
+                              {member.status}
+                            </Badge>
+                            {promotable && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                aria-label={`Promote ${member.container_name} to primary`}
+                                title="Promote to primary"
+                                onClick={() =>
+                                  setMemberToPromote({
+                                    id: member.id,
+                                    container_name: member.container_name,
+                                  })
+                                }
+                              >
+                                <ArrowUpCircle className="h-4 w-4" />
+                              </Button>
+                            )}
+                            {removable && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                                aria-label={`Remove ${member.container_name}`}
+                                onClick={() =>
+                                  setMemberToRemove({
+                                    id: member.id,
+                                    container_name: member.container_name,
+                                    role: member.role,
+                                  })
+                                }
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            )}
+                          </div>
                         </div>
-                        <Badge
-                          variant={
-                            member.status === 'running'
-                              ? 'default'
-                              : member.status === 'failed'
-                                ? 'destructive'
-                                : member.status === 'creating'
-                                  ? 'outline'
-                                  : 'secondary'
-                          }
-                          className="capitalize"
-                        >
-                          {member.status === 'creating' && (
-                            <Loader2 className="h-3 w-3 animate-spin mr-1" />
-                          )}
-                          {member.status}
-                        </Badge>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </CardContent>
               </Card>
+            )}
+
+          {/* Per-cluster live health panel — reads from pg_auto_failover monitor */}
+          {service.service.topology === 'cluster' &&
+            service.service.service_type === 'postgres' && (
+              <ClusterHealthPanel serviceId={service.service.id} />
             )}
 
           {/* Service Configuration Section */}
@@ -1263,6 +1480,104 @@ export function ServiceDetail() {
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               )}
               Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!memberToRemove}
+        onOpenChange={(open) => {
+          if (!open) setMemberToRemove(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove Cluster Member</DialogTitle>
+            <DialogDescription>
+              Stop and remove{' '}
+              <span className="font-mono text-foreground">
+                {memberToRemove?.container_name}
+              </span>{' '}
+              from this cluster. The container, its data volume, and the
+              member's DNS record will be deleted. The pg_auto_failover
+              monitor will mark the node as unreachable; run{' '}
+              <span className="font-mono">pg_autoctl drop node</span>{' '}
+              manually if you want a fully-clean monitor view.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setMemberToRemove(null)}
+              disabled={removeMember.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() =>
+                memberToRemove &&
+                removeMember.mutate({
+                  serviceId: parseInt(id!),
+                  memberId: memberToRemove.id,
+                })
+              }
+              disabled={removeMember.isPending}
+            >
+              {removeMember.isPending && (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              )}
+              Remove Member
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!memberToPromote}
+        onOpenChange={(open) => {
+          if (!open) setMemberToPromote(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Promote to Primary</DialogTitle>
+            <DialogDescription>
+              Trigger a pg_auto_failover failover so{' '}
+              <span className="font-mono text-foreground">
+                {memberToPromote?.container_name}
+              </span>{' '}
+              becomes the new primary. The current primary will be
+              demoted to a replica. Brief write unavailability is
+              expected during the transition (typically a few seconds).
+              The role reconciler refreshes the role-aliased VIP DNS
+              records on its next tick (≤30s) so app connections that
+              use the FQDN follow without restart.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setMemberToPromote(null)}
+              disabled={promoteMember.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() =>
+                memberToPromote &&
+                promoteMember.mutate({
+                  serviceId: parseInt(id!),
+                  memberId: memberToPromote.id,
+                })
+              }
+              disabled={promoteMember.isPending}
+            >
+              {promoteMember.isPending && (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              )}
+              Promote
             </Button>
           </DialogFooter>
         </DialogContent>

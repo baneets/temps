@@ -95,13 +95,14 @@ impl PostgresSource {
             Err(tls_err) => {
                 warn!(
                     "TLS connection failed, falling back to plain connection: {}",
-                    tls_err
+                    format_chain(&tls_err)
                 );
                 let (client, connection) =
                     tokio_postgres::connect(&config, NoTls).await.map_err(|e| {
                         DataError::ConnectionFailed(format!(
                             "PostgreSQL connection failed (TLS error: {}, plain error: {})",
-                            tls_err, e
+                            format_chain(&tls_err),
+                            format_chain(&e),
                         ))
                     })?;
 
@@ -139,23 +140,58 @@ impl PostgresSource {
     /// Attempt a TLS connection using rustls configured to accept self-signed certificates.
     /// Returns the Client after spawning the connection task.
     async fn connect_with_tls(config: &str) -> std::result::Result<Client, tokio_postgres::Error> {
-        let rustls_config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
-            .with_no_client_auth();
-
-        let tls = MakeRustlsConnect::new(rustls_config);
-        let (client, connection) = tokio_postgres::connect(config, tls).await?;
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                error!("PostgreSQL TLS connection error: {}", e);
-            }
-        });
-
-        Ok(client)
+        connect_with_self_signed_tls(config).await
     }
+}
 
+/// Open a `tokio_postgres::Client` against a libpq-style connection string,
+/// negotiating TLS with rustls + a verifier that accepts any server cert
+/// (self-signed included). The spawned connection task is detached and
+/// runs until the returned `Client` is dropped.
+///
+/// Public so probes (cluster health-checks, `pg_auto_failover` monitor
+/// reads, etc.) outside this crate can reuse the same TLS posture without
+/// re-implementing the verifier or wrestling with `MakeRustlsConnect`
+/// directly.
+/// Walk an error's `source()` chain and join messages with `: `.
+/// `tokio_postgres::Error` displays only `"db error"` at the top level
+/// — the actual reason (e.g. "password authentication failed",
+/// "channel binding required") is one or two layers deeper.
+fn format_chain<E: std::error::Error>(err: &E) -> String {
+    let mut out = err.to_string();
+    let mut cause: Option<&dyn std::error::Error> = err.source();
+    while let Some(c) = cause {
+        let s = c.to_string();
+        if !s.is_empty() && !out.ends_with(&s) {
+            out.push_str(": ");
+            out.push_str(&s);
+        }
+        cause = c.source();
+    }
+    out
+}
+
+pub async fn connect_with_self_signed_tls(
+    config: &str,
+) -> std::result::Result<Client, tokio_postgres::Error> {
+    let rustls_config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
+        .with_no_client_auth();
+
+    let tls = MakeRustlsConnect::new(rustls_config);
+    let (client, connection) = tokio_postgres::connect(config, tls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            error!("PostgreSQL TLS connection error: {}", e);
+        }
+    });
+
+    Ok(client)
+}
+
+impl PostgresSource {
     /// Strip SQL string literals to avoid false positives when scanning for dangerous patterns.
     /// Replaces content inside single-quoted strings with empty strings.
     fn strip_sql_string_literals(sql: &str) -> String {
