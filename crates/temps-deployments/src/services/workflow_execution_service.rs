@@ -20,7 +20,8 @@ use tracing::{debug, error, info, warn};
 use crate::jobs::{
     AgentSyncService, BuildImageJobBuilder, ConfigureAgentsJobBuilder, ConfigureCronsJobBuilder,
     CronConfigService, DeployImageJobBuilder, DeployStaticBundleJob, DeployStaticJob,
-    DeploymentTarget, DownloadRepoBuilder, PullExternalImageJob, VerifyLocalImageJob,
+    DeploymentTarget, DownloadRepoBuilder, PullExternalImageJob, ResourceUsage,
+    VerifyLocalImageJob,
 };
 use crate::services::DeploymentJobTracker;
 use temps_screenshots::ScreenshotService;
@@ -681,6 +682,33 @@ impl WorkflowExecutionService {
                             .and_then(|c| c.target_labels.clone())
                     });
 
+                // Resolve CPU/memory limits + requests from environment first,
+                // then project. Each field is resolved independently so an
+                // env override can supply only memory while inheriting the
+                // project's CPU. When neither side configures a value we leave
+                // it unset and the deployer applies no limit at the Docker
+                // layer (rather than the previous hardcoded 1000m/512Mi).
+                let env_cfg = environment.deployment_config.as_ref();
+                let proj_cfg = project.deployment_config.as_ref();
+                let resolve_i32 = |getter: fn(
+                    &temps_entities::deployment_config::DeploymentConfig,
+                ) -> Option<i32>|
+                 -> Option<i32> {
+                    env_cfg
+                        .and_then(getter)
+                        .or_else(|| proj_cfg.and_then(getter))
+                };
+                let cpu_limit_milli = resolve_i32(|c| c.cpu_limit);
+                let memory_limit_mb = resolve_i32(|c| c.memory_limit);
+                let cpu_request_milli = resolve_i32(|c| c.cpu_request);
+                let memory_request_mb = resolve_i32(|c| c.memory_request);
+                let resources = ResourceUsage {
+                    cpu_limit: cpu_limit_milli.map(|m| format!("{}m", m)),
+                    memory_limit: memory_limit_mb.map(|mb| format!("{}Mi", mb)),
+                    cpu_request: cpu_request_milli.map(|m| format!("{}m", m)),
+                    memory_request: memory_request_mb.map(|mb| format!("{}Mi", mb)),
+                };
+
                 let mut builder = DeployImageJobBuilder::new()
                     .job_id(db_job.job_id.clone())
                     .build_job_id(build_job_id)
@@ -695,6 +723,7 @@ impl WorkflowExecutionService {
                     .environment_variables(env_variables)
                     .remote_environment_variables(remote_env_variables)
                     .secrets(secrets)
+                    .resources(resources)
                     .log_id(db_job.log_id.clone())
                     .log_service(self.log_service.clone());
 
@@ -2224,6 +2253,7 @@ mod tests {
                 status: temps_deployer::ContainerStatus::Running,
                 restart_count: Some(0),
                 labels: HashMap::new(),
+                ..Default::default()
             })
         }
 

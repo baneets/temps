@@ -12357,6 +12357,7 @@ dependencies = [
  "aws-smithy-runtime",
  "axum 0.8.6",
  "axum-macros",
+ "base64 0.22.1",
  "bollard",
  "bytes",
  "chrono",

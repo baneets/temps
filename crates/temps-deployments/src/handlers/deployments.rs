@@ -1498,6 +1498,11 @@ pub async fn get_container_detail(
         resource_limits: None,
         service_name: container.service_name,
         service_url,
+        exit_code: container.exit_code,
+        exit_reason: container.exit_reason,
+        oom_killed: container.oom_killed,
+        error_message: container.error_message,
+        finished_at: container.finished_at.map(|dt| dt.to_rfc3339()),
     };
 
     Ok(Json(response).into_response())

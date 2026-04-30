@@ -1225,6 +1225,11 @@ mod tests {
                 ready_at: None,
                 deleted_at: None,
                 node_id: None,
+                exit_code: None,
+                exit_reason: None,
+                oom_killed: None,
+                error_message: None,
+                finished_at: None,
             }]])
             // NOTIFY
             .append_exec_results(vec![MockExecResult {
@@ -1292,6 +1297,11 @@ mod tests {
                 ready_at: None,
                 deleted_at: None,
                 node_id: None,
+                exit_code: None,
+                exit_reason: None,
+                oom_killed: None,
+                error_message: None,
+                finished_at: None,
             }]])
             // Revert UPDATE sleeping=true
             .append_exec_results(vec![MockExecResult {
@@ -1432,6 +1442,11 @@ mod tests {
                     ready_at: None,
                     deleted_at: None,
                     node_id: None,
+                    exit_code: None,
+                    exit_reason: None,
+                    oom_killed: None,
+                    error_message: None,
+                    finished_at: None,
                 },
                 deployment_containers::Model {
                     id: 2,
@@ -1447,7 +1462,12 @@ mod tests {
                     deployed_at: chrono::Utc::now(),
                     ready_at: None,
                     deleted_at: None,
-                    node_id: Some(2), // Remote node
+                    node_id: Some(2),
+                    exit_code: None,
+                    exit_reason: None,
+                    oom_killed: None,
+                    error_message: None,
+                    finished_at: None, // Remote node
                 },
                 deployment_containers::Model {
                     id: 3,
@@ -1463,7 +1483,12 @@ mod tests {
                     deployed_at: chrono::Utc::now(),
                     ready_at: None,
                     deleted_at: None,
-                    node_id: Some(3), // Another remote node
+                    node_id: Some(3),
+                    exit_code: None,
+                    exit_reason: None,
+                    oom_killed: None,
+                    error_message: None,
+                    finished_at: None, // Another remote node
                 },
             ]])
             // NOTIFY
@@ -1786,6 +1811,11 @@ mod tests {
             status: Some("stopped".to_string()),
             service_name: None,
             node_id: None,
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -1883,6 +1913,11 @@ mod tests {
             status: Some("running".to_string()),
             service_name: None,
             node_id: None,
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -1899,6 +1934,11 @@ mod tests {
             status: Some("running".to_string()),
             service_name: None,
             node_id: None,
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,
@@ -1985,6 +2025,11 @@ mod tests {
             status: Some("running".to_string()),
             service_name: None,
             node_id: None,
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
             created_at: chrono::Utc::now(),
             deployed_at: chrono::Utc::now(),
             ready_at: None,

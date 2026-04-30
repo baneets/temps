@@ -26,6 +26,9 @@ use tracing::{error, info};
 pub enum AlarmType {
     ContainerRestart,
     ContainerOomKilled,
+    /// Container exited or died for a reason other than OOM (non-zero exit code,
+    /// killed by signal, Docker reported error, etc.).
+    ContainerCrash,
     HighResponseTime,
     Outage,
     HighCpu,
@@ -39,6 +42,7 @@ impl AlarmType {
         match self {
             Self::ContainerRestart => "container_restart",
             Self::ContainerOomKilled => "container_oom_killed",
+            Self::ContainerCrash => "container_crash",
             Self::HighResponseTime => "high_response_time",
             Self::Outage => "outage",
             Self::HighCpu => "high_cpu",
@@ -52,6 +56,7 @@ impl AlarmType {
         match s {
             "container_restart" => Some(Self::ContainerRestart),
             "container_oom_killed" => Some(Self::ContainerOomKilled),
+            "container_crash" => Some(Self::ContainerCrash),
             "high_response_time" => Some(Self::HighResponseTime),
             "outage" => Some(Self::Outage),
             "high_cpu" => Some(Self::HighCpu),

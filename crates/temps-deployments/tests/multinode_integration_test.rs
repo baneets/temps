@@ -64,6 +64,11 @@ fn make_container(
         ready_at: Some(chrono::Utc::now()),
         deleted_at: None,
         node_id: Some(node_id),
+        exit_code: None,
+        exit_reason: None,
+        oom_killed: None,
+        error_message: None,
+        finished_at: None,
     }
 }
 

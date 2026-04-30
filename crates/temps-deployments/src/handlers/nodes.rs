@@ -2323,6 +2323,11 @@ mod tests {
             ready_at: Some(chrono::Utc::now()),
             deleted_at: None,
             node_id: Some(1),
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
         };
         let c2 = deployment_containers::Model {
             id: 2,
@@ -2339,6 +2344,11 @@ mod tests {
             ready_at: Some(chrono::Utc::now()),
             deleted_at: None,
             node_id: Some(1),
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
         };
         let mut c2_updated = c2.clone();
         c2_updated.status = Some("removed".to_string());
@@ -2444,6 +2454,11 @@ mod tests {
             ready_at: Some(chrono::Utc::now()),
             deleted_at: None,
             node_id: Some(1),
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
         };
         let mut c1_updated = c1.clone();
         c1_updated.status = Some("removed".to_string());

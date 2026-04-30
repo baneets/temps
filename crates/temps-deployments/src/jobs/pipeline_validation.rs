@@ -138,6 +138,7 @@ impl ContainerDeployer for MockContainerDeployer {
             environment_vars: HashMap::new(),
             restart_count: Some(0),
             labels: HashMap::new(),
+            ..Default::default()
         })
     }
 

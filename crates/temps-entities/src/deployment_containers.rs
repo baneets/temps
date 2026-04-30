@@ -25,6 +25,19 @@ pub struct Model {
     pub deleted_at: Option<DBDateTime>,
     /// Node this container runs on. NULL = local node (single-node mode).
     pub node_id: Option<i32>,
+    /// Process exit code from Docker (NULL if still running or never inspected post-exit).
+    pub exit_code: Option<i32>,
+    /// Human-readable reason the container exited, e.g. "OOMKilled",
+    /// "Signal SIGKILL (9)", "Exit code 137". NULL if still running.
+    #[sea_orm(column_type = "String(StringLen::N(255))", nullable)]
+    pub exit_reason: Option<String>,
+    /// True when Docker reported the container was killed by the OOM killer.
+    pub oom_killed: Option<bool>,
+    /// Free-form error string captured from Docker's container state on exit.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub error_message: Option<String>,
+    /// When the container exited (FinishedAt from Docker inspect).
+    pub finished_at: Option<DBDateTime>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

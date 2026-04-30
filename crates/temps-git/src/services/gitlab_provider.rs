@@ -642,27 +642,6 @@ impl GitProviderService for GitLabProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<Branch>, GitProviderError> {
-        let client = self.get_client();
-        let headers = self.get_headers(access_token);
-
-        let project_path = format!("{}/{}", owner, repo);
-        let encoded_path = urlencoding::encode(&project_path);
-        let url = format!(
-            "{}/api/v4/projects/{}/repository/branches",
-            self.base_url, encoded_path
-        );
-
-        let response = self
-            .send_with_retry(|| client.get(&url).headers(headers.clone()))
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(GitProviderError::ApiError(format!(
-                "Failed to list branches: {}",
-                response.status()
-            )));
-        }
-
         #[derive(Deserialize)]
         struct GitLabBranch {
             name: String,
@@ -675,21 +654,59 @@ impl GitProviderService for GitLabProvider {
             id: String,
         }
 
-        let gitlab_branches: Vec<GitLabBranch> = response
-            .json()
-            .await
-            .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
 
-        let branches = gitlab_branches
-            .into_iter()
-            .map(|b| Branch {
+        let project_path = format!("{}/{}", owner, repo);
+        let encoded_path = urlencoding::encode(&project_path);
+
+        // GitLab defaults to 20 results per page; without an explicit pager the
+        // selected branch may fall outside the first page on busy repos and the
+        // UI then can't show it. Mirror the public-repo pattern: per_page=100,
+        // walk pages until short or we hit the 1000-branch safety cap.
+        let mut all_branches: Vec<Branch> = Vec::new();
+        let mut page: u32 = 1;
+        let per_page: usize = 100;
+
+        loop {
+            let url = format!(
+                "{}/api/v4/projects/{}/repository/branches?per_page={}&page={}",
+                self.base_url, encoded_path, per_page, page
+            );
+
+            let response = self
+                .send_with_retry(|| client.get(&url).headers(headers.clone()))
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(GitProviderError::ApiError(format!(
+                    "Failed to list branches for {}/{} (page {}): {}",
+                    owner,
+                    repo,
+                    page,
+                    response.status()
+                )));
+            }
+
+            let gitlab_branches: Vec<GitLabBranch> = response
+                .json()
+                .await
+                .map_err(|e| GitProviderError::ApiError(e.to_string()))?;
+
+            let count = gitlab_branches.len();
+            all_branches.extend(gitlab_branches.into_iter().map(|b| Branch {
                 name: b.name,
                 commit_sha: b.commit.id,
                 protected: b.protected,
-            })
-            .collect();
+            }));
 
-        Ok(branches)
+            if count < per_page || all_branches.len() >= 1000 {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_branches)
     }
 
     async fn list_tags(
@@ -698,28 +715,6 @@ impl GitProviderService for GitLabProvider {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<GitProviderTag>, GitProviderError> {
-        let client = self.get_client();
-        let headers = self.get_headers(access_token);
-
-        let project_path = format!("{}/{}", owner, repo);
-        let encoded_path = urlencoding::encode(&project_path);
-
-        let url = format!(
-            "{}/api/v4/projects/{}/repository/tags",
-            self.base_url, encoded_path
-        );
-
-        let response = self
-            .send_with_retry(|| client.get(&url).headers(headers.clone()))
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(GitProviderError::ApiError(format!(
-                "Failed to list tags: {}",
-                response.status()
-            )));
-        }
-
         #[derive(Deserialize)]
         struct GitLabTag {
             name: String,
@@ -731,19 +726,55 @@ impl GitProviderService for GitLabProvider {
             id: String,
         }
 
-        let gitlab_tags: Vec<GitLabTag> = response.json().await.map_err(|e| {
-            GitProviderError::ApiError(format!("Failed to parse tags response: {}", e))
-        })?;
+        let client = self.get_client();
+        let headers = self.get_headers(access_token);
 
-        let tags = gitlab_tags
-            .into_iter()
-            .map(|t| GitProviderTag {
+        let project_path = format!("{}/{}", owner, repo);
+        let encoded_path = urlencoding::encode(&project_path);
+
+        // Paginate: GitLab's default 20-per-page truncates large tag sets. Cap
+        // at 1000 tags to bound memory on huge repos.
+        let mut all_tags: Vec<GitProviderTag> = Vec::new();
+        let mut page: u32 = 1;
+        let per_page: usize = 100;
+
+        loop {
+            let url = format!(
+                "{}/api/v4/projects/{}/repository/tags?per_page={}&page={}",
+                self.base_url, encoded_path, per_page, page
+            );
+
+            let response = self
+                .send_with_retry(|| client.get(&url).headers(headers.clone()))
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(GitProviderError::ApiError(format!(
+                    "Failed to list tags for {}/{} (page {}): {}",
+                    owner,
+                    repo,
+                    page,
+                    response.status()
+                )));
+            }
+
+            let gitlab_tags: Vec<GitLabTag> = response.json().await.map_err(|e| {
+                GitProviderError::ApiError(format!("Failed to parse tags response: {}", e))
+            })?;
+
+            let count = gitlab_tags.len();
+            all_tags.extend(gitlab_tags.into_iter().map(|t| GitProviderTag {
                 name: t.name,
                 commit_sha: t.commit.id,
-            })
-            .collect();
+            }));
 
-        Ok(tags)
+            if count < per_page || all_tags.len() >= 1000 {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all_tags)
     }
 
     async fn get_file_content(

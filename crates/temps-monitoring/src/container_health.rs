@@ -7,7 +7,7 @@
 //! - Containers that exited unexpectedly
 
 use crate::alarm_service::{AlarmService, AlarmSeverity, AlarmType, FireAlarmRequest};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use std::collections::HashMap;
 use std::sync::Arc;
 use temps_deployer::ContainerDeployer;
@@ -276,6 +276,11 @@ impl ContainerHealthMonitor {
 
         match &info.status {
             temps_deployer::ContainerStatus::Exited | temps_deployer::ContainerStatus::Dead => {
+                // Persist the exit metadata first so the UI/API can surface
+                // *why* even if the alarm path is skipped (e.g. on-demand
+                // sleep).
+                self.persist_exit_info(container, info).await;
+
                 // Skip alarm if this is an on-demand environment that was intentionally
                 // put to sleep. The on-demand manager stops containers on idle — that's
                 // expected, not an error.
@@ -288,14 +293,26 @@ impl ContainerHealthMonitor {
                 }
 
                 warn!(
-                    "Container {} ({}) is in '{}' state",
-                    container.id, container.container_name, status_str
+                    "Container {} ({}) is in '{}' state (reason: {})",
+                    container.id,
+                    container.container_name,
+                    status_str,
+                    info.exit_reason.as_deref().unwrap_or("unknown")
                 );
 
-                // Determine if it's an OOM kill by checking metadata
-                // Docker sets OOMKilled in state, which we can check via restart_count behavior
-                let alarm_type = AlarmType::ContainerOomKilled;
+                // Pick OOM alarm only when Docker actually flagged OOMKilled;
+                // a plain non-zero exit is a different signal.
+                let alarm_type = if info.oom_killed == Some(true) {
+                    AlarmType::ContainerOomKilled
+                } else {
+                    AlarmType::ContainerCrash
+                };
                 let severity = AlarmSeverity::Critical;
+
+                let exit_reason_str = info
+                    .exit_reason
+                    .clone()
+                    .unwrap_or_else(|| status_str.clone());
 
                 let request = FireAlarmRequest {
                     project_id: deployment.project_id,
@@ -304,15 +321,23 @@ impl ContainerHealthMonitor {
                     container_id: Some(container.id),
                     alarm_type,
                     severity,
-                    title: format!("Container '{}' is {}", container.container_name, status_str),
+                    title: format!(
+                        "Container '{}' is {}: {}",
+                        container.container_name, status_str, exit_reason_str
+                    ),
                     message: format!(
-                        "Container '{}' has exited or died unexpectedly. Status: {}",
-                        container.container_name, status_str
+                        "Container '{}' has exited or died unexpectedly. Status: {}. Reason: {}",
+                        container.container_name, status_str, exit_reason_str
                     ),
                     metadata: Some(serde_json::json!({
                         "container_name": container.container_name,
                         "container_id": container.container_id,
                         "status": status_str,
+                        "exit_code": info.exit_code,
+                        "exit_reason": info.exit_reason,
+                        "oom_killed": info.oom_killed,
+                        "error_message": info.error_message,
+                        "finished_at": info.finished_at.map(|d| d.to_rfc3339()),
                     })),
                 };
 
@@ -326,6 +351,47 @@ impl ContainerHealthMonitor {
             _ => {
                 // Container is in a healthy state, nothing to do
             }
+        }
+    }
+
+    /// Write Docker's exit metadata onto the deployment_containers row so the
+    /// API can return it long after the alarm fires. Skips writes when nothing
+    /// changed, so this is safe to call every poll cycle.
+    async fn persist_exit_info(
+        &self,
+        container: &deployment_containers::Model,
+        info: &temps_deployer::ContainerInfo,
+    ) {
+        let new_status = Some(info.status.to_string());
+        let unchanged = container.status == new_status
+            && container.exit_code == info.exit_code
+            && container.exit_reason == info.exit_reason
+            && container.oom_killed == info.oom_killed
+            && container.error_message == info.error_message
+            && container.finished_at == info.finished_at;
+        if unchanged {
+            return;
+        }
+
+        let active = deployment_containers::ActiveModel {
+            id: Set(container.id),
+            status: Set(new_status),
+            exit_code: Set(info.exit_code),
+            exit_reason: Set(info.exit_reason.clone()),
+            oom_killed: Set(info.oom_killed),
+            error_message: Set(info.error_message.clone()),
+            finished_at: Set(info.finished_at),
+            ..Default::default()
+        };
+
+        if let Err(e) = deployment_containers::Entity::update(active)
+            .exec(self.db.as_ref())
+            .await
+        {
+            error!(
+                "Failed to persist exit info for container {} ({}): {}",
+                container.id, container.container_name, e
+            );
         }
     }
 
@@ -555,6 +621,7 @@ mod tests {
                     environment_vars: std::collections::HashMap::new(),
                     restart_count: Some(restart_count),
                     labels: std::collections::HashMap::new(),
+                    ..Default::default()
                 }),
                 stats: tokio::sync::Mutex::new(ContainerStats {
                     container_id: "abc123".to_string(),
@@ -646,6 +713,11 @@ mod tests {
             ready_at: None,
             deleted_at: None,
             node_id: None,
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
         }
     }
 

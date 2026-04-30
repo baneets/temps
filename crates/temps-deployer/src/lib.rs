@@ -266,6 +266,44 @@ pub struct ContainerInfo {
     /// Docker labels set on the container (e.g., `sh.temps.managed`, `sh.temps.project_id`).
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// Process exit code reported by Docker. None while the container is still running.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub exit_code: Option<i32>,
+    /// Human-readable reason the container exited (e.g. "OOMKilled",
+    /// "Signal SIGKILL (9)", "Exit code 137"). None while still running.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub exit_reason: Option<String>,
+    /// True when Docker's OOM killer terminated the container.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub oom_killed: Option<bool>,
+    /// Error string captured from Docker's container state on exit.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error_message: Option<String>,
+    /// When the container exited (Docker's FinishedAt). None while still running.
+    #[schema(value_type = Option<String>, example = "2025-10-12T12:16:47.609192Z")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub finished_at: Option<UtcDateTime>,
+}
+
+impl Default for ContainerInfo {
+    fn default() -> Self {
+        Self {
+            container_id: String::new(),
+            container_name: String::new(),
+            image_name: String::new(),
+            status: ContainerStatus::Created,
+            created_at: chrono::Utc::now(),
+            ports: Vec::new(),
+            environment_vars: HashMap::new(),
+            restart_count: None,
+            labels: HashMap::new(),
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
+        }
+    }
 }
 
 /// Container performance statistics (CPU, memory, network)
@@ -706,6 +744,7 @@ mod tests {
             environment_vars: env_vars,
             restart_count: Some(0),
             labels: HashMap::new(),
+            ..Default::default()
         };
 
         assert_eq!(info.container_id, "abc123");

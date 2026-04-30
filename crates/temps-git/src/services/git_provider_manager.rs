@@ -457,6 +457,101 @@ impl GitProviderManager {
         }
     }
 
+    /// Unconditionally refresh the OAuth/GitLab App access token for a
+    /// connection, bypassing the expires_at check. Use this after a clone or
+    /// download fails with an auth error: the stored token may have been
+    /// revoked or invalidated server-side even if our recorded expiry says
+    /// otherwise. Falls back to `validate_and_refresh_connection_token` for
+    /// auth methods that don't use refresh tokens (PAT, GitHub App).
+    pub async fn force_refresh_connection_token(
+        &self,
+        connection_id: i32,
+    ) -> Result<String, GitProviderManagerError> {
+        use chrono::Utc;
+        use sea_orm::{ActiveModelTrait, Set};
+
+        let connection = self.get_connection(connection_id).await?;
+        let provider = self.get_provider(connection.provider_id).await?;
+
+        let auth_config = self.decrypt_sensitive_data(&provider.auth_config).await?;
+        let auth_method = serde_json::from_value::<AuthMethod>(auth_config).map_err(|e| {
+            GitProviderManagerError::InvalidConfiguration(format!("Invalid auth config: {}", e))
+        })?;
+
+        match auth_method {
+            // OAuth / GitLab App: always exchange the refresh token for a new pair.
+            AuthMethod::OAuth { .. } | AuthMethod::GitLabApp { .. } => {
+                let refresh_encrypted = connection.refresh_token.as_ref().ok_or_else(|| {
+                    GitProviderManagerError::InvalidConfiguration(
+                        "Cannot force-refresh: no refresh token stored for connection".to_string(),
+                    )
+                })?;
+                let refresh_token = self.decrypt_string(refresh_encrypted).await?;
+
+                let access_token_old = match connection.access_token.as_ref() {
+                    Some(enc) => self.decrypt_string(enc).await?,
+                    None => String::new(),
+                };
+
+                info!(
+                    "Force-refreshing OAuth/GitLabApp token for connection {} after auth failure",
+                    connection_id
+                );
+                let provider_service = self.get_provider_service(provider.id).await?;
+                let (new_access_token, new_refresh_token) = provider_service
+                    .validate_and_refresh_token(&access_token_old, Some(&refresh_token))
+                    .await?;
+
+                let encrypted_access_token = self.encrypt_string(&new_access_token).await?;
+                let mut active_connection: git_provider_connections::ActiveModel =
+                    connection.into();
+                active_connection.access_token = Set(Some(encrypted_access_token));
+                if let Some(new_refresh) = new_refresh_token {
+                    let encrypted_refresh = self.encrypt_string(&new_refresh).await?;
+                    active_connection.refresh_token = Set(Some(encrypted_refresh));
+                }
+                active_connection.token_expires_at =
+                    Set(Some(Utc::now() + chrono::Duration::hours(1)));
+                active_connection.updated_at = Set(Utc::now());
+                active_connection.update(self.db.as_ref()).await?;
+
+                Ok(new_access_token)
+            }
+            // GitHub App installation tokens regenerate via JWT, not refresh
+            // token. Delegate to the existing path which already handles that.
+            AuthMethod::GitHubApp { .. } => {
+                self.validate_and_refresh_connection_token(connection_id)
+                    .await
+            }
+            // PATs can't be refreshed — surface the original token. Caller's
+            // retry will fail again, which is the correct signal.
+            AuthMethod::PersonalAccessToken { .. } => {
+                self.validate_and_refresh_connection_token(connection_id)
+                    .await
+            }
+            _ => Err(GitProviderManagerError::InvalidConfiguration(
+                "Unsupported auth method for force-refresh".to_string(),
+            )),
+        }
+    }
+
+    /// Heuristically detect whether an error message represents an
+    /// authentication/authorization failure that a token refresh might fix.
+    /// Used by clone/download retry paths since the libgit2 + reqwest error
+    /// surface doesn't expose HTTP status codes uniformly.
+    fn is_auth_failure(message: &str) -> bool {
+        let lower = message.to_lowercase();
+        lower.contains("401")
+            || lower.contains("403")
+            || lower.contains("unauthorized")
+            || lower.contains("authentication failed")
+            || lower.contains("authentication required")
+            || lower.contains("invalid token")
+            || lower.contains("invalid_token")
+            || lower.contains("access token")
+            || lower.contains("token expired")
+    }
+
     /// Validate and refresh connection token if needed
     /// Returns the valid access token
     pub async fn validate_and_refresh_connection_token(
@@ -548,10 +643,16 @@ impl GitProviderManager {
                 })?;
                 let access_token = self.decrypt_string(access_token).await?;
 
-                // Check if expired (with 60 second buffer)
+                // Check if expired (with 5 minute buffer). The previous 60-second
+                // buffer was not enough headroom: a slow clone over flaky
+                // network can easily run past the wire-time check before the
+                // libgit2 credential callback even fires, leaving us with a
+                // freshly-validated-but-just-expired token. Five minutes makes
+                // that window much harder to hit while still letting us reuse
+                // tokens for nearly their entire lifetime.
                 let should_refresh = if let Some(expires_at) = connection.token_expires_at {
                     let now = Utc::now();
-                    let buffer = chrono::Duration::seconds(60);
+                    let buffer = chrono::Duration::minutes(5);
                     expires_at < now + buffer
                 } else {
                     false
@@ -4435,21 +4536,99 @@ impl GitProviderManagerTrait for GitProviderManager {
             .await
             .map_err(|e| TraitError::DecryptionError(e.to_string()))?;
 
-        // Get repository info
-        let repo = provider_service
+        // Get repository info — also retry-on-auth, since the same stale
+        // token would fail here before we ever reach the clone.
+        let repo = match provider_service
             .get_repository(&access_token, repo_owner, repo_name)
             .await
-            .map_err(|e| TraitError::CloneError(format!("Failed to get repository: {}", e)))?;
+        {
+            Ok(r) => r,
+            Err(e) if Self::is_auth_failure(&e.to_string()) => {
+                tracing::warn!(
+                    connection_id,
+                    "get_repository hit auth failure ({}); force-refreshing token and retrying",
+                    e
+                );
+                let refreshed = self
+                    .force_refresh_connection_token(connection_id)
+                    .await
+                    .map_err(|err| TraitError::DecryptionError(err.to_string()))?;
+                provider_service
+                    .get_repository(&refreshed, repo_owner, repo_name)
+                    .await
+                    .map_err(|err| {
+                        TraitError::CloneError(format!(
+                            "Failed to get repository after token refresh: {}",
+                            err
+                        ))
+                    })?
+            }
+            Err(e) => {
+                return Err(TraitError::CloneError(format!(
+                    "Failed to get repository: {}",
+                    e
+                )))
+            }
+        };
 
-        // Clone the repository
-        provider_service
-            .clone_repository(
-                &repo.clone_url,
-                target_dir.to_str().unwrap(),
-                Some(&access_token),
-            )
-            .await
-            .map_err(|e| TraitError::CloneError(format!("Failed to clone: {}", e)))?;
+        // Clone the repository. On auth failure (libgit2 surfaces 401/403 as a
+        // generic credential error), force-refresh the OAuth token and retry
+        // once. Two motivations:
+        //   1. Time-of-check / time-of-use gap: the token we validated above
+        //      may have expired between then and libgit2's HTTPS auth attempt.
+        //   2. Server-side revocation: GitLab can invalidate a token before
+        //      its recorded expiry.
+        // libgit2's credential callback only fires once, so we have to retry
+        // the whole operation rather than refreshing inside the callback.
+        let target_str = target_dir.to_str().ok_or_else(|| {
+            TraitError::CloneError("target directory contains invalid UTF-8".to_string())
+        })?;
+        let clone_result = provider_service
+            .clone_repository(&repo.clone_url, target_str, Some(&access_token))
+            .await;
+
+        if let Err(e) = clone_result {
+            if Self::is_auth_failure(&e.to_string()) {
+                tracing::warn!(
+                    connection_id,
+                    "clone_repository hit auth failure ({}); force-refreshing token and retrying once",
+                    e
+                );
+
+                // Wipe the partially-cloned state, otherwise the retry trips
+                // the "directory not empty" check or fails with a corrupted
+                // git tree.
+                if target_dir.exists() {
+                    if let Err(rm) = std::fs::remove_dir_all(target_dir) {
+                        return Err(TraitError::CloneError(format!(
+                            "Auth retry: failed to clean partial clone at {}: {}",
+                            target_dir.display(),
+                            rm
+                        )));
+                    }
+                    std::fs::create_dir_all(target_dir).map_err(|err| {
+                        TraitError::CloneError(format!(
+                            "Auth retry: failed to recreate target directory: {}",
+                            err
+                        ))
+                    })?;
+                }
+
+                let refreshed = self
+                    .force_refresh_connection_token(connection_id)
+                    .await
+                    .map_err(|err| TraitError::DecryptionError(err.to_string()))?;
+
+                provider_service
+                    .clone_repository(&repo.clone_url, target_str, Some(&refreshed))
+                    .await
+                    .map_err(|err| {
+                        TraitError::CloneError(format!("Failed to clone after refresh: {}", err))
+                    })?;
+            } else {
+                return Err(TraitError::CloneError(format!("Failed to clone: {}", e)));
+            }
+        }
 
         // Checkout specific ref if provided
         if let Some(ref_name) = branch_or_ref {
@@ -4562,7 +4741,10 @@ impl GitProviderManagerTrait for GitProviderManager {
             .await
             .map_err(|e| TraitError::DecryptionError(e.to_string()))?;
 
-        provider_service
+        // Same retry-on-auth logic as clone_repository: the token we just
+        // validated may have expired or been revoked between the check and
+        // the HTTP request the provider issues to download the tarball.
+        match provider_service
             .download_archive(
                 &access_token,
                 repo_owner,
@@ -4571,9 +4753,46 @@ impl GitProviderManagerTrait for GitProviderManager {
                 archive_path,
             )
             .await
-            .map_err(|e| TraitError::Other(format!("Failed to download archive: {}", e)))?;
-
-        Ok(())
+        {
+            Ok(()) => Ok(()),
+            Err(e) if Self::is_auth_failure(&e.to_string()) => {
+                tracing::warn!(
+                    connection_id,
+                    "download_archive hit auth failure ({}); force-refreshing token and retrying once",
+                    e
+                );
+                // The provider usually creates the archive file as it streams
+                // — if the auth failed mid-stream we'd be left with a partial
+                // file. Remove it so the retry starts clean.
+                if archive_path.exists() {
+                    let _ = std::fs::remove_file(archive_path);
+                }
+                let refreshed = self
+                    .force_refresh_connection_token(connection_id)
+                    .await
+                    .map_err(|err| TraitError::DecryptionError(err.to_string()))?;
+                provider_service
+                    .download_archive(
+                        &refreshed,
+                        repo_owner,
+                        repo_name,
+                        branch_or_ref,
+                        archive_path,
+                    )
+                    .await
+                    .map_err(|err| {
+                        TraitError::Other(format!(
+                            "Failed to download archive after token refresh: {}",
+                            err
+                        ))
+                    })?;
+                Ok(())
+            }
+            Err(e) => Err(TraitError::Other(format!(
+                "Failed to download archive: {}",
+                e
+            ))),
+        }
     }
 
     async fn push_files_and_create_pr(
@@ -4649,6 +4868,38 @@ mod tests {
     use temps_core::{async_trait::async_trait, Job, JobReceiver, QueueError};
     use temps_database::test_utils::TestDatabase;
     use temps_entities::{git_provider_connections, git_providers};
+
+    #[test]
+    fn is_auth_failure_recognizes_common_messages() {
+        // Things that should trigger a retry-with-fresh-token.
+        assert!(GitProviderManager::is_auth_failure(
+            "HTTP 401: Unauthorized"
+        ));
+        assert!(GitProviderManager::is_auth_failure("HTTP 403"));
+        assert!(GitProviderManager::is_auth_failure(
+            "remote: HTTP authentication required"
+        ));
+        assert!(GitProviderManager::is_auth_failure(
+            "authentication failed for 'https://gitlab.com/foo/bar.git'"
+        ));
+        assert!(GitProviderManager::is_auth_failure(
+            "GitLab error: invalid_token"
+        ));
+        assert!(GitProviderManager::is_auth_failure(
+            "the provided access token is invalid"
+        ));
+        assert!(GitProviderManager::is_auth_failure(
+            "HTTP 401: token expired"
+        ));
+
+        // Things that should NOT trigger a retry — refreshing won't help.
+        assert!(!GitProviderManager::is_auth_failure("HTTP 404: not found"));
+        assert!(!GitProviderManager::is_auth_failure(
+            "connection refused (ECONNREFUSED)"
+        ));
+        assert!(!GitProviderManager::is_auth_failure("directory not empty"));
+        assert!(!GitProviderManager::is_auth_failure("disk full"));
+    }
 
     // Mock implementations for tests
     struct MockJobQueue;
