@@ -1071,9 +1071,46 @@ export type ChatMessage = {
     tool_calls?: Array<unknown> | null;
 };
 
+export type CliLoginPasswordRequest = {
+    /**
+     * Friendly device name shown to the user when they audit API keys.
+     * Defaults to `cli` when omitted.
+     */
+    device_name?: string | null;
+    /**
+     * User email.
+     */
+    email: string;
+    /**
+     * Six-digit TOTP code. Required only when the user has MFA enabled.
+     */
+    mfa_code?: string | null;
+    /**
+     * Opaque session token returned by a prior `/auth/cli/login` call when
+     * MFA was required. Must be passed back together with `mfa_code`.
+     */
+    mfa_session_token?: string | null;
+    /**
+     * User password.
+     */
+    password: string;
+};
+
 export type CliLoginRequest = {
     password: string;
     username: string;
+};
+
+export type CliLoginResponse = {
+    mfa_required: boolean;
+    mfa_session_token: string;
+} | {
+    api_key: string;
+    email: string;
+    expires_at?: string | null;
+    key_prefix: string;
+    role: string;
+    user_id: number;
 };
 
 /**
@@ -1361,6 +1398,10 @@ export type ContainerDetailResponse = {
      * Port inside the container
      */
     container_port: number;
+    /**
+     * CPU limit in whole cores (e.g. 1.0). None when no limit is configured.
+     */
+    cpu_limit_cores?: number | null;
     created_at: string;
     deployed_at: string;
     deployment_id: number;
@@ -1369,11 +1410,31 @@ export type ContainerDetailResponse = {
      */
     environment_variables: Array<EnvVarResponse>;
     /**
+     * Free-form error string from Docker's container state on exit.
+     */
+    error_message?: string | null;
+    /**
+     * Process exit code reported by Docker. None while still running.
+     */
+    exit_code?: number | null;
+    /**
+     * Human-readable reason the container exited.
+     */
+    exit_reason?: string | null;
+    /**
+     * When the container exited (Docker's FinishedAt). None while running.
+     */
+    finished_at?: string | null;
+    /**
      * Port on the host machine
      */
     host_port?: number | null;
     id: number;
     image_name: string;
+    /**
+     * True when Docker's OOM killer terminated the container.
+     */
+    oom_killed?: boolean | null;
     ready_at?: string | null;
     resource_limits?: null | ResourceLimitsResponse;
     /**
@@ -1388,18 +1449,52 @@ export type ContainerDetailResponse = {
      * Per-service URL for compose deployments
      */
     service_url?: string | null;
+    /**
+     * When the container's main process most recently started.
+     */
+    started_at?: string | null;
     status: string;
 };
 
 export type ContainerInfoResponse = {
     container_id: string;
     container_name: string;
+    /**
+     * CPU limit in whole cores (e.g. 1.0). None when no limit is configured.
+     */
+    cpu_limit_cores?: number | null;
     created_at: string;
+    /**
+     * Free-form error string from Docker's container state on exit.
+     */
+    error_message?: string | null;
+    /**
+     * Process exit code reported by Docker. None while still running.
+     */
+    exit_code?: number | null;
+    /**
+     * Human-readable reason the container exited (e.g. "OOMKilled",
+     * "Killed by SIGKILL (exit code 137)", "Exit code 1"). None while running.
+     */
+    exit_reason?: string | null;
+    /**
+     * When the container exited (Docker's FinishedAt). None while running.
+     */
+    finished_at?: string | null;
     image_name: string;
     /**
      * Node name where this container is running. None for local (single-node) deployments.
      */
     node_name?: string | null;
+    /**
+     * True when Docker's OOM killer terminated the container.
+     */
+    oom_killed?: boolean | null;
+    /**
+     * Container restart count from Docker. The UI shows a chip when this is
+     * > 0 so a crash loop is visible without opening detail.
+     */
+    restart_count?: number | null;
     /**
      * Compose service name (e.g. "web", "redis"). None for single-container deployments.
      */
@@ -1408,6 +1503,12 @@ export type ContainerInfoResponse = {
      * Per-service URL for compose deployments (e.g. "https://web-myapp.localho.st")
      */
     service_url?: string | null;
+    /**
+     * When the container's main process most recently started. The UI uses
+     * this for the uptime label so the count resets when a container is
+     * restarted in place. None for containers that never started.
+     */
+    started_at?: string | null;
     status: string;
 };
 
@@ -8394,6 +8495,12 @@ export type ProjectResponse = {
      * Git clone URL for the repository (used for public repos without a provider connection)
      */
     git_url?: string | null;
+    /**
+     * GitLab webhook ID installed on the connected repository.
+     * `null` when no GitLab webhook is installed (not connected to GitLab,
+     * or webhook was removed / never created).
+     */
+    gitlab_webhook_id?: number | null;
     id: number;
     last_deployment?: number | null;
     main_branch: string;
@@ -9195,6 +9302,20 @@ export type RegisterRequest = {
     email: string;
     name: string;
     password: string;
+};
+
+/**
+ * Response for `POST /projects/{project_id}/gitlab/reinstall-webhook`
+ */
+export type ReinstallWebhookResponse = {
+    /**
+     * The new GitLab hook ID that was installed.
+     */
+    hook_id: number;
+    /**
+     * Human-readable status message.
+     */
+    message: string;
 };
 
 export type ReleaseListResponse = {
@@ -15947,6 +16068,68 @@ export type DeactivateApiKeyResponses = {
 };
 
 export type DeactivateApiKeyResponse = DeactivateApiKeyResponses[keyof DeactivateApiKeyResponses];
+
+export type CliLoginData = {
+    body: CliLoginPasswordRequest;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/login';
+};
+
+export type CliLoginErrors = {
+    /**
+     * Invalid credentials or MFA code
+     */
+    401: unknown;
+    /**
+     * User has no role assigned
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliLoginResponses = {
+    /**
+     * Login successful or MFA challenge issued
+     */
+    200: CliLoginResponse;
+};
+
+export type CliLoginResponse2 = CliLoginResponses[keyof CliLoginResponses];
+
+export type CliLogoutData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/auth/cli/logout';
+};
+
+export type CliLogoutErrors = {
+    /**
+     * Not authenticated
+     */
+    401: unknown;
+    /**
+     * Endpoint requires API key authentication
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CliLogoutResponses = {
+    /**
+     * API key revoked
+     */
+    204: void;
+};
+
+export type CliLogoutResponse = CliLogoutResponses[keyof CliLogoutResponses];
 
 export type EmailStatusData = {
     body?: never;
@@ -30855,6 +31038,50 @@ export type UpdateGitSettingsResponses = {
 };
 
 export type UpdateGitSettingsResponse = UpdateGitSettingsResponses[keyof UpdateGitSettingsResponses];
+
+export type ReinstallGitlabWebhookData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/gitlab/reinstall-webhook';
+};
+
+export type ReinstallGitlabWebhookErrors = {
+    /**
+     * Project is not connected to a GitLab repository
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ReinstallGitlabWebhookResponses = {
+    /**
+     * Webhook reinstalled
+     */
+    200: ReinstallWebhookResponse;
+};
+
+export type ReinstallGitlabWebhookResponse = ReinstallGitlabWebhookResponses[keyof ReinstallGitlabWebhookResponses];
 
 export type HasErrorGroupsData = {
     body?: never;

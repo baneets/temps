@@ -32,6 +32,7 @@ import {
   Folder,
   Gauge,
   GitBranch,
+  GitFork,
   Globe,
   HardDrive,
   Home,
@@ -54,9 +55,11 @@ import {
   ShieldAlert,
   SlidersHorizontal,
   Sparkles,
+  TerminalSquare,
   Users,
   Wand2,
   Webhook,
+  Workflow,
   Zap,
 } from 'lucide-react'
 
@@ -356,7 +359,13 @@ export default function AppSidebar() {
       </SidebarHeader>
       <SidebarContent>
         {showDefault ? (
-          <DefaultNav pluginItems={pluginItems} />
+          <DefaultNav
+            pluginItems={pluginItems}
+            pinnedProjectSlug={
+              forceDefault && projectSlug ? projectSlug : null
+            }
+            onReturnToProject={() => setForceDefault(false)}
+          />
         ) : settingsMode ? (
           <SettingsNav onBack={() => setForceDefault(true)} />
         ) : projectSlug ? (
@@ -541,9 +550,19 @@ function NavUser() {
 
 interface NavProps {
   pluginItems: { title: string; url: string; icon: LucideIcon }[]
+  // Slug of the project the user is currently viewing (URL still
+  // points inside `/projects/:slug/...`) but has temporarily swapped
+  // the sidebar to default via Back. When set, render a pinned row at
+  // the top so they can return to the project sidebar in one click.
+  pinnedProjectSlug?: string | null
+  onReturnToProject?: () => void
 }
 
-function DefaultNav({ pluginItems }: NavProps) {
+function DefaultNav({
+  pluginItems,
+  pinnedProjectSlug,
+  onReturnToProject,
+}: NavProps) {
   const { isMinimal, isMobile } = useSidebar()
   const compact = isMinimal && !isMobile
 
@@ -557,6 +576,12 @@ function DefaultNav({ pluginItems }: NavProps) {
   return (
     <>
       <NavCommandTrigger />
+      {pinnedProjectSlug && onReturnToProject && (
+        <CurrentProjectPin
+          slug={pinnedProjectSlug}
+          onReturn={onReturnToProject}
+        />
+      )}
       <NavSection label="Platform" items={flatItems} />
       {grouped.map((group) => (
         <NavSection
@@ -636,23 +661,12 @@ interface ProjectNavItem {
 const projectBaseNav: ProjectNavItem[] = [
   { title: 'Overview', url: 'project', icon: Home },
   { title: 'Deployments', url: 'deployments', icon: GitBranch },
-  { title: 'Workspace', url: 'workspace', icon: Sparkles },
-  { title: 'Databases', url: 'storage', icon: Database },
   { title: 'Environments', url: 'environments', icon: Layers },
+  { title: 'Databases', url: 'storage', icon: Database },
+  { title: 'Environment Variables', url: 'environment-variables', icon: KeyRound },
+  { title: 'Domains', url: 'domains', icon: Globe },
+  { title: 'Git', url: 'git', icon: GitFork },
   { title: 'Logs', url: 'runtime', icon: ScrollText },
-  {
-    title: 'Observability',
-    url: 'monitors',
-    icon: Eye,
-    subItems: [
-      { title: 'Uptime', url: 'monitors', icon: Activity },
-      { title: 'Metrics', url: 'monitoring', icon: Gauge },
-      { title: 'Traces', url: 'traces', icon: Network },
-      { title: 'AI Traces', url: 'ai-gateway?tab=activity', icon: Bot },
-      { title: 'Request Logs', url: 'request-logs', icon: Rss },
-    ],
-  },
-  { title: 'Error Tracking', url: 'errors', icon: ShieldAlert },
   {
     title: 'Analytics',
     url: 'analytics',
@@ -665,20 +679,39 @@ const projectBaseNav: ProjectNavItem[] = [
       { title: 'Funnels', url: 'analytics/funnels', icon: Filter },
       { title: 'Session Replays', url: 'analytics/replays', icon: Play },
       { title: 'Speed', url: 'speed', icon: Zap },
+      { title: 'Revenue', url: 'revenue', icon: CreditCard },
     ],
   },
-  { title: 'AI Workflows', url: 'agents', icon: Sparkles },
-  { title: 'Revenue', url: 'revenue', icon: CreditCard },
+  {
+    title: 'Observability',
+    url: 'monitors',
+    icon: Eye,
+    subItems: [
+      { title: 'Uptime', url: 'monitors', icon: Activity },
+      { title: 'Metrics', url: 'monitoring', icon: Gauge },
+      { title: 'Traces', url: 'traces', icon: Network },
+      { title: 'AI Traces', url: 'ai-gateway?tab=activity', icon: Bot },
+      { title: 'Request Logs', url: 'request-logs', icon: Rss },
+      { title: 'Error Tracking', url: 'errors', icon: ShieldAlert },
+    ],
+  },
+  {
+    title: 'AI',
+    url: 'agents',
+    icon: Sparkles,
+    navigateOnClick: true,
+    subItems: [
+      { title: 'AI Workflows', url: 'agents', icon: Workflow },
+      { title: 'Workspace', url: 'workspace', icon: TerminalSquare },
+    ],
+  },
   {
     title: 'Settings',
     url: 'settings',
     icon: Settings,
     subItems: [
       { title: 'General', url: 'settings/general', icon: SlidersHorizontal },
-      { title: 'Domains', url: 'settings/domains', icon: Globe },
-      { title: 'Environment Variables', url: 'settings/environment-variables', icon: KeyRound },
       { title: 'Secrets', url: 'settings/secrets', icon: FileLock2 },
-      { title: 'Git', url: 'settings/git', icon: GitBranch },
       { title: 'Security', url: 'settings/security', icon: Shield },
       { title: 'Cron Jobs', url: 'settings/cron-jobs', icon: Clock },
       { title: 'Webhooks', url: 'settings/webhooks', icon: Webhook },
@@ -867,6 +900,56 @@ function ProjectNav({
         </SidebarMenu>
       </SidebarGroup>
     </>
+  )
+}
+
+// Inverse of SwapHeader: shown at the top of DefaultNav when the user
+// pressed Back from a project sidebar but the URL is still inside that
+// project. One click restores the project sidebar without navigating.
+function CurrentProjectPin({
+  slug,
+  onReturn,
+}: {
+  slug: string
+  onReturn: () => void
+}) {
+  const { isMinimal, isMobile } = useSidebar()
+  const compact = isMinimal && !isMobile
+  const { data: project } = useQuery({
+    ...getProjectBySlugOptions({ path: { slug } }),
+  })
+  const label = project?.name ?? slug
+  if (compact) {
+    return (
+      <SidebarGroup className="pb-0">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              tooltip={`Open ${label}`}
+              onClick={onReturn}
+              className="justify-center"
+            >
+              <Folder />
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarGroup>
+    )
+  }
+  return (
+    <SidebarGroup className="pb-0">
+      <button
+        type="button"
+        onClick={onReturn}
+        className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors hover:bg-sidebar-accent"
+      >
+        <Folder className="size-4 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+          {label}
+        </span>
+        <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+      </button>
+    </SidebarGroup>
   )
 }
 

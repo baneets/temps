@@ -162,26 +162,26 @@ function EnvironmentVariableRow({
     setEditIncludeInPreview(variable.include_in_preview ?? false)
   }, [variable.environments, variable.include_in_preview])
 
-  const handleEdit = async () => {
-    if (isEditing) {
-      await updateMutation.mutateAsync({
-        path: {
-          project_id: project.id,
-          var_id: variable.id,
-        },
-        body: {
-          value: editValue,
-          environment_ids: selectedEditEnvironments,
-          key: variable.key,
-          include_in_preview: editIncludeInPreview,
-        },
-      })
-      setIsEditModalOpen(false)
-      setIsEditing(false)
-    } else {
-      setIsEditing(true)
-      setIsEditModalOpen(true)
-    }
+  const openEditDialog = () => {
+    setIsEditing(true)
+    setIsEditModalOpen(true)
+  }
+
+  const submitEdit = async () => {
+    await updateMutation.mutateAsync({
+      path: {
+        project_id: project.id,
+        var_id: variable.id,
+      },
+      body: {
+        value: editValue,
+        environment_ids: selectedEditEnvironments,
+        key: variable.key,
+        include_in_preview: editIncludeInPreview,
+      },
+    })
+    setIsEditModalOpen(false)
+    setIsEditing(false)
   }
 
   const { data: allEnvironments } = useQuery({
@@ -249,7 +249,7 @@ function EnvironmentVariableRow({
           <Button
             variant="outline"
             size="sm"
-            onClick={handleEdit}
+            onClick={openEditDialog}
             disabled={deleteMutation.isPending || updateMutation.isPending}
           >
             Edit
@@ -312,7 +312,7 @@ function EnvironmentVariableRow({
           <form
             onSubmit={(e) => {
               e.preventDefault()
-              handleEdit()
+              submitEdit()
             }}
           >
             <div className="space-y-4 py-4">

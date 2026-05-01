@@ -170,6 +170,19 @@ export function BranchSelector({
 
   const effectiveBranch = value !== undefined ? value : (defaultBranch ?? '')
 
+  // Always include the currently-selected branch in the dropdown, even when
+  // the API didn't return it (huge branch counts hitting the safety cap, a
+  // branch that was renamed/deleted upstream, or an unauthenticated public
+  // fetch that excluded it). Without this, Radix Select falls back to the
+  // placeholder and the user sees an empty trigger.
+  const displayBranches = useMemo(() => {
+    if (!effectiveBranch) return sortedBranches
+    if (sortedBranches.some((b) => b.name === effectiveBranch)) {
+      return sortedBranches
+    }
+    return [{ name: effectiveBranch }, ...sortedBranches]
+  }, [sortedBranches, effectiveBranch])
+
   // Notify parent when branches are loaded
   useEffect(() => {
     if (sortedBranches.length > 0 && onBranchesLoaded) {
@@ -188,7 +201,7 @@ export function BranchSelector({
             Your Git provider token has expired. Please reconnect to continue.
           </p>
           <Link to="/git-providers">
-            <Button variant="outline" size="sm">
+            <Button type="button" variant="outline" size="sm">
               <Key className="mr-2 h-4 w-4" />
               Manage Git Providers
             </Button>
@@ -216,7 +229,10 @@ export function BranchSelector({
     )
   }
 
-  if (sortedBranches.length > 0 && !isCustomBranch) {
+  if (displayBranches.length > 0 && !isCustomBranch) {
+    const selectedNotInList =
+      !!effectiveBranch &&
+      !sortedBranches.some((b) => b.name === effectiveBranch)
     return (
       <div className="flex gap-2">
         <Select
@@ -236,10 +252,13 @@ export function BranchSelector({
             <SelectValue placeholder="Select a branch" />
           </SelectTrigger>
           <SelectContent>
-            {sortedBranches.map((branch) => (
+            {displayBranches.map((branch) => (
               <SelectItem key={branch.name} value={branch.name}>
                 {branch.name}
                 {branch.name === defaultBranch && ' (default)'}
+                {selectedNotInList &&
+                  branch.name === effectiveBranch &&
+                  ' (currently selected)'}
               </SelectItem>
             ))}
             <SelectItem value="__custom__">Enter custom branch...</SelectItem>
@@ -271,7 +290,7 @@ export function BranchSelector({
         placeholder={`Enter branch name${defaultBranch ? ` (default: ${defaultBranch})` : ''}`}
         disabled={disabled}
       />
-      {isCustomBranch && sortedBranches.length > 0 && (
+      {isCustomBranch && displayBranches.length > 0 && (
         <Button
           type="button"
           variant="link"

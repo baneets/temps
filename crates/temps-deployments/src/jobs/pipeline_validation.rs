@@ -138,6 +138,7 @@ impl ContainerDeployer for MockContainerDeployer {
             environment_vars: HashMap::new(),
             restart_count: Some(0),
             labels: HashMap::new(),
+            ..Default::default()
         })
     }
 
@@ -170,6 +171,7 @@ impl ContainerDeployer for MockContainerDeployer {
             network_rx_bytes: 1024000,
             network_tx_bytes: 512000,
             timestamp: chrono::Utc::now(),
+            ..Default::default()
         })
     }
 }

@@ -78,6 +78,7 @@ pub struct ProjectService {
     pub git_provider_manager: Arc<temps_git::GitProviderManager>,
     env_var_service: Arc<EnvVarService>,
     environment_service: Arc<temps_environments::EnvironmentService>,
+    encryption_service: Arc<temps_core::EncryptionService>,
 }
 
 impl ProjectService {
@@ -90,7 +91,7 @@ impl ProjectService {
         environment_service: Arc<temps_environments::EnvironmentService>,
         encryption_service: Arc<temps_core::EncryptionService>,
     ) -> Self {
-        let env_var_service = Arc::new(EnvVarService::new(db.clone(), encryption_service));
+        let env_var_service = Arc::new(EnvVarService::new(db.clone(), encryption_service.clone()));
 
         ProjectService {
             db: db.clone(),
@@ -100,6 +101,7 @@ impl ProjectService {
             git_provider_manager,
             env_var_service,
             environment_service,
+            encryption_service,
         }
     }
 
@@ -303,6 +305,53 @@ impl ProjectService {
                 project_found_db.id, project_found_db.source_type
             );
         }
+
+        // Auto-install GitLab webhook if applicable (best-effort, non-fatal).
+        let project_found_db = if let Some(conn_id) = project_found_db.git_provider_connection_id {
+            let repo_owner = project_found_db.repo_owner.clone();
+            let repo_name = project_found_db.repo_name.clone();
+            if !repo_owner.is_empty() && !repo_name.is_empty() {
+                match self
+                    .install_gitlab_webhook_for_connection(
+                        project_found_db.id,
+                        conn_id,
+                        &repo_owner,
+                        &repo_name,
+                    )
+                    .await
+                {
+                    Ok((hook_id, encrypted_token)) => {
+                        let mut active = projects::ActiveModel::from(project_found_db.clone());
+                        active.gitlab_webhook_id = Set(Some(hook_id as i32));
+                        active.gitlab_webhook_signing_token = Set(Some(encrypted_token));
+                        active.updated_at = Set(chrono::Utc::now());
+                        match active.update(self.db.as_ref()).await {
+                            Ok(updated) => updated,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to persist GitLab webhook fields on new project {}: {}",
+                                    project_found_db.id,
+                                    e
+                                );
+                                project_found_db
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to install GitLab webhook for new project {}: {}",
+                            project_found_db.id,
+                            e
+                        );
+                        project_found_db
+                    }
+                }
+            } else {
+                project_found_db
+            }
+        } else {
+            project_found_db
+        };
 
         Ok(Self::map_db_project_to_project(project_found_db))
     }
@@ -883,7 +932,7 @@ impl ProjectService {
         git_url: Option<String>,
         is_public_repo: Option<bool>,
     ) -> Result<Project, ProjectError> {
-        // Get the current project
+        // Get the current project (includes the old gitlab_webhook_id / signing_token)
         let project = projects::Entity::find_by_id(project_id)
             .one(self.db.as_ref())
             .await?
@@ -891,6 +940,12 @@ impl ProjectService {
                 "Project {} not found",
                 project_id
             )))?;
+
+        // Snapshot fields we need to reason about the old/new repo transition.
+        let old_connection_id = project.git_provider_connection_id;
+        let old_repo_owner = project.repo_owner.clone();
+        let old_repo_name = project.repo_name.clone();
+        let old_gitlab_webhook_id = project.gitlab_webhook_id;
 
         // Verify git provider connection if provided
         if let Some(connection_id) = git_provider_connection_id {
@@ -935,9 +990,9 @@ impl ProjectService {
 
         // Update the project
         let mut active_project: projects::ActiveModel = project.into();
-        active_project.main_branch = Set(main_branch);
-        active_project.repo_owner = Set(repo_owner);
-        active_project.repo_name = Set(repo_name);
+        active_project.main_branch = Set(main_branch.clone());
+        active_project.repo_owner = Set(repo_owner.clone());
+        active_project.repo_name = Set(repo_name.clone());
         active_project.directory = Set(directory);
 
         if let Some(preset_value) = preset {
@@ -948,13 +1003,26 @@ impl ProjectService {
             active_project.preset = Set(preset_enum);
         }
 
-        if let Some(connection_id) = git_provider_connection_id {
-            if connection_id > 0 {
-                active_project.git_provider_connection_id = Set(Some(connection_id));
-            } else {
-                active_project.git_provider_connection_id = Set(None);
+        // Determine the effective new connection id and whether we need to handle
+        // webhook lifecycle.  Three cases:
+        //   1. connection_id provided and > 0 → connecting / changing repo
+        //   2. connection_id provided and == 0 → disconnecting
+        //   3. connection_id not provided → no change
+        let new_connection_id: Option<i32> = match git_provider_connection_id {
+            Some(cid) if cid > 0 => {
+                active_project.git_provider_connection_id = Set(Some(cid));
+                Some(cid)
             }
-        }
+            Some(_) => {
+                // Explicit disconnect (connection_id == 0)
+                active_project.git_provider_connection_id = Set(None);
+                None
+            }
+            None => {
+                // No change requested — carry existing connection forward.
+                old_connection_id
+            }
+        };
 
         if let Some(url) = git_url {
             active_project.git_url = Set(Some(url));
@@ -982,9 +1050,286 @@ impl ProjectService {
             active_project.preset_config = Set(Some(parsed_config));
         }
 
+        // ── GitLab webhook lifecycle ──────────────────────────────────────────
+        //
+        // We detect a "repo change" when either the connection or the repo path
+        // differs from what was previously stored.  A change triggers:
+        //   • Delete the old webhook from GitLab (best-effort, idempotent on 404).
+        //   • Install a new webhook on the new repo (GitLab connections only).
+        //
+        // Failures here are non-fatal: we log warnings and continue so that the
+        // project save always succeeds.
+
+        let repo_changed = git_provider_connection_id.is_some()
+            || repo_owner != old_repo_owner
+            || repo_name != old_repo_name;
+
+        if repo_changed {
+            // Step 1: Remove old webhook if the old connection was GitLab.
+            if let (Some(old_hook_id), Some(old_conn_id)) =
+                (old_gitlab_webhook_id, old_connection_id)
+            {
+                if let Err(e) = self
+                    .delete_gitlab_webhook_for_connection(
+                        old_conn_id,
+                        &old_repo_owner,
+                        &old_repo_name,
+                        old_hook_id,
+                    )
+                    .await
+                {
+                    warn!(
+                        "Failed to remove old GitLab webhook {} for project {}: {}",
+                        old_hook_id, project_id, e
+                    );
+                }
+                // Clear stale hook fields unconditionally — even if delete failed
+                // (it may already be gone on GitLab's side).
+                active_project.gitlab_webhook_id = Set(None);
+                active_project.gitlab_webhook_signing_token = Set(None);
+            }
+
+            // Step 2: Install a new webhook if the new connection is GitLab.
+            if let Some(conn_id) = new_connection_id {
+                match self
+                    .install_gitlab_webhook_for_connection(
+                        project_id,
+                        conn_id,
+                        &repo_owner,
+                        &repo_name,
+                    )
+                    .await
+                {
+                    Ok((hook_id, encrypted_token)) => {
+                        active_project.gitlab_webhook_id = Set(Some(hook_id as i32));
+                        active_project.gitlab_webhook_signing_token = Set(Some(encrypted_token));
+                    }
+                    Err(e) => {
+                        // Non-fatal: the project connects without the webhook.
+                        warn!(
+                            "Failed to install GitLab webhook for project {}: {}",
+                            project_id, e
+                        );
+                        active_project.gitlab_webhook_id = Set(None);
+                        active_project.gitlab_webhook_signing_token = Set(None);
+                    }
+                }
+            }
+        } else if git_provider_connection_id == Some(0) {
+            // Explicit disconnect: clear webhook state.
+            active_project.gitlab_webhook_id = Set(None);
+            active_project.gitlab_webhook_signing_token = Set(None);
+        }
+
         let updated_project = active_project.update(self.db.as_ref()).await?;
 
         Ok(Self::map_db_project_to_project(updated_project))
+    }
+
+    /// Resolve whether the given connection points to a GitLab provider.
+    /// Returns `(base_url, access_token, auth_method)` for GitLab connections;
+    /// `Err` for all others.
+    async fn resolve_gitlab_connection(
+        &self,
+        connection_id: i32,
+    ) -> Result<(String, String, String), String> {
+        use temps_entities::{git_provider_connections, git_providers};
+
+        let connection = git_provider_connections::Entity::find_by_id(connection_id)
+            .one(self.db.as_ref())
+            .await
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or_else(|| format!("Connection {} not found", connection_id))?;
+
+        let provider = git_providers::Entity::find_by_id(connection.provider_id)
+            .one(self.db.as_ref())
+            .await
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or_else(|| format!("Provider {} not found", connection.provider_id))?;
+
+        // Only handle GitLab providers.
+        if provider.provider_type != "gitlab" {
+            return Err(format!(
+                "Provider {} is not a GitLab provider (type: {})",
+                provider.id, provider.provider_type
+            ));
+        }
+
+        let base_url = provider
+            .base_url
+            .unwrap_or_else(|| "https://gitlab.com".to_string());
+
+        let auth_method = provider.auth_method.clone();
+
+        let access_token = self
+            .git_provider_manager
+            .get_connection_token(connection_id)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to get access token for connection {}: {}",
+                    connection_id, e
+                )
+            })?;
+
+        Ok((base_url, access_token, auth_method))
+    }
+
+    /// Install a GitLab webhook for the given project/connection.
+    /// Returns `(hook_id, encrypted_signing_token)` on success.
+    async fn install_gitlab_webhook_for_connection(
+        &self,
+        project_id: i32,
+        connection_id: i32,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(i64, String), String> {
+        use temps_git::services::gitlab_webhook::{
+            generate_signing_token, GitLabWebhookClient, WebhookAuthMethod,
+        };
+
+        let (base_url, access_token, auth_method_str) =
+            match self.resolve_gitlab_connection(connection_id).await {
+                Ok(triple) => triple,
+                // Not a GitLab provider — skip silently.
+                Err(e) => return Err(e),
+            };
+
+        let client = GitLabWebhookClient::new(
+            base_url,
+            access_token,
+            WebhookAuthMethod::from_str(&auth_method_str),
+        );
+
+        // Pre-flight: verify the user has >= Maintainer (40) access.
+        let access_level = client
+            .get_project_access_level(owner, repo)
+            .await
+            .map_err(|e| format!("Could not check permissions for {}/{}: {}", owner, repo, e))?;
+
+        if access_level < 40 {
+            return Err(format!(
+                "Insufficient GitLab permissions for {}/{}: access_level={} (need >= 40 Maintainer)",
+                owner, repo, access_level
+            ));
+        }
+
+        // Resolve the webhook URL from config.
+        let external_url = self
+            .config_service
+            .get_settings()
+            .await
+            .ok()
+            .and_then(|s| s.external_url)
+            .unwrap_or_else(|| "http://localhost:8080".to_string());
+        let webhook_url = format!("{}/api/webhook/git/gitlab/events", external_url);
+
+        // Generate a random 32-byte signing token.
+        let signing_token = generate_signing_token();
+
+        let hook_id = client
+            .install_webhook(owner, repo, &webhook_url, &signing_token)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to install webhook for project {}: {}",
+                    project_id, e
+                )
+            })?;
+
+        // Encrypt the token before storing.
+        let encrypted = self
+            .encryption_service
+            .encrypt_string(&signing_token)
+            .map_err(|e| format!("Failed to encrypt signing token: {}", e))?;
+
+        info!(
+            "Installed GitLab webhook {} for project {} ({}/{})",
+            hook_id, project_id, owner, repo
+        );
+
+        Ok((hook_id, encrypted))
+    }
+
+    /// Remove a GitLab webhook.  Best-effort; 404 is treated as success.
+    async fn delete_gitlab_webhook_for_connection(
+        &self,
+        connection_id: i32,
+        owner: &str,
+        repo: &str,
+        hook_id: i32,
+    ) -> Result<(), String> {
+        use temps_git::services::gitlab_webhook::{GitLabWebhookClient, WebhookAuthMethod};
+
+        let (base_url, access_token, auth_method_str) =
+            match self.resolve_gitlab_connection(connection_id).await {
+                Ok(triple) => triple,
+                // Not a GitLab connection — nothing to remove.
+                Err(_) => return Ok(()),
+            };
+
+        let client = GitLabWebhookClient::new(
+            base_url,
+            access_token,
+            WebhookAuthMethod::from_str(&auth_method_str),
+        );
+        client
+            .delete_webhook(owner, repo, hook_id as i64)
+            .await
+            .map_err(|e| format!("GitLab delete webhook error: {}", e))
+    }
+
+    /// Reinstall (or install for the first time) a GitLab webhook for a project.
+    /// Called by `POST /projects/{id}/gitlab/reinstall-webhook`.
+    pub async fn reinstall_gitlab_webhook(&self, project_id: i32) -> Result<i32, ProjectError> {
+        let project = projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or(ProjectError::NotFound(format!(
+                "Project {} not found",
+                project_id
+            )))?;
+
+        let connection_id = project.git_provider_connection_id.ok_or_else(|| {
+            ProjectError::Other(format!(
+                "Project {} has no git provider connection",
+                project_id
+            ))
+        })?;
+
+        let owner = project.repo_owner.clone();
+        let repo = project.repo_name.clone();
+
+        // Best-effort: remove the old webhook first.
+        if let Some(old_hook_id) = project.gitlab_webhook_id {
+            if let Err(e) = self
+                .delete_gitlab_webhook_for_connection(connection_id, &owner, &repo, old_hook_id)
+                .await
+            {
+                warn!(
+                    "Failed to remove old GitLab webhook {} during reinstall for project {}: {}",
+                    old_hook_id, project_id, e
+                );
+            }
+        }
+
+        let (hook_id, encrypted_token) = self
+            .install_gitlab_webhook_for_connection(project_id, connection_id, &owner, &repo)
+            .await
+            .map_err(ProjectError::Other)?;
+
+        // Persist the new hook id + token.
+        let mut active_project: projects::ActiveModel = project.into();
+        active_project.gitlab_webhook_id = Set(Some(hook_id as i32));
+        active_project.gitlab_webhook_signing_token = Set(Some(encrypted_token));
+        active_project.update(self.db.as_ref()).await?;
+
+        info!(
+            "Reinstalled GitLab webhook {} for project {}",
+            hook_id, project_id
+        );
+
+        Ok(hook_id as i32)
     }
 
     pub async fn get_projects_paginated(
@@ -1304,6 +1649,7 @@ impl ProjectService {
             attack_mode: db_project.attack_mode,
             enable_preview_environments: db_project.enable_preview_environments,
             source_type: db_project.source_type,
+            gitlab_webhook_id: db_project.gitlab_webhook_id,
         }
     }
 

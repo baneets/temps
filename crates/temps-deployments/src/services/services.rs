@@ -3600,6 +3600,7 @@ mod tests {
                 status: temps_deployer::ContainerStatus::Running,
                 restart_count: Some(0),
                 labels: std::collections::HashMap::new(),
+                ..Default::default()
             })
         });
         deployer.expect_list_containers().returning(|| Ok(vec![]));

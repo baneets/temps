@@ -266,6 +266,57 @@ pub struct ContainerInfo {
     /// Docker labels set on the container (e.g., `sh.temps.managed`, `sh.temps.project_id`).
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// Process exit code reported by Docker. None while the container is still running.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub exit_code: Option<i32>,
+    /// Human-readable reason the container exited (e.g. "OOMKilled",
+    /// "Signal SIGKILL (9)", "Exit code 137"). None while still running.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub exit_reason: Option<String>,
+    /// True when Docker's OOM killer terminated the container.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub oom_killed: Option<bool>,
+    /// Error string captured from Docker's container state on exit.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error_message: Option<String>,
+    /// When the container exited (Docker's FinishedAt). None while still running.
+    #[schema(value_type = Option<String>, example = "2025-10-12T12:16:47.609192Z")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub finished_at: Option<UtcDateTime>,
+    /// When the container's main process most recently started (Docker's
+    /// StartedAt). On a restarted container this is *after* `created_at`, so
+    /// uptime should be derived from this rather than `created_at`. None for
+    /// containers that have never started.
+    #[schema(value_type = Option<String>, example = "2025-10-12T12:15:50.000000Z")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started_at: Option<UtcDateTime>,
+    /// CPU limit applied to the container, in whole cores (e.g. `1.0` =
+    /// 1 vCPU, `0.5` = half a vCPU). None if no limit is set.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cpu_limit_cores: Option<f64>,
+}
+
+impl Default for ContainerInfo {
+    fn default() -> Self {
+        Self {
+            container_id: String::new(),
+            container_name: String::new(),
+            image_name: String::new(),
+            status: ContainerStatus::Created,
+            created_at: chrono::Utc::now(),
+            ports: Vec::new(),
+            environment_vars: HashMap::new(),
+            restart_count: None,
+            labels: HashMap::new(),
+            exit_code: None,
+            exit_reason: None,
+            oom_killed: None,
+            error_message: None,
+            finished_at: None,
+            started_at: None,
+            cpu_limit_cores: None,
+        }
+    }
 }
 
 /// Container performance statistics (CPU, memory, network)
@@ -275,6 +326,10 @@ pub struct ContainerStats {
     pub container_name: String,
     /// CPU usage percentage (0-100)
     pub cpu_percent: f64,
+    /// CPU limit applied to the container, in whole cores (e.g. `1.0`).
+    /// None if no limit is set. Lets the UI render "0.5 / 1.0 cores".
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cpu_limit_cores: Option<f64>,
     /// Memory usage in bytes
     pub memory_bytes: u64,
     /// Memory limit in bytes (if set)
@@ -285,8 +340,36 @@ pub struct ContainerStats {
     pub network_rx_bytes: u64,
     /// Network bytes transmitted
     pub network_tx_bytes: u64,
+    /// Container restart count from Docker. Lets the UI render
+    /// "Restarted 3×" so a restart loop is visible at a glance.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub restart_count: Option<i64>,
+    /// When the container's main process most recently started. Drives the
+    /// uptime label in the header — distinct from `created_at` because the
+    /// container may have been restarted in place after a crash.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub started_at: Option<UtcDateTime>,
     /// Timestamp of metrics collection
     pub timestamp: UtcDateTime,
+}
+
+impl Default for ContainerStats {
+    fn default() -> Self {
+        Self {
+            container_id: String::new(),
+            container_name: String::new(),
+            cpu_percent: 0.0,
+            cpu_limit_cores: None,
+            memory_bytes: 0,
+            memory_limit_bytes: None,
+            memory_percent: None,
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+            restart_count: None,
+            started_at: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
 }
 
 /// Configuration for stopping containers
@@ -706,6 +789,7 @@ mod tests {
             environment_vars: env_vars,
             restart_count: Some(0),
             labels: HashMap::new(),
+            ..Default::default()
         };
 
         assert_eq!(info.container_id, "abc123");

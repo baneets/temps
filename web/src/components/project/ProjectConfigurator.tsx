@@ -1181,21 +1181,6 @@ export function ProjectConfigurator({
                       />
                     </div>
                     <div className="flex flex-col gap-2">
-                      <FormField
-                        control={form.control}
-                        name={`environmentVariables.${index}.isSecret`}
-                        render={({ field }) => (
-                          <FormItem className="flex items-center space-x-2 space-y-0">
-                            <FormControl>
-                              <Checkbox
-                                checked={field.value}
-                                onCheckedChange={field.onChange}
-                              />
-                            </FormControl>
-                            <FormLabel className="text-xs">Secret</FormLabel>
-                          </FormItem>
-                        )}
-                      />
                       <Button
                         type="button"
                         variant="ghost"

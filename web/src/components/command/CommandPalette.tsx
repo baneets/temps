@@ -362,12 +362,6 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['funnels', 'conversion', 'flow', 'analytics'],
   },
   {
-    title: 'Request Logs',
-    url: 'analytics/requests',
-    icon: ScrollText,
-    keywords: ['logs', 'requests', 'http', 'analytics'],
-  },
-  {
     title: 'Analytics Setup',
     url: 'analytics/setup',
     icon: Settings,
@@ -380,7 +374,7 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['database', 'storage', 'data'],
   },
   {
-    title: 'Runtime Logs',
+    title: 'Logs',
     url: 'runtime',
     icon: ScrollText,
     keywords: ['logs', 'runtime', 'console', 'output', 'live'],
@@ -973,7 +967,7 @@ export function CommandPalette() {
       onOpenChange={setOpen}
       contentClassName="sm:max-w-2xl"
     >
-      <Command className="rounded-lg border shadow-md" loop>
+      <Command className="rounded-lg border shadow-md" loop shouldFilter={false}>
         <CommandInput
           placeholder="Type a command or search..."
           value={search}

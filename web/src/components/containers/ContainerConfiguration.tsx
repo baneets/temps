@@ -10,6 +10,29 @@ export function ContainerConfiguration({
 }: ContainerConfigurationProps) {
   const envVars = normalizeEnvVars(container.environment_variables)
   const hasPorts = !!(container.container_port || container.host_port)
+  // Configured limits (from project/env deployment_config). cpu_limit and
+  // cpu_request are in millicores, memory in MB — matches the form values
+  // used in project settings.
+  const cpuLimitMilli = container.resource_limits?.cpu_limit
+  const cpuRequestMilli = container.resource_limits?.cpu_request
+  const memoryLimitMb = container.resource_limits?.memory_limit
+  const memoryRequestMb = container.resource_limits?.memory_request
+  // Actual CPU limit observed from Docker — useful for spotting drift between
+  // configured value and what the container is actually running with.
+  const cpuLimitObservedCores = (
+    container as { cpu_limit_cores?: number | null }
+  ).cpu_limit_cores
+  const hasResourceLimits =
+    cpuLimitMilli != null ||
+    memoryLimitMb != null ||
+    cpuRequestMilli != null ||
+    memoryRequestMb != null ||
+    cpuLimitObservedCores != null
+  const startedAt = (container as { started_at?: string | null }).started_at
+  const isExited =
+    container.status === 'exited' ||
+    container.status === 'dead' ||
+    container.status === 'stopped'
 
   return (
     <div className="flex flex-col gap-10">
@@ -18,12 +41,20 @@ export function ContainerConfiguration({
         description="Identity and runtime metadata for this container."
       >
         <FieldGrid>
-          <Field label="Container ID" mono copyable value={container.container_id} />
+          <Field
+            label="Container ID"
+            mono
+            copyable
+            value={container.container_id}
+          />
           <Field label="Image" mono copyable value={container.image_name} />
           <Field label="Status" value={container.status} />
           <Field
             label="Uptime"
-            value={formatUptimeFromTimestamp(container.created_at)}
+            // Prefer started_at — uptime should reset on a restart-in-place.
+            // Fall back to created_at on older rows the migration hasn't
+            // populated yet.
+            value={formatUptimeFromTimestamp(startedAt || container.created_at)}
           />
           {container.service_name && (
             <Field label="Service" mono value={container.service_name} />
@@ -37,6 +68,86 @@ export function ContainerConfiguration({
           )}
         </FieldGrid>
       </Section>
+
+      {hasResourceLimits && (
+        <Section
+          title="Resource limits"
+          description="CPU and memory caps applied to this container at deploy time."
+        >
+          <FieldGrid>
+            {cpuRequestMilli != null && (
+              <Field
+                label="CPU request"
+                mono
+                value={formatCoresFromMilli(cpuRequestMilli)}
+              />
+            )}
+            {cpuLimitMilli != null && (
+              <Field
+                label="CPU limit"
+                mono
+                value={formatCoresFromMilli(cpuLimitMilli)}
+              />
+            )}
+            {memoryRequestMb != null && (
+              <Field
+                label="Memory request"
+                mono
+                value={formatMemoryMb(memoryRequestMb)}
+              />
+            )}
+            {memoryLimitMb != null && (
+              <Field
+                label="Memory limit"
+                mono
+                value={formatMemoryMb(memoryLimitMb)}
+              />
+            )}
+            {cpuLimitObservedCores != null && (
+              <Field
+                label="CPU limit (observed)"
+                mono
+                value={formatCores(cpuLimitObservedCores)}
+              />
+            )}
+          </FieldGrid>
+        </Section>
+      )}
+
+      {isExited && container.exit_reason && (
+        <Section
+          title="Exit details"
+          description="Why this container is no longer running."
+        >
+          <FieldGrid>
+            <Field
+              label="Reason"
+              value={container.exit_reason}
+              tone={container.oom_killed ? 'warn' : undefined}
+            />
+            {container.exit_code != null && (
+              <Field
+                label="Exit code"
+                mono
+                value={String(container.exit_code)}
+              />
+            )}
+            {container.finished_at && (
+              <Field
+                label="Exited at"
+                value={new Date(container.finished_at).toLocaleString()}
+              />
+            )}
+            {container.error_message && (
+              <Field
+                label="Error"
+                value={container.error_message}
+                tone="warn"
+              />
+            )}
+          </FieldGrid>
+        </Section>
+      )}
 
       {hasPorts && (
         <Section
@@ -213,9 +324,10 @@ function normalizeEnvVars(
   return out
 }
 
-function formatUptimeFromTimestamp(createdAt?: string): string {
+function formatUptimeFromTimestamp(createdAt?: string | null): string {
   if (!createdAt) return 'N/A'
   const elapsedMs = Date.now() - new Date(createdAt).getTime()
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return 'N/A'
   const elapsedSeconds = Math.floor(elapsedMs / 1000)
   return formatUptime(elapsedSeconds)
 }
@@ -225,4 +337,24 @@ function formatUptime(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
   return `${Math.floor(seconds / 86400)}d`
+}
+
+function formatCores(cores: number): string {
+  if (cores >= 1) {
+    const rounded = Math.round(cores * 100) / 100
+    return `${rounded} ${rounded === 1 ? 'core' : 'cores'}`
+  }
+  return `${Math.round(cores * 1000)}m`
+}
+
+function formatCoresFromMilli(milli: number): string {
+  return formatCores(milli / 1000)
+}
+
+function formatMemoryMb(mb: number): string {
+  if (mb >= 1024) {
+    const gb = mb / 1024
+    return `${gb % 1 === 0 ? gb.toFixed(0) : gb.toFixed(2)} GB`
+  }
+  return `${Math.round(mb)} MB`
 }

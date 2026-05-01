@@ -66,6 +66,8 @@ pub struct Project {
     pub enable_preview_environments: bool,
     /// Source type for deployments (git, docker_image, or static_files)
     pub source_type: SourceType,
+    /// GitLab webhook ID installed on the connected repository, if any.
+    pub gitlab_webhook_id: Option<i32>,
 }
 
 #[derive(Deserialize)]

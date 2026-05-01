@@ -108,12 +108,69 @@ pub struct ResourceUsage {
 
 impl Default for ResourceUsage {
     fn default() -> Self {
+        // Microcore convention: 1_000_000u = 1 core, 100_000u = 0.1 core.
         Self {
-            cpu_limit: Some("1000m".to_string()),
+            cpu_limit: Some("1000000u".to_string()),
             memory_limit: Some("512Mi".to_string()),
-            cpu_request: Some("100m".to_string()),
+            cpu_request: Some("100000u".to_string()),
             memory_request: Some("128Mi".to_string()),
         }
+    }
+}
+
+/// Parse a CPU quantity into whole cores. Accepts:
+///   - microcores via `u` suffix: "2000000u" → 2.0 (1_000_000u = 1 core)
+///   - millicores via `m` suffix: "1000m"   → 1.0 (1_000m     = 1 core)
+///   - bare cores:                "2"        → 2.0
+///
+/// Returns None on unrecognized input so the caller can fall back to "no limit".
+pub(crate) fn parse_cpu_cores(s: &str) -> Option<f64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(micro) = trimmed.strip_suffix('u') {
+        return micro.parse::<f64>().ok().map(|v| v / 1_000_000.0);
+    }
+    if let Some(milli) = trimmed.strip_suffix('m') {
+        return milli.parse::<f64>().ok().map(|v| v / 1000.0);
+    }
+    trimmed.parse::<f64>().ok()
+}
+
+/// Parse a Kubernetes-style memory quantity into megabytes (binary units, so
+/// "1Gi" → 1024 MB). Accepts Ki/Mi/Gi/Ti and the decimal K/M/G/T variants;
+/// bare numbers are interpreted as bytes and rounded up to the nearest MB.
+pub(crate) fn parse_memory_mb(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (num, factor_to_bytes): (&str, f64) = if let Some(v) = trimmed.strip_suffix("Ki") {
+        (v, 1024.0)
+    } else if let Some(v) = trimmed.strip_suffix("Mi") {
+        (v, 1024.0 * 1024.0)
+    } else if let Some(v) = trimmed.strip_suffix("Gi") {
+        (v, 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(v) = trimmed.strip_suffix("Ti") {
+        (v, 1024.0 * 1024.0 * 1024.0 * 1024.0)
+    } else if let Some(v) = trimmed.strip_suffix('K') {
+        (v, 1000.0)
+    } else if let Some(v) = trimmed.strip_suffix('M') {
+        (v, 1_000_000.0)
+    } else if let Some(v) = trimmed.strip_suffix('G') {
+        (v, 1_000_000_000.0)
+    } else if let Some(v) = trimmed.strip_suffix('T') {
+        (v, 1_000_000_000_000.0)
+    } else {
+        (trimmed, 1.0)
+    };
+    let value = num.parse::<f64>().ok()?;
+    let mb = (value * factor_to_bytes) / (1024.0 * 1024.0);
+    if mb.is_finite() && mb >= 0.0 {
+        Some(mb.ceil() as u64)
+    } else {
+        None
     }
 }
 
@@ -978,19 +1035,24 @@ impl DeployImageJob {
             protocol: Protocol::Tcp,
         }];
 
+        // Convert k8s-style strings ("1000m", "512Mi", "2", "1Gi") into the
+        // numeric ResourceLimits the deployer feeds to bollard. The previous
+        // implementation called `parse::<f64>()` directly, which silently
+        // returned None for any value containing a unit suffix — so even the
+        // builder defaults ("1000m" / "512Mi") never made it to the container.
         let resource_limits = ResourceLimits {
             cpu_limit: self
                 .config
                 .resources
                 .cpu_limit
                 .as_ref()
-                .and_then(|s| s.parse::<f64>().ok()),
+                .and_then(|s| parse_cpu_cores(s)),
             memory_limit_mb: self
                 .config
                 .resources
                 .memory_limit
                 .as_ref()
-                .and_then(|s| s.trim_end_matches("Mi").parse::<u64>().ok()),
+                .and_then(|s| parse_memory_mb(s)),
             disk_limit_mb: None,
         };
 
@@ -1940,6 +2002,38 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
 
+    #[test]
+    fn parse_cpu_cores_handles_millicores_and_whole_cores() {
+        assert_eq!(parse_cpu_cores("1000m"), Some(1.0));
+        assert_eq!(parse_cpu_cores("500m"), Some(0.5));
+        assert_eq!(parse_cpu_cores("2"), Some(2.0));
+        assert_eq!(parse_cpu_cores("0.25"), Some(0.25));
+        assert_eq!(parse_cpu_cores("  1500m  "), Some(1.5));
+        assert_eq!(parse_cpu_cores(""), None);
+        assert_eq!(parse_cpu_cores("garbage"), None);
+    }
+
+    #[test]
+    fn parse_cpu_cores_handles_microcores() {
+        // 1_000_000u = 1 core (the storage convention used by temps DB).
+        assert_eq!(parse_cpu_cores("1000000u"), Some(1.0));
+        assert_eq!(parse_cpu_cores("500000u"), Some(0.5));
+        assert_eq!(parse_cpu_cores("2000000u"), Some(2.0));
+        assert_eq!(parse_cpu_cores("100000u"), Some(0.1));
+        assert_eq!(parse_cpu_cores("  2000000u  "), Some(2.0));
+    }
+
+    #[test]
+    fn parse_memory_mb_handles_binary_and_decimal_suffixes() {
+        assert_eq!(parse_memory_mb("512Mi"), Some(512));
+        assert_eq!(parse_memory_mb("1Gi"), Some(1024));
+        assert_eq!(parse_memory_mb("2048Ki"), Some(2));
+        assert_eq!(parse_memory_mb("1G"), Some(954)); // 1e9 / (1024*1024) ≈ 953.67 → ceil
+        assert_eq!(parse_memory_mb("128"), Some(1)); // 128 bytes → ceil to 1 MB
+        assert_eq!(parse_memory_mb(""), None);
+        assert_eq!(parse_memory_mb("garbage"), None);
+    }
+
     use temps_deployer::{
         ContainerDeployer, ContainerInfo, ContainerStats,
         ContainerStatus as DeployerContainerStatus, DeployRequest, DeployResult, DeployerError,
@@ -2030,6 +2124,7 @@ mod tests {
                 environment_vars: HashMap::new(),
                 restart_count: Some(0),
                 labels: HashMap::new(),
+                ..Default::default()
             })
         }
 
@@ -2047,6 +2142,7 @@ mod tests {
                 network_rx_bytes: 2048000,
                 network_tx_bytes: 1024000,
                 timestamp: chrono::Utc::now(),
+                ..Default::default()
             })
         }
 

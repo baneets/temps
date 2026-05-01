@@ -64,10 +64,15 @@ export function EnvironmentConfigurationCard({
   const activeNodes: NodeInfoResponse[] =
     nodesQuery.data?.nodes?.filter((n) => n.status === 'active') ?? []
 
+  // CPU is stored as microcores in the API/DB (1_000_000 = 1 core).
+  // Convert to cores for display so users can type "1", "0.5", "2".
+  const microToCores = (u?: number | null): string =>
+    u != null ? (u / 1_000_000).toString() : ''
+
   const [formData, setFormData] = useState({
     branch: environment.branch ?? '',
-    cpu_request: environment.deployment_config?.cpuRequest?.toString() ?? '',
-    cpu_limit: environment.deployment_config?.cpuLimit?.toString() ?? '',
+    cpu_request: microToCores(environment.deployment_config?.cpuRequest),
+    cpu_limit: microToCores(environment.deployment_config?.cpuLimit),
     memory_request:
       environment.deployment_config?.memoryRequest?.toString() ?? '',
     memory_limit: environment.deployment_config?.memoryLimit?.toString() ?? '',
@@ -118,8 +123,8 @@ export function EnvironmentConfigurationCard({
   useEffect(() => {
     setFormData({
       branch: environment.branch ?? '',
-      cpu_request: environment.deployment_config?.cpuRequest?.toString() ?? '',
-      cpu_limit: environment.deployment_config?.cpuLimit?.toString() ?? '',
+      cpu_request: microToCores(environment.deployment_config?.cpuRequest),
+      cpu_limit: microToCores(environment.deployment_config?.cpuLimit),
       memory_request:
         environment.deployment_config?.memoryRequest?.toString() ?? '',
       memory_limit:
@@ -188,9 +193,11 @@ export function EnvironmentConfigurationCard({
       body: {
         branch: formData.branch.trim() !== '' ? formData.branch : null,
         cpu_request: formData.cpu_request
-          ? parseInt(formData.cpu_request)
+          ? Math.round(parseFloat(formData.cpu_request) * 1_000_000)
           : null,
-        cpu_limit: formData.cpu_limit ? parseInt(formData.cpu_limit) : null,
+        cpu_limit: formData.cpu_limit
+          ? Math.round(parseFloat(formData.cpu_limit) * 1_000_000)
+          : null,
         memory_request: formData.memory_request
           ? parseInt(formData.memory_request)
           : null,
@@ -271,9 +278,11 @@ export function EnvironmentConfigurationCard({
                   <h3 className="text-sm font-medium">CPU Resources</h3>
                   <div className="space-y-4">
                     <div>
-                      <Label>CPU Request (millicores)</Label>
+                      <Label>CPU Request (cores)</Label>
                       <Input
                         type="number"
+                        step="any"
+                        min="0.01"
                         value={formData.cpu_request}
                         onChange={(e) =>
                           setFormData((prev) => ({
@@ -281,16 +290,18 @@ export function EnvironmentConfigurationCard({
                             cpu_request: e.target.value,
                           }))
                         }
-                        placeholder="e.g., 100"
+                        placeholder="e.g., 0.1"
                       />
                       <p className="text-xs text-muted-foreground mt-1">
-                        Minimum CPU resources (1000m = 1 CPU core)
+                        Minimum CPU cores (e.g., 0.25, 0.5, 1, 2)
                       </p>
                     </div>
                     <div>
-                      <Label>CPU Limit (millicores)</Label>
+                      <Label>CPU Limit (cores)</Label>
                       <Input
                         type="number"
+                        step="any"
+                        min="0.01"
                         value={formData.cpu_limit}
                         onChange={(e) =>
                           setFormData((prev) => ({
@@ -298,10 +309,10 @@ export function EnvironmentConfigurationCard({
                             cpu_limit: e.target.value,
                           }))
                         }
-                        placeholder="e.g., 200"
+                        placeholder="e.g., 1"
                       />
                       <p className="text-xs text-muted-foreground mt-1">
-                        Maximum CPU resources (1000m = 1 CPU core)
+                        Maximum CPU cores (e.g., 0.5, 1, 2)
                       </p>
                     </div>
                   </div>

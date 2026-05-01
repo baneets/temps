@@ -594,6 +594,36 @@ pub struct ContainerInfoResponse {
     /// Per-service URL for compose deployments (e.g. "https://web-myapp.localho.st")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_url: Option<String>,
+    /// Process exit code reported by Docker. None while still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Human-readable reason the container exited (e.g. "OOMKilled",
+    /// "Killed by SIGKILL (exit code 137)", "Exit code 1"). None while running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
+    /// True when Docker's OOM killer terminated the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oom_killed: Option<bool>,
+    /// Free-form error string from Docker's container state on exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// When the container exited (Docker's FinishedAt). None while running.
+    #[schema(example = "2025-10-12T12:16:47.609192Z")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// When the container's main process most recently started. The UI uses
+    /// this for the uptime label so the count resets when a container is
+    /// restarted in place. None for containers that never started.
+    #[schema(example = "2025-10-12T12:15:50.000000Z")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// Container restart count from Docker. The UI shows a chip when this is
+    /// > 0 so a crash loop is visible without opening detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_count: Option<i64>,
+    /// CPU limit in whole cores (e.g. 1.0). None when no limit is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit_cores: Option<f64>,
 }
 
 impl ContainerInfoResponse {
@@ -612,6 +642,14 @@ impl ContainerInfoResponse {
             node_name,
             service_name,
             service_url,
+            exit_code: info.exit_code,
+            exit_reason: info.exit_reason,
+            oom_killed: info.oom_killed,
+            error_message: info.error_message,
+            finished_at: info.finished_at.map(|d| d.to_rfc3339()),
+            started_at: info.started_at.map(|d| d.to_rfc3339()),
+            restart_count: info.restart_count,
+            cpu_limit_cores: info.cpu_limit_cores,
         }
     }
 }
@@ -662,6 +700,29 @@ pub struct ContainerDetailResponse {
     /// Per-service URL for compose deployments
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_url: Option<String>,
+    /// Process exit code reported by Docker. None while still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Human-readable reason the container exited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_reason: Option<String>,
+    /// True when Docker's OOM killer terminated the container.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oom_killed: Option<bool>,
+    /// Free-form error string from Docker's container state on exit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    /// When the container exited (Docker's FinishedAt). None while running.
+    #[schema(example = "2025-10-12T12:16:47.609192Z")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    /// When the container's main process most recently started.
+    #[schema(example = "2025-10-12T12:15:50.000000Z")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// CPU limit in whole cores (e.g. 1.0). None when no limit is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_limit_cores: Option<f64>,
 }
 
 /// Environment variable with masked sensitive values

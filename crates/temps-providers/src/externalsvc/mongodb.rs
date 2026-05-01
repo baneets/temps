@@ -59,6 +59,15 @@ pub struct MongodbInputConfig {
     #[serde(default = "default_docker_image")]
     #[schemars(example = "example_docker_image", default = "default_docker_image")]
     pub docker_image: String,
+
+    /// Optional replica set name. When set, mongod is started with `--replSet <name>`,
+    /// a keyfile-protected `--auth`, and `rs.initiate()` is run after first start.
+    /// Required for transactions, change streams, and oplog-based CDC.
+    /// This is a single-node replica set — for multi-node HA use the cluster topology.
+    /// Cannot be changed after creation: switching modes on an existing data volume corrupts state.
+    #[serde(default, deserialize_with = "deserialize_optional_replica_set")]
+    #[schemars(with = "Option<String>", example = "example_replica_set")]
+    pub replica_set: Option<String>,
 }
 
 // Example functions for schemars
@@ -90,6 +99,10 @@ fn example_docker_image() -> &'static str {
     "gotempsh/mongodb-walg:8.0"
 }
 
+fn example_replica_set() -> &'static str {
+    "rs0"
+}
+
 /// Internal runtime configuration for MongoDB service
 /// This is what the service uses internally after processing input
 /// and what gets saved to the database
@@ -101,10 +114,25 @@ pub struct MongodbRuntimeConfig {
     pub username: String,
     pub password: String,
     pub docker_image: String,
+    /// When set, mongod runs with `--replSet <name>`. None means standalone mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_set: Option<String>,
+    /// Base64 keyfile contents used for `--keyFile` when replica_set is enabled.
+    /// MongoDB requires a keyfile whenever both `--auth` and `--replSet` are set,
+    /// even for a single-node replica set. Generated once at creation and persisted
+    /// here so the same keyfile is written into the container on every restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keyfile_content: Option<String>,
 }
 
 impl From<MongodbInputConfig> for MongodbRuntimeConfig {
     fn from(input: MongodbInputConfig) -> Self {
+        let replica_set = input.replica_set;
+        let keyfile_content = if replica_set.is_some() {
+            Some(generate_keyfile_content())
+        } else {
+            None
+        };
         Self {
             host: input.host,
             port: input.port.unwrap_or_else(|| {
@@ -116,6 +144,8 @@ impl From<MongodbInputConfig> for MongodbRuntimeConfig {
             username: input.username,
             password: input.password.unwrap_or_else(generate_password),
             docker_image: input.docker_image,
+            replica_set,
+            keyfile_content,
         }
     }
 }
@@ -132,6 +162,28 @@ where
         Some(s) if !s.is_empty() => Some(s),
         _ => None,
     })
+}
+
+/// Treat empty string as `None` so the UI can submit a blank field without
+/// accidentally enabling replica set mode. Validates the name contains only
+/// the characters MongoDB accepts in a replica set name.
+fn deserialize_optional_replica_set<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    let trimmed = opt.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(ref name) = trimmed {
+        let valid = name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !valid {
+            return Err(serde::de::Error::custom(
+                "replica_set must contain only ASCII letters, digits, '-', or '_'",
+            ));
+        }
+    }
+    Ok(trimmed)
 }
 
 fn default_host() -> String {
@@ -153,6 +205,17 @@ pub fn generate_password() -> String {
         .take(16)
         .map(char::from)
         .collect()
+}
+
+/// Generate a MongoDB keyfile body. Mongo accepts a base64-encoded shared secret
+/// between 6 and 1024 characters; we use 32 random bytes (~44 chars base64) which
+/// matches what `openssl rand -base64 32` produces in MongoDB's own docs.
+pub fn generate_keyfile_content() -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    STANDARD.encode(bytes)
 }
 
 fn is_port_available(port: u16) -> bool {
@@ -178,12 +241,70 @@ impl MongodbService {
         }
     }
 
+    /// Returns `true` when the desired config wants a replica set but the
+    /// existing container was created without `--replSet`. In that case the
+    /// caller must remove and recreate the container (preserving the data
+    /// volume) so the new flags take effect; a plain `start_container` would
+    /// just bring up the previous standalone process.
+    ///
+    /// Returns `false` (and never recreates) when the container already runs
+    /// in replica-set mode, or when the config is standalone — downgrading
+    /// from replica set back to standalone is intentionally not supported.
+    async fn container_needs_replset_recreate(
+        &self,
+        docker: &Docker,
+        container_name: &str,
+        config: &MongodbRuntimeConfig,
+    ) -> Result<bool> {
+        if config.replica_set.is_none() {
+            return Ok(false);
+        }
+        let inspect = docker
+            .inspect_container(container_name, None::<InspectContainerOptions>)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to inspect MongoDB container '{}' for replica-set drift check: {}",
+                    container_name,
+                    e
+                )
+            })?;
+        let cmd_has_replset = inspect
+            .config
+            .as_ref()
+            .and_then(|c| c.cmd.as_ref())
+            .map(|cmd| cmd.iter().any(|arg| arg.contains("--replSet")))
+            .unwrap_or(false);
+        Ok(!cmd_has_replset)
+    }
+
     fn get_mongodb_config(&self, service_config: ServiceConfig) -> Result<MongodbRuntimeConfig> {
-        // Deserialize input config from parameters
+        // After init the persisted parameters carry runtime-only fields like
+        // `keyfile_content`. We must NOT round-trip those through the input
+        // config — that would drop the keyfile and `From<InputConfig>` would
+        // regenerate a new one, breaking the live replica set's auth.
+        //
+        // Detect that case by looking for `keyfile_content`. If present, the
+        // parameters are already runtime-shaped and we deserialize directly.
+        if service_config
+            .parameters
+            .get("keyfile_content")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            let runtime: MongodbRuntimeConfig = serde_json::from_value(service_config.parameters)
+                .map_err(|e| {
+                anyhow::anyhow!("Failed to parse MongoDB runtime configuration: {}", e)
+            })?;
+            return Ok(runtime);
+        }
+
+        // First-time init or standalone (no replica set): parse as input
+        // config and transform. This auto-generates password/port and, if
+        // replica_set is set, generates a fresh keyfile.
         let input_config: MongodbInputConfig = serde_json::from_value(service_config.parameters)
             .map_err(|e| anyhow::anyhow!("Failed to parse MongoDB input configuration: {}", e))?;
-
-        // Transform input config to runtime config (auto-generates password if needed)
         Ok(input_config.into())
     }
 
@@ -207,11 +328,22 @@ impl MongodbService {
 
         info!("Created MongoDB volume: {}", volume_name);
 
-        let env_vars = [
+        let mut env_vars: Vec<String> = vec![
             format!("MONGO_INITDB_ROOT_USERNAME={}", config.username),
             format!("MONGO_INITDB_ROOT_PASSWORD={}", config.password),
             format!("MONGO_INITDB_DATABASE={}", config.database),
         ];
+
+        // When replica set mode is enabled, smuggle the keyfile through an env
+        // var read by a small bash wrapper (see `cmd` below). Persisting the
+        // keyfile in `MongodbRuntimeConfig` means restarts use the same key,
+        // which is critical — a different keyfile would invalidate the
+        // existing replica set's local.system.keys.
+        if let (Some(_), Some(keyfile_content)) =
+            (config.replica_set.as_ref(), config.keyfile_content.as_ref())
+        {
+            env_vars.push(format!("TEMPS_MONGO_KEYFILE_B64={}", keyfile_content));
+        }
 
         let mut container_labels = HashMap::new();
         container_labels.insert("temps.service".to_string(), "mongodb".to_string());
@@ -268,10 +400,38 @@ impl MongodbService {
             )])),
         });
 
+        // In replica-set mode we replace the image's CMD with a bash wrapper
+        // that materializes the keyfile inside the container (with strict
+        // perms required by mongod), then execs the standard entrypoint with
+        // `--replSet` and `--keyFile`. The official mongo entrypoint still
+        // handles MONGO_INITDB_ROOT_USERNAME/PASSWORD via the localhost
+        // exception during first boot.
+        //
+        // We deliberately avoid mounting the keyfile from the host: that path
+        // would require coordinating a host-side temp file across worker
+        // nodes. Writing it inside the container at start time keeps the
+        // service self-contained.
+        let cmd_override: Option<Vec<String>> = config.replica_set.as_ref().map(|rs_name| {
+            let escaped_rs = rs_name.replace('\'', "'\\''");
+            let script = format!(
+                concat!(
+                    "set -e; ",
+                    "printf '%s' \"$TEMPS_MONGO_KEYFILE_B64\" > /etc/mongo-keyfile; ",
+                    "chmod 400 /etc/mongo-keyfile; ",
+                    "chown mongodb:mongodb /etc/mongo-keyfile 2>/dev/null || true; ",
+                    "exec docker-entrypoint.sh mongod ",
+                    "--replSet '{}' --bind_ip_all --keyFile /etc/mongo-keyfile",
+                ),
+                escaped_rs
+            );
+            vec!["bash".to_string(), "-c".to_string(), script]
+        });
+
         let container_config = bollard::models::ContainerCreateBody {
             image: Some(image_tag),
             exposed_ports: Some(Vec::from(["27017/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.to_string()).collect()),
+            cmd: cmd_override,
             labels: Some(container_labels),
             host_config: Some(bollard::models::HostConfig {
                 restart_policy: Some(bollard::models::RestartPolicy {
@@ -325,8 +485,175 @@ impl MongodbService {
         self.wait_for_container_health(docker, &container.id)
             .await?;
 
+        // Replica set mode: initiate the set after first healthy boot. This
+        // is idempotent — if it's already initiated (e.g., container restart),
+        // mongod replies AlreadyInitialized and we treat that as success.
+        if let Some(rs_name) = config.replica_set.as_ref() {
+            self.initiate_replica_set(docker, &container_name, config, rs_name)
+                .await?;
+        }
+
         info!("MongoDB container {} created and started", container.id);
         Ok(())
+    }
+
+    /// Run `rs.initiate(...)` inside the container against localhost. Uses the
+    /// root credentials we know mongod will accept (they were created by the
+    /// entrypoint during first-boot via the localhost exception). On a
+    /// container restart the replica set is already initialized — that surfaces
+    /// as `AlreadyInitialized` (code 23) and we return success.
+    async fn initiate_replica_set(
+        &self,
+        docker: &Docker,
+        container_name: &str,
+        config: &MongodbRuntimeConfig,
+        rs_name: &str,
+    ) -> Result<()> {
+        use bollard::exec::{StartExecOptions, StartExecResults};
+
+        // Pass credentials via env to avoid quoting hazards in the shell
+        // command. The replica-set name is also injected as an env var so it
+        // can't break out of the JSON literal.
+        let env = [
+            format!("INIT_USER={}", config.username),
+            format!("INIT_PASS={}", config.password),
+            format!("INIT_RS={}", rs_name),
+        ];
+        let env_refs: Vec<&str> = env.iter().map(String::as_str).collect();
+
+        let script = "mongosh --quiet --norc \
+             -u \"$INIT_USER\" -p \"$INIT_PASS\" --authenticationDatabase admin \
+             --eval 'try { rs.initiate({_id: process.env.INIT_RS, members: [{_id: 0, host: \"127.0.0.1:27017\"}]}); } catch (e) { if (e.codeName !== \"AlreadyInitialized\" && !String(e).includes(\"already initialized\")) { throw e; } print(\"replica set already initialized\"); }' 2>&1";
+
+        let exec = docker
+            .create_exec(
+                container_name,
+                CreateExecOptions {
+                    cmd: Some(vec!["sh", "-c", script]),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    env: Some(env_refs),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create rs.initiate exec on '{}': {}",
+                    container_name,
+                    e
+                )
+            })?;
+
+        let start = docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start rs.initiate exec: {}", e))?;
+
+        let mut captured = String::new();
+        if let StartExecResults::Attached { mut output, .. } = start {
+            while let Some(chunk) = output.next().await {
+                if let Ok(log) = chunk {
+                    captured.push_str(&log.to_string());
+                    if captured.len() > 4096 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let inspect = docker.inspect_exec(&exec.id).await?;
+        let exit_code = inspect.exit_code.unwrap_or(-1);
+
+        if exit_code == 0 {
+            info!(
+                "rs.initiate completed on '{}' (replica set '{}')",
+                container_name, rs_name
+            );
+            // Wait briefly for the node to elect itself primary so subsequent
+            // operations (e.g. provision_resource creating databases) don't
+            // race the election. mongod typically reaches PRIMARY in <2s for
+            // a single-node set; we cap the wait at 30s.
+            self.wait_for_primary(docker, container_name, config)
+                .await?;
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "rs.initiate failed on '{}' with exit {}: {}",
+                container_name,
+                exit_code,
+                captured.trim()
+            ))
+        }
+    }
+
+    /// Poll `db.hello()` until it reports `isWritablePrimary: true` or 30s elapse.
+    /// Single-node replica sets normally elect themselves primary in <2s.
+    async fn wait_for_primary(
+        &self,
+        docker: &Docker,
+        container_name: &str,
+        config: &MongodbRuntimeConfig,
+    ) -> Result<()> {
+        use bollard::exec::{StartExecOptions, StartExecResults};
+
+        let env = [
+            format!("INIT_USER={}", config.username),
+            format!("INIT_PASS={}", config.password),
+        ];
+        let env_refs: Vec<&str> = env.iter().map(String::as_str).collect();
+        let probe_script = "mongosh --quiet --norc \
+             -u \"$INIT_USER\" -p \"$INIT_PASS\" --authenticationDatabase admin \
+             --eval 'const r = db.hello(); if (!r.isWritablePrimary) { quit(2); }' 2>&1";
+
+        let max_wait = Duration::from_secs(30);
+        let start = std::time::Instant::now();
+        loop {
+            let exec = docker
+                .create_exec(
+                    container_name,
+                    CreateExecOptions {
+                        cmd: Some(vec!["sh", "-c", probe_script]),
+                        attach_stdout: Some(true),
+                        attach_stderr: Some(true),
+                        env: Some(env_refs.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            if let StartExecResults::Attached { mut output, .. } = docker
+                .start_exec(
+                    &exec.id,
+                    Some(StartExecOptions {
+                        detach: false,
+                        ..Default::default()
+                    }),
+                )
+                .await?
+            {
+                while output.next().await.is_some() {}
+            }
+
+            let inspect = docker.inspect_exec(&exec.id).await?;
+            if inspect.exit_code == Some(0) {
+                return Ok(());
+            }
+            if start.elapsed() > max_wait {
+                return Err(anyhow::anyhow!(
+                    "Replica set on '{}' did not elect a primary within {}s",
+                    container_name,
+                    max_wait.as_secs()
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
@@ -373,8 +700,15 @@ impl MongodbService {
             .ok_or_else(|| anyhow::anyhow!("MongoDB not configured"))?
             .clone();
 
+        // `directConnection=true` keeps the driver pointed at exactly this
+        // host:port instead of doing replica-set topology discovery. In RS
+        // mode `rs.initiate` registers the member as `127.0.0.1:27017`, which
+        // the driver would then try to dial — that address is the container's
+        // loopback and is unreachable from the host or from sibling
+        // containers. Direct connection bypasses discovery and is safe on
+        // standalone too. See ReplicaSetNoPrimary failure mode.
         let connection_string = format!(
-            "mongodb://{}:{}@{}:{}/?authSource=admin",
+            "mongodb://{}:{}@{}:{}/?authSource=admin&directConnection=true",
             urlencoding::encode(&config.username),
             urlencoding::encode(&config.password),
             config.host,
@@ -1154,8 +1488,12 @@ impl ExternalService for MongodbService {
         };
 
         // authSource=admin because that's where we create the root user.
+        // directConnection=true skips replica-set topology discovery so the
+        // probe checks *this* node instead of chasing the member address
+        // advertised by `rs.initiate` (`127.0.0.1:27017`, unreachable from
+        // outside the container). Safe on standalone too.
         let uri = format!(
-            "mongodb://{}:{}@{}:{}/?authSource=admin&serverSelectionTimeoutMS=3000&connectTimeoutMS=3000",
+            "mongodb://{}:{}@{}:{}/?authSource=admin&directConnection=true&serverSelectionTimeoutMS=3000&connectTimeoutMS=3000",
             urlencoding::encode(&cfg.username),
             urlencoding::encode(&cfg.password),
             cfg.host,
@@ -1252,6 +1590,9 @@ impl ExternalService for MongodbService {
                     "username" => false,    // Don't change username after creation
                     "password" => false,    // Password is auto-generated and cannot be changed
                     "docker_image" => true, // Docker image can be upgraded
+                    // One-way: standalone -> replica set is supported in-place.
+                    // The merge_updates strategy rejects unsetting or renaming.
+                    "replica_set" => true,
                     _ => false,
                 };
 
@@ -1280,24 +1621,70 @@ impl ExternalService for MongodbService {
             }))
             .await?;
 
+        let config = self
+            .config
+            .read()
+            .await
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("MongoDB configuration not found"))?
+            .clone();
+
         if containers.is_empty() {
-            let config = self
-                .config
-                .read()
-                .await
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("MongoDB configuration not found"))?
-                .clone();
             self.create_container(docker, &config).await?;
         } else {
-            docker
-                .start_container(
-                    &container_name,
-                    None::<bollard::query_parameters::StartContainerOptions>,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to start MongoDB container: {}", e))?;
-            info!("Started existing MongoDB container: {}", container_name);
+            // If the persisted config now requires `--replSet` but the
+            // existing container was created in standalone mode, restarting it
+            // would just bring up the old standalone again. Detect drift by
+            // inspecting the container's Cmd, then recreate (preserving the
+            // data volume — `remove_container` does NOT touch named volumes).
+            if self
+                .container_needs_replset_recreate(docker, &container_name, &config)
+                .await?
+            {
+                info!(
+                    "MongoDB container {} needs recreate to apply replica_set='{}'; \
+                     removing standalone container and recreating in replica-set mode \
+                     (data volume preserved)",
+                    container_name,
+                    config.replica_set.as_deref().unwrap_or("")
+                );
+                let _ = docker
+                    .stop_container(
+                        &container_name,
+                        Some(StopContainerOptions {
+                            t: Some(10),
+                            signal: None,
+                        }),
+                    )
+                    .await;
+                docker
+                    .remove_container(
+                        &container_name,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            v: false, // keep the data volume
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to remove standalone MongoDB container before \
+                             replica-set recreate: {}",
+                            e
+                        )
+                    })?;
+                self.create_container(docker, &config).await?;
+            } else {
+                docker
+                    .start_container(
+                        &container_name,
+                        None::<bollard::query_parameters::StartContainerOptions>,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to start MongoDB container: {}", e))?;
+                info!("Started existing MongoDB container: {}", container_name);
+            }
         }
 
         Ok(())
@@ -2057,6 +2444,7 @@ mod tests {
             "username",
             "password",
             "docker_image",
+            "replica_set",
         ];
         for field in &expected_fields {
             assert!(
@@ -2110,6 +2498,7 @@ mod tests {
             ("username", false),
             ("password", false),
             ("docker_image", true),
+            ("replica_set", true),
         ];
 
         for (field_name, should_be_editable) in editable_status {
@@ -2316,6 +2705,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_replica_set_default_is_none() {
+        let input: MongodbInputConfig = serde_json::from_value(serde_json::json!({
+            "host": "localhost",
+            "database": "admin",
+            "username": "root",
+            "docker_image": "gotempsh/mongodb-walg:8.0",
+        }))
+        .expect("should deserialize without replica_set");
+        assert!(input.replica_set.is_none());
+
+        let runtime: MongodbRuntimeConfig = input.into();
+        assert!(runtime.replica_set.is_none());
+        assert!(runtime.keyfile_content.is_none());
+    }
+
+    #[test]
+    fn test_replica_set_some_generates_keyfile() {
+        let input: MongodbInputConfig = serde_json::from_value(serde_json::json!({
+            "host": "localhost",
+            "database": "admin",
+            "username": "root",
+            "docker_image": "gotempsh/mongodb-walg:8.0",
+            "replica_set": "rs0",
+        }))
+        .expect("should deserialize with replica_set");
+        assert_eq!(input.replica_set.as_deref(), Some("rs0"));
+
+        let runtime: MongodbRuntimeConfig = input.into();
+        assert_eq!(runtime.replica_set.as_deref(), Some("rs0"));
+        let kf = runtime
+            .keyfile_content
+            .expect("keyfile should be generated");
+        // Base64 of 32 bytes is 44 chars including padding
+        assert_eq!(kf.len(), 44);
+    }
+
+    #[test]
+    fn test_replica_set_empty_string_treated_as_none() {
+        let input: MongodbInputConfig = serde_json::from_value(serde_json::json!({
+            "host": "localhost",
+            "database": "admin",
+            "username": "root",
+            "docker_image": "gotempsh/mongodb-walg:8.0",
+            "replica_set": "",
+        }))
+        .expect("empty replica_set should deserialize");
+        assert!(input.replica_set.is_none());
+    }
+
+    #[test]
+    fn test_replica_set_rejects_invalid_chars() {
+        let result: Result<MongodbInputConfig, _> = serde_json::from_value(serde_json::json!({
+            "host": "localhost",
+            "database": "admin",
+            "username": "root",
+            "docker_image": "gotempsh/mongodb-walg:8.0",
+            "replica_set": "bad name with spaces",
+        }));
+        assert!(result.is_err(), "spaces in replica_set should fail");
+    }
+
+    #[test]
+    fn test_runtime_config_round_trip_preserves_keyfile() {
+        // First-time init: input has replica_set, no keyfile
+        let input: MongodbInputConfig = serde_json::from_value(serde_json::json!({
+            "host": "localhost",
+            "database": "admin",
+            "username": "root",
+            "password": "secret",
+            "docker_image": "gotempsh/mongodb-walg:8.0",
+            "replica_set": "rs0",
+        }))
+        .unwrap();
+        let runtime: MongodbRuntimeConfig = input.into();
+        let original_keyfile = runtime.keyfile_content.clone().unwrap();
+
+        // Persisted as JSON, then loaded back via the runtime path
+        let persisted = serde_json::to_value(&runtime).unwrap();
+        assert!(persisted.get("keyfile_content").is_some());
+
+        let docker = match Docker::connect_with_local_defaults() {
+            Ok(d) => Arc::new(d),
+            Err(_) => return, // No docker on host; skip this round-trip path
+        };
+        let service = MongodbService::new("test-rt".to_string(), docker);
+        let svc_config = ServiceConfig {
+            name: "test-rt".into(),
+            service_type: ServiceType::Mongodb,
+            version: None,
+            parameters: persisted,
+        };
+        let reloaded = service
+            .get_mongodb_config(svc_config)
+            .expect("should reload runtime config");
+        // Critical: the keyfile must NOT be regenerated on reload
+        assert_eq!(
+            reloaded.keyfile_content.as_deref(),
+            Some(original_keyfile.as_str())
+        );
+        assert_eq!(reloaded.replica_set.as_deref(), Some("rs0"));
+    }
+
+    #[test]
+    fn test_generate_keyfile_content_is_random() {
+        let a = generate_keyfile_content();
+        let b = generate_keyfile_content();
+        assert_eq!(a.len(), 44);
+        assert_eq!(b.len(), 44);
+        assert_ne!(a, b);
+    }
+
     /// Test backup and restore of MongoDB to/from S3 using real Docker containers
     /// This test uses MongoDB and MinIO (S3-compatible) containers
     /// Demonstrates the use of test_utils for backup/restore testing
@@ -2385,6 +2886,8 @@ mod tests {
             username: username.to_string(),
             password: password.to_string(),
             docker_image: "gotempsh/mongodb-walg:8.0".to_string(),
+            replica_set: None,
+            keyfile_content: None,
         };
 
         *service.config.write().await = Some(mongodb_config.clone());

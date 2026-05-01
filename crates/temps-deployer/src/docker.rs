@@ -59,6 +59,66 @@ pub struct DockerRuntime {
     overlay_peers: Option<Arc<std::sync::RwLock<Vec<temps_network::Peer>>>>,
 }
 
+/// Map a POSIX exit code (>= 128 means "killed by signal N - 128") to a human
+/// signal name. Returns None for normal-range exit codes.
+fn signal_name_from_exit_code(code: i64) -> Option<&'static str> {
+    if !(128..=192).contains(&code) {
+        return None;
+    }
+    match (code - 128) as i32 {
+        1 => Some("SIGHUP"),
+        2 => Some("SIGINT"),
+        3 => Some("SIGQUIT"),
+        4 => Some("SIGILL"),
+        6 => Some("SIGABRT"),
+        8 => Some("SIGFPE"),
+        9 => Some("SIGKILL"),
+        11 => Some("SIGSEGV"),
+        13 => Some("SIGPIPE"),
+        14 => Some("SIGALRM"),
+        15 => Some("SIGTERM"),
+        _ => None,
+    }
+}
+
+/// Build a short human-readable explanation of why a container is in its
+/// current state. Returns None for containers that are still running, have
+/// never been started, or exited cleanly with status 0 and no Docker error.
+pub(crate) fn build_exit_reason(
+    status: &ContainerStatus,
+    oom_killed: Option<bool>,
+    exit_code: Option<i64>,
+    error: Option<&str>,
+) -> Option<String> {
+    let is_terminal = matches!(
+        status,
+        ContainerStatus::Exited | ContainerStatus::Dead | ContainerStatus::Stopped
+    );
+    if !is_terminal {
+        return None;
+    }
+    if oom_killed == Some(true) {
+        return Some(match exit_code {
+            Some(code) => format!("OOMKilled (exit code {})", code),
+            None => "OOMKilled".to_string(),
+        });
+    }
+    if let Some(err) = error.filter(|e| !e.is_empty()) {
+        return Some(match exit_code {
+            Some(code) => format!("Error (exit code {}): {}", code, err),
+            None => format!("Error: {}", err),
+        });
+    }
+    match exit_code {
+        Some(0) => None,
+        Some(code) => Some(match signal_name_from_exit_code(code) {
+            Some(sig) => format!("Killed by {} (exit code {})", sig, code),
+            None => format!("Exit code {}", code),
+        }),
+        None => None,
+    }
+}
+
 impl DockerRuntime {
     /// Per-container directory that holds plaintext secret files for bind-mounting
     /// into `/run/secrets`. Lives outside `TempDir` because Docker keeps the
@@ -1491,6 +1551,9 @@ impl ContainerDeployer for DockerRuntime {
             .await
             .map_err(|e| DeployerError::ContainerNotFound(format!("Container not found: {}", e)))?;
 
+        // Pull host_config out before state/config so we can read the CPU
+        // limit (nano_cpus) without re-borrowing the moved container value.
+        let host_config = container.host_config.clone();
         let state = container.state.unwrap_or_default();
         let config = container.config.unwrap_or_default();
         let container_labels = config.labels.clone().unwrap_or_default();
@@ -1541,6 +1604,51 @@ impl ContainerDeployer for DockerRuntime {
             })
             .collect();
 
+        let status =
+            Self::map_container_status(&state.status.map(|s| s.to_string()).unwrap_or_default());
+
+        // Capture exit metadata so the API/UI can show *why* a container is
+        // gone instead of a bare "Exited". Docker only populates these once
+        // the container has actually exited; for running containers they
+        // remain None.
+        let oom_killed = state.oom_killed;
+        let exit_code_i64 = state.exit_code;
+        let exit_code: Option<i32> = exit_code_i64.and_then(|c| i32::try_from(c).ok());
+        // Trim Docker's empty-string "no error" sentinel; only surface a real message.
+        let error_message = state.error.and_then(|e| {
+            let trimmed = e.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        // FinishedAt comes back as RFC3339; "0001-01-01T00:00:00Z" means
+        // never-finished, which we treat as None.
+        let parse_docker_ts = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+            if s.is_empty() || s.starts_with("0001-01-01") {
+                None
+            } else {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            }
+        };
+        let finished_at = state.finished_at.as_deref().and_then(parse_docker_ts);
+        let started_at = state.started_at.as_deref().and_then(parse_docker_ts);
+
+        // Translate Docker's nano_cpus to whole-core units so the UI can
+        // render "0.5 / 1.0 cores" without doing the divide. None when no
+        // limit was set on the container (host_config absent or nano_cpus 0).
+        let cpu_limit_cores = host_config
+            .as_ref()
+            .and_then(|hc| hc.nano_cpus)
+            .filter(|nc| *nc > 0)
+            .map(|nc| nc as f64 / 1_000_000_000.0);
+
+        let exit_reason =
+            build_exit_reason(&status, oom_killed, exit_code_i64, error_message.as_deref());
+
         Ok(ContainerInfo {
             container_id: container.id.unwrap_or_default(),
             container_name: container
@@ -1549,9 +1657,7 @@ impl ContainerDeployer for DockerRuntime {
                 .trim_start_matches('/')
                 .to_string(),
             image_name: config.image.unwrap_or_default(),
-            status: Self::map_container_status(
-                &state.status.map(|s| s.to_string()).unwrap_or_default(),
-            ),
+            status,
             created_at: container
                 .created
                 .and_then(|dt| {
@@ -1562,6 +1668,13 @@ impl ContainerDeployer for DockerRuntime {
             environment_vars: env_vars,
             restart_count: container.restart_count,
             labels: container_labels,
+            exit_code,
+            exit_reason,
+            oom_killed,
+            error_message,
+            finished_at,
+            started_at,
+            cpu_limit_cores,
         })
     }
 
@@ -1662,11 +1775,14 @@ impl ContainerDeployer for DockerRuntime {
             container_id: container_info.container_id,
             container_name: container_info.container_name,
             cpu_percent,
+            cpu_limit_cores: container_info.cpu_limit_cores,
             memory_bytes,
             memory_limit_bytes,
             memory_percent,
             network_rx_bytes,
             network_tx_bytes,
+            restart_count: container_info.restart_count,
+            started_at: container_info.started_at,
             timestamp: chrono::Utc::now(),
         })
     }

@@ -21,9 +21,9 @@ use tracing::{debug, error, info};
 
 use super::types::{
     CreateProjectRequest, PaginatedProjectList, PaginationParams, ProjectResponse,
-    ProjectStatisticsResponse, TriggerPipelinePayload, TriggerPipelineResponse,
-    UpdateAutomaticDeployRequest, UpdateDeploymentConfigRequest, UpdateGitSettingsRequest,
-    UpdateProjectSettingsRequest,
+    ProjectStatisticsResponse, ReinstallWebhookResponse, TriggerPipelinePayload,
+    TriggerPipelineResponse, UpdateAutomaticDeployRequest, UpdateDeploymentConfigRequest,
+    UpdateGitSettingsRequest, UpdateProjectSettingsRequest,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use temps_core::problemdetails;
@@ -75,6 +75,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/deployment-config",
             patch(update_project_deployment_config),
         )
+        .route(
+            "/projects/{project_id}/gitlab/reinstall-webhook",
+            post(reinstall_gitlab_webhook),
+        )
         // Merge custom domain routes
         .merge(custom_domain_routes)
 }
@@ -92,6 +96,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         update_git_settings,
         update_automatic_deploy,
         update_project_deployment_config,
+        reinstall_gitlab_webhook,
         trigger_project_pipeline,
         get_project_statistics,
         list_presets,
@@ -111,6 +116,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             UpdateGitSettingsRequest,
             UpdateAutomaticDeployRequest,
             UpdateDeploymentConfigRequest,
+            ReinstallWebhookResponse,
             TriggerPipelinePayload,
             TriggerPipelineResponse,
             ProjectStatisticsResponse,
@@ -684,6 +690,82 @@ pub async fn update_git_settings(
     }
 
     Ok(Json(ProjectResponse::map_from_project(updated_project)))
+}
+
+/// Reinstall the GitLab webhook for a project
+///
+/// Removes the existing webhook (if any) and installs a fresh one.
+/// Use this when a webhook has been manually deleted on the GitLab side
+/// and automatic deployments have stopped working.
+#[utoipa::path(
+    post,
+    path = "/projects/{project_id}/gitlab/reinstall-webhook",
+    tag = "Projects",
+    responses(
+        (status = 200, description = "Webhook reinstalled", body = ReinstallWebhookResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Project not found"),
+        (status = 400, description = "Project is not connected to a GitLab repository"),
+        (status = 500, description = "Internal server error")
+    ),
+    params(
+        ("project_id" = i32, Path, description = "Project ID")
+    ),
+    security(
+        ("bearer_auth" = [])
+    )
+)]
+pub async fn reinstall_gitlab_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<i32>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+
+    info!("Reinstalling GitLab webhook for project: {}", project_id);
+
+    let hook_id = state
+        .project_service
+        .reinstall_gitlab_webhook(project_id)
+        .await
+        .map_err(|e| {
+            error!("Error reinstalling GitLab webhook: {:?}", e);
+            Problem::from(e)
+        })?;
+
+    // Audit log the reinstall.
+    let audit_context = AuditContext {
+        user_id: auth.user_id(),
+        ip_address: Some(metadata.ip_address.to_string()),
+        user_agent: metadata.user_agent,
+    };
+
+    let audit_event = ProjectUpdatedAudit {
+        context: audit_context,
+        project_id,
+        project_name: format!("project-{}", project_id),
+        project_slug: String::new(),
+        updated_fields: ProjectUpdatedFields {
+            name: None,
+            repo_name: None,
+            repo_owner: None,
+            directory: None,
+            main_branch: None,
+            preset: None,
+            automatic_deploy: None,
+        },
+    };
+
+    if let Err(e) = state.audit_service.create_audit_log(&audit_event).await {
+        error!("Failed to create audit log: {:?}", e);
+    }
+
+    Ok(Json(ReinstallWebhookResponse {
+        hook_id,
+        message: "GitLab webhook reinstalled successfully".to_string(),
+    }))
 }
 
 /// Update deployment configuration for a project

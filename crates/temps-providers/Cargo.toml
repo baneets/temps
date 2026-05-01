@@ -51,6 +51,7 @@ axum-macros = { workspace = true }
 schemars = { workspace = true }
 urlencoding = "2.1"
 tokio-postgres = "0.7"
+base64 = { workspace = true }
 
 [features]
 docker-tests = []
