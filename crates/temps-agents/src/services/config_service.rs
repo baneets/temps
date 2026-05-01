@@ -1024,6 +1024,8 @@ mod tests {
             is_public_repo: false,
             git_url: None,
             git_provider_connection_id: if has_git { Some(1) } else { None },
+            gitlab_webhook_id: None,
+            gitlab_webhook_signing_token: None,
             attack_mode: false,
             enable_preview_environments: false,
             source_type: temps_entities::source_type::SourceType::Git,

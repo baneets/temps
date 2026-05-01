@@ -714,14 +714,57 @@ impl NotificationService {
         Ok(providers)
     }
 
-    fn get_next_allowed_time(priority: &NotificationPriority) -> DateTime<Utc> {
-        let now = Utc::now();
+    /// Returns the base delay between notifications for a given priority.
+    /// This is the gap after the very first notification — subsequent gaps
+    /// grow exponentially (see `get_next_allowed_time`).
+    fn base_delay(priority: &NotificationPriority) -> Duration {
         match priority {
-            NotificationPriority::Low => now + Duration::days(7),
-            NotificationPriority::Normal => now + Duration::days(1),
-            NotificationPriority::High => now + Duration::hours(1),
-            NotificationPriority::Critical => now + Duration::minutes(15),
+            NotificationPriority::Low => Duration::days(7),
+            NotificationPriority::Normal => Duration::days(1),
+            NotificationPriority::High => Duration::hours(1),
+            NotificationPriority::Critical => Duration::minutes(15),
         }
+    }
+
+    /// Returns the maximum gap between notifications for a given priority.
+    /// Exponential backoff is clamped here so a long-running incident still
+    /// produces an occasional reminder rather than going completely silent.
+    fn max_delay(priority: &NotificationPriority) -> Duration {
+        match priority {
+            NotificationPriority::Low => Duration::days(30),
+            NotificationPriority::Normal => Duration::days(7),
+            NotificationPriority::High => Duration::hours(24),
+            NotificationPriority::Critical => Duration::hours(24),
+        }
+    }
+
+    /// Compute the next-allowed timestamp using exponential backoff.
+    ///
+    /// `previous_attempts` is the `occurrence_count` of the previous record for
+    /// this batch_key — i.e., how many times the same alarm tried to fire
+    /// (1 send + N throttled events) before this send. The first ever send
+    /// passes 0 and gets the base delay; persistent incidents grow the gap
+    /// exponentially, clamped at `max_delay`. This stops a flapping container
+    /// from generating one email every 15 minutes forever.
+    fn get_next_allowed_time(
+        priority: &NotificationPriority,
+        previous_attempts: i32,
+    ) -> DateTime<Utc> {
+        let base = Self::base_delay(priority);
+        let cap = Self::max_delay(priority);
+
+        // First-time send (no prior attempts) uses the base delay.
+        // Otherwise double per prior attempt: 1 prior -> 2x, 2 prior -> 4x, etc.
+        // Clamp shift at 20 so we never overflow i64 before clamping to `cap`.
+        let shift = previous_attempts.clamp(0, 20) as u32;
+        let multiplier: i64 = 1i64 << shift;
+
+        let scaled_secs = base
+            .num_seconds()
+            .saturating_mul(multiplier)
+            .min(cap.num_seconds());
+
+        Utc::now() + Duration::seconds(scaled_secs)
     }
 
     pub async fn send_notification(&self, notification: Notification) -> Result<()> {
@@ -736,25 +779,32 @@ impl NotificationService {
             .await?;
 
         if let Some(existing) = existing.clone() {
-            // If we have a similar notification, check if we should send it or batch it
-            if now < existing.next_allowed_at {
+            // If we have a similar notification, check if we should send it or batch it.
+            // `bypass_throttling` lets callers (e.g. weekly digest, manual test sends)
+            // skip the gate entirely. Critical alarms intentionally still respect the
+            // backoff — bypassing them is what produced 100 emails/day.
+            if !notification.bypass_throttling && now < existing.next_allowed_at {
                 // Update occurrence count and return
                 let mut existing_update: notifications::ActiveModel = existing.clone().into();
                 existing_update.occurrence_count = Set(existing.occurrence_count + 1);
                 existing_update.update(self.db.as_ref()).await?;
 
                 info!(
-                    "Batching notification '{}'. Current count: {}",
+                    "Batching notification '{}'. Current count: {}, next send allowed at {}",
                     notification.title,
-                    existing.occurrence_count + 1
+                    existing.occurrence_count + 1,
+                    existing.next_allowed_at,
                 );
                 return Ok(());
             }
         }
 
-        // If we reach here, we should send the notification
+        // If we reach here, we should send the notification.
+        // Pass the previous record's occurrence_count so the gap doubles per
+        // ongoing-incident attempt instead of staying at the base delay forever.
+        let previous_attempts = existing.as_ref().map(|e| e.occurrence_count).unwrap_or(0);
         let metadata_json = serde_json::to_string(&notification.metadata)?;
-        let next_allowed = Self::get_next_allowed_time(&notification.priority);
+        let next_allowed = Self::get_next_allowed_time(&notification.priority, previous_attempts);
 
         // Create new notification record
         let new_notification = notifications::ActiveModel {
@@ -1348,22 +1398,61 @@ mod tests {
         assert_eq!(key, "Info:Normal:Test Notification");
     }
 
+    /// Helper: assert `actual` falls within `expected ± tolerance_secs`.
+    /// Accounts for the few microseconds between the test's `Utc::now()`
+    /// snapshot and the inner call inside `get_next_allowed_time`.
+    fn assert_near(actual: DateTime<Utc>, expected: DateTime<Utc>, tolerance_secs: i64) {
+        let diff = (actual - expected).num_seconds().abs();
+        assert!(
+            diff <= tolerance_secs,
+            "actual {} differs from expected {} by {}s (tolerance {}s)",
+            actual,
+            expected,
+            diff,
+            tolerance_secs
+        );
+    }
+
     #[test]
-    fn test_next_allowed_time_calculation() {
+    fn test_next_allowed_time_base_delay_first_send() {
+        // First send (previous_attempts = 0) should equal the base delay.
         let now = Utc::now();
 
-        let low_priority = NotificationService::get_next_allowed_time(&NotificationPriority::Low);
-        let normal_priority =
-            NotificationService::get_next_allowed_time(&NotificationPriority::Normal);
-        let high_priority = NotificationService::get_next_allowed_time(&NotificationPriority::High);
-        let critical_priority =
-            NotificationService::get_next_allowed_time(&NotificationPriority::Critical);
+        let low = NotificationService::get_next_allowed_time(&NotificationPriority::Low, 0);
+        let normal = NotificationService::get_next_allowed_time(&NotificationPriority::Normal, 0);
+        let high = NotificationService::get_next_allowed_time(&NotificationPriority::High, 0);
+        let critical =
+            NotificationService::get_next_allowed_time(&NotificationPriority::Critical, 0);
 
-        // Check relative times
-        assert!(low_priority > now + Duration::days(6));
-        assert!(normal_priority > now + Duration::hours(23));
-        assert!(high_priority > now + Duration::minutes(59));
-        assert!(critical_priority > now + Duration::minutes(14));
+        assert_near(low, now + Duration::days(7), 5);
+        assert_near(normal, now + Duration::days(1), 5);
+        assert_near(high, now + Duration::hours(1), 5);
+        assert_near(critical, now + Duration::minutes(15), 5);
+    }
+
+    #[test]
+    fn test_next_allowed_time_doubles_per_attempt() {
+        // Critical: base 15m. After 1 prior attempt -> 30m. After 2 -> 1h. After 3 -> 2h.
+        let now = Utc::now();
+
+        let one = NotificationService::get_next_allowed_time(&NotificationPriority::Critical, 1);
+        let two = NotificationService::get_next_allowed_time(&NotificationPriority::Critical, 2);
+        let three = NotificationService::get_next_allowed_time(&NotificationPriority::Critical, 3);
+
+        assert_near(one, now + Duration::minutes(30), 5);
+        assert_near(two, now + Duration::hours(1), 5);
+        assert_near(three, now + Duration::hours(2), 5);
+    }
+
+    #[test]
+    fn test_next_allowed_time_clamped_at_max() {
+        // Critical: cap is 24h. Even an absurd attempt count must not exceed it.
+        let now = Utc::now();
+
+        let huge =
+            NotificationService::get_next_allowed_time(&NotificationPriority::Critical, 1000);
+
+        assert_near(huge, now + Duration::hours(24), 5);
     }
 
     #[test]
@@ -1535,13 +1624,15 @@ mod tests {
 
     #[test]
     fn test_notification_priority_ordering() {
-        let low_time = NotificationService::get_next_allowed_time(&NotificationPriority::Low);
-        let normal_time = NotificationService::get_next_allowed_time(&NotificationPriority::Normal);
-        let high_time = NotificationService::get_next_allowed_time(&NotificationPriority::High);
+        // For a first send (no prior attempts), Critical should have the shortest
+        // wait time and Low the longest.
+        let low_time = NotificationService::get_next_allowed_time(&NotificationPriority::Low, 0);
+        let normal_time =
+            NotificationService::get_next_allowed_time(&NotificationPriority::Normal, 0);
+        let high_time = NotificationService::get_next_allowed_time(&NotificationPriority::High, 0);
         let critical_time =
-            NotificationService::get_next_allowed_time(&NotificationPriority::Critical);
+            NotificationService::get_next_allowed_time(&NotificationPriority::Critical, 0);
 
-        // Critical should have the shortest wait time, Low should have the longest
         assert!(critical_time < high_time);
         assert!(high_time < normal_time);
         assert!(normal_time < low_time);

@@ -288,23 +288,33 @@ export function ProjectOverview({
         {isLoadingVisitors ? (
           <Skeleton className="h-24" />
         ) : visitorError ? (
-          <MetricCard
-            title="Visitors last 24 hours (Unique)"
-            icon={<Users />}
-            value="Error"
-            change=""
-            error={true}
-          />
+          <Link
+            to={`/projects/${project.slug}/analytics`}
+            className="h-full w-full"
+          >
+            <MetricCard
+              title="Visitors last 24 hours (Unique)"
+              icon={<Users />}
+              value="Error"
+              change=""
+              error={true}
+            />
+          </Link>
         ) : (
-          <MetricCard
-            change=""
-            changeDisplay={getChangeDisplay(
-              Number((visitorStats?.count || 0).toFixed(1))
-            )}
-            value={visitorStats?.count || '0'}
-            title="Visitors last 24 hours"
-            icon={<Users />}
-          />
+          <Link
+            to={`/projects/${project.slug}/analytics`}
+            className="h-full w-full"
+          >
+            <MetricCard
+              change=""
+              changeDisplay={getChangeDisplay(
+                Number((visitorStats?.count || 0).toFixed(1))
+              )}
+              value={visitorStats?.count || '0'}
+              title="Visitors last 24 hours"
+              icon={<Users />}
+            />
+          </Link>
         )}
 
         <RevenueMetric project={project} />

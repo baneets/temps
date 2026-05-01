@@ -192,6 +192,19 @@ impl GitProviderManager {
         }
     }
 
+    /// Expose the underlying database connection for crate-internal use.
+    pub fn db(&self) -> &DatabaseConnection {
+        self.db.as_ref()
+    }
+
+    /// Decrypt an encrypted token string (e.g., a GitLab webhook signing token).
+    /// Thin public wrapper around the private `decrypt_string` helper so that
+    /// webhook handlers inside the same crate can access it without going through
+    /// the full service layer.
+    pub async fn decrypt_token(&self, encrypted: &str) -> Result<String, GitProviderManagerError> {
+        self.decrypt_string(encrypted).await
+    }
+
     /// Get an access token from any active GitHub connection.
     /// Used for public repo API calls to avoid unauthenticated rate limits (60 → 5000 req/hr).
     /// Validates the token against GitHub's API before returning it.

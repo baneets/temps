@@ -1104,66 +1104,56 @@ impl LoadBalancer {
                 .and_then(|h| h.get("x-cache").or_else(|| h.get("cf-cache-status")))
                 .cloned();
 
-            // Only log HTML pages (skip static assets like .js, .css, .svg, etc.)
-            let should_log = ctx
-                .response_headers
-                .as_ref()
-                .and_then(|h| h.get("content-type"))
-                .map(|ct| ct.starts_with("text/html"))
-                .unwrap_or(false);
+            let proxy_log_request = CreateProxyLogRequest {
+                method: ctx.method.clone(),
+                path: ctx.path.clone(),
+                query_string: ctx.query_string.clone(),
+                host: ctx.host.clone(),
+                status_code: status_code as i16,
+                response_time_ms: Some(ctx.start_time.elapsed().as_millis() as i32),
+                request_source: "proxy".to_string(),
+                is_system_request: ctx.path.starts_with(ROUTE_PREFIX_TEMPS),
+                routing_status: ctx.routing_status.clone(),
+                project_id: ctx.project.as_ref().map(|p| p.id),
+                environment_id: ctx.environment.as_ref().map(|e| e.id),
+                deployment_id: ctx.deployment.as_ref().map(|d| d.id),
+                session_id: ctx.session_id_i32,
+                visitor_id: ctx.visitor_id_i32,
+                container_id: ctx.container_id.clone(),
+                upstream_host: ctx.upstream_host.clone(),
+                error_message: ctx.error_message.clone(),
+                client_ip: ctx.ip_address.clone(),
+                user_agent: Some(ctx.user_agent.clone()),
+                referrer: ctx.referrer.clone(),
+                request_id: ctx.request_id.clone(),
+                // Batch writer will enrich these fields
+                ip_geolocation_id: None,
+                browser: None,
+                browser_version: None,
+                operating_system: None,
+                device_type: None,
+                is_bot: None,
+                bot_name: None,
+                request_size_bytes: request_size,
+                response_size_bytes: response_size,
+                cache_status,
+                request_headers: ctx
+                    .request_headers
+                    .as_ref()
+                    .and_then(|h| serde_json::to_value(h).ok()),
+                response_headers: ctx
+                    .response_headers
+                    .as_ref()
+                    .and_then(|h| serde_json::to_value(h).ok()),
+            };
 
-            if should_log {
-                let proxy_log_request = CreateProxyLogRequest {
-                    method: ctx.method.clone(),
-                    path: ctx.path.clone(),
-                    query_string: ctx.query_string.clone(),
-                    host: ctx.host.clone(),
-                    status_code: status_code as i16,
-                    response_time_ms: Some(ctx.start_time.elapsed().as_millis() as i32),
-                    request_source: "proxy".to_string(),
-                    is_system_request: ctx.path.starts_with(ROUTE_PREFIX_TEMPS),
-                    routing_status: ctx.routing_status.clone(),
-                    project_id: ctx.project.as_ref().map(|p| p.id),
-                    environment_id: ctx.environment.as_ref().map(|e| e.id),
-                    deployment_id: ctx.deployment.as_ref().map(|d| d.id),
-                    session_id: ctx.session_id_i32,
-                    visitor_id: ctx.visitor_id_i32,
-                    container_id: ctx.container_id.clone(),
-                    upstream_host: ctx.upstream_host.clone(),
-                    error_message: ctx.error_message.clone(),
-                    client_ip: ctx.ip_address.clone(),
-                    user_agent: Some(ctx.user_agent.clone()),
-                    referrer: ctx.referrer.clone(),
-                    request_id: ctx.request_id.clone(),
-                    // Batch writer will enrich these fields
-                    ip_geolocation_id: None,
-                    browser: None,
-                    browser_version: None,
-                    operating_system: None,
-                    device_type: None,
-                    is_bot: None,
-                    bot_name: None,
-                    request_size_bytes: request_size,
-                    response_size_bytes: response_size,
-                    cache_status,
-                    request_headers: ctx
-                        .request_headers
-                        .as_ref()
-                        .and_then(|h| serde_json::to_value(h).ok()),
-                    response_headers: ctx
-                        .response_headers
-                        .as_ref()
-                        .and_then(|h| serde_json::to_value(h).ok()),
-                };
-
-                // Send to batch writer with backpressure (blocks briefly if buffer full)
-                let handle = self.proxy_log_handle.clone();
-                tokio::spawn(async move {
-                    if !handle.send(proxy_log_request).await {
-                        warn!("Proxy log batch writer is closed, log entry dropped");
-                    }
-                });
-            }
+            // Send to batch writer with backpressure (blocks briefly if buffer full)
+            let handle = self.proxy_log_handle.clone();
+            tokio::spawn(async move {
+                if !handle.send(proxy_log_request).await {
+                    warn!("Proxy log batch writer is closed, log entry dropped");
+                }
+            });
         }
 
         Ok(())

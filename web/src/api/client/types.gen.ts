@@ -1398,6 +1398,10 @@ export type ContainerDetailResponse = {
      * Port inside the container
      */
     container_port: number;
+    /**
+     * CPU limit in whole cores (e.g. 1.0). None when no limit is configured.
+     */
+    cpu_limit_cores?: number | null;
     created_at: string;
     deployed_at: string;
     deployment_id: number;
@@ -1445,12 +1449,20 @@ export type ContainerDetailResponse = {
      * Per-service URL for compose deployments
      */
     service_url?: string | null;
+    /**
+     * When the container's main process most recently started.
+     */
+    started_at?: string | null;
     status: string;
 };
 
 export type ContainerInfoResponse = {
     container_id: string;
     container_name: string;
+    /**
+     * CPU limit in whole cores (e.g. 1.0). None when no limit is configured.
+     */
+    cpu_limit_cores?: number | null;
     created_at: string;
     /**
      * Free-form error string from Docker's container state on exit.
@@ -1479,6 +1491,11 @@ export type ContainerInfoResponse = {
      */
     oom_killed?: boolean | null;
     /**
+     * Container restart count from Docker. The UI shows a chip when this is
+     * > 0 so a crash loop is visible without opening detail.
+     */
+    restart_count?: number | null;
+    /**
      * Compose service name (e.g. "web", "redis"). None for single-container deployments.
      */
     service_name?: string | null;
@@ -1486,6 +1503,12 @@ export type ContainerInfoResponse = {
      * Per-service URL for compose deployments (e.g. "https://web-myapp.localho.st")
      */
     service_url?: string | null;
+    /**
+     * When the container's main process most recently started. The UI uses
+     * this for the uptime label so the count resets when a container is
+     * restarted in place. None for containers that never started.
+     */
+    started_at?: string | null;
     status: string;
 };
 
@@ -8472,6 +8495,12 @@ export type ProjectResponse = {
      * Git clone URL for the repository (used for public repos without a provider connection)
      */
     git_url?: string | null;
+    /**
+     * GitLab webhook ID installed on the connected repository.
+     * `null` when no GitLab webhook is installed (not connected to GitLab,
+     * or webhook was removed / never created).
+     */
+    gitlab_webhook_id?: number | null;
     id: number;
     last_deployment?: number | null;
     main_branch: string;
@@ -9273,6 +9302,20 @@ export type RegisterRequest = {
     email: string;
     name: string;
     password: string;
+};
+
+/**
+ * Response for `POST /projects/{project_id}/gitlab/reinstall-webhook`
+ */
+export type ReinstallWebhookResponse = {
+    /**
+     * The new GitLab hook ID that was installed.
+     */
+    hook_id: number;
+    /**
+     * Human-readable status message.
+     */
+    message: string;
 };
 
 export type ReleaseListResponse = {
@@ -30995,6 +31038,50 @@ export type UpdateGitSettingsResponses = {
 };
 
 export type UpdateGitSettingsResponse = UpdateGitSettingsResponses[keyof UpdateGitSettingsResponses];
+
+export type ReinstallGitlabWebhookData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/gitlab/reinstall-webhook';
+};
+
+export type ReinstallGitlabWebhookErrors = {
+    /**
+     * Project is not connected to a GitLab repository
+     */
+    400: unknown;
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Forbidden
+     */
+    403: unknown;
+    /**
+     * Project not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ReinstallGitlabWebhookResponses = {
+    /**
+     * Webhook reinstalled
+     */
+    200: ReinstallWebhookResponse;
+};
+
+export type ReinstallGitlabWebhookResponse = ReinstallGitlabWebhookResponses[keyof ReinstallGitlabWebhookResponses];
 
 export type HasErrorGroupsData = {
     body?: never;

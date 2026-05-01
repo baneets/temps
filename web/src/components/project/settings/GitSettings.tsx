@@ -9,30 +9,20 @@ import {
   getRepositoryPresetLiveOptions,
   listConnectionsOptions,
   listGitProvidersOptions,
+  reinstallGitlabWebhookMutation,
   updateAutomaticDeployMutation,
   updateGitSettingsMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { RepositorySelector } from '@/components/repositories/RepositorySelector'
-import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Card,
   CardContent,
   CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import {
-  Form,
-  FormControl,
-  FormDescription,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -44,11 +34,9 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import GithubIcon from '@/icons/Github'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { useFieldArray } from 'react-hook-form'
+import { cn } from '@/lib/utils'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
-  AlertCircle,
   Check,
   FileIcon,
   FolderIcon,
@@ -59,10 +47,8 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { useForm, useWatch } from 'react-hook-form'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { z } from 'zod'
 import FrameworkIcon from '../FrameworkIcon'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { FrameworkSelector } from '../FrameworkSelector'
@@ -72,337 +58,32 @@ interface GitSettingsProps {
   refetch: () => void
 }
 
-// Unified schema for all git settings
-const gitSettingsSchema = z.object({
-  branch: z.string(),
-  preset: z.string().optional(),
-  directory: z.string().optional(),
-  dockerfilePath: z.string().optional(),
-  composePath: z.string().optional(),
-  composeOverride: z.string().optional(),
-  publicPorts: z
-    .array(
-      z.object({
-        service: z.string(),
-        port: z.number().min(1).max(65535),
-      })
-    )
-    .optional(),
-})
 
-type GitSettingsFormValues = z.infer<typeof gitSettingsSchema>
-
-/** Known service/port combinations commonly found in Docker Compose files */
-const COMMON_PORTS: Record<string, number[]> = {
-  clickhouse: [8123, 9000],
-  postgres: [5432],
-  mysql: [3306],
-  redis: [6379],
-  mongodb: [27017],
-  elasticsearch: [9200, 9300],
-  rabbitmq: [5672, 15672],
-  kafka: [9092],
-  nginx: [80, 443],
-  traefik: [80, 443, 8080],
-  minio: [9000, 9001],
-  grafana: [3000],
-  prometheus: [9090],
-}
-
-function PortSuggestions({
-  suggestions,
-  currentPorts,
-  onAdd,
-}: {
-  suggestions: { service: string; port: number }[]
-  currentPorts: { service: string; port: number }[]
-  onAdd: (s: { service: string; port: number }) => void
-}) {
-  const remaining = suggestions.filter(
-    (s) =>
-      !currentPorts.some(
-        (cp) => cp.service === s.service && cp.port === s.port
-      )
-  )
-  if (remaining.length === 0) return null
-  return (
-    <div className="space-y-1.5">
-      <p className="text-xs text-muted-foreground">Detected from compose:</p>
-      <div className="flex flex-wrap gap-1.5">
-        {remaining.map((s) => (
-          <Button
-            key={`${s.service}:${s.port}`}
-            type="button"
-            variant="outline"
-            size="sm"
-            className="text-xs h-7"
-            onClick={() => onAdd(s)}
-          >
-            <Plus className="h-3 w-3 mr-1" />
-            {s.service}:{s.port}
-          </Button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function PublicPortsField({
-  form,
-}: {
-  form: ReturnType<typeof useForm<GitSettingsFormValues>>
-}) {
-  const { fields, append, remove } = useFieldArray({
-    control: form.control,
-    name: 'publicPorts',
-  })
-
-  // Parse compose override to suggest services/ports
-  const composeOverride = useWatch({
-    control: form.control,
-    name: 'composeOverride',
-  })
-
-  // Suggest services from compose override or common ports
-  const suggestions = useMemo(() => {
-    const result: { service: string; port: number }[] = []
-    // Parse services from compose override if available
-    if (composeOverride) {
-      let inServices = false
-      let currentService: string | null = null
-      let servicesIndent = 0
-      let serviceIndent: number | null = null
-      for (const line of composeOverride.split('\n')) {
-        const trimmed = line.trim()
-        const indent = line.length - line.trimStart().length
-        if (trimmed === 'services:' || trimmed.startsWith('services:')) {
-          inServices = true
-          servicesIndent = indent
-          serviceIndent = null
-          continue
-        }
-        if (inServices && indent <= servicesIndent && trimmed) {
-          inServices = false
-        }
-        if (
-          inServices &&
-          trimmed.endsWith(':') &&
-          !trimmed.includes(' ') &&
-          !trimmed.startsWith('-')
-        ) {
-          if (serviceIndent === null || indent === serviceIndent) {
-            serviceIndent = indent
-            currentService = trimmed.replace(':', '')
-            // Add common ports for this service
-            const known = COMMON_PORTS[currentService.toLowerCase()]
-            if (known) {
-              known.forEach((p) =>
-                result.push({ service: currentService!, port: p })
-              )
-            }
-          }
-        }
-        // Parse port entries: handles - 48080:80, - "48080:80", - '48080:80'
-        // Uses the host port (left side) since that's what's externally accessible
-        if (currentService && trimmed.startsWith('-')) {
-          const portMatch = trimmed.match(/(\d+):(\d+)/)
-          if (portMatch) {
-            result.push({
-              service: currentService!,
-              port: parseInt(portMatch[1]),
-            })
-          }
-        }
-      }
-    }
-    return result
-  }, [composeOverride])
-
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <Label className="text-sm font-medium">Public Ports</Label>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Ports exposed publicly through the proxy. All other ports remain
-            private.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => append({ service: '', port: 0 })}
-        >
-          <Plus className="h-3.5 w-3.5 mr-1" />
-          Add
-        </Button>
-      </div>
-
-      {fields.length === 0 && (
-        <p className="text-xs text-muted-foreground italic py-2">
-          No public ports configured. All services are private by default.
-        </p>
-      )}
-
-      {fields.map((field, index) => (
-        <div key={field.id} className="flex items-center gap-2">
-          <Input
-            placeholder="Service name"
-            list="compose-services"
-            className="flex-1 text-sm"
-            {...form.register(`publicPorts.${index}.service`)}
-          />
-          <Input
-            type="number"
-            placeholder="Port"
-            className="w-24 text-sm"
-            {...form.register(`publicPorts.${index}.port`, {
-              valueAsNumber: true,
-            })}
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 shrink-0"
-            onClick={() => remove(index)}
-          >
-            <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-          </Button>
-        </div>
-      ))}
-
-      <PortSuggestions
-        suggestions={suggestions}
-        currentPorts={(form.getValues('publicPorts') || []).map((p) => ({
-          service: p.service || '',
-          port: p.port || 0,
-        }))}
-        onAdd={(s) => append(s)}
-      />
-
-      {/* Datalist for autocomplete */}
-      <datalist id="compose-services">
-        {[...new Set(suggestions.map((s) => s.service))].map((svc) => (
-          <option key={svc} value={svc} />
-        ))}
-      </datalist>
-    </div>
-  )
-}
-
-function getGithubRepoUrl(owner: string, repo: string) {
-  return `https://github.com/${owner}/${repo}`
-}
-
-export function GitSettings({ project, refetch }: GitSettingsProps) {
-  const navigate = useNavigate()
-  const updateGithubRepo = useMutation({
+function GitSettingsInline({ project, refetch }: GitSettingsProps) {
+  const updateGitSettings = useMutation({
     ...updateGitSettingsMutation(),
-    meta: {
-      errorTitle: 'Failed to update git settings',
-    },
+    meta: { errorTitle: 'Failed to update git settings' },
   })
   const updateAutomaticDeploy = useMutation({
     ...updateAutomaticDeployMutation(),
-    meta: {
-      errorTitle: 'Failed to update automatic deploy settings',
-    },
-  })
-  const [isEditingSettings, setIsEditingSettings] = useState(false)
-  const [isCustomBranch, setIsCustomBranch] = useState(false)
-  const [customBranch, setCustomBranch] = useState('')
-  const [selectedConnectionId, setSelectedConnectionId] = useState<
-    number | null
-  >(() => project?.git_provider_connection_id || null)
-  const [selectedRepository, setSelectedRepository] =
-    useState<RepositoryResponse | null>(null)
-  const [isSelectingRepository, setIsSelectingRepository] = useState(false)
-  const [publicRepoUrl, setPublicRepoUrl] = useState('')
-  const [parsedPublicRepo, setParsedPublicRepo] = useState<{ owner: string; name: string } | null>(null)
-
-  // Unified form for all git settings
-  const form = useForm<GitSettingsFormValues>({
-    resolver: zodResolver(gitSettingsSchema),
-    defaultValues: {
-      branch: project?.main_branch || '',
-      preset: project?.preset || '',
-      directory: project?.directory || '',
-      dockerfilePath:
-        (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
-      composePath:
-        (project?.preset_config as any)?.composePath || 'docker-compose.yml',
-      composeOverride:
-        (project?.preset_config as any)?.composeOverride || '',
-      publicPorts:
-        (project?.preset_config as any)?.publicPorts || [],
-    },
+    meta: { errorTitle: 'Failed to update auto-deploy' },
   })
 
-  // Sync form with project values when project changes
-  useEffect(() => {
-    if (project) {
-      form.reset({
-        branch: project.main_branch || '',
-        preset: project.preset || '',
-        directory: project.directory || '',
-        dockerfilePath:
-          (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
-        composePath:
-          (project?.preset_config as any)?.composePath || 'docker-compose.yml',
-        composeOverride:
-          (project?.preset_config as any)?.composeOverride || '',
-        publicPorts:
-          (project?.preset_config as any)?.publicPorts || [],
-      })
-    }
-  }, [project, form])
+  // ---------------- Live API data ----------------
+  const isPublicRepo = !project?.git_provider_connection_id
 
-  // Watch preset changes for directory field behavior
-  const currentPreset = useWatch({
-    control: form.control,
-    name: 'preset',
-  })
+  const { data: providersData } = useQuery({ ...listGitProvidersOptions() })
+  const providers = providersData || []
 
-  // State to track if user wants to manually override directory
-  const [allowDirectoryOverride, setAllowDirectoryOverride] = useState(false)
-
-  // Fetch git providers
-  const { data: providersData, isLoading: isLoadingProviders } = useQuery({
-    ...listGitProvidersOptions(),
-  })
-
-  const providers = useMemo(() => providersData || [], [providersData])
-  const hasProviders = useMemo(() => providers.length > 0, [providers])
-
-  // Fetch connections to get the current connection details
-  const { data: connectionsData } = useQuery({
-    ...listConnectionsOptions(),
-  })
-
-  // Find the current connection
-  const currentConnection = useMemo(
-    () =>
-      connectionsData?.connections?.find(
-        (conn) => conn.id === project?.git_provider_connection_id
-      ),
-    [connectionsData, project]
+  const { data: connectionsData } = useQuery({ ...listConnectionsOptions() })
+  const currentConnection = connectionsData?.connections?.find(
+    (c) => c.id === project?.git_provider_connection_id,
   )
-  const currentProvider = useMemo(
-    () =>
-      providers.find(
-        (provider) => provider.id === currentConnection?.provider_id
-      ),
-    [providers, currentConnection?.provider_id]
+  const currentProvider = providers.find(
+    (p) => p.id === currentConnection?.provider_id,
   )
 
-  // Fetch branches from repository
-  const {
-    data: branchesData,
-    isLoading: isLoadingBranches,
-    refetch: refetchBranches,
-  } = useQuery({
+  const { data: branchesData, isLoading: isLoadingBranches, refetch: refetchBranches } = useQuery({
     queryKey: [
       'repository-branches',
       project?.repo_owner,
@@ -410,46 +91,22 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       project?.git_provider_connection_id,
     ],
     queryFn: async () => {
-      if (
-        !project?.repo_owner ||
-        !project?.repo_name ||
-        !project?.git_provider_connection_id
-      ) {
-        return { branches: [] }
+      if (!project?.repo_owner || !project?.repo_name || !project?.git_provider_connection_id) {
+        return { branches: [] as Array<{ name: string; commit_sha: string; protected: boolean }> }
       }
-      try {
-        const response = await getRepositoryBranches({
-          path: {
-            owner: project.repo_owner,
-            repo: project.repo_name,
-          },
-          query: {
-            connection_id: project.git_provider_connection_id,
-          },
-        })
-        return response.data || { branches: [] }
-      } catch (error) {
-        console.error('Failed to fetch branches:', error)
-        return { branches: [] }
-      }
+      const response = await getRepositoryBranches({
+        path: { owner: project.repo_owner, repo: project.repo_name },
+        query: { connection_id: project.git_provider_connection_id },
+      })
+      return response.data || { branches: [] }
     },
     enabled:
-      !!project?.repo_owner &&
-      !!project?.repo_name &&
-      !!project?.git_provider_connection_id,
+      !!project?.repo_owner && !!project?.repo_name && !!project?.git_provider_connection_id,
   })
+  const branches: Array<{ name: string; commit_sha: string; protected: boolean }> =
+    (branchesData?.branches as any) || []
 
-  const branches = useMemo(() => branchesData?.branches || [], [branchesData])
-  const currentBranch = useWatch({ control: form.control, name: 'branch' })
-
-  // Derive if the current branch is custom (not in the branches list)
-  const isCurrentBranchCustom = useMemo(() => {
-    if (!currentBranch || branches.length === 0) return false
-    const branchNames = branches.map((b: any) => b.name || b)
-    return !branchNames.includes(currentBranch)
-  }, [currentBranch, branches])
-
-  // Get repository ID for live preset detection
+  // Repository metadata (description, language, pushed_at, default_branch, clone urls)
   const { data: repositoryData } = useQuery({
     queryKey: [
       'repository-search',
@@ -465,39 +122,29 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       ) {
         return null
       }
-      try {
-        const response = await listRepositoriesByConnection({
-          path: { connection_id: project.git_provider_connection_id },
-          query: { search: project.repo_name, per_page: 100 },
-          throwOnError: true,
-        })
-
-        const repo = response.data?.repositories?.find(
-          (r: any) =>
-            r.owner === project.repo_owner && r.name === project.repo_name
-        )
-        return repo || null
-      } catch (error) {
-        console.error('Failed to find repository:', error)
-        return null
-      }
+      const response = await listRepositoriesByConnection({
+        path: { connection_id: project.git_provider_connection_id },
+        query: { search: project.repo_name, per_page: 100 },
+        throwOnError: true,
+      })
+      return (
+        response.data?.repositories?.find(
+          (r: any) => r.owner === project.repo_owner && r.name === project.repo_name,
+        ) || null
+      )
     },
     enabled:
-      !!project?.repo_owner &&
-      !!project?.repo_name &&
-      !!project?.git_provider_connection_id,
+      !!project?.repo_owner && !!project?.repo_name && !!project?.git_provider_connection_id,
   })
 
-  // Get live preset detection for authenticated repos
+  // Preset detection — authenticated repos
   const presetQuery = useQuery({
     ...getRepositoryPresetLiveOptions({
       path: { repository_id: repositoryData?.id || 0 },
     }),
     enabled: !!repositoryData?.id,
   })
-
-  // Get preset detection for public repos (no git connection = public)
-  const isPublicRepo = !project?.git_provider_connection_id
+  // Preset detection — public repos
   const publicPresetQuery = useQuery({
     ...detectPublicPresetsOptions({
       path: {
@@ -508,8 +155,6 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
     }),
     enabled: isPublicRepo && !!project?.repo_owner && !!project?.repo_name,
   })
-
-  // Transform public preset data to match FrameworkSelector format (camelCase)
   const publicPresetData = useMemo(() => {
     if (!publicPresetQuery.data?.presets?.length) return null
     return {
@@ -524,1269 +169,1042 @@ export function GitSettings({ project, refetch }: GitSettingsProps) {
       })),
     }
   }, [publicPresetQuery.data])
-
-  // Combined preset data: authenticated or public
   const effectivePresetData = presetQuery.data || publicPresetData
-  const effectivePresetLoading = presetQuery.isLoading || publicPresetQuery.isLoading || publicPresetQuery.isFetching
+  const effectivePresetLoading =
+    presetQuery.isLoading || publicPresetQuery.isLoading || publicPresetQuery.isFetching
 
-  const presets = useMemo(() => {
-    if (effectivePresetData?.presets && effectivePresetData.presets.length > 0) {
-      return effectivePresetData.presets.map((preset: any) => ({
-        value: preset.preset,
-        label: preset.presetLabel || preset.preset_label || preset.preset,
-        directory: preset.path || './',
-      }))
+  // ---------------- Save helpers ----------------
+  // The API expects a full update; build it from current project state plus overrides.
+  const saveGitField = async (overrides: Partial<{
+    main_branch: string
+    preset: string
+    directory: string
+    preset_config: any
+    repo_owner: string
+    repo_name: string
+    git_url: string
+    is_public_repo: boolean
+    git_provider_connection_id: number | null
+  }>) => {
+    const presetCfg: any = (project?.preset_config as any) || {}
+    const body: Record<string, unknown> = {
+      main_branch: overrides.main_branch ?? project.main_branch,
+      preset: overrides.preset ?? project.preset,
+      directory: overrides.directory ?? project.directory ?? './',
+      repo_owner: overrides.repo_owner ?? project.repo_owner!,
+      repo_name: overrides.repo_name ?? project.repo_name!,
+      preset_config: overrides.preset_config ?? presetCfg ?? undefined,
     }
-
-    // Fallback to all available presets if no detection data
-    return [
-      { value: 'docker-compose', label: 'Docker Compose', directory: './' },
-      { value: 'dockerfile', label: 'Dockerfile', directory: './' },
-      { value: 'nextjs', label: 'Next.js', directory: './' },
-      { value: 'vite', label: 'Vite', directory: './' },
-      { value: 'rsbuild', label: 'RSBuild', directory: './' },
-      { value: 'astro', label: 'Astro', directory: './' },
-      { value: 'nuxt', label: 'Nuxt', directory: './' },
-      { value: 'remix', label: 'Remix', directory: './' },
-      { value: 'python', label: 'Python', directory: './' },
-      { value: 'go', label: 'Go', directory: './' },
-      { value: 'rust', label: 'Rust', directory: './' },
-      { value: 'nodejs', label: 'Node.js', directory: './' },
-      { value: 'static', label: 'Static', directory: './' },
-    ]
-  }, [effectivePresetData])
-
-  // Unified handler for all git settings
-  const handleUpdateSettings = async (values: GitSettingsFormValues) => {
-    try {
-      // Extract just the preset name from "preset::path" format for backend
-      const [presetName] = values.preset?.split('::') || ['']
-
-      // Build preset_config for presets that support it
-      const isComposePreset = presetName === 'docker-compose' || presetName === 'dockercompose'
-      const presetConfig =
-        presetName === 'dockerfile' && values.dockerfilePath
-          ? { preset: 'dockerfile', dockerfilePath: values.dockerfilePath }
-          : isComposePreset
-            ? {
-                preset: 'docker-compose',
-                composePath: values.composePath || 'docker-compose.yml',
-                composeOverride: values.composeOverride || undefined,
-                publicPorts: values.publicPorts?.length ? values.publicPorts : undefined,
-              }
-            : undefined
-
-      // Backend normalizes "dockercompose" -> "docker-compose" via FromStr
-      const backendPreset = isComposePreset ? 'docker-compose' : presetName
-
-      const updateBody: Record<string, unknown> = {
-        main_branch: values.branch,
-        preset: backendPreset,
-        directory: values.directory!,
-        repo_owner: project.repo_owner!,
-        repo_name: project.repo_name!,
-        preset_config: presetConfig,
-      }
-
-      if (isPublicRepo) {
-        updateBody.git_url = project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`
-        updateBody.is_public_repo = true
-        updateBody.git_provider_connection_id = null
-      } else {
-        updateBody.git_provider_connection_id =
-          selectedConnectionId ??
-          project.git_provider_connection_id ??
-          null
-      }
-
-      await updateGithubRepo.mutateAsync({
-        body: updateBody as any,
-        path: { project_id: project.id },
-      })
-      toast.success('Git settings updated successfully')
-      setIsEditingSettings(false)
-      refetch()
-    } catch (error) {
-      console.error('Failed to update git settings:', error)
-      toast.error('Failed to update git settings')
+    if (isPublicRepo) {
+      body.git_url =
+        overrides.git_url ??
+        project.git_url ??
+        `https://github.com/${project.repo_owner}/${project.repo_name}`
+      body.is_public_repo = true
+      body.git_provider_connection_id = null
+    } else {
+      body.git_provider_connection_id =
+        overrides.git_provider_connection_id ?? project.git_provider_connection_id ?? null
     }
-  }
-
-  const handleRepositorySelect = async (repo: RepositoryResponse | null) => {
-    if (!repo) {
-      setSelectedRepository(null)
-      return
-    }
-
-    setSelectedRepository(repo)
-
-    // Update the project with the selected repository
-    try {
-      // Extract just the preset name from "preset::path" format for backend
-      const formPreset = form.getValues('preset')
-      const [presetName] = formPreset?.split('::') || ['']
-
-      // Build the update body — public repos use git_url, private repos use connection_id
-      const body: Record<string, unknown> = {
-        repo_owner: repo.owner,
-        repo_name: repo.name,
-        directory: form.getValues('directory') || './',
-        preset: presetName,
-        main_branch:
-          form.getValues('branch') || repo.default_branch || 'main',
-      }
-
-      if (isPublicRepo) {
-        body.git_url = `https://github.com/${repo.owner}/${repo.name}`
-        body.is_public_repo = true
-        body.git_provider_connection_id = null
-      } else {
-        body.git_provider_connection_id =
-          selectedConnectionId ??
-          project.git_provider_connection_id ??
-          null
-      }
-
-      await updateGithubRepo.mutateAsync({
-        body: body as any,
-        path: { project_id: project.id },
-      })
-
-      toast.success('Repository connected successfully')
-      refetch()
-      setIsSelectingRepository(false)
-
-      // Update the form values to reflect the new repository
-      if (repo.default_branch) {
-        form.setValue('branch', repo.default_branch)
-      }
-    } catch (error) {
-      console.error('Failed to connect repository:', error)
-      toast.error('Failed to connect repository')
-      setSelectedRepository(null)
-    }
-  }
-
-  const handleAutoDeployToggle = async (enabled: boolean) => {
-    if (!project?.id) return
-
-    await toast.promise(
-      updateAutomaticDeploy.mutateAsync({
-        path: { project_id: project.id! },
-        body: {
-          automatic_deploy: enabled,
-        },
-      }),
-      {
-        loading: 'Updating deployment settings...',
-        success: 'Deployment settings updated successfully',
-        error: 'Failed to update deployment settings',
-      }
-    )
+    await updateGitSettings.mutateAsync({
+      body: body as any,
+      path: { project_id: project.id },
+    })
     refetch()
+  }
+
+  // ---------------- Inline editors ----------------
+  const [editing, setEditing] = useState<null | 'branch' | 'framework' | 'directory' | 'dockerfile' | 'composePath' | 'composeOverride'>(null)
+  const close = () => setEditing(null)
+
+  // Branch editor
+  const [branchDraft, setBranchDraft] = useState('')
+  useEffect(() => setBranchDraft(project.main_branch || ''), [project.main_branch])
+
+  // Directory editor
+  const [directoryDraft, setDirectoryDraft] = useState('')
+  useEffect(() => setDirectoryDraft(project.directory || './'), [project.directory])
+
+  // Dockerfile path editor
+  const [dockerfileDraft, setDockerfileDraft] = useState('')
+  useEffect(() => {
+    setDockerfileDraft((project?.preset_config as any)?.dockerfilePath || 'Dockerfile')
+  }, [project?.preset_config])
+
+  // Compose path editor
+  const [composePathDraft, setComposePathDraft] = useState('')
+  useEffect(() => {
+    setComposePathDraft((project?.preset_config as any)?.composePath || 'docker-compose.yml')
+  }, [project?.preset_config])
+
+  // Compose override editor (full-width textarea, explicit save)
+  const [overrideDraft, setOverrideDraft] = useState('')
+  useEffect(() => {
+    setOverrideDraft((project?.preset_config as any)?.composeOverride || '')
+  }, [project?.preset_config])
+
+  const presetName = (project.preset || '').toString()
+  const isDockerfilePreset = presetName === 'dockerfile'
+  const isComposePreset = presetName === 'docker-compose' || presetName === 'dockercompose'
+
+  const navigate = useNavigate()
+  const goToChangeRepo = () =>
+    navigate(`/projects/${project.slug}/git/change-repository`)
+
+  // GitLab webhook reinstall
+  const reinstallWebhook = useMutation({
+    ...reinstallGitlabWebhookMutation(),
+    meta: { errorTitle: 'Failed to reinstall webhook' },
+  })
+  const isGitlab = currentProvider?.provider_type === 'gitlab'
+  const hasWebhook = !!project.gitlab_webhook_id
+
+  const handleReinstallWebhook = async () => {
+    try {
+      await reinstallWebhook.mutateAsync({ path: { project_id: project.id! } })
+      await refetch()
+      toast.success('Webhook reinstalled')
+    } catch {
+      toast.error(
+        'Failed to reinstall webhook — check your GitLab user has Maintainer role on the repo.',
+      )
+    }
+  }
+
+  // Auto-deploy
+  const handleAutoDeployToggle = async (enabled: boolean) => {
+    try {
+      await updateAutomaticDeploy.mutateAsync({
+        path: { project_id: project.id! },
+        body: { automatic_deploy: enabled },
+      })
+      await refetch()
+      toast.success(enabled ? 'Auto-deploy enabled' : 'Auto-deploy disabled')
+    } catch {
+      toast.error('Failed to update')
+    }
+  }
+
+  // Empty state — no repo connected.
+  if (!project.repo_owner || !project.repo_name) {
+    return (
+      <div className="space-y-6">
+        <Card>
+          <CardContent className="p-8 text-center space-y-4">
+            <div className="mx-auto flex size-12 items-center justify-center rounded-full bg-muted">
+              <GithubIcon className="size-6" />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-base font-semibold">No repository connected</h3>
+              <p className="text-sm text-muted-foreground">
+                Connect a Git repository to enable deployments for this project.
+              </p>
+            </div>
+            <Button onClick={goToChangeRepo}>
+              <Plus className="size-4 mr-1" />
+              Connect repository
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  const ghHref =
+    project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`
+
+  // Helper for displaying short SHA
+  const shortSha = (sha: string) => sha?.slice(0, 7)
+
+  const autoDeployOn = project.deployment_config?.automaticDeploy ?? true
+
+  return (
+    <div className="space-y-6">
+      {/* ----------------- Repository card ----------------- */}
+      <Card>
+        <CardContent className="p-6 space-y-4">
+          <div className="flex items-start gap-4">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-muted/40">
+              <GithubIcon className="size-5" />
+            </div>
+            <div className="flex-1 min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={ghHref}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-semibold text-base hover:underline truncate"
+                >
+                  {project.repo_owner}/{project.repo_name}
+                </a>
+                <Badge variant="secondary" className="text-xs">
+                  {isPublicRepo ? 'Public' : repositoryData?.private ? 'Private' : 'Connected'}
+                </Badge>
+              </div>
+              {repositoryData?.description && (
+                <p className="text-sm text-muted-foreground line-clamp-2">
+                  {repositoryData.description}
+                </p>
+              )}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                {repositoryData?.pushed_at && (
+                  <span>
+                    Pushed <TimeAgo date={repositoryData.pushed_at} />
+                  </span>
+                )}
+                {repositoryData?.default_branch && (
+                  <span className="flex items-center gap-1">
+                    <GitBranchIcon className="size-3" />
+                    default <span className="font-mono text-foreground">{repositoryData.default_branch}</span>
+                  </span>
+                )}
+                {currentConnection && (
+                  <span>
+                    via <span className="text-foreground">{currentConnection.account_name}</span>{' '}
+                    <span className="text-muted-foreground">({currentProvider?.name})</span>
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <Button variant="outline" size="sm" onClick={goToChangeRepo}>
+                Change repository
+              </Button>
+            </div>
+          </div>
+
+        </CardContent>
+      </Card>
+
+      {/* ----------------- Build configuration card ----------------- */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Build configuration</CardTitle>
+          <CardDescription>
+            How Temps builds and deploys this project.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          <ul className="divide-y">
+            {/* Branch row */}
+            <InlineRow
+              label="Branch"
+              editing={editing === 'branch'}
+              onStartEdit={() => {
+                setBranchDraft(project.main_branch || '')
+                setEditing('branch')
+              }}
+              onCancel={close}
+              onSave={async () => {
+                if (!branchDraft || branchDraft === project.main_branch) {
+                  close()
+                  return
+                }
+                await saveGitField({ main_branch: branchDraft })
+                toast.success('Branch updated')
+                close()
+              }}
+              isPending={updateGitSettings.isPending}
+              display={
+                <div className="flex items-center gap-2 min-w-0">
+                  <GitBranchIcon className="size-4 text-muted-foreground shrink-0" />
+                  <span className="font-mono text-sm truncate">{project.main_branch}</span>
+                  {repositoryData?.default_branch === project.main_branch && (
+                    <Badge variant="outline" className="text-xs">default</Badge>
+                  )}
+                  {(() => {
+                    const b = branches.find((br) => br.name === project.main_branch)
+                    if (b?.protected) {
+                      return <Badge variant="outline" className="text-xs">protected</Badge>
+                    }
+                    return null
+                  })()}
+                  {(() => {
+                    const b = branches.find((br) => br.name === project.main_branch)
+                    if (b?.commit_sha) {
+                      return (
+                        <span className="font-mono text-xs text-muted-foreground">
+                          {shortSha(b.commit_sha)}
+                        </span>
+                      )
+                    }
+                    return null
+                  })()}
+                </div>
+              }
+              editor={
+                <div className="flex flex-1 items-center gap-2">
+                  {isLoadingBranches ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" />
+                      Loading branches…
+                    </div>
+                  ) : branches.length > 0 ? (
+                    <Select
+                      value={branches.some((b) => b.name === branchDraft) ? branchDraft : '__custom__'}
+                      onValueChange={(v) => {
+                        if (v === '__custom__') {
+                          setBranchDraft('')
+                        } else {
+                          setBranchDraft(v)
+                        }
+                      }}
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue placeholder="Select a branch" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {branches.map((b) => (
+                          <SelectItem key={b.name} value={b.name}>
+                            <div className="flex items-center gap-2">
+                              <GitBranchIcon className="size-4" />
+                              <span className="font-mono">{b.name}</span>
+                              {b.protected && (
+                                <Badge variant="outline" className="text-[10px] py-0">protected</Badge>
+                              )}
+                              {b.name === repositoryData?.default_branch && (
+                                <Check className="size-3 text-green-500" />
+                              )}
+                              {b.commit_sha && (
+                                <span className="ml-auto font-mono text-xs text-muted-foreground">
+                                  {shortSha(b.commit_sha)}
+                                </span>
+                              )}
+                            </div>
+                          </SelectItem>
+                        ))}
+                        <SelectItem value="__custom__">
+                          <span className="text-muted-foreground">Custom branch…</span>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+                  {(branches.length === 0 || !branches.some((b) => b.name === branchDraft)) && (
+                    <Input
+                      value={branchDraft}
+                      onChange={(e) => setBranchDraft(e.target.value)}
+                      placeholder="Branch name"
+                      className="flex-1 font-mono text-sm"
+                      autoFocus
+                    />
+                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => refetchBranches()}
+                    disabled={isLoadingBranches}
+                    title="Refresh branches"
+                  >
+                    {isLoadingBranches ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="size-3.5" />
+                    )}
+                  </Button>
+                </div>
+              }
+            />
+
+            {/* Framework row */}
+            <InlineRow
+              label="Framework"
+              editing={editing === 'framework'}
+              onStartEdit={() => setEditing('framework')}
+              onCancel={close}
+              hideSaveButtons
+              display={
+                <div className="flex items-center gap-2 min-w-0">
+                  <FrameworkIcon preset={project.preset as any} className="size-5 shrink-0" />
+                  <span className="text-sm truncate">{project.preset}</span>
+                </div>
+              }
+              editor={
+                <div className="flex-1">
+                  <FrameworkSelector
+                    presetData={effectivePresetData as any}
+                    isLoading={effectivePresetLoading}
+                    error={presetQuery.error}
+                    selectedPreset={(() => {
+                      const dir = project.directory || './'
+                      const norm = dir === '.' || dir === './' ? 'root' : dir.startsWith('./') ? dir.slice(2) : dir
+                      return `${project.preset}::${norm}`
+                    })()}
+                    onSelectPreset={async (value) => {
+                      if (value === 'custom') {
+                        await saveGitField({ preset: 'custom', directory: './' })
+                      } else {
+                        const [name, path] = value.split('::')
+                        const dir =
+                          path && path !== 'root' && path !== '.' && path.trim() !== ''
+                            ? `./${path.startsWith('./') ? path.slice(2) : path}`
+                            : './'
+                        await saveGitField({ preset: name, directory: dir })
+                      }
+                      toast.success('Framework updated')
+                      close()
+                    }}
+                  />
+                </div>
+              }
+            />
+
+            {/* Directory row */}
+            <InlineRow
+              label="Root directory"
+              editing={editing === 'directory'}
+              onStartEdit={() => {
+                setDirectoryDraft(project.directory || './')
+                setEditing('directory')
+              }}
+              onCancel={close}
+              onSave={async () => {
+                const next = directoryDraft || './'
+                if (next === project.directory) {
+                  close()
+                  return
+                }
+                await saveGitField({ directory: next })
+                toast.success('Root directory updated')
+                close()
+              }}
+              isPending={updateGitSettings.isPending}
+              display={
+                <div className="flex items-center gap-2 min-w-0">
+                  <FolderIcon className="size-4 text-muted-foreground shrink-0" />
+                  <span className="font-mono text-sm truncate">{project.directory || './'}</span>
+                </div>
+              }
+              editor={
+                <Input
+                  value={directoryDraft}
+                  onChange={(e) => setDirectoryDraft(e.target.value)}
+                  placeholder="./"
+                  className="flex-1 font-mono text-sm"
+                  autoFocus
+                />
+              }
+            />
+
+            {/* Dockerfile path — only when dockerfile preset */}
+            {isDockerfilePreset && (
+              <InlineRow
+                label="Dockerfile path"
+                editing={editing === 'dockerfile'}
+                onStartEdit={() => {
+                  setDockerfileDraft(
+                    (project?.preset_config as any)?.dockerfilePath || 'Dockerfile',
+                  )
+                  setEditing('dockerfile')
+                }}
+                onCancel={close}
+                onSave={async () => {
+                  const cfg = (project.preset_config as any) || {}
+                  const next = dockerfileDraft || 'Dockerfile'
+                  if (next === (cfg.dockerfilePath || 'Dockerfile')) {
+                    close()
+                    return
+                  }
+                  await saveGitField({
+                    preset_config: { ...cfg, preset: 'dockerfile', dockerfilePath: next },
+                  })
+                  toast.success('Dockerfile path updated')
+                  close()
+                }}
+                isPending={updateGitSettings.isPending}
+                display={
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileIcon className="size-4 text-muted-foreground shrink-0" />
+                    <span className="font-mono text-sm truncate">
+                      {(project.preset_config as any)?.dockerfilePath || 'Dockerfile'}
+                    </span>
+                  </div>
+                }
+                editor={
+                  <Input
+                    value={dockerfileDraft}
+                    onChange={(e) => setDockerfileDraft(e.target.value)}
+                    placeholder="Dockerfile"
+                    className="flex-1 font-mono text-sm"
+                    autoFocus
+                  />
+                }
+              />
+            )}
+
+            {/* Compose path — only when compose preset */}
+            {isComposePreset && (
+              <InlineRow
+                label="Compose file"
+                editing={editing === 'composePath'}
+                onStartEdit={() => {
+                  setComposePathDraft(
+                    (project?.preset_config as any)?.composePath || 'docker-compose.yml',
+                  )
+                  setEditing('composePath')
+                }}
+                onCancel={close}
+                onSave={async () => {
+                  const cfg = (project.preset_config as any) || {}
+                  const next = composePathDraft || 'docker-compose.yml'
+                  if (next === (cfg.composePath || 'docker-compose.yml')) {
+                    close()
+                    return
+                  }
+                  await saveGitField({
+                    preset_config: { ...cfg, preset: 'docker-compose', composePath: next },
+                  })
+                  toast.success('Compose path updated')
+                  close()
+                }}
+                isPending={updateGitSettings.isPending}
+                display={
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileIcon className="size-4 text-muted-foreground shrink-0" />
+                    <span className="font-mono text-sm truncate">
+                      {(project.preset_config as any)?.composePath || 'docker-compose.yml'}
+                    </span>
+                  </div>
+                }
+                editor={
+                  <Input
+                    value={composePathDraft}
+                    onChange={(e) => setComposePathDraft(e.target.value)}
+                    placeholder="docker-compose.yml"
+                    className="flex-1 font-mono text-sm"
+                    autoFocus
+                  />
+                }
+              />
+            )}
+          </ul>
+        </CardContent>
+      </Card>
+
+      {/* ----------------- Compose advanced — collapsed accordion ----------------- */}
+      {isComposePreset && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Compose overrides</CardTitle>
+            <CardDescription>
+              Advanced YAML override and public port mapping.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-sm font-medium">YAML override</Label>
+                {editing !== 'composeOverride' ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setOverrideDraft(
+                        (project?.preset_config as any)?.composeOverride || '',
+                      )
+                      setEditing('composeOverride')
+                    }}
+                  >
+                    Edit
+                  </Button>
+                ) : (
+                  <div className="flex gap-2">
+                    <Button variant="ghost" size="sm" onClick={close}>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={updateGitSettings.isPending}
+                      onClick={async () => {
+                        const cfg = (project.preset_config as any) || {}
+                        await saveGitField({
+                          preset_config: {
+                            ...cfg,
+                            preset: 'docker-compose',
+                            composeOverride: overrideDraft || undefined,
+                          },
+                        })
+                        toast.success('Override saved')
+                        close()
+                      }}
+                    >
+                      {updateGitSettings.isPending && (
+                        <Loader2 className="size-3 mr-1 animate-spin" />
+                      )}
+                      Save
+                    </Button>
+                  </div>
+                )}
+              </div>
+              {editing === 'composeOverride' ? (
+                <textarea
+                  value={overrideDraft}
+                  onChange={(e) => setOverrideDraft(e.target.value)}
+                  className="flex min-h-[160px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  placeholder={`services:\n  app:\n    ports:\n      - "8080:80"`}
+                />
+              ) : (project.preset_config as any)?.composeOverride ? (
+                <pre className="p-3 rounded-md border bg-muted/50 text-xs font-mono whitespace-pre-wrap overflow-x-auto">
+                  {(project.preset_config as any).composeOverride}
+                </pre>
+              ) : (
+                <p className="text-sm text-muted-foreground italic">
+                  No override applied. The compose file is used as-is.
+                </p>
+              )}
+            </div>
+
+            <PublicPortsInline project={project} saveGitField={saveGitField} />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ----------------- Deployment behavior ----------------- */}
+      <Card>
+        <CardContent className="p-0 divide-y">
+          <div className="flex items-center gap-4 p-6">
+            <Switch checked={autoDeployOn} onCheckedChange={handleAutoDeployToggle} />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium">Automatic deployments</div>
+              <p className="text-xs text-muted-foreground">
+                {autoDeployOn ? (
+                  <>
+                    Pushes to{' '}
+                    <span className="font-mono text-foreground">
+                      {project.main_branch}
+                    </span>{' '}
+                    trigger a new deployment.
+                  </>
+                ) : (
+                  <>
+                    Pushes to{' '}
+                    <span className="font-mono text-foreground">
+                      {project.main_branch}
+                    </span>{' '}
+                    will not deploy. Use manual deploy or the API.
+                  </>
+                )}
+              </p>
+            </div>
+          </div>
+
+          {isGitlab && (
+            <div className="flex items-center gap-4 p-6">
+              <div
+                className={cn(
+                  'flex size-9 shrink-0 items-center justify-center rounded-full',
+                  hasWebhook ? 'bg-green-500/10' : 'bg-amber-500/10',
+                )}
+              >
+                {hasWebhook ? (
+                  <Check className="size-4 text-green-600 dark:text-green-400" />
+                ) : (
+                  <RefreshCw className="size-4 text-amber-600 dark:text-amber-400" />
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium">
+                  {hasWebhook ? 'GitLab webhook installed' : 'GitLab webhook not installed'}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {hasWebhook ? (
+                    <>
+                      Push events from{' '}
+                      <span className="font-mono text-foreground">
+                        {project.repo_owner}/{project.repo_name}
+                      </span>{' '}
+                      reach Temps automatically.
+                    </>
+                  ) : (
+                    <>
+                      We couldn't install the webhook automatically. Your GitLab
+                      user needs the Maintainer role on{' '}
+                      <span className="font-mono text-foreground">
+                        {project.repo_owner}/{project.repo_name}
+                      </span>
+                      .
+                    </>
+                  )}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleReinstallWebhook}
+                disabled={reinstallWebhook.isPending}
+              >
+                {reinstallWebhook.isPending && (
+                  <Loader2 className="size-3 mr-1 animate-spin" />
+                )}
+                {hasWebhook ? 'Reinstall' : 'Install webhook'}
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+    </div>
+  )
+}
+
+// One row in the build configuration list. Click anywhere on the row to edit;
+// while editing, the editor occupies the row, and Save/Cancel sit on the right.
+function InlineRow({
+  label,
+  display,
+  editor,
+  editing,
+  onStartEdit,
+  onSave,
+  onCancel,
+  isPending,
+  hideSaveButtons,
+}: {
+  label: string
+  display: React.ReactNode
+  editor: React.ReactNode
+  editing: boolean
+  onStartEdit: () => void
+  onSave?: () => void | Promise<void>
+  onCancel: () => void
+  isPending?: boolean
+  hideSaveButtons?: boolean
+}) {
+  return (
+    <li className="px-6 py-4">
+      <div className="flex items-center gap-4">
+        <div className="w-32 shrink-0 text-sm text-muted-foreground">{label}</div>
+        <div className="flex-1 min-w-0">
+          {editing ? (
+            <div
+              className="flex items-center gap-2"
+              onKeyDown={(e) => {
+                // Allow Enter to save, Esc to cancel — but only on simple inputs
+                // (let textarea handle Enter natively).
+                const target = e.target as HTMLElement
+                const isTextarea = target.tagName === 'TEXTAREA'
+                if (e.key === 'Enter' && !isTextarea && !e.shiftKey) {
+                  e.preventDefault()
+                  if (!hideSaveButtons && onSave && !isPending) onSave()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  onCancel()
+                }
+              }}
+            >
+              <div className="flex-1 min-w-0">{editor}</div>
+              {!hideSaveButtons && (
+                <>
+                  <Button variant="ghost" size="sm" onClick={onCancel}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={onSave} disabled={isPending}>
+                    {isPending && <Loader2 className="size-3 mr-1 animate-spin" />}
+                    Save
+                  </Button>
+                </>
+              )}
+              {hideSaveButtons && (
+                <Button variant="ghost" size="sm" onClick={onCancel}>
+                  Cancel
+                </Button>
+              )}
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onStartEdit}
+              className="group flex w-full items-center justify-between gap-2 rounded-md py-1 px-2 -mx-2 text-left hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:outline-none"
+            >
+              <div className="flex-1 min-w-0">{display}</div>
+              <span className="text-xs text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                Edit
+              </span>
+            </button>
+          )}
+        </div>
+      </div>
+    </li>
+  )
+}
+
+function PublicPortsInline({
+  project,
+  saveGitField,
+}: {
+  project: ProjectResponse
+  saveGitField: (overrides: any) => Promise<void>
+}) {
+  const cfg: any = (project.preset_config as any) || {}
+  const ports: { service: string; port: number }[] =
+    cfg.publicPorts || cfg.public_ports || []
+  const [draft, setDraft] = useState<{ service: string; port: number }[]>(ports)
+  const [dirty, setDirty] = useState(false)
+  useEffect(() => {
+    setDraft(cfg.publicPorts || cfg.public_ports || [])
+    setDirty(false)
+  }, [project.preset_config])
+
+  const update = (next: { service: string; port: number }[]) => {
+    setDraft(next)
+    setDirty(true)
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <Label className="text-sm font-medium">Public ports</Label>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Ports exposed publicly through the proxy. Other ports stay private.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => update([...draft, { service: '', port: 0 }])}
+          >
+            <Plus className="size-3.5 mr-1" />
+            Add
+          </Button>
+        </div>
+      </div>
+
+      {draft.length === 0 ? (
+        <p className="text-xs text-muted-foreground italic py-2">
+          No public ports configured.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {draft.map((row, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input
+                value={row.service}
+                placeholder="Service name"
+                className="flex-1 text-sm"
+                onChange={(e) => {
+                  const next = [...draft]
+                  next[i] = { ...next[i], service: e.target.value }
+                  update(next)
+                }}
+              />
+              <Input
+                type="number"
+                value={row.port || ''}
+                placeholder="Port"
+                className="w-24 text-sm"
+                onChange={(e) => {
+                  const next = [...draft]
+                  next[i] = { ...next[i], port: Number(e.target.value) }
+                  update(next)
+                }}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8 shrink-0"
+                onClick={() => update(draft.filter((_, j) => j !== i))}
+              >
+                <Trash2 className="size-3.5 text-muted-foreground" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {dirty && (
+        <div className="flex items-center justify-end gap-2 pt-2 border-t">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setDraft(cfg.publicPorts || cfg.public_ports || [])
+              setDirty(false)
+            }}
+          >
+            Reset
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={async () => {
+              const filtered = draft.filter((p) => p.service && p.port > 0)
+              await saveGitField({
+                preset_config: {
+                  ...cfg,
+                  preset: 'docker-compose',
+                  publicPorts: filtered.length ? filtered : undefined,
+                },
+              })
+              toast.success('Public ports saved')
+              setDirty(false)
+            }}
+          >
+            Save ports
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// Repo change dialog — wraps the existing repo selector flow without re-implementing it.
+export function ChangeRepositoryPage({ project, refetch }: GitSettingsProps) {
+  const navigate = useNavigate()
+  const isPublicRepo = !project?.git_provider_connection_id
+  const updateGit = useMutation({ ...updateGitSettingsMutation() })
+  const { data: connectionsData } = useQuery({ ...listConnectionsOptions() })
+  const { data: providersData } = useQuery({ ...listGitProvidersOptions() })
+  const providers = providersData || []
+
+  const [selectedConnectionId, setSelectedConnectionId] = useState<number | null>(
+    project.git_provider_connection_id || null,
+  )
+  const [publicUrl, setPublicUrl] = useState('')
+  const [parsedPublic, setParsedPublic] = useState<{ owner: string; name: string } | null>(null)
+
+  const back = () => navigate(`/projects/${project.slug}/git`)
+
+  const handleRepoSelect = async (repo: RepositoryResponse) => {
+    const presetCfg = (project.preset_config as any) || {}
+    const body: Record<string, unknown> = {
+      repo_owner: repo.owner,
+      repo_name: repo.name,
+      directory: project.directory || './',
+      preset: project.preset,
+      preset_config: presetCfg,
+      main_branch: project.main_branch || repo.default_branch || 'main',
+    }
+    if (isPublicRepo) {
+      body.git_url = `https://github.com/${repo.owner}/${repo.name}`
+      body.is_public_repo = true
+      body.git_provider_connection_id = null
+    } else {
+      body.git_provider_connection_id =
+        selectedConnectionId ?? project.git_provider_connection_id ?? null
+    }
+    try {
+      await updateGit.mutateAsync({ body: body as any, path: { project_id: project.id } })
+      toast.success('Repository changed')
+      refetch()
+      back()
+    } catch {
+      toast.error('Failed to change repository')
+    }
   }
 
   return (
     <div className="space-y-6">
-      <h3 className="text-lg font-medium">Git Settings</h3>
-      <p className="text-sm text-muted-foreground">
-        Manage Git repository settings for your project.
-      </p>
-
-      {project.repo_owner && project.repo_name ? (
-        <div className="space-y-6">
-          <Form {...form}>
-            <form onSubmit={form.handleSubmit(handleUpdateSettings)}>
-              <Card>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <CardTitle>Git Settings</CardTitle>
-                      <CardDescription>
-                        Configure repository, branch, and framework settings.
-                      </CardDescription>
-                    </div>
-                    {!isEditingSettings && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => setIsEditingSettings(true)}
-                      >
-                        Edit Settings
-                      </Button>
-                    )}
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-6">
-                  {/* Repository Info */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label>Connected Repository</Label>
-                      {isEditingSettings && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setIsSelectingRepository(true)}
-                        >
-                          Change Repository
-                        </Button>
-                      )}
-                    </div>
-                    {isSelectingRepository && isEditingSettings ? (
-                      <div className="space-y-4">
-                        {isPublicRepo ? (
-                          /* Public repo: show URL input */
-                          <div className="space-y-2">
-                            <Label htmlFor="public-repo-url">
-                              Public Repository URL
-                            </Label>
-                            <Input
-                              id="public-repo-url"
-                              placeholder="https://github.com/owner/repo"
-                              value={publicRepoUrl || `https://github.com/${project.repo_owner}/${project.repo_name}`}
-                              onChange={(e) => {
-                                const url = e.target.value
-                                setPublicRepoUrl(url)
-                                // Parse GitHub/GitLab URL to extract owner/repo
-                                // Handles: https://github.com/owner/repo, https://github.com/owner/repo.git,
-                                // https://github.com/owner/repo/tree/branch/path, etc.
-                                const match = url.trim().match(/(?:github\.com|gitlab\.com)[/:]([^/\s]+)\/([^/\s.]+)/)
-                                if (match) {
-                                  const [, owner, repo] = match
-                                  setParsedPublicRepo({ owner, name: repo.replace(/\.git$/, '') })
-                                } else {
-                                  setParsedPublicRepo(null)
-                                }
-                              }}
-                            />
-                            <p className="text-xs text-muted-foreground">
-                              Enter the full URL of a public GitHub or GitLab repository.
-                            </p>
-                            {parsedPublicRepo && (
-                              <div className="flex items-center gap-2">
-                                <p className="text-sm text-muted-foreground">
-                                  Detected: <span className="font-mono font-medium text-foreground">{parsedPublicRepo.owner}/{parsedPublicRepo.name}</span>
-                                </p>
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  onClick={async () => {
-                                    await handleRepositorySelect({ owner: parsedPublicRepo.owner, name: parsedPublicRepo.name } as RepositoryResponse)
-                                    setIsSelectingRepository(false)
-                                    setPublicRepoUrl('')
-                                    setParsedPublicRepo(null)
-                                  }}
-                                >
-                                  Update Repository
-                                </Button>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          /* Private repo: show git provider connection selector */
-                          <>
-                            <div className="space-y-2">
-                              <Label htmlFor="change-connection">
-                                Git Provider Connection
-                              </Label>
-                              <Select
-                                value={
-                                  selectedConnectionId?.toString() ||
-                                  project.git_provider_connection_id?.toString()
-                                }
-                                onValueChange={(value) => {
-                                  setSelectedConnectionId(Number(value))
-                                  setSelectedRepository(null)
-                                }}
-                              >
-                                <SelectTrigger id="change-connection">
-                                  <SelectValue placeholder="Select a git connection" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {(
-                                    connectionsData?.connections ?? []
-                                  ).map((conn) => {
-                                    const provider = providers.find(
-                                      (p) => p.id === conn.provider_id
-                                    )
-                                    return (
-                                      <SelectItem
-                                        key={conn.id}
-                                        value={conn.id.toString()}
-                                      >
-                                        <div className="flex items-center gap-2">
-                                          {provider?.provider_type === 'github' ||
-                                          provider?.provider_type ===
-                                            'github_app' ? (
-                                            <GithubIcon className="h-4 w-4" />
-                                          ) : (
-                                            <GitBranchIcon className="h-4 w-4" />
-                                          )}
-                                          {conn.account_name}
-                                          {provider && (
-                                            <Badge
-                                              variant="secondary"
-                                              className="ml-1 text-xs"
-                                            >
-                                              {provider.name}
-                                            </Badge>
-                                          )}
-                                        </div>
-                                      </SelectItem>
-                                    )
-                                  })}
-                                </SelectContent>
-                              </Select>
-                            </div>
-
-                            {/* Repository Selection */}
-                            {(selectedConnectionId ||
-                              project.git_provider_connection_id) && (
-                              <RepositorySelector
-                                connectionId={
-                                  selectedConnectionId ||
-                                  project.git_provider_connection_id!
-                                }
-                                onSelect={(repo) => {
-                                  handleRepositorySelect(repo)
-                                  setIsSelectingRepository(false)
-                                }}
-                                selectedRepository={selectedRepository}
-                                title="Select New Repository"
-                                description="Choose a repository from your connected git provider"
-                                showAsCard={false}
-                              />
-                            )}
-                          </>
-                        )}
-
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setIsSelectingRepository(false)
-                            setSelectedRepository(null)
-                          }}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex items-center gap-2 p-4 rounded-lg border bg-muted/50">
-                          <GithubIcon className="h-5 w-5" />
-                          <a
-                            href={project.git_url || getGithubRepoUrl(
-                              project.repo_owner,
-                              project.repo_name
-                            )}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-medium hover:underline"
-                          >
-                            {isPublicRepo
-                              ? (project.git_url || `https://github.com/${project.repo_owner}/${project.repo_name}`)
-                              : `${project.repo_owner}/${project.repo_name}`}
-                          </a>
-                          {isPublicRepo && (
-                            <Badge variant="secondary" className="text-xs">Public</Badge>
-                          )}
-                        </div>
-                        <p className="text-xs text-muted-foreground">
-                          {isPublicRepo
-                            ? 'Public repository cloned directly via HTTPS.'
-                            : 'Seamlessly create Deployments for any commits pushed to your Git repository.'}
-                        </p>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Git Connection Info — hide for public repos */}
-                  {!!project?.git_provider_connection_id && (
-                  <div className="space-y-2">
-                    <Label>Git Provider Connection</Label>
-                    {currentConnection ? (
-                      <div className="flex items-center gap-3 p-4 rounded-lg border bg-card">
-                        {currentProvider?.provider_type === 'github' ||
-                        currentProvider?.provider_type === 'github_app' ? (
-                          <GithubIcon className="h-6 w-6" />
-                        ) : (
-                          <GitBranchIcon className="h-6 w-6" />
-                        )}
-                        <div className="flex-1 space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium">
-                              {currentConnection.account_name}
-                            </span>
-                            <Badge variant="secondary" className="text-xs">
-                              {currentProvider?.name}
-                            </Badge>
-                          </div>
-                          {currentConnection.created_at && (
-                            <div className="text-xs text-muted-foreground">
-                              Connected{' '}
-                              <TimeAgo date={currentConnection.created_at} />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                        <span className="text-sm text-muted-foreground">
-                          No connection found
-                        </span>
-                      </div>
-                    )}
-                    <p className="text-xs text-muted-foreground">
-                      The git provider connection used for this project.
-                    </p>
-                  </div>
-                  )}
-
-                  {isEditingSettings ? (
-                    <>
-                      {/* Branch Settings */}
-                      <FormField
-                        control={form.control}
-                        name="branch"
-                        render={({ field }) => (
-                          <FormItem>
-                            <div className="flex items-center justify-between mb-2">
-                              <FormLabel>Main Branch</FormLabel>
-                              {project?.repo_owner && project?.repo_name && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => refetchBranches()}
-                                  disabled={isLoadingBranches}
-                                >
-                                  {isLoadingBranches ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <RefreshCw className="h-4 w-4" />
-                                  )}
-                                  <span className="ml-2">Refresh</span>
-                                </Button>
-                              )}
-                            </div>
-                            <FormControl>
-                              {isLoadingBranches ? (
-                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                  <Loader2 className="h-4 w-4 animate-spin" />
-                                  Loading branches...
-                                </div>
-                              ) : branches.length === 0 ? (
-                                <Input {...field} placeholder="main" />
-                              ) : !isCustomBranch ? (
-                                <Select
-                                  value={field.value}
-                                  onValueChange={(value) => {
-                                    if (value === 'custom') {
-                                      setIsCustomBranch(true)
-                                      field.onChange(customBranch || 'main')
-                                    } else {
-                                      setIsCustomBranch(false)
-                                      setCustomBranch('')
-                                      field.onChange(value)
-                                    }
-                                  }}
-                                >
-                                  <SelectTrigger>
-                                    <SelectValue placeholder="Select a branch" />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {branches.map((branch: any) => {
-                                      const branchName = branch.name || branch
-                                      return (
-                                        <SelectItem
-                                          key={branchName}
-                                          value={branchName}
-                                        >
-                                          <div className="flex items-center gap-2">
-                                            <GitBranchIcon className="h-4 w-4" />
-                                            {branchName}
-                                            {branchName ===
-                                              project?.main_branch && (
-                                              <Check className="h-3 w-3 text-green-500 ml-1" />
-                                            )}
-                                          </div>
-                                        </SelectItem>
-                                      )
-                                    })}
-                                    <SelectItem value="custom">
-                                      <div className="flex items-center gap-2 text-muted-foreground">
-                                        <GitBranchIcon className="h-4 w-4" />
-                                        Custom branch...
-                                      </div>
-                                    </SelectItem>
-                                  </SelectContent>
-                                </Select>
-                              ) : (
-                                <div className="space-y-2">
-                                  <Input
-                                    {...field}
-                                    value={field.value}
-                                    onChange={(e) => {
-                                      setCustomBranch(e.target.value)
-                                      field.onChange(e.target.value)
-                                    }}
-                                    placeholder="Enter custom branch name"
-                                  />
-                                  {branches.length > 0 && (
-                                    <Button
-                                      type="button"
-                                      variant="link"
-                                      size="sm"
-                                      className="text-xs"
-                                      onClick={() => {
-                                        setIsCustomBranch(false)
-                                        field.onChange(
-                                          branches[0]?.name ||
-                                            branches[0] ||
-                                            'main'
-                                        )
-                                      }}
-                                    >
-                                      ← Back to branch list
-                                    </Button>
-                                  )}
-                                </div>
-                              )}
-                            </FormControl>
-                            <FormDescription>
-                              The default branch to deploy from
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-
-                      <FormField
-                        control={form.control}
-                        name="preset"
-                        render={({ field }) => {
-                          // Convert stored preset value to select format
-                          const getSelectValue = () => {
-                            if (field.value === 'custom') return 'custom'
-                            if (!field.value) return ''
-
-                            // Get the current directory to match with preset path
-                            const currentDirectory =
-                              form.getValues('directory') || './'
-
-                            // Normalize directory for comparison (remove leading ./)
-                            const normalizeDir = (dir: string) => {
-                              if (!dir || dir === '.' || dir === './')
-                                return 'root'
-                              return dir.startsWith('./') ? dir.slice(2) : dir
-                            }
-
-                            const normalizedCurrentDir =
-                              normalizeDir(currentDirectory)
-
-                            // Find matching preset by both name AND path
-                            const allPresets = effectivePresetData?.presets || []
-                            const matchingPreset =
-                              allPresets.find((p: any) => {
-                                const normalizedPresetPath = normalizeDir(
-                                  p.path
-                                )
-                                return (
-                                  p.preset === field.value &&
-                                  normalizedPresetPath === normalizedCurrentDir
-                                )
-                              })
-
-                            if (matchingPreset) {
-                              return `${matchingPreset.preset}::${normalizeDir(matchingPreset.path)}`
-                            }
-
-                            // Fallback: if no exact match, find by preset name only
-                            const fallbackPreset =
-                              allPresets.find(
-                                (p: any) => p.preset === field.value
-                              )
-                            if (fallbackPreset) {
-                              return `${fallbackPreset.preset}::${normalizeDir(fallbackPreset.path)}`
-                            }
-
-                            // Fallback: construct value from slug + current directory
-                            return `${field.value}::${normalizedCurrentDir}`
-                          }
-
-                          const selectValue = getSelectValue()
-
-                          return (
-                            <FormItem>
-                              <FormControl>
-                                <FrameworkSelector
-                                  presetData={effectivePresetData as any}
-                                  isLoading={effectivePresetLoading}
-                                  error={presetQuery.error}
-                                  selectedPreset={selectValue}
-                                  onSelectPreset={(value) => {
-                                    if (value === 'custom') {
-                                      field.onChange('custom')
-                                      form.setValue('directory', './')
-                                    } else {
-                                      const [_presetName, presetPath] =
-                                        value.split('::')
-                                      // Store the full preset::path value for proper selection tracking
-                                      field.onChange(value)
-
-                                      // Treat empty, '.', and 'root' as root directory
-                                      if (
-                                        presetPath &&
-                                        presetPath !== 'root' &&
-                                        presetPath !== '.' &&
-                                        presetPath.trim() !== ''
-                                      ) {
-                                        // Remove leading ./ if present in the path
-                                        const cleanPath = presetPath.startsWith(
-                                          './'
-                                        )
-                                          ? presetPath.slice(2)
-                                          : presetPath
-                                        form.setValue(
-                                          'directory',
-                                          `./${cleanPath}`
-                                        )
-                                      } else {
-                                        form.setValue('directory', './')
-                                      }
-                                    }
-                                  }}
-                                />
-                              </FormControl>
-                              <FormMessage />
-                            </FormItem>
-                          )
-                        }}
-                      />
-
-                      <FormField
-                        control={form.control}
-                        name="directory"
-                        render={({ field }) => {
-                          const isCustomPreset = currentPreset === 'custom'
-                          const canEditDirectory =
-                            isCustomPreset || allowDirectoryOverride
-
-                          return (
-                            <FormItem>
-                              <div className="flex items-center justify-between">
-                                <FormLabel>Root Directory</FormLabel>
-                                {!isCustomPreset && !allowDirectoryOverride && (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() =>
-                                      setAllowDirectoryOverride(true)
-                                    }
-                                    className="h-auto py-1 px-2 text-xs"
-                                  >
-                                    Edit manually
-                                  </Button>
-                                )}
-                                {!isCustomPreset && allowDirectoryOverride && (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => {
-                                      setAllowDirectoryOverride(false)
-                                      // Reset to preset-based directory if available
-                                      const presetValue =
-                                        form.getValues('preset')
-                                      if (
-                                        presetValue &&
-                                        presetValue !== 'custom'
-                                      ) {
-                                        const [, presetPath] =
-                                          presetValue.split('::')
-                                        if (
-                                          presetPath &&
-                                          presetPath !== 'root'
-                                        ) {
-                                          const cleanPath =
-                                            presetPath.startsWith('./')
-                                              ? presetPath.slice(2)
-                                              : presetPath
-                                          form.setValue(
-                                            'directory',
-                                            `./${cleanPath}`
-                                          )
-                                        } else {
-                                          form.setValue('directory', './')
-                                        }
-                                      }
-                                    }}
-                                    className="h-auto py-1 px-2 text-xs"
-                                  >
-                                    Reset to preset
-                                  </Button>
-                                )}
-                              </div>
-                              <FormControl>
-                                <Input
-                                  {...field}
-                                  placeholder="./"
-                                  readOnly={!canEditDirectory}
-                                  className={
-                                    !canEditDirectory
-                                      ? 'bg-muted cursor-not-allowed'
-                                      : ''
-                                  }
-                                />
-                              </FormControl>
-                              <FormDescription>
-                                {canEditDirectory
-                                  ? 'Enter the directory path manually'
-                                  : 'Directory is set automatically based on selected preset'}
-                              </FormDescription>
-                              <FormMessage />
-                            </FormItem>
-                          )
-                        }}
-                      />
-
-                      {/* Dockerfile path - only shown when Dockerfile preset is selected */}
-                      {currentPreset?.split('::')[0] === 'dockerfile' && (
-                        <FormField
-                          control={form.control}
-                          name="dockerfilePath"
-                          render={({ field }) => (
-                            <FormItem>
-                              <FormLabel>Dockerfile Path</FormLabel>
-                              <FormControl>
-                                <Input
-                                  {...field}
-                                  placeholder="Dockerfile"
-                                />
-                              </FormControl>
-                              <FormDescription>
-                                Path to your Dockerfile relative to the root
-                                directory
-                              </FormDescription>
-                              <FormMessage />
-                            </FormItem>
-                          )}
-                        />
-                      )}
-
-                      {/* Compose settings - only shown when Docker Compose preset is selected */}
-                      {(currentPreset?.split('::')[0]?.replace('-', '')?.toLowerCase()?.includes('dockercompose') ||
-                        currentPreset?.split('::')[0] === 'docker-compose' ||
-                        project?.preset === 'docker-compose' ||
-                        project?.preset === 'dockercompose') && (
-                        <>
-                          <FormField
-                            control={form.control}
-                            name="composePath"
-                            render={({ field }) => (
-                              <FormItem>
-                                <FormLabel>Compose File Path</FormLabel>
-                                <FormControl>
-                                  <Input
-                                    {...field}
-                                    placeholder="docker-compose.yml"
-                                  />
-                                </FormControl>
-                                <FormDescription>
-                                  Path to your Docker Compose file relative to the
-                                  root directory
-                                </FormDescription>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-
-                          <FormField
-                            control={form.control}
-                            name="composeOverride"
-                            render={({ field }) => (
-                              <FormItem>
-                                <FormLabel>Compose Override (optional)</FormLabel>
-                                <FormControl>
-                                  <textarea
-                                    {...field}
-                                    className="flex min-h-[120px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                                    placeholder={`# Override ports, volumes, etc.\nservices:\n  clickhouse:\n    ports:\n      - "18123:8123"`}
-                                  />
-                                </FormControl>
-                                <FormDescription>
-                                  YAML override merged with the compose file at deploy time.
-                                  Use to remap ports, add volumes, change commands, etc.
-                                  without modifying the original compose file.
-                                </FormDescription>
-                                <FormMessage />
-                              </FormItem>
-                            )}
-                          />
-
-                          <PublicPortsField form={form} />
-                        </>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      {/* Read-only view */}
-                      <div className="space-y-4">
-                        <div className="space-y-2">
-                          <Label>Main Branch</Label>
-                          <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                            <GitBranchIcon className="h-4 w-4 text-muted-foreground" />
-                            <span className="font-mono text-sm">
-                              {project.main_branch}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <Label>Framework Preset</Label>
-                          <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                            <FrameworkIcon
-                              preset={project.preset as any}
-                              className="h-5 w-5"
-                            />
-                            <span>
-                              {presets.find((p) => p.value === project.preset)
-                                ?.label || project.preset}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <Label>Root Directory</Label>
-                          <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                            <FolderIcon className="h-4 w-4 text-muted-foreground" />
-                            <span className="font-mono text-sm">
-                              {project.directory}
-                            </span>
-                          </div>
-                        </div>
-
-                        {project.preset === 'dockerfile' && (
-                          <div className="space-y-2">
-                            <Label>Dockerfile Path</Label>
-                            <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                              <FileIcon className="h-4 w-4 text-muted-foreground" />
-                              <span className="font-mono text-sm">
-                                {(project.preset_config as any)
-                                  ?.dockerfilePath || 'Dockerfile'}
-                              </span>
-                            </div>
-                          </div>
-                        )}
-
-                        {(project.preset === 'docker-compose' || project.preset === 'dockercompose') && (
-                          <>
-                            <div className="space-y-2">
-                              <Label>Compose File Path</Label>
-                              <div className="flex items-center gap-2 p-3 rounded-lg border bg-muted/50">
-                                <FileIcon className="h-4 w-4 text-muted-foreground" />
-                                <span className="font-mono text-sm">
-                                  {(project.preset_config as any)
-                                    ?.composePath || (project.preset_config as any)?.compose_path || 'docker-compose.yml'}
-                                </span>
-                              </div>
-                            </div>
-                            <div className="space-y-2">
-                              <Label>Public Ports</Label>
-                              {((project.preset_config as any)?.publicPorts?.length > 0 || (project.preset_config as any)?.public_ports?.length > 0) ? (
-                                <div className="flex flex-wrap gap-1.5">
-                                  {((project.preset_config as any)?.publicPorts || (project.preset_config as any)?.public_ports || []).map(
-                                    (pp: { service: string; port: number }) => (
-                                      <Badge
-                                        key={`${pp.service}:${pp.port}`}
-                                        variant="secondary"
-                                        className="font-mono text-xs"
-                                      >
-                                        {pp.service}:{pp.port}
-                                      </Badge>
-                                    )
-                                  )}
-                                </div>
-                              ) : (
-                                <p className="text-sm text-muted-foreground italic">
-                                  No public ports — all services are private
-                                </p>
-                              )}
-                            </div>
-
-                            {(project.preset_config as any)?.composeOverride && (
-                              <div className="space-y-2">
-                                <Label>Compose Override</Label>
-                                <pre className="p-3 rounded-lg border bg-muted/50 text-xs font-mono whitespace-pre-wrap overflow-x-auto">
-                                  {(project.preset_config as any)?.composeOverride}
-                                </pre>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </>
-                  )}
-                </CardContent>
-                <CardFooter className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <Switch
-                      checked={project.automatic_deploy ?? true}
-                      onCheckedChange={handleAutoDeployToggle}
-                    />
-                    <label className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
-                      Automatic Deployments{' '}
-                      {project.automatic_deploy ? 'Enabled' : 'Disabled'}
-                    </label>
-                  </div>
-                  {isEditingSettings && (
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => setIsEditingSettings(false)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button type="submit">Save Changes</Button>
-                    </div>
-                  )}
-                </CardFooter>
-              </Card>
-            </form>
-          </Form>
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h2 className="text-xl font-semibold">Change repository</h2>
+          <p className="text-sm text-muted-foreground">
+            Connect <span className="font-mono">{project.slug}</span> to a
+            different repository.
+          </p>
         </div>
-      ) : (
-        <div className="space-y-6">
-          {/* Check if there are any git providers */}
-          {isLoadingProviders ? (
-            <Card>
-              <CardContent className="p-8">
-                <div className="flex items-center justify-center">
-                  <Loader2 className="h-8 w-8 animate-spin" />
-                  <span className="ml-2">Loading git providers...</span>
-                </div>
-              </CardContent>
-            </Card>
-          ) : !hasProviders ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>No Git Providers Connected</CardTitle>
-                <CardDescription>
-                  Connect a git provider to enable repository integration for
-                  your project.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Alert>
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>
-                    You need to connect a git provider before you can connect a
-                    repository.
-                  </AlertDescription>
-                </Alert>
-              </CardContent>
-              <CardFooter>
-                <Button onClick={() => navigate('/git-providers/add')}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add Git Provider
+        <Button variant="ghost" size="sm" onClick={back}>
+          Cancel
+        </Button>
+      </div>
+
+      {isPublicRepo ? (
+        <Card>
+          <CardContent className="p-6 space-y-2">
+            <Label>Public repository URL</Label>
+            <Input
+              placeholder="https://github.com/owner/repo"
+              value={publicUrl}
+              onChange={(e) => {
+                const url = e.target.value
+                setPublicUrl(url)
+                const m = url
+                  .trim()
+                  .match(/(?:github\.com|gitlab\.com)[/:]([^/\s]+)\/([^/\s.]+)/)
+                if (m) {
+                  setParsedPublic({ owner: m[1], name: m[2].replace(/\.git$/, '') })
+                } else {
+                  setParsedPublic(null)
+                }
+              }}
+            />
+            {parsedPublic && (
+              <div className="flex flex-col gap-2 pt-2 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm text-muted-foreground">
+                  Will connect to{' '}
+                  <span className="font-mono text-foreground">
+                    {parsedPublic.owner}/{parsedPublic.name}
+                  </span>
+                </p>
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    handleRepoSelect({
+                      owner: parsedPublic.owner,
+                      name: parsedPublic.name,
+                    } as RepositoryResponse)
+                  }
+                >
+                  Connect
                 </Button>
-              </CardFooter>
-            </Card>
-          ) : (
-            <Card>
-              <CardHeader>
-                <CardTitle>Repository Settings</CardTitle>
-                <CardDescription>
-                  Connect or update the GitHub repository for this project.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                {/* Git Provider Connection Selection */}
-                <div className="space-y-2">
-                  <Label htmlFor="initial-connection">
-                    Git Provider Connection
-                  </Label>
-                  <Select
-                    value={selectedConnectionId?.toString()}
-                    onValueChange={(value) => {
-                      setSelectedConnectionId(Number(value))
-                      setSelectedRepository(null)
-                    }}
-                  >
-                    <SelectTrigger id="initial-connection">
-                      <SelectValue placeholder="Select a git connection" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(connectionsData?.connections ?? []).map(
-                        (conn) => {
-                          const provider = providers.find(
-                            (p) => p.id === conn.provider_id
-                          )
-                          return (
-                            <SelectItem
-                              key={conn.id}
-                              value={conn.id.toString()}
-                            >
-                              <div className="flex items-center gap-2">
-                                {provider?.provider_type === 'github' ||
-                                provider?.provider_type === 'github_app' ? (
-                                  <GithubIcon className="h-4 w-4" />
-                                ) : (
-                                  <GitBranchIcon className="h-4 w-4" />
-                                )}
-                                {conn.account_name}
-                                {provider && (
-                                  <Badge
-                                    variant="secondary"
-                                    className="ml-1 text-xs"
-                                  >
-                                    {provider.name}
-                                  </Badge>
-                                )}
-                              </div>
-                            </SelectItem>
-                          )
-                        }
-                      )}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-sm text-muted-foreground">
-                    Select the git provider connection to use for this project
-                  </p>
-                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-4">
+          <Card>
+            <CardContent className="p-6 space-y-2">
+              <Label>Git provider connection</Label>
+              <Select
+                value={selectedConnectionId?.toString()}
+                onValueChange={(v) => setSelectedConnectionId(Number(v))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(connectionsData?.connections ?? []).map((c) => {
+                    const provider = providers.find((p) => p.id === c.provider_id)
+                    return (
+                      <SelectItem key={c.id} value={c.id.toString()}>
+                        <div className="flex items-center gap-2">
+                          <GithubIcon className="size-4" />
+                          {c.account_name}
+                          {provider && (
+                            <Badge variant="secondary" className="ml-1 text-xs">
+                              {provider.name}
+                            </Badge>
+                          )}
+                        </div>
+                      </SelectItem>
+                    )
+                  })}
+                </SelectContent>
+              </Select>
+            </CardContent>
+          </Card>
 
-                {/* Repository Selection */}
-                {selectedConnectionId && (
-                  <div className="space-y-2">
-                    {isSelectingRepository ? (
-                      <RepositorySelector
-                        connectionId={selectedConnectionId}
-                        onSelect={handleRepositorySelect}
-                        selectedRepository={selectedRepository}
-                        title="Select Repository"
-                        description="Choose a repository from your connected git provider"
-                        showAsCard={false}
-                      />
-                    ) : (
-                      <div>
-                        <Label>Repository</Label>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="w-full justify-start mt-2"
-                          onClick={() => setIsSelectingRepository(true)}
-                        >
-                          <GitBranchIcon className="mr-2 h-4 w-4" />
-                          Select Repository
-                        </Button>
-                        <p className="text-sm text-muted-foreground mt-2">
-                          Choose a repository to connect to this project
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Framework Preset Selection - Using FrameworkSelector */}
-                {selectedRepository && (
-                  <Form {...form}>
-                    <FormField
-                      control={form.control}
-                      name="preset"
-                      render={({ field }) => {
-                        // Convert stored preset value to select format
-                        const getSelectValue = () => {
-                          if (field.value === 'custom') return 'custom'
-                          if (!field.value) return ''
-
-                          // Get the current directory to match with preset path
-                          const currentDirectory =
-                            form.getValues('directory') || './'
-
-                          // Normalize directory for comparison (remove leading ./)
-                          const normalizeDir = (dir: string) => {
-                            if (!dir || dir === '.' || dir === './')
-                              return 'root'
-                            return dir.startsWith('./') ? dir.slice(2) : dir
-                          }
-
-                          const normalizedCurrentDir =
-                            normalizeDir(currentDirectory)
-
-                          // Find matching preset by both name AND path
-                          const allPresets2 = effectivePresetData?.presets || []
-                          const matchingPreset =
-                            allPresets2.find((p: any) => {
-                              const normalizedPresetPath = normalizeDir(p.path)
-                              return (
-                                p.preset === field.value &&
-                                normalizedPresetPath === normalizedCurrentDir
-                              )
-                            })
-
-                          if (matchingPreset) {
-                            return `${matchingPreset.preset}::${normalizeDir(matchingPreset.path)}`
-                          }
-
-                          // Fallback: if no exact match, find by preset name only
-                          const fallbackPreset =
-                            allPresets2.find(
-                              (p: any) => p.preset === field.value
-                            )
-                          if (fallbackPreset) {
-                            return `${fallbackPreset.preset}::${normalizeDir(fallbackPreset.path)}`
-                          }
-
-                          // Fallback: construct value from slug + current directory
-                          return `${field.value}::${normalizedCurrentDir}`
-                        }
-
-                        const selectValue = getSelectValue()
-
-                        return (
-                          <FormItem>
-                            <FormControl>
-                              <FrameworkSelector
-                                presetData={effectivePresetData as any}
-                                isLoading={effectivePresetLoading}
-                                error={presetQuery.error}
-                                selectedPreset={selectValue}
-                                onSelectPreset={(value) => {
-                                  if (value === 'custom') {
-                                    field.onChange('custom')
-                                    form.setValue('directory', './')
-                                  } else {
-                                    const [_presetName, presetPath] =
-                                      value.split('::')
-                                    // Store the full preset::path value for proper selection tracking
-                                    field.onChange(value)
-
-                                    // Treat empty, '.', and 'root' as root directory
-                                    if (
-                                      presetPath &&
-                                      presetPath !== 'root' &&
-                                      presetPath !== '.' &&
-                                      presetPath.trim() !== ''
-                                    ) {
-                                      // Remove leading ./ if present in the path
-                                      const cleanPath = presetPath.startsWith(
-                                        './'
-                                      )
-                                        ? presetPath.slice(2)
-                                        : presetPath
-                                      form.setValue(
-                                        'directory',
-                                        `./${cleanPath}`
-                                      )
-                                    } else {
-                                      form.setValue('directory', './')
-                                    }
-                                  }
-                                }}
-                              />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )
-                      }}
-                    />
-
-                    {/* Directory Field */}
-                    <FormField
-                      control={form.control}
-                      name="directory"
-                      render={({ field }) => {
-                        const isCustomPreset = currentPreset === 'custom'
-                        const canEditDirectory =
-                          isCustomPreset || allowDirectoryOverride
-
-                        return (
-                          <FormItem>
-                            <div className="flex items-center justify-between">
-                              <FormLabel>Root Directory</FormLabel>
-                              {!isCustomPreset && !allowDirectoryOverride && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() =>
-                                    setAllowDirectoryOverride(true)
-                                  }
-                                  className="h-auto py-1 px-2 text-xs"
-                                >
-                                  Edit manually
-                                </Button>
-                              )}
-                              {!isCustomPreset && allowDirectoryOverride && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => {
-                                    setAllowDirectoryOverride(false)
-                                    // Reset to preset-based directory if available
-                                    const presetValue = form.getValues('preset')
-                                    if (
-                                      presetValue &&
-                                      presetValue !== 'custom'
-                                    ) {
-                                      const [, presetPath] =
-                                        presetValue.split('::')
-                                      if (presetPath && presetPath !== 'root') {
-                                        const cleanPath = presetPath.startsWith(
-                                          './'
-                                        )
-                                          ? presetPath.slice(2)
-                                          : presetPath
-                                        form.setValue(
-                                          'directory',
-                                          `./${cleanPath}`
-                                        )
-                                      } else {
-                                        form.setValue('directory', './')
-                                      }
-                                    }
-                                  }}
-                                  className="h-auto py-1 px-2 text-xs"
-                                >
-                                  Reset to preset
-                                </Button>
-                              )}
-                            </div>
-                            <FormControl>
-                              <Input
-                                {...field}
-                                placeholder="./"
-                                readOnly={!canEditDirectory}
-                                className={
-                                  !canEditDirectory
-                                    ? 'bg-muted cursor-not-allowed'
-                                    : ''
-                                }
-                              />
-                            </FormControl>
-                            <FormDescription>
-                              {canEditDirectory
-                                ? 'Enter the directory path manually'
-                                : 'Directory is set automatically based on selected preset'}
-                            </FormDescription>
-                            <FormMessage />
-                          </FormItem>
-                        )
-                      }}
-                    />
-                  </Form>
-                )}
-              </CardContent>
-            </Card>
+          {selectedConnectionId && (
+            <RepositorySelector
+              connectionId={selectedConnectionId}
+              onSelect={(repo) => repo && handleRepoSelect(repo)}
+              selectedRepository={null}
+              title="Select repository"
+              description="Choose a repository from the connected provider."
+              showAsCard
+            />
           )}
         </div>
       )}
     </div>
   )
+}
+
+export function GitSettings(props: GitSettingsProps) {
+  return <GitSettingsInline {...props} />
 }

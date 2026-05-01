@@ -269,6 +269,12 @@ pub struct ProjectResponse {
     pub enable_preview_environments: bool,
     /// Source type for deployments (git, docker_image, or static_files)
     pub source_type: SourceType,
+    /// GitLab webhook ID installed on the connected repository.
+    /// `null` when no GitLab webhook is installed (not connected to GitLab,
+    /// or webhook was removed / never created).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 42)]
+    pub gitlab_webhook_id: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -298,6 +304,7 @@ impl ProjectResponse {
             attack_mode: project.attack_mode,
             enable_preview_environments: project.enable_preview_environments,
             source_type: project.source_type,
+            gitlab_webhook_id: project.gitlab_webhook_id,
             deployment_config: DeploymentConfig {
                 cpu_request: project
                     .deployment_config
@@ -933,4 +940,13 @@ pub struct GenerateDockerfileResponse {
     pub build_args: std::collections::HashMap<String, String>,
     /// The preset slug used for generation
     pub preset: String,
+}
+
+/// Response for `POST /projects/{project_id}/gitlab/reinstall-webhook`
+#[derive(Serialize, ToSchema)]
+pub struct ReinstallWebhookResponse {
+    /// The new GitLab hook ID that was installed.
+    pub hook_id: i32,
+    /// Human-readable status message.
+    pub message: String,
 }
