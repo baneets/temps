@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+## [0.1.0-beta.6] - 2026-05-03
+
+### Added
 - **Unified Observe page (`/projects/:slug/observe`)**: new project-level page that merges Requests, Traces, Errors, and Revenue into a single time-ordered timeline. Cockpit header shows one sparkline per kind over the selected time range — clickable to toggle that kind on/off. Below it, a console-style monospace stream with color-coded gutters per kind (sky=requests, violet=traces, rose=errors, emerald=revenue), `HH:mm:ss` timestamps, and rich one-line summaries. Side panel renders entirely from the row payload — no follow-up fetch in the common case. Filter state lives in URL search params so the page is shareable. Traces default OFF (high-volume hypertable, opt-in via cockpit card). Runtime logs are intentionally NOT included — they live on the dedicated Logs page because their volume would dominate the merged business-signal timeline
 - **`temps-observability` crate**: new merge service backing the Observe page. Per-kind parallel queries against `proxy_logs`, `error_events`, `revenue_events`, and the `otel_spans` TimescaleDB hypertable (raw SQL via `FromQueryResult`); k-way merged by `ts DESC` and trimmed to a single page. Heavy fields are truncated server-side (stack frames → first 5, span attributes → first 20 keys alphabetized, headers → whitelist of ~10 keys) with `*_truncated` flags so the panel can offer a "Show full" un-truncate fetch when needed. Wire shape is a discriminated `ObservabilityEvent` union — every row carries its own `type` discriminator and all data the panel needs
 - **Cross-source correlation columns**: new migration `m20260502_000001_add_observe_correlation` adds `proxy_logs.trace_id` + `proxy_logs.error_group_id` + indexes, `revenue_events.deployment_id` + `revenue_events.environment_id` + `revenue_events.trace_id`, and `error_events.trace_id_indexed` (denormalized from `data.trace.trace_id` JSONB for index speed). All nullable — old rows just render without correlation links. Lets the Observe view jump from any event to its peers in the same trace
@@ -370,7 +381,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status page and uptime monitoring
 - Web UI built with React and Rsbuild
 
-[Unreleased]: https://github.com/gotempsh/temps/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/gotempsh/temps/compare/v0.1.0-beta.6...HEAD
+[0.1.0-beta.6]: https://github.com/gotempsh/temps/compare/v0.1.0-beta.5...v0.1.0-beta.6
 [0.0.7]: https://github.com/gotempsh/temps/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/gotempsh/temps/compare/v0.1.0...v0.0.6
 [0.1.0]: https://github.com/gotempsh/temps/releases/tag/v0.1.0
