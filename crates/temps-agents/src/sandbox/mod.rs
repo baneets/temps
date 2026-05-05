@@ -1,6 +1,10 @@
 pub mod docker;
+pub mod git_credential_bundle;
 pub mod local;
 pub mod pty_agent_bundle;
+pub mod user;
+
+pub use user::{SANDBOX_CHOWN, SANDBOX_GROUP, SANDBOX_HOME, SANDBOX_USER, SANDBOX_WORK_DIR};
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -60,7 +64,7 @@ pub struct SandboxHandle {
     pub sandbox_id: String,
     /// Human-readable name for logging (e.g. `temps-sandbox-42`)
     pub sandbox_name: String,
-    /// Path to the repository inside the sandbox (e.g. `/workspace`)
+    /// Path to the repository inside the sandbox. See `sandbox::user::SANDBOX_WORK_DIR`.
     pub work_dir: PathBuf,
 }
 
@@ -81,7 +85,7 @@ pub struct SandboxCreateConfig {
     /// the volume on first use (only if the volume is empty) and is then
     /// ignored — the volume is the source of truth.
     pub host_work_dir: PathBuf,
-    /// When `Some`, mount this Docker named volume at `/workspace` instead
+    /// When `Some`, mount this Docker named volume at the sandbox work dir instead
     /// of bind-mounting `host_work_dir`. The volume is seeded from
     /// `host_work_dir` on first use (detected by checking if it's empty)
     /// and retained on sandbox destroy so a follow-up workspace can mount
@@ -160,6 +164,52 @@ pub trait SandboxProvider: Send + Sync {
         env: HashMap<String, String>,
         on_output: Option<OnEventCallback>,
     ) -> Result<SandboxExecResult, AgentError>;
+
+    /// Execute a command as the sandbox container's root user.
+    ///
+    /// Used for setup-time tasks that must touch files owned by uids
+    /// other than the sandbox user (`temps`/uid 1000). The credential
+    /// daemon's env file at `/etc/temps/credential-daemon.env` is one
+    /// such case: it must be owned by `temps-git`/uid 1001, mode 0600.
+    ///
+    /// The default implementation falls back to the regular [`Self::exec`]
+    /// — useful for providers that don't have a uid concept (e.g. local
+    /// fork-and-exec). Docker overrides this to set `user: 0:0` on the
+    /// underlying exec config.
+    async fn exec_as_root(
+        &self,
+        handle: &SandboxHandle,
+        cmd: Vec<String>,
+        env: HashMap<String, String>,
+        on_output: Option<OnEventCallback>,
+    ) -> Result<SandboxExecResult, AgentError> {
+        self.exec(handle, cmd, env, on_output).await
+    }
+
+    /// Execute a command as a specific user inside the sandbox.
+    ///
+    /// `user` is whatever the underlying provider accepts — for Docker
+    /// that's a `uid[:gid]` string or a name (e.g. `"1001:1001"` or
+    /// `"temps-git:temps-git"`).
+    ///
+    /// Used to write the credential daemon's env file as the
+    /// `temps-git` uid (1001) directly, sidestepping the `CapDrop=ALL`
+    /// limitation that prevents root from writing into 0700 dirs owned
+    /// by other users (root has CHOWN+FOWNER but not DAC_OVERRIDE in
+    /// our sandbox config).
+    ///
+    /// Default: falls back to [`Self::exec`] (no uid concept).
+    async fn exec_as_user(
+        &self,
+        handle: &SandboxHandle,
+        user: &str,
+        cmd: Vec<String>,
+        env: HashMap<String, String>,
+        on_output: Option<OnEventCallback>,
+    ) -> Result<SandboxExecResult, AgentError> {
+        let _ = user;
+        self.exec(handle, cmd, env, on_output).await
+    }
 
     /// Execute a command with a stream-tagged callback — the callback
     /// receives `(ExecStream::Stdout|Stderr, line)` for every line as it

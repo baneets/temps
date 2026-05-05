@@ -5,6 +5,8 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use temps_agents::ai_cli::OnEventCallback;
+use temps_agents::sandbox::{SANDBOX_CHOWN, SANDBOX_HOME, SANDBOX_WORK_DIR};
+use temps_config::ConfigService;
 use temps_core::{EncryptionService, WorkflowMemoryProvider};
 use temps_deployments::services::deployment_token_service::{
     CreateDeploymentTokenRequest, DeploymentTokenService,
@@ -34,6 +36,11 @@ pub struct MessageExecutor {
     encryption_service: Arc<EncryptionService>,
     deployment_token_service: Arc<DeploymentTokenService>,
     external_service_manager: Arc<ExternalServiceManager>,
+    /// Platform-wide settings — used to resolve the public `external_url`
+    /// the in-sandbox CLI must dial when calling back to the API. The
+    /// container can't reach `127.0.0.1:3000`, so we hand it the same URL
+    /// real users hit (e.g. `https://temps.example.com`).
+    platform_config_service: Arc<ConfigService>,
     /// Optional memory provider. When set, the executor pre-loads relevant
     /// workflow memory into the prompt before spawning the harness.
     /// Workspace chat sessions don't currently use this (they have no
@@ -77,6 +84,9 @@ pub struct MessageExecutor {
 }
 
 impl MessageExecutor {
+    // Constructor takes 8 service Arcs — refactoring into a builder for the
+    // sake of one clippy lint is more ceremony than payoff.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<DatabaseConnection>,
         workspace_service: Arc<WorkspaceService>,
@@ -85,6 +95,7 @@ impl MessageExecutor {
         encryption_service: Arc<EncryptionService>,
         deployment_token_service: Arc<DeploymentTokenService>,
         external_service_manager: Arc<ExternalServiceManager>,
+        platform_config_service: Arc<ConfigService>,
     ) -> Self {
         Self {
             db,
@@ -94,6 +105,7 @@ impl MessageExecutor {
             encryption_service,
             deployment_token_service,
             external_service_manager,
+            platform_config_service,
             memory_provider: None,
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             active_runs: Arc::new(RwLock::new(HashMap::new())),
@@ -166,8 +178,13 @@ impl MessageExecutor {
     /// on its bytes. Writes back only if the repair changed anything.
     async fn repair_session_jsonl(&self, session_id: i32) -> Result<(), WorkspaceError> {
         // Claude encodes the workdir as a filename by replacing '/' with '-'.
-        // Our sandbox workdir is /workspace, so the encoded path is "-workspace".
-        const CLAUDE_PROJECTS_DIR: &str = "/home/temps/.claude/projects/-workspace";
+        // The leading slash on the workdir produces a leading dash in the
+        // encoded name (e.g. `/home/temps/workspace` → `-home-temps-workspace`).
+        let claude_projects_dir = format!(
+            "{}/.claude/projects/{}",
+            SANDBOX_HOME,
+            SANDBOX_WORK_DIR.replace('/', "-")
+        );
 
         // List the directory and find the newest .jsonl. We run `ls -t` via
         // exec — small, bounded, no phantom hang risk.
@@ -176,7 +193,7 @@ impl MessageExecutor {
             "-c".to_string(),
             format!(
                 "ls -t {}/*.jsonl 2>/dev/null | head -1",
-                CLAUDE_PROJECTS_DIR
+                claude_projects_dir
             ),
         ];
         let listing = self
@@ -233,7 +250,10 @@ impl MessageExecutor {
         let cmd = vec![
             "sh".to_string(),
             "-c".to_string(),
-            "git -C /workspace rev-parse --abbrev-ref HEAD 2>/dev/null".to_string(),
+            format!(
+                "git -C {} rev-parse --abbrev-ref HEAD 2>/dev/null",
+                SANDBOX_WORK_DIR
+            ),
         ];
         match self
             .session_manager
@@ -577,12 +597,26 @@ impl MessageExecutor {
         let mut managed_env: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
-        managed_env.insert("TEMPS_API_URL".to_string(), self.get_temps_api_url());
-        managed_env.insert("TEMPS_API_TOKEN".to_string(), session_token);
+        let temps_api_url = self.get_temps_api_url().await;
+        managed_env.insert("TEMPS_API_URL".to_string(), temps_api_url.clone());
+        managed_env.insert("TEMPS_API_TOKEN".to_string(), session_token.clone());
         managed_env.insert(
             "TEMPS_PROJECT_ID".to_string(),
             session.project_id.to_string(),
         );
+
+        // Persist the token in the in-sandbox CLI's auth files so
+        // `bunx @temps-sdk/cli` is authenticated even outside `. ~/.env`.
+        if let Err(e) = self
+            .write_cli_auth_files(session.id, session.user_id, &temps_api_url, &session_token)
+            .await
+        {
+            tracing::warn!(
+                "refresh_sandbox: failed to refresh CLI auth files for session {}: {}",
+                session.id,
+                e
+            );
+        }
 
         // Re-inject credentials for *every* configured provider (not just the
         // active one) so claude/codex/opencode terminal tabs all stay
@@ -613,35 +647,11 @@ impl MessageExecutor {
             }
         }
 
-        let mut git_creds: Option<(String, String)> = None;
-        if let Some(connection_id) = project.git_provider_connection_id {
-            match self
-                .git_provider_manager
-                .get_connection_access_token(connection_id)
-                .await
-            {
-                Ok((token, provider_type)) => match provider_type.as_str() {
-                    "github" => {
-                        managed_env.insert("GH_TOKEN".to_string(), token.clone());
-                        managed_env.insert("GITHUB_TOKEN".to_string(), token.clone());
-                        git_creds = Some((token, "github".to_string()));
-                    }
-                    "gitlab" => {
-                        managed_env.insert("GITLAB_TOKEN".to_string(), token.clone());
-                        managed_env.insert("GL_TOKEN".to_string(), token.clone());
-                        git_creds = Some((token, "gitlab".to_string()));
-                    }
-                    _ => {}
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "refresh_sandbox: failed to fetch git provider token for connection {}: {}",
-                        connection_id,
-                        e
-                    );
-                }
-            }
-        }
+        // Git tokens deliberately NOT injected — handled by the
+        // in-sandbox credential daemon (see temps-git-credential).
+        // `git_creds` is preserved as `None` for compatibility with
+        // downstream callers; the credential daemon owns this path now.
+        let git_creds: Option<(String, String)> = None;
 
         let project_ctx = crate::services::session_manager::ProjectContext {
             id: project.id,
@@ -719,6 +729,18 @@ impl MessageExecutor {
             .await
         {
             tracing::warn!("refresh_sandbox: setup_git_credentials failed: {}", e);
+        }
+
+        // Refresh the in-sandbox credential daemon's env file so it
+        // picks up the rotated TEMPS_API_TOKEN (deployment tokens are
+        // re-issued on every refresh per `issue_session_token`). Without
+        // this, the daemon would still hold the old token and start
+        // 401'ing once it expires.
+        if let Err(e) = self
+            .write_credential_daemon_env(session.id, &temps_api_url, &session_token)
+            .await
+        {
+            tracing::warn!("refresh_sandbox: write_credential_daemon_env failed: {}", e);
         }
 
         // Sync cached branch with actual /workspace HEAD.
@@ -1167,10 +1189,15 @@ impl MessageExecutor {
                 temps_agents::sandbox::KillSignal::Kill,
             )
             .await;
+        let claude_projects_dir = format!(
+            "{}/.claude/projects/{}",
+            SANDBOX_HOME,
+            SANDBOX_WORK_DIR.replace('/', "-")
+        );
         let delete_cmd = vec![
             "sh".to_string(),
             "-c".to_string(),
-            "rm -f /home/temps/.claude/projects/-workspace/*.jsonl 2>/dev/null; exit 0".to_string(),
+            format!("rm -f {}/*.jsonl 2>/dev/null; exit 0", claude_projects_dir),
         ];
         let _ = self
             .session_manager
@@ -1329,8 +1356,9 @@ impl MessageExecutor {
         // from the chat sandbox will fail until we add a chat-scoped memory
         // model. Workflow runs use a different code path that DOES set the slug.
         let (provider_id, auth_type, decrypted_credential) = self.resolve_ai_credentials().await?;
+        let temps_api_url = self.get_temps_api_url().await;
         let env_vars = WorkspaceSessionManager::build_env_vars_with_workflow(
-            &self.get_temps_api_url(),
+            &temps_api_url,
             &session_token,
             &provider_id,
             &auth_type,
@@ -1486,44 +1514,26 @@ impl MessageExecutor {
             }
         }
 
-        // Git provider token (so gh / glab can authenticate inside the sandbox).
-        // We also remember the (token, provider) pair so we can wire it into
-        // git's credential store + git config below — the AI shouldn't have
-        // to source ~/.env or paste a token to push/pull.
-        let mut git_creds: Option<(String, String)> = None;
-        if let Some(connection_id) = project.git_provider_connection_id {
-            match self
-                .git_provider_manager
-                .get_connection_access_token(connection_id)
-                .await
-            {
-                Ok((token, provider_type)) => match provider_type.as_str() {
-                    "github" => {
-                        managed_env.insert("GH_TOKEN".to_string(), token.clone());
-                        managed_env.insert("GITHUB_TOKEN".to_string(), token.clone());
-                        git_creds = Some((token, "github".to_string()));
-                    }
-                    "gitlab" => {
-                        managed_env.insert("GITLAB_TOKEN".to_string(), token.clone());
-                        managed_env.insert("GL_TOKEN".to_string(), token.clone());
-                        git_creds = Some((token, "gitlab".to_string()));
-                    }
-                    other => {
-                        tracing::debug!(
-                            "Unknown git provider type '{}' — skipping token injection",
-                            other
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to fetch git provider token for connection {}: {}",
-                        connection_id,
-                        e
-                    );
-                }
-            }
-        }
+        // Git authentication is now handled by the in-sandbox credential
+        // daemon (see temps-git-credential). We deliberately do NOT
+        // inject GH_TOKEN/GITHUB_TOKEN/GITLAB_TOKEN/GL_TOKEN into the
+        // user-visible environment any more — every git operation gets
+        // a fresh per-repo per-op scoped token from the daemon, and the
+        // long-lived installation token never crosses the user/process
+        // boundary. The daemon's deployment token lives in a 0600
+        // env file owned by uid 1001 (`temps-git`) which user code (uid
+        // 1000) cannot read.
+        //
+        // Tradeoff: `gh` and `glab` CLIs that previously read these env
+        // vars will need to be re-authenticated explicitly inside the
+        // sandbox if the user wants them. This is by design — those
+        // CLIs need API-level scopes (issues, PRs, releases) that the
+        // git-clone-only narrow tokens don't grant. Deferring that to
+        // a follow-up that wires `gh` through a separate scoped flow.
+        //
+        // Kept as `None` for call-site stability; setup_git_credentials
+        // ignores the value now that the daemon owns this path.
+        let git_creds: Option<(String, String)> = None;
 
         // Always inject the global CLAUDE.md (with project context) even
         // when there are no env vars to write — the agent still needs to
@@ -1545,17 +1555,51 @@ impl MessageExecutor {
             tracing::warn!("Failed to inject ~/.env into session {}: {}", session.id, e);
         }
 
-        // Wire git config (user.name + user.email from the session owner) and
-        // credentials so the AI can `git pull` / `git push` without ever
-        // touching a token. We write `~/.git-credentials` with the provider
-        // token and enable `credential.helper=store` so git picks it up
-        // automatically — no env sourcing required.
+        // Write the CLI's persisted-login files (`~/.temps/.contexts.json`,
+        // `~/.temps/.secrets`, and `~/.config/temps-cli-nodejs/config.json`)
+        // so `bunx @temps-sdk/cli` is authenticated even when the user runs
+        // it outside `. ~/.env` (e.g. from a fresh shell tab the AI just
+        // opened).
+        if let Err(e) = self
+            .write_cli_auth_files(session.id, session.user_id, &temps_api_url, &session_token)
+            .await
+        {
+            tracing::warn!(
+                "Failed to seed CLI auth files for session {}: {}",
+                session.id,
+                e
+            );
+        }
+
+        // Wire git config (user.name + user.email from the session owner)
+        // and force HTTPS rewrites. Per-op credentials come from the
+        // in-sandbox credential daemon, NOT from a long-lived
+        // `~/.git-credentials` file — see `setup_git_credentials` above
+        // for the full migration story.
         if let Err(e) = self
             .setup_git_credentials(session.id, session.user_id, git_creds.as_ref())
             .await
         {
             tracing::warn!(
                 "Failed to set up git credentials for session {}: {}",
+                session.id,
+                e
+            );
+        }
+
+        // Provision the credential daemon's env file. This is the only
+        // place the workspace deployment token is written into the
+        // sandbox; it lives at /etc/temps/credential-daemon.env, mode
+        // 0600, owned by `temps-git` (uid 1001). User code (uid 1000)
+        // cannot read it. The daemon picks up the file on next start
+        // (the entrypoint supervises with a 5s back-off, so even if we
+        // lose this race the daemon attaches within seconds).
+        if let Err(e) = self
+            .write_credential_daemon_env(session.id, &temps_api_url, &session_token)
+            .await
+        {
+            tracing::warn!(
+                "Failed to write credential daemon env for session {}: {}",
                 session.id,
                 e
             );
@@ -1592,14 +1636,17 @@ impl MessageExecutor {
     /// What this writes:
     /// 1. `git config --global user.email` and `user.name` — set to the
     ///    session owner's email/name so commits are attributed correctly.
-    /// 2. `~/.git-credentials` containing
-    ///    `https://x-access-token:<token>@github.com` (or gitlab.com).
-    /// 3. `git config --global credential.helper store` so git auto-loads
-    ///    the credentials file for any HTTPS push/pull.
+    /// 2. Default branch + pull.rebase preferences.
+    /// 3. `url.https://<host>/.insteadOf git@<host>:` so any accidental
+    ///    SSH-style URL gets rewritten to HTTPS, which the credential
+    ///    daemon can serve.
     ///
-    /// The token is the SAME one already in `~/.env` (`GH_TOKEN` /
-    /// `GITLAB_TOKEN`) — we just put it where git looks for it natively so
-    /// no `. ~/.env &&` prefix is needed for `git` commands.
+    /// What this NO LONGER does (deliberate security change): write
+    /// `~/.git-credentials` containing a long-lived token. That's been
+    /// replaced by the in-sandbox credential daemon (see
+    /// `temps-git-credential` and the system-wide
+    /// `credential.helper=temps-git-credential-helper` set in the
+    /// sandbox image). Tokens never touch user-owned disk any more.
     async fn setup_git_credentials(
         &self,
         session_id: i32,
@@ -1618,7 +1665,7 @@ impl MessageExecutor {
         let shell_quote = |v: &str| v.replace('\'', "'\\''");
 
         let mut script = String::from("set -e\n");
-        script.push_str("mkdir -p /home/temps\n");
+        script.push_str(&format!("mkdir -p {}\n", SANDBOX_HOME));
 
         if let Some(u) = user.as_ref() {
             script.push_str(&format!(
@@ -1635,30 +1682,28 @@ impl MessageExecutor {
         script.push_str("git config --global init.defaultBranch main\n");
         script.push_str("git config --global pull.rebase false\n");
 
-        if let Some((token, provider)) = git_creds {
-            let host = match provider.as_str() {
-                "github" => "github.com",
-                "gitlab" => "gitlab.com",
-                _ => "github.com",
-            };
-            // x-access-token is the conventional username for token auth on
-            // both GitHub and GitLab — the token is the password.
-            script.push_str(&format!(
-                "umask 077 && printf 'https://x-access-token:%s@%s\\n' '{}' '{}' > /home/temps/.git-credentials\n",
-                shell_quote(token),
-                host,
-            ));
-            script.push_str("git config --global credential.helper store\n");
-            // Force HTTPS even if the AI tries to clone via SSH — we don't
-            // ship SSH keys into the sandbox.
-            script.push_str(&format!(
-                "git config --global url.'https://{host}/'.insteadOf 'git@{host}:'\n",
-                host = host,
-            ));
-        }
+        // Force HTTPS rewrites for both providers — the credential daemon
+        // serves HTTPS, never SSH. We don't have provider-side info here
+        // any more (since git_creds is always None now), so we set both
+        // rewrites unconditionally; harmless when one isn't used.
+        script.push_str("git config --global url.https://github.com/.insteadOf git@github.com:\n");
+        script.push_str("git config --global url.https://gitlab.com/.insteadOf git@gitlab.com:\n");
+
+        // Idempotent cleanup of a stale `~/.git-credentials` left over
+        // from older session lifetimes that ran before this change.
+        // Without this, a re-opened session with a stale named volume
+        // would still see the old long-lived token sitting on disk.
+        script.push_str(&format!(
+            "rm -f {home}/.git-credentials\n",
+            home = SANDBOX_HOME,
+        ));
 
         // Make sure everything is owned by the sandbox user.
-        script.push_str("chown -R temps:temps /home/temps/.git-credentials /home/temps/.gitconfig 2>/dev/null || true\n");
+        script.push_str(&format!(
+            "chown -R {chown} {home}/.gitconfig 2>/dev/null || true\n",
+            chown = SANDBOX_CHOWN,
+            home = SANDBOX_HOME,
+        ));
 
         let cmd = vec!["sh".to_string(), "-c".to_string(), script];
         self.session_manager
@@ -1666,11 +1711,130 @@ impl MessageExecutor {
             .await?;
 
         tracing::debug!(
-            "Configured git for session {} (user_email={}, has_token={})",
+            "Configured git for session {} (user_email={}, credentials_via_daemon=true)",
             session_id,
             user.as_ref().map(|u| u.email.as_str()).unwrap_or("<none>"),
-            git_creds.is_some()
         );
+        // `git_creds` is intentionally unused — kept in the signature for
+        // call-site stability while the daemon migration lands.
+        let _ = git_creds;
+        Ok(())
+    }
+
+    /// Write the credential daemon's env file inside the sandbox.
+    ///
+    /// The daemon (running as `temps-git`, uid 1001) reads
+    /// `/etc/temps/credential-daemon.env` at startup to learn the
+    /// control-plane URL and the per-session deployment token it should
+    /// authenticate with when minting scoped git credentials.
+    ///
+    /// Security properties:
+    /// - File mode is `0600` and owned by `temps-git:temps-git`. User
+    ///   code (uid 1000 = `temps`) cannot read it.
+    /// - The Dockerfile pre-creates the file at image build time with
+    ///   the correct ownership and mode. This function overwrites the
+    ///   *contents* by exec'ing as `temps-git` directly — that uid is
+    ///   the only one that can open the file in the 0700 parent dir.
+    ///   We deliberately do NOT do this as root, because the sandbox
+    ///   container drops `CAP_DAC_OVERRIDE` (only `CHOWN` and `FOWNER`
+    ///   are kept), so root inside the container *cannot* bypass the
+    ///   0700 directory permission. Trying to do so silently fails
+    ///   with EACCES, which is exactly the bug that bit us before this
+    ///   refactor.
+    /// - Token is identical to `TEMPS_API_TOKEN` in `~/.env` — but where
+    ///   the env var is readable by the user (and gives them the same
+    ///   ability to call the mint endpoint themselves), the env file is
+    ///   not. The asymmetry is the security improvement: user code can
+    ///   ask for a credential via the daemon's IPC socket but cannot
+    ///   bypass the daemon and call the mint endpoint directly with a
+    ///   different (project_id-spoofing) host header.
+    ///
+    /// Idempotent: safe to call again on session refresh — overwrite of
+    /// the existing file preserves perms/ownership because we never
+    /// recreate it.
+    async fn write_credential_daemon_env(
+        &self,
+        session_id: i32,
+        api_url: &str,
+        api_token: &str,
+    ) -> Result<(), WorkspaceError> {
+        let shell_quote = |v: &str| v.replace('\'', "'\\''");
+
+        // Trailing newline matters — daemon's `lines()` parser skips
+        // the last line if it doesn't end with one.
+        let body = format!(
+            "# Managed by temps. Do not edit.\nTEMPS_API_URL='{}'\nTEMPS_API_TOKEN='{}'\n",
+            shell_quote(api_url),
+            shell_quote(api_token),
+        );
+
+        // Overwrite-in-place. The file already exists at image build
+        // time with the correct ownership/mode; the heredoc cat keeps
+        // both. `umask 077` is belt-and-braces in case a future image
+        // change ever recreates the file from scratch.
+        let script = format!(
+            "set -e
+umask 077
+cat > /etc/temps/credential-daemon.env <<'TEMPS_DAEMON_ENV_EOF'
+{body}TEMPS_DAEMON_ENV_EOF
+chmod 0600 /etc/temps/credential-daemon.env"
+        );
+
+        let cmd = vec!["sh".to_string(), "-c".to_string(), script];
+        // Run as `temps-git` (uid 1001) — the only uid that can open
+        // the file in /etc/temps/. See doc comment above for the
+        // CapDrop=ALL rationale that rules out running as root.
+        self.session_manager
+            .exec_as_user(session_id, "1001:1001", cmd, HashMap::new(), None)
+            .await?;
+
+        tracing::debug!(
+            "Wrote credential daemon env for session {} (api_url={})",
+            session_id,
+            api_url
+        );
+
+        // Now kick the daemon off as `temps-git`. The sandbox container
+        // sets `no-new-privileges:true`, which blocks an in-container
+        // supervisor from `sudo`-ing into uid 1001 — so we launch via
+        // `docker exec --user` (a Docker API call, which is *not*
+        // subject to no-new-privileges) and detach with `setsid`.
+        //
+        // Idempotency: if the daemon is already running we don't want
+        // to spawn a second one, so the launcher first checks for an
+        // existing socket. The daemon's bind() also fails-fast on
+        // collision, but the pre-check keeps the logs clean.
+        let launch_script = "set -e
+if [ -S /run/temps-git/git.sock ]; then
+    # Daemon already running — env-file refresh path. Send SIGHUP so
+    # it picks up the new token. The daemon doesn't currently handle
+    # SIGHUP — but a future revision can without changing this caller.
+    pkill -HUP -u temps-git temps-git-cred 2>/dev/null || true
+    exit 0
+fi
+# setsid + redirect detaches from the docker exec lifecycle so this
+# process survives `start_exec`'s wait. Logs go to syslog-ish stdout
+# of the container which `docker logs` surfaces.
+setsid /usr/local/bin/temps-git-credential-daemon \
+    >> /tmp/temps-git-credential-daemon.log \
+    2>&1 < /dev/null &
+disown 2>/dev/null || true";
+        let launch_cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            launch_script.to_string(),
+        ];
+        if let Err(e) = self
+            .session_manager
+            .exec_as_user(session_id, "1001:1001", launch_cmd, HashMap::new(), None)
+            .await
+        {
+            tracing::warn!(
+                "Failed to launch credential daemon for session {}: {}",
+                session_id,
+                e
+            );
+        }
         Ok(())
     }
 
@@ -1877,9 +2041,143 @@ impl MessageExecutor {
         env
     }
 
-    fn get_temps_api_url(&self) -> String {
-        std::env::var("TEMPS_INTERNAL_API_URL")
-            .unwrap_or_else(|_| "http://host.docker.internal:3000".to_string())
+    /// Resolve the URL the sandbox should use to call back to the Temps API.
+    ///
+    /// Resolution order:
+    ///   1. `TEMPS_INTERNAL_API_URL` env var — escape hatch for CI/dev when
+    ///      you want the sandbox to bypass the public URL (e.g. talk to a
+    ///      local server via `host.docker.internal`).
+    ///   2. `external_url` from platform settings — the public URL real users
+    ///      hit (e.g. `https://temps.example.com`). This is what the in-sandbox
+    ///      CLI's persisted login points at, so commands like
+    ///      `bunx @temps-sdk/cli` work the same as if the user ran them on
+    ///      their host.
+    ///   3. `http://host.docker.internal:3000` — last-resort fallback for
+    ///      single-machine dev where the user hasn't configured `external_url`.
+    async fn get_temps_api_url(&self) -> String {
+        if let Ok(env_url) = std::env::var("TEMPS_INTERNAL_API_URL") {
+            return env_url;
+        }
+        match self.platform_config_service.get_external_url().await {
+            Ok(Some(url)) if !url.is_empty() => url,
+            Ok(_) => "http://host.docker.internal:3000".to_string(),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read external_url from platform settings, falling back to host.docker.internal: {}",
+                    e
+                );
+                "http://host.docker.internal:3000".to_string()
+            }
+        }
+    }
+
+    /// Persist the deployment token in the in-sandbox CLI's auth files so
+    /// `bunx @temps-sdk/cli` is authenticated without the user needing to
+    /// `. ~/.env` first. We write two files, both mode 0600:
+    ///
+    /// - `~/.temps/.contexts.json` — the CLI's multi-instance auth store
+    ///   (cf. `temps-cli/src/config/contexts.ts`). Contains a single
+    ///   `workspace` context flagged `isActive: true`, pointing at the
+    ///   public API URL with the session's deployment token as `apiKey`.
+    /// - `~/.temps/.secrets` — the legacy single-instance secrets file
+    ///   (cf. `temps-cli/src/config/store.ts`). Contains
+    ///   `temps_api_key`, `temps_user_id`, `temps_email` so the CLI's
+    ///   `credentials.getApiKey()` resolves on the fallback path too.
+    ///
+    /// Called from both `initialize_sandbox` (first boot) and
+    /// `refresh_sandbox` (token rotation) so both paths produce the same
+    /// on-disk state.
+    async fn write_cli_auth_files(
+        &self,
+        session_id: i32,
+        user_id: i32,
+        api_url: &str,
+        api_token: &str,
+    ) -> Result<(), WorkspaceError> {
+        // Look up the session owner's email — the CLI surfaces it in
+        // `temps configure` output for users to confirm they're logged in
+        // as the right account.
+        let user = users::Entity::find_by_id(user_id)
+            .one(self.db.as_ref())
+            .await?;
+        let email = user.as_ref().map(|u| u.email.as_str()).unwrap_or("");
+
+        let temps_dir = format!("{}/.temps", SANDBOX_HOME);
+        let contexts_path = format!("{}/.contexts.json", temps_dir);
+        let secrets_path = format!("{}/.secrets", temps_dir);
+        // Conf (the CLI's config library) writes to
+        // `$XDG_CONFIG_HOME/<projectName>-nodejs/config.json` on Linux. The
+        // CLI sets `projectName: 'temps-cli'`, so the on-disk path is
+        // `~/.config/temps-cli-nodejs/config.json`.
+        let cli_config_dir = format!("{}/.config/temps-cli-nodejs", SANDBOX_HOME);
+        let cli_config_path = format!("{}/config.json", cli_config_dir);
+
+        // mkdir -p both target directories inside the container.
+        let _ = self
+            .session_manager
+            .exec(
+                session_id,
+                vec!["mkdir".into(), "-p".into(), temps_dir, cli_config_dir],
+                std::collections::HashMap::new(),
+                None,
+            )
+            .await;
+
+        // Contexts file (multi-instance store).
+        let key_prefix: String = api_token.chars().take(8).collect();
+        let contexts = serde_json::json!([{
+            "name": "workspace",
+            "url": api_url,
+            "apiKey": api_token,
+            "email": email,
+            "keyPrefix": key_prefix,
+            "isActive": true,
+        }]);
+        let contexts_bytes =
+            serde_json::to_vec_pretty(&contexts).map_err(|e| WorkspaceError::AiCliFailed {
+                session_id,
+                reason: format!("write_cli_auth_files: contexts serialize failed: {}", e),
+            })?;
+        self.session_manager
+            .write_file(session_id, &contexts_path, &contexts_bytes, 0o600)
+            .await?;
+
+        // Secrets file (legacy single-instance store). Plain `key="value"`
+        // lines, mirroring `temps-cli/src/config/store.ts:saveSecrets`.
+        let escape = |v: &str| v.replace('\\', "\\\\").replace('"', "\\\"");
+        let mut secrets_body = String::from("# Temps CLI secrets - DO NOT SHARE THIS FILE\n");
+        secrets_body.push_str(&format!("temps_api_key=\"{}\"\n", escape(api_token)));
+        secrets_body.push_str(&format!("temps_user_id=\"{}\"\n", user_id));
+        secrets_body.push_str(&format!("temps_email=\"{}\"\n", escape(email)));
+        self.session_manager
+            .write_file(session_id, &secrets_path, secrets_body.as_bytes(), 0o600)
+            .await?;
+
+        // CLI config file. `apiUrl` comes from the platform's external URL
+        // (resolved by `get_temps_api_url`) so the in-sandbox CLI dials the
+        // same public endpoint a user would. Shape mirrors the sample
+        // `~/.config/temps-cli-nodejs/config.json` produced by `temps configure`.
+        let cli_config = serde_json::json!({
+            "apiUrl": api_url,
+            "outputFormat": "table",
+            "colorEnabled": true,
+        });
+        let cli_config_bytes =
+            serde_json::to_vec_pretty(&cli_config).map_err(|e| WorkspaceError::AiCliFailed {
+                session_id,
+                reason: format!("write_cli_auth_files: cli config serialize failed: {}", e),
+            })?;
+        self.session_manager
+            .write_file(session_id, &cli_config_path, &cli_config_bytes, 0o644)
+            .await?;
+
+        tracing::debug!(
+            "Seeded CLI auth files for session {} (api_url={}, email={})",
+            session_id,
+            api_url,
+            email
+        );
+        Ok(())
     }
 
     /// Issue a deployment token scoped to this project for the workspace session.
