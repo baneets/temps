@@ -1501,7 +1501,233 @@ WHERE project_id = $1
         };
 
         let result = event.insert(self.db.as_ref()).await?;
+
+        // Enqueue for the ClickHouse fan-out worker. This is a separate
+        // statement, not in the same transaction as the events insert,
+        // because:
+        //   1. `events` is a TimescaleDB hypertable; running multi-statement
+        //      transactions across hypertables is fine but adds locking
+        //      that this hot path doesn't need.
+        //   2. If the outbox insert fails, the event is still recorded —
+        //      we'd rather lose the CH replication of one event than fail
+        //      the user's request.
+        // Failures are logged at debug because the outbox table may not
+        // exist on installs that haven't run migrations yet, and that's
+        // not a user-actionable problem.
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        let outbox_sql = "INSERT INTO events_ch_outbox (event_id) VALUES ($1) \
+                          ON CONFLICT (event_id) DO NOTHING";
+        if let Err(e) = self
+            .db
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                outbox_sql,
+                vec![result.id.into()],
+            ))
+            .await
+        {
+            tracing::debug!(
+                event_id = result.id,
+                error = %e,
+                "ch_fanout outbox enqueue failed (non-fatal); event will not replicate to ClickHouse"
+            );
+        }
+
         Ok(result)
+    }
+}
+
+// AnalyticsEvents trait impl: unpacks query value-types into the inherent
+// SQL methods above so handlers can depend on `Arc<dyn AnalyticsEvents>`.
+// The trait describes *what* to query (parameters); each backend chooses
+// *how* (SQL strings here, typed query builder for ClickHouse, etc.).
+#[async_trait::async_trait]
+impl crate::services::traits::AnalyticsEvents for AnalyticsEventsService {
+    async fn query_events_count(
+        &self,
+        q: crate::services::queries::EventsCountSpec,
+    ) -> Result<Vec<crate::types::EventCount>, EventsError> {
+        AnalyticsEventsService::get_events_count(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            Some(q.limit),
+            Some(q.custom_events_only),
+            q.aggregation_level,
+        )
+        .await
+    }
+
+    async fn query_session_events(
+        &self,
+        q: crate::services::queries::SessionEventsSpec,
+    ) -> Result<Option<crate::types::AnalyticsSessionEventsResponse>, EventsError> {
+        AnalyticsEventsService::get_session_events(
+            self,
+            q.session_id,
+            q.scope.project_id,
+            q.scope.environment_id,
+        )
+        .await
+    }
+
+    async fn query_has_events(
+        &self,
+        q: crate::services::queries::HasEventsSpec,
+    ) -> Result<bool, EventsError> {
+        AnalyticsEventsService::has_analytics_events(
+            self,
+            q.scope.project_id,
+            q.scope.environment_id,
+        )
+        .await
+    }
+
+    async fn query_event_type_breakdown(
+        &self,
+        q: crate::services::queries::EventTypeBreakdownSpec,
+    ) -> Result<Vec<crate::types::EventTypeBreakdown>, EventsError> {
+        AnalyticsEventsService::get_event_type_breakdown(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.aggregation_level,
+        )
+        .await
+    }
+
+    async fn query_events_timeline(
+        &self,
+        q: crate::services::queries::EventsTimelineSpec,
+    ) -> Result<Vec<crate::types::EventTimeline>, EventsError> {
+        AnalyticsEventsService::get_events_timeline(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.event_name,
+            q.bucket_size,
+            q.aggregation_level,
+        )
+        .await
+    }
+
+    async fn query_property_breakdown(
+        &self,
+        q: crate::services::queries::PropertyBreakdownSpec,
+    ) -> Result<crate::types::PropertyBreakdownResponse, EventsError> {
+        AnalyticsEventsService::get_property_breakdown(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.scope.deployment_id,
+            q.event_name,
+            q.group_by_column,
+            &q.aggregation_level,
+            Some(q.limit),
+            q.filters,
+        )
+        .await
+    }
+
+    async fn query_property_timeline(
+        &self,
+        q: crate::services::queries::PropertyTimelineSpec,
+    ) -> Result<crate::types::PropertyTimelineResponse, EventsError> {
+        AnalyticsEventsService::get_property_timeline(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.scope.deployment_id,
+            q.event_name,
+            q.group_by_column,
+            &q.aggregation_level,
+            q.bucket_size,
+        )
+        .await
+    }
+
+    async fn query_active_visitors(
+        &self,
+        q: crate::services::queries::ActiveVisitorsSpec,
+    ) -> Result<i64, EventsError> {
+        AnalyticsEventsService::get_active_visitors_count(
+            self,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.scope.deployment_id,
+        )
+        .await
+    }
+
+    async fn query_hourly_visits(
+        &self,
+        q: crate::services::queries::HourlyVisitsSpec,
+    ) -> Result<Vec<crate::types::EventTimeline>, EventsError> {
+        AnalyticsEventsService::get_hourly_visits(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.aggregation_level,
+        )
+        .await
+    }
+
+    async fn query_unique_counts(
+        &self,
+        q: crate::services::queries::UniqueCountsSpec,
+    ) -> Result<crate::types::UniqueCountsResponse, EventsError> {
+        AnalyticsEventsService::get_unique_counts(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.scope.deployment_id,
+            q.metric,
+        )
+        .await
+    }
+
+    async fn query_dashboard_projects(
+        &self,
+        q: crate::services::queries::DashboardProjectsSpec,
+    ) -> Result<crate::types::DashboardProjectsAnalyticsResponse, EventsError> {
+        AnalyticsEventsService::get_dashboard_projects_analytics(
+            self,
+            &q.project_ids,
+            q.range.start,
+            q.range.end,
+        )
+        .await
+    }
+
+    async fn query_aggregated_buckets(
+        &self,
+        q: crate::services::queries::AggregatedBucketsSpec,
+    ) -> Result<crate::types::AggregatedBucketsResponse, EventsError> {
+        AnalyticsEventsService::get_aggregated_buckets(
+            self,
+            q.range.start,
+            q.range.end,
+            q.scope.project_id,
+            q.scope.environment_id,
+            q.scope.deployment_id,
+            q.aggregation_level,
+            q.bucket_size,
+        )
+        .await
     }
 }
 
