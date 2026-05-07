@@ -14,7 +14,7 @@ use std::sync::Arc;
 use temps_core::notifications::DynNotificationService;
 use thiserror::Error;
 use totp_rs::Secret;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 const DEFAULT_EXTERNAL_URL: &str = "http://localhost:8000";
 #[derive(Serialize)]
@@ -51,6 +51,22 @@ pub enum AuthError {
     InternalServerError(String),
     #[error("Generic error: {0}")]
     GenericError(String),
+
+    // Password-change-specific errors. Distinct variants so the handler can
+    // map each one to a meaningful HTTP status / problem type instead of
+    // collapsing everything to 500.
+    #[error("Current password is incorrect")]
+    InvalidCurrentPassword,
+    #[error("MFA code is required for this account")]
+    MfaCodeRequired,
+    #[error("MFA code is invalid")]
+    InvalidMfaCode,
+    #[error("New password must differ from the current password")]
+    SamePassword,
+    #[error("Password complexity check failed: {0}")]
+    WeakPassword(String),
+    #[error("Account has no password set (likely a SSO/magic-link-only user)")]
+    NoPasswordSet,
 }
 
 impl From<sea_orm::DbErr> for AuthError {
@@ -562,6 +578,136 @@ impl AuthService {
         let updated_user = user_update.update(self.db.as_ref()).await?;
 
         Ok(updated_user)
+    }
+
+    /// In-app password change for an authenticated user.
+    ///
+    /// Distinct from [`reset_password`] — that flow runs out-of-band via an
+    /// email link and trusts the token as proof of identity. This flow runs
+    /// while the user is already logged in and uses the current password +
+    /// (when applicable) an MFA code as the re-auth gate.
+    ///
+    /// Caller must pass the encrypted session token from the request cookie
+    /// in `current_session_token` so we can preserve that one session when
+    /// `revoke_other_sessions` is true. The decrypted form is stored in the
+    /// `sessions` table; the handler decrypts before passing it in.
+    pub async fn change_password_self(
+        &self,
+        user_id: i32,
+        current_password: &str,
+        new_password: &str,
+        mfa_code: Option<&str>,
+        revoke_other_sessions: bool,
+        current_session_token: Option<&str>,
+    ) -> Result<temps_entities::users::Model, AuthError> {
+        let user = temps_entities::users::Entity::find_by_id(user_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| AuthError::NotFound(format!("User {} not found", user_id)))?;
+
+        // 1. Account must have a password set. SSO/magic-link-only users
+        // get a friendly error instead of a generic 401.
+        let stored_hash = user
+            .password_hash
+            .as_ref()
+            .ok_or(AuthError::NoPasswordSet)?;
+
+        // 2. Verify current password (Argon2 only; legacy bcrypt rows would
+        // already have been migrated by login).
+        if !stored_hash.starts_with("$argon2") {
+            error!(
+                "User {} has unsupported password hash format during change",
+                user_id
+            );
+            return Err(AuthError::InvalidCurrentPassword);
+        }
+        use argon2::PasswordVerifier;
+        let parsed = argon2::password_hash::PasswordHash::new(stored_hash)
+            .map_err(|_| AuthError::InvalidCurrentPassword)?;
+        if argon2::Argon2::default()
+            .verify_password(current_password.as_bytes(), &parsed)
+            .is_err()
+        {
+            warn!("Password-change re-auth failed for user {}", user_id);
+            return Err(AuthError::InvalidCurrentPassword);
+        }
+
+        // 3. MFA gate. When the account has MFA, a code must be supplied
+        // and accepted by the same verifier used for login (TOTP or
+        // recovery code). Recovery codes are single-use; verify_mfa_code
+        // burns them on success — that's the desired audit trail.
+        if user.mfa_enabled {
+            let code = mfa_code
+                .filter(|c| !c.is_empty())
+                .ok_or(AuthError::MfaCodeRequired)?;
+            // Reuse the user_service verifier so behavior matches login
+            // exactly (TOTP skew window, recovery code burn-on-use).
+            let user_service = crate::user_service::UserService::new(self.db.clone());
+            let mfa_ok = user_service
+                .verify_mfa_code(user_id, code)
+                .await
+                .map_err(|e| {
+                    error!("MFA verification error during password change: {}", e);
+                    AuthError::InvalidMfaCode
+                })?;
+            if !mfa_ok {
+                return Err(AuthError::InvalidMfaCode);
+            }
+        }
+
+        // 4. Refuse no-op changes — silently succeeding here is confusing
+        // ("did it work?") and weakens the audit log.
+        if current_password == new_password {
+            return Err(AuthError::SamePassword);
+        }
+
+        // 5. New-password complexity check. The crate-level helper is the
+        // same one register / reset use, so the rules stay consistent.
+        crate::auth_service::validate_password_complexity(new_password)
+            .map_err(|e| AuthError::WeakPassword(e.to_string()))?;
+
+        // 6. Hash + persist. We also bump updated_at; downstream watchers
+        // (audit consumers, cache invalidators) key off this.
+        use argon2::password_hash::{rand_core::OsRng, SaltString};
+        let argon2 = argon2::Argon2::default();
+        let salt = SaltString::generate(&mut OsRng);
+        use argon2::PasswordHasher;
+        let new_hash = argon2
+            .hash_password(new_password.as_bytes(), &salt)
+            .map_err(|e| AuthError::EncryptionError(format!("password hash failed: {}", e)))?
+            .to_string();
+
+        let mut user_update: temps_entities::users::ActiveModel = user.clone().into();
+        user_update.password_hash = Set(Some(new_hash));
+        user_update.updated_at = Set(Utc::now());
+        let updated = user_update.update(self.db.as_ref()).await?;
+
+        // 7. Optional session sweep. Drops every session for this user
+        // EXCEPT the current one (kept so the user's tab keeps working).
+        // When current_session_token is None — e.g. called from a non-
+        // browser context — we drop everything to be safe.
+        if revoke_other_sessions {
+            use sea_orm::QueryFilter;
+            let mut q = temps_entities::sessions::Entity::delete_many()
+                .filter(temps_entities::sessions::Column::UserId.eq(user_id));
+            if let Some(tok) = current_session_token {
+                q = q.filter(temps_entities::sessions::Column::SessionToken.ne(tok));
+            }
+            if let Err(e) = q.exec(self.db.as_ref()).await {
+                // Don't fail the whole operation — the password is already
+                // rotated. Log loudly so an operator notices.
+                error!(
+                    "Failed to revoke other sessions for user {} after password change: {}",
+                    user_id, e
+                );
+            }
+        }
+
+        info!(
+            "Password changed for user {} (revoke_other_sessions={})",
+            user_id, revoke_other_sessions
+        );
+        Ok(updated)
     }
 
     // Verify email with token

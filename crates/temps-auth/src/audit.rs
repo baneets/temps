@@ -93,11 +93,22 @@ pub struct LogoutAudit {
     pub username: String,
 }
 
-// Password reset audit
+// Password reset audit (out-of-band email-link flow)
 #[derive(Debug, Clone, Serialize)]
 pub struct PasswordResetAudit {
     pub context: AuditContext,
     pub username: String,
+}
+
+// In-app password change for an authenticated user. `other_sessions_revoked`
+// reflects whether the operator opted to invalidate every other session on
+// submit; useful for auditors trying to reconstruct "did this user lose
+// access on every device on date X" after a credential rotation.
+#[derive(Debug, Clone, Serialize)]
+pub struct PasswordChangedAudit {
+    pub context: AuditContext,
+    pub username: String,
+    pub other_sessions_revoked: bool,
 }
 
 // Email verification audit
@@ -364,6 +375,29 @@ impl AuditOperation for LogoutAudit {
 impl AuditOperation for PasswordResetAudit {
     fn operation_type(&self) -> String {
         "PASSWORD_RESET".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+impl AuditOperation for PasswordChangedAudit {
+    fn operation_type(&self) -> String {
+        "PASSWORD_CHANGED".to_string()
     }
 
     fn user_id(&self) -> i32 {

@@ -30,10 +30,10 @@ use tracing::{debug, error, info, warn};
 use utoipa::{OpenApi, ToSchema};
 
 use crate::types::{
-    AssignRoleRequest, AuthStatusResponse, AuthTokenResponse, CliLoginRequest, CreateUserRequest,
-    DisableMfaRequest, InitAuthResponse, MfaRequiredResponse, MfaSetupResponse,
-    MfaVerificationRequest, RouteRole, RouteUser, RouteUserWithRoles, TokenRenewalRequest,
-    UpdateSelfRequest, UpdateUserRequest, UserResponse, VerifyMfaRequest,
+    AssignRoleRequest, AuthStatusResponse, AuthTokenResponse, ChangePasswordRequest,
+    CliLoginRequest, CreateUserRequest, DisableMfaRequest, InitAuthResponse, MfaRequiredResponse,
+    MfaSetupResponse, MfaVerificationRequest, RouteRole, RouteUser, RouteUserWithRoles,
+    TokenRenewalRequest, UpdateSelfRequest, UpdateUserRequest, UserResponse, VerifyMfaRequest,
 };
 use temps_core::problemdetails::{new as problem_new, Problem};
 
@@ -277,6 +277,7 @@ pub async fn verify_mfa_challenge(
         update_user,
         restore_user,
         update_self,
+        change_password_self,
         setup_mfa,
         verify_and_enable_mfa,
         disable_mfa,
@@ -306,6 +307,7 @@ pub async fn verify_mfa_challenge(
             CreateUserRequest,
             UpdateUserRequest,
             UpdateSelfRequest,
+            ChangePasswordRequest,
             VerifyMfaRequest,
             MfaSetupResponse,
             DisableMfaRequest,
@@ -358,6 +360,7 @@ pub fn configure_routes() -> Router<Arc<AuthState>> {
         .route("/users", get(list_users))
         .route("/users", post(create_user))
         .route("/users/me", patch(update_self))
+        .route("/users/me/password", post(change_password_self))
         .route("/users/me/mfa/setup", post(setup_mfa))
         .route("/users/me/mfa/verify", post(verify_and_enable_mfa))
         .route("/users/me/mfa", delete(disable_mfa))
@@ -1639,6 +1642,115 @@ async fn setup_mfa(
         recovery_codes: setup_data.recovery_codes,
     })
     .into_response())
+}
+
+#[utoipa::path(
+    tag = "Users",
+    post,
+    path = "/users/me/password",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 204, description = "Password updated"),
+        (status = 400, description = "Validation error (weak password, same as current, MFA missing)"),
+        (status = 401, description = "Current password incorrect or MFA code invalid"),
+        (status = 403, description = "Account has no password set (SSO/magic-link only)"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn change_password_self(
+    State(app_state): State<Arc<AuthState>>,
+    RequireAuth(auth): RequireAuth,
+    Extension(metadata): Extension<RequestMetadata>,
+    headers: HeaderMap,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    // Real users only — deployment tokens have no password to rotate.
+    let user = auth.require_user().map_err(|msg| {
+        problem_new(StatusCode::FORBIDDEN)
+            .with_title("User Required")
+            .with_detail(msg)
+    })?;
+
+    // Pull the encrypted session cookie so the service can preserve the
+    // current session when revoke_other_sessions is true. Decrypt to the
+    // plaintext token (that's what the sessions table stores). Missing /
+    // undecryptable cookie just means we don't know which session is
+    // "current" — fine, the service falls back to revoking everything.
+    let current_session_token: Option<String> = headers
+        .get_all("Cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| Cookie::split_parse(s).filter_map(Result::ok))
+        .find_map(|c| {
+            if c.name() == "session" {
+                Some(c.value().to_string())
+            } else {
+                None
+            }
+        })
+        .and_then(|enc| app_state.cookie_crypto.decrypt(&enc).ok());
+
+    match app_state
+        .auth_service
+        .change_password_self(
+            auth.user_id(),
+            &req.current_password,
+            &req.new_password,
+            req.mfa_code.as_deref(),
+            req.revoke_other_sessions,
+            current_session_token.as_deref(),
+        )
+        .await
+    {
+        Ok(_) => {
+            let audit = crate::audit::PasswordChangedAudit {
+                context: AuditContext {
+                    user_id: auth.user_id(),
+                    ip_address: Some(metadata.ip_address.to_string()),
+                    user_agent: metadata.user_agent.as_str().to_string(),
+                },
+                username: user.name.clone(),
+                other_sessions_revoked: req.revoke_other_sessions,
+            };
+            if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+                error!("Failed to create audit log: {}", e);
+            }
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        Err(e) => Err(match e {
+            crate::auth_service::AuthError::InvalidCurrentPassword => {
+                problem_new(StatusCode::UNAUTHORIZED)
+                    .with_title("Invalid Current Password")
+                    .with_detail("The current password you entered is incorrect.")
+            }
+            crate::auth_service::AuthError::MfaCodeRequired => problem_new(StatusCode::BAD_REQUEST)
+                .with_title("MFA Code Required")
+                .with_detail("Your account has MFA enabled. Provide a TOTP code or recovery code."),
+            crate::auth_service::AuthError::InvalidMfaCode => problem_new(StatusCode::UNAUTHORIZED)
+                .with_title("Invalid MFA Code")
+                .with_detail("The MFA code you entered is incorrect or expired."),
+            crate::auth_service::AuthError::SamePassword => problem_new(StatusCode::BAD_REQUEST)
+                .with_title("Same Password")
+                .with_detail("The new password must be different from the current one."),
+            crate::auth_service::AuthError::WeakPassword(msg) => {
+                problem_new(StatusCode::BAD_REQUEST)
+                    .with_title("Weak Password")
+                    .with_detail(msg)
+            }
+            crate::auth_service::AuthError::NoPasswordSet => problem_new(StatusCode::FORBIDDEN)
+                .with_title("No Password On Account")
+                .with_detail(
+                    "This account uses SSO or magic-link login and has no password to change.",
+                ),
+            other => {
+                error!("Password change failed: {}", other);
+                problem_new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Password Change Failed")
+                    .with_detail("Could not change password. Please try again.")
+            }
+        }),
+    }
 }
 
 #[utoipa::path(

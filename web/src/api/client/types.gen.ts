@@ -1041,6 +1041,20 @@ export type ChallengeValidationStatus = {
     validated?: string | null;
 };
 
+export type ChangePasswordRequest = {
+    current_password: string;
+    /**
+     * TOTP code (or recovery code). Required iff the user has MFA enabled.
+     */
+    mfa_code?: string | null;
+    new_password: string;
+    /**
+     * When true, every session OTHER than the one making this request is
+     * revoked. Defaults to false; the UI surfaces this as a checkbox.
+     */
+    revoke_other_sessions?: boolean;
+};
+
 export type ChatCompletionChoice = {
     finish_reason?: string | null;
     index: number;
@@ -37181,6 +37195,41 @@ export type VerifyAndEnableMfaResponses = {
 };
 
 export type VerifyAndEnableMfaResponse = VerifyAndEnableMfaResponses[keyof VerifyAndEnableMfaResponses];
+
+export type ChangePasswordSelfData = {
+    body: ChangePasswordRequest;
+    path?: never;
+    query?: never;
+    url: '/users/me/password';
+};
+
+export type ChangePasswordSelfErrors = {
+    /**
+     * Validation error (weak password, same as current, MFA missing)
+     */
+    400: unknown;
+    /**
+     * Current password incorrect or MFA code invalid
+     */
+    401: unknown;
+    /**
+     * Account has no password set (SSO/magic-link only)
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ChangePasswordSelfResponses = {
+    /**
+     * Password updated
+     */
+    204: void;
+};
+
+export type ChangePasswordSelfResponse = ChangePasswordSelfResponses[keyof ChangePasswordSelfResponses];
 
 export type DeleteUserData = {
     body?: never;

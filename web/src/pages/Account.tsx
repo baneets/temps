@@ -1,4 +1,5 @@
 import {
+  changePasswordSelfMutation,
   disableMfaMutation,
   getCurrentUserOptions,
   setupMfaMutation,
@@ -21,6 +22,7 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -49,6 +51,37 @@ const formSchema = z.object({
 })
 
 type FormValues = z.infer<typeof formSchema>
+
+// Change-password form. Current + new + confirm + optional MFA + revoke.
+// Server enforces complexity (>=8 chars, etc.) so we only do the obvious
+// client-side checks: non-empty current, min-8 new, confirm matches, MFA
+// is exactly 6 digits when provided.
+const passwordSchema = z
+  .object({
+    current_password: z.string().min(1, 'Current password is required'),
+    new_password: z
+      .string()
+      .min(8, 'Password must be at least 8 characters'),
+    confirm_password: z.string().min(1, 'Please confirm your new password'),
+    mfa_code: z
+      .string()
+      .optional()
+      .refine(
+        (v) => !v || /^\d{6}$/.test(v) || v.length >= 8,
+        'Enter a 6-digit TOTP code or a recovery code',
+      ),
+    revoke_other_sessions: z.boolean(),
+  })
+  .refine((data) => data.new_password === data.confirm_password, {
+    message: 'Passwords do not match',
+    path: ['confirm_password'],
+  })
+  .refine((data) => data.new_password !== data.current_password, {
+    message: 'New password must differ from the current one',
+    path: ['new_password'],
+  })
+
+type PasswordValues = z.infer<typeof passwordSchema>
 
 const mfaVerifySchema = z.object({
   code: z.string().length(6, 'Code must be 6 digits'),
@@ -97,6 +130,33 @@ export function Account() {
     onSuccess: () => {
       toast.success('Account updated successfully')
       refetch()
+    },
+  })
+
+  // Change-password form. Server requires current_password as the re-auth
+  // gate; mfa_code is required iff the account has MFA enabled (we mirror
+  // that with a conditional field below). revoke_other_sessions defaults to
+  // false to match the backend default — checking it kicks every other
+  // session on submit.
+  const passwordForm = useForm<PasswordValues>({
+    resolver: zodResolver(passwordSchema),
+    defaultValues: {
+      current_password: '',
+      new_password: '',
+      confirm_password: '',
+      mfa_code: '',
+      revoke_other_sessions: false,
+    },
+  })
+
+  const { mutate: changePassword, isPending: isChangingPassword } = useMutation({
+    ...changePasswordSelfMutation(),
+    meta: {
+      errorTitle: 'Failed to change password',
+    },
+    onSuccess: () => {
+      toast.success('Password changed successfully')
+      passwordForm.reset()
     },
   })
 
@@ -165,6 +225,20 @@ export function Account() {
     })
   }
 
+  const onChangePassword = (data: PasswordValues) => {
+    changePassword({
+      body: {
+        current_password: data.current_password,
+        new_password: data.new_password,
+        // Empty string = "no MFA code provided." Server treats this as
+        // missing for MFA-enabled users and rejects with MfaCodeRequired,
+        // which is correct.
+        mfa_code: data.mfa_code?.length ? data.mfa_code : null,
+        revoke_other_sessions: data.revoke_other_sessions,
+      },
+    })
+  }
+
   const onVerifyMfa = (data: MfaVerifyValues) => {
     verifyMfa({
       body: { code: data.code },
@@ -223,6 +297,130 @@ export function Account() {
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   )}
                   Save Changes
+                </Button>
+              </div>
+            </form>
+          </Form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Change Password</CardTitle>
+          <CardDescription>
+            Update your account password. You'll need your current password to
+            confirm the change.
+            {user?.mfa_enabled
+              ? ' Because you have MFA enabled, a TOTP code (or recovery code) is also required.'
+              : ''}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Form {...passwordForm}>
+            <form
+              onSubmit={passwordForm.handleSubmit(onChangePassword)}
+              className="space-y-4"
+            >
+              <FormField
+                control={passwordForm.control}
+                name="current_password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Current password</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        autoComplete="current-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={passwordForm.control}
+                name="new_password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>New password</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        autoComplete="new-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={passwordForm.control}
+                name="confirm_password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Confirm new password</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        autoComplete="new-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              {user?.mfa_enabled && (
+                <FormField
+                  control={passwordForm.control}
+                  name="mfa_code"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>MFA code</FormLabel>
+                      <FormControl>
+                        <Input
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          placeholder="6-digit TOTP or recovery code"
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
+              <FormField
+                control={passwordForm.control}
+                name="revoke_other_sessions"
+                render={({ field }) => (
+                  <FormItem className="flex flex-row items-start space-x-2 space-y-0">
+                    <FormControl>
+                      <Checkbox
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                    <div className="space-y-0.5 leading-none">
+                      <FormLabel className="font-normal cursor-pointer">
+                        Sign out of all other sessions
+                      </FormLabel>
+                      <p className="text-xs text-muted-foreground">
+                        Revokes every session except this one. Recommended if
+                        you're rotating because of a leak or shared device.
+                      </p>
+                    </div>
+                  </FormItem>
+                )}
+              />
+              <div className="flex justify-end">
+                <Button type="submit" disabled={isChangingPassword}>
+                  {isChangingPassword && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  Change password
                 </Button>
               </div>
             </form>
