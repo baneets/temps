@@ -314,13 +314,21 @@ COPY --from=git-credential-builder /build/target/release/temps-git-credential-da
 RUN chmod 0755 /usr/local/bin/temps-git-credential-helper /usr/local/bin/temps-git-credential-daemon \
     && mkdir -p /run/temps-git \
     && chown temps-git:git-users /run/temps-git \
-    && chmod 0750 /run/temps-git \
+    && chmod 2750 /run/temps-git \
     && mkdir -p /etc/temps \
     && chown temps-git:git-users /etc/temps \
     && chmod 0710 /etc/temps \
     && touch /etc/temps/credential-daemon.env \
     && chown temps-git:temps-git /etc/temps/credential-daemon.env \
     && chmod 0600 /etc/temps/credential-daemon.env
+# Mode 2750 on /run/temps-git/ sets the setgid bit on the directory.
+# Without it, files (including the IPC socket) created inside inherit
+# the *creating process's egid* — `temps-git`'s primary group, which
+# is also `temps-git`. With setgid, new files inherit the parent dir's
+# group (`git-users`) instead, which is what the user shell needs for
+# `connect()` to succeed under mode 0660. Belt-and-braces: the daemon
+# also explicitly chgrp's the socket on bind, so existing images
+# without the setgid bit still recover after a daemon restart.
 # System-wide git config: route every HTTPS git auth request through
 # the credential helper. `useHttpPath=true` is mandatory — without it
 # git omits the `path=` field, and the daemon can't tell what repo is

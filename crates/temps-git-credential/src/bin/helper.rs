@@ -92,7 +92,7 @@ fn run_get(input: &str) {
             eprintln!("temps-git-credential-helper: refused by daemon: {reason}");
         }
         Err(e) => {
-            eprintln!("temps-git-credential-helper: daemon IPC failed: {e}");
+            eprintln!("temps-git-credential-helper: {}", explain_ipc_error(&e));
         }
     }
 }
@@ -102,7 +102,7 @@ fn run_store_or_erase(req: IpcRequest) {
     // inject tokens into our flow). Erase without a parsed body is also
     // a no-op against the daemon — handled here as "ack and forget".
     if let Err(e) = send_to_daemon(&req) {
-        eprintln!("temps-git-credential-helper: daemon IPC failed: {e}");
+        eprintln!("temps-git-credential-helper: {}", explain_ipc_error(&e));
     }
 }
 
@@ -120,7 +120,7 @@ fn run_erase(input: &str) {
         repo: req.repo,
     };
     if let Err(e) = send_to_daemon(&ipc_req) {
-        eprintln!("temps-git-credential-helper: daemon IPC failed: {e}");
+        eprintln!("temps-git-credential-helper: {}", explain_ipc_error(&e));
     }
 }
 
@@ -129,6 +129,39 @@ fn socket_path() -> PathBuf {
         std::env::var("TEMPS_GIT_CREDENTIAL_SOCKET")
             .unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string()),
     )
+}
+
+/// Map an IPC error into a message that points the user at the actual
+/// cause. The default `daemon IPC failed: …` error was a debugging
+/// black hole — every failure mode (missing daemon, wrong group
+/// membership, dead daemon, malformed response) surfaced identically.
+/// These messages are the user's only feedback path because git itself
+/// only reports "Authentication failed" downstream.
+fn explain_ipc_error(e: &io::Error) -> String {
+    let path = socket_path();
+    let path_str = path.display();
+    match e.kind() {
+        io::ErrorKind::NotFound => format!(
+            "credential daemon socket not found at {path_str}. \
+             The daemon was not started for this session — try reopening \
+             the workspace, or check /tmp/temps-git-credential-daemon.log \
+             inside the sandbox for startup errors."
+        ),
+        io::ErrorKind::PermissionDenied => format!(
+            "permission denied connecting to {path_str}. \
+             Your shell user is likely missing the 'git-users' group \
+             membership that grants access to the daemon socket. \
+             Run `id` inside the sandbox to verify; expected groups \
+             include 'git-users'."
+        ),
+        io::ErrorKind::ConnectionRefused => format!(
+            "connection refused at {path_str}. \
+             A stale socket exists but no daemon is listening — the \
+             daemon may have crashed. Check \
+             /tmp/temps-git-credential-daemon.log inside the sandbox."
+        ),
+        _ => format!("daemon IPC failed: {e}"),
+    }
 }
 
 fn send_to_daemon(req: &IpcRequest) -> io::Result<IpcResponse> {
@@ -148,4 +181,46 @@ fn send_to_daemon(req: &IpcRequest) -> io::Result<IpcResponse> {
         )
     })?;
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ENOENT must steer the user toward "daemon never started" rather
+    /// than the generic IPC error — the original bug surfaced as opaque
+    /// "Permission denied" when the socket dir was actually readable but
+    /// the daemon never launched.
+    #[test]
+    fn explain_ipc_error_distinguishes_not_found() {
+        let err = io::Error::from(io::ErrorKind::NotFound);
+        let msg = explain_ipc_error(&err);
+        assert!(msg.contains("not found"), "msg: {msg}");
+        assert!(msg.contains("daemon was not started"), "msg: {msg}");
+    }
+
+    /// EACCES means the socket exists but the caller's group membership
+    /// is wrong — a different fix path from "daemon down". The message
+    /// must mention `git-users` or the user has nothing to grep for.
+    #[test]
+    fn explain_ipc_error_distinguishes_permission_denied() {
+        let err = io::Error::from(io::ErrorKind::PermissionDenied);
+        let msg = explain_ipc_error(&err);
+        assert!(msg.contains("permission denied"), "msg: {msg}");
+        assert!(msg.contains("git-users"), "msg: {msg}");
+    }
+
+    /// ECONNREFUSED only happens when a socket file exists but no
+    /// process is bound to it — a crashed daemon. The message must
+    /// point at the daemon log so the user can find the crash reason.
+    #[test]
+    fn explain_ipc_error_distinguishes_connection_refused() {
+        let err = io::Error::from(io::ErrorKind::ConnectionRefused);
+        let msg = explain_ipc_error(&err);
+        assert!(msg.contains("connection refused"), "msg: {msg}");
+        assert!(
+            msg.contains("temps-git-credential-daemon.log"),
+            "msg: {msg}"
+        );
+    }
 }

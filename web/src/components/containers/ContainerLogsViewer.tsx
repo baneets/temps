@@ -204,49 +204,59 @@ export function ContainerLogsViewer({ fetchUrl }: ContainerLogsViewerProps) {
         </Alert>
       )}
 
-      {/* Logs Container */}
-      <div
-        ref={parentRef}
-        className={cn(
-          'flex-1 overflow-auto bg-background text-foreground p-4 font-mono text-xs select-text min-h-0',
-          connectionStatus === 'connecting' && 'opacity-50'
-        )}
-        onScroll={handleScroll}
-      >
-        {logs.length === 0 && connectionStatus === 'connecting' && (
-          <div className="text-muted-foreground">Connecting to logs...</div>
-        )}
-
-        {logs.length === 0 && connectionStatus !== 'connecting' && (
-          <div className="text-muted-foreground">No logs available</div>
-        )}
-
-        <div
-          style={{
-            height: `${virtualizer.getTotalSize()}px`,
-            width: '100%',
-            position: 'relative',
-          }}
-        >
-          {virtualizer.getVirtualItems().map((virtualItem) => {
-            const log = filteredLogs[virtualItem.index]
-
-            return (
-              <div
-                key={virtualItem.key}
-                data-index={virtualItem.index}
-                ref={virtualizer.measureElement}
-                style={{
-                  position: 'absolute',
-                  top: `${virtualItem.start}px`,
-                  left: 0,
-                  width: '100%',
-                }}
-              >
-                <LogLine content={log} searchTerm={searchTerm} />
+      {/* Logs Container — wrapped in a bordered rounded card so the live
+          tail visually matches the history viewer (which uses the same
+          shell at `runtime-logs/history-log-viewer.tsx:631`). The outer
+          padding lets the card breathe inside the parent flex column;
+          inner div is the scroll viewport. */}
+      <div className="flex-1 min-h-0 p-4">
+        <div className="h-full border rounded-lg bg-background overflow-hidden">
+          <div
+            ref={parentRef}
+            className={cn(
+              'h-full overflow-auto text-foreground font-mono text-xs select-text',
+              connectionStatus === 'connecting' && 'opacity-50'
+            )}
+            onScroll={handleScroll}
+          >
+            {logs.length === 0 && connectionStatus === 'connecting' && (
+              <div className="p-4 text-muted-foreground">
+                Connecting to logs...
               </div>
-            )
-          })}
+            )}
+
+            {logs.length === 0 && connectionStatus !== 'connecting' && (
+              <div className="p-4 text-muted-foreground">No logs available</div>
+            )}
+
+            <div
+              style={{
+                height: `${virtualizer.getTotalSize()}px`,
+                width: '100%',
+                position: 'relative',
+              }}
+            >
+              {virtualizer.getVirtualItems().map((virtualItem) => {
+                const log = filteredLogs[virtualItem.index]
+
+                return (
+                  <div
+                    key={virtualItem.key}
+                    data-index={virtualItem.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: `${virtualItem.start}px`,
+                      left: 0,
+                      width: '100%',
+                    }}
+                  >
+                    <LogLine content={log} searchTerm={searchTerm} />
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>

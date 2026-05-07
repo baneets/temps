@@ -4,7 +4,7 @@
 //! ## Architecture (one paragraph)
 //! Git, running as user `temps` (uid 1000), invokes the credential
 //! helper. The helper reads git's request from stdin (key=value lines),
-//! connects to the daemon over a Unix socket at `/run/temps/git.sock`
+//! connects to the daemon over a Unix socket at `/run/temps-git/git.sock`
 //! (mode `0660`, owned by `temps-git:git-users`, with `temps` in the
 //! `git-users` group), forwards the request as a JSON line, and writes
 //! the daemon's JSON response back to stdout in git's expected

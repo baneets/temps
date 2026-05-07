@@ -1800,21 +1800,32 @@ chmod 0600 /etc/temps/credential-daemon.env"
         // `docker exec --user` (a Docker API call, which is *not*
         // subject to no-new-privileges) and detach with `setsid`.
         //
-        // Idempotency: if the daemon is already running we don't want
-        // to spawn a second one, so the launcher first checks for an
-        // existing socket. The daemon's bind() also fails-fast on
-        // collision, but the pre-check keeps the logs clean.
+        // Liveness check: a present socket file alone is not enough
+        // evidence the daemon is alive — a previous daemon may have
+        // crashed leaving a stale socket behind. We check both: socket
+        // exists AND a `temps-git`-owned daemon process is running. If
+        // either is missing, remove the stale socket and relaunch. This
+        // makes the call self-healing across daemon crashes without
+        // needing an in-container supervisor (which `no-new-privileges`
+        // would block anyway).
         let launch_script = "set -e
-if [ -S /run/temps-git/git.sock ]; then
-    # Daemon already running — env-file refresh path. Send SIGHUP so
-    # it picks up the new token. The daemon doesn't currently handle
-    # SIGHUP — but a future revision can without changing this caller.
-    pkill -HUP -u temps-git temps-git-cred 2>/dev/null || true
+socket=/run/temps-git/git.sock
+# pgrep -u temps-git -f exits 0 when ≥1 matching process is alive.
+if [ -S \"$socket\" ] && pgrep -u temps-git -f temps-git-credential-daemon >/dev/null 2>&1; then
+    # Daemon healthy — env-file refresh path. Send SIGHUP so it picks up
+    # the new token. The daemon doesn't currently handle SIGHUP — but a
+    # future revision can without changing this caller.
+    pkill -HUP -u temps-git -f temps-git-credential-daemon 2>/dev/null || true
     exit 0
 fi
+# Stale socket from a crashed daemon will block bind() with EADDRINUSE.
+# Remove it before relaunching. The daemon also does this on its own
+# startup, but doing it here makes the relaunch path explicit.
+rm -f \"$socket\"
 # setsid + redirect detaches from the docker exec lifecycle so this
-# process survives `start_exec`'s wait. Logs go to syslog-ish stdout
-# of the container which `docker logs` surfaces.
+# process survives `start_exec`'s wait. Logs go to /tmp on the
+# container so `docker exec cat /tmp/temps-git-credential-daemon.log`
+# can surface daemon failures during diagnosis.
 setsid /usr/local/bin/temps-git-credential-daemon \
     >> /tmp/temps-git-credential-daemon.log \
     2>&1 < /dev/null &

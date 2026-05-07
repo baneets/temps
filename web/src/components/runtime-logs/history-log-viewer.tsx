@@ -14,6 +14,14 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -34,6 +42,7 @@ import {
   AlertCircle,
   ArrowUp,
   Clock,
+  Columns3,
   Loader2,
   Search,
 } from 'lucide-react'
@@ -89,7 +98,19 @@ function presetTimeRange(range: string): { start: string; end: string } {
 }
 
 
-function HistoryLogLine({ line }: { line: LogSearchLine }) {
+interface ColumnVisibility {
+  timestamp: boolean
+  level: boolean
+  service: boolean
+}
+
+function HistoryLogLine({
+  line,
+  columns,
+}: {
+  line: LogSearchLine
+  columns: ColumnVisibility
+}) {
   const d = new Date(line.timestamp)
   const base = d.toLocaleTimeString('en-US', {
     hour12: false,
@@ -101,21 +122,27 @@ function HistoryLogLine({ line }: { line: LogSearchLine }) {
 
   return (
     <div className="flex items-start gap-2 py-0.5 px-2 font-mono text-xs hover:bg-muted/50">
-      <span className="text-muted-foreground shrink-0 tabular-nums w-[85px]">
-        {ts}
-      </span>
-      <Badge
-        variant="outline"
-        className={cn(
-          'shrink-0 text-[10px] font-medium px-1.5 py-0 h-[18px] leading-[18px] rounded-sm',
-          LEVEL_COLORS[line.level] ?? LEVEL_COLORS.INFO
-        )}
-      >
-        {line.level}
-      </Badge>
-      <span className="text-muted-foreground shrink-0 w-[70px] truncate">
-        {line.service}
-      </span>
+      {columns.timestamp && (
+        <span className="text-muted-foreground shrink-0 tabular-nums w-[85px]">
+          {ts}
+        </span>
+      )}
+      {columns.level && (
+        <Badge
+          variant="outline"
+          className={cn(
+            'shrink-0 text-[10px] font-medium px-1.5 py-0 h-[18px] leading-[18px] rounded-sm',
+            LEVEL_COLORS[line.level] ?? LEVEL_COLORS.INFO
+          )}
+        >
+          {line.level}
+        </Badge>
+      )}
+      {columns.service && (
+        <span className="text-muted-foreground shrink-0 w-[70px] truncate">
+          {line.service}
+        </span>
+      )}
       <span
         className="whitespace-pre-wrap break-all min-w-0 flex-1"
         dangerouslySetInnerHTML={{ __html: ansiConverter.toHtml(line.message) }}
@@ -148,6 +175,38 @@ export default function HistoryLogViewer({
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderError, setOlderError] = useState<string | undefined>()
   const [olderExhausted, setOlderExhausted] = useState(false)
+  // Column visibility — persisted to localStorage so the user's choice
+  // survives navigation. Defaults to all visible. The "deployment" column
+  // is the per-line service name (container/service that emitted the log).
+  const [columns, setColumns] = useState<ColumnVisibility>(() => {
+    if (typeof window === 'undefined') {
+      return { timestamp: true, level: true, service: true }
+    }
+    try {
+      const raw = window.localStorage.getItem('temps.history-log.columns')
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<ColumnVisibility>
+        return {
+          timestamp: parsed.timestamp ?? true,
+          level: parsed.level ?? true,
+          service: parsed.service ?? true,
+        }
+      }
+    } catch {
+      // Ignore corrupted storage and fall through to defaults.
+    }
+    return { timestamp: true, level: true, service: true }
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        'temps.history-log.columns',
+        JSON.stringify(columns),
+      )
+    } catch {
+      // Storage may be unavailable (private mode, quota); not worth surfacing.
+    }
+  }, [columns])
 
   const parentRef = useRef<HTMLDivElement>(null)
   // Include the custom range in the filterKey so picking a different window
@@ -573,6 +632,43 @@ export default function HistoryLogViewer({
               </TooltipContent>
             )}
           </Tooltip>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="gap-1.5">
+                <Columns3 className="h-3.5 w-3.5" />
+                Columns
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuLabel>Show columns</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuCheckboxItem
+                checked={columns.timestamp}
+                onCheckedChange={(v) =>
+                  setColumns((c) => ({ ...c, timestamp: v === true }))
+                }
+              >
+                Timestamp
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                checked={columns.level}
+                onCheckedChange={(v) =>
+                  setColumns((c) => ({ ...c, level: v === true }))
+                }
+              >
+                Level
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                checked={columns.service}
+                onCheckedChange={(v) =>
+                  setColumns((c) => ({ ...c, service: v === true }))
+                }
+              >
+                Deployment
+              </DropdownMenuCheckboxItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         {/* Level filter chips */}
@@ -712,7 +808,10 @@ export default function HistoryLogViewer({
                       width: '100%',
                     }}
                   >
-                    <HistoryLogLine line={lines[virtualRow.index]} />
+                    <HistoryLogLine
+                      line={lines[virtualRow.index]}
+                      columns={columns}
+                    />
                   </div>
                 ))}
               </div>

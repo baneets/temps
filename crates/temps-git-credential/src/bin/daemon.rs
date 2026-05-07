@@ -18,7 +18,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use temps_git_credential::ipc::{IpcRequest, IpcResponse};
@@ -105,12 +106,21 @@ async fn main() {
     let config_path = std::env::var("TEMPS_GIT_CREDENTIAL_DAEMON_ENV")
         .unwrap_or_else(|_| DEFAULT_DAEMON_ENV_PATH.to_string());
     let config = match DaemonConfig::load_from(Path::new(&config_path)) {
-        Ok(c) => Arc::new(c),
+        Ok(c) => Arc::new(RwLock::new(c)),
         Err(e) => {
             error!("Failed to load daemon config from {}: {}", config_path, e);
             std::process::exit(1);
         }
     };
+
+    // Spawn a SIGHUP listener that reloads the env file in place. The
+    // host-side message_executor sends SIGHUP after rewriting the env
+    // file (e.g. when a session's deployment token rotates) — without
+    // this handler, the default disposition for SIGHUP is *terminate*,
+    // which would kill the daemon and force a relaunch on next IPC.
+    // Reloading in place keeps cached credentials valid across token
+    // rotations and avoids the brief unavailability window.
+    spawn_sighup_reloader(config.clone(), config_path.clone());
 
     let socket_path = PathBuf::from(
         std::env::var("TEMPS_GIT_CREDENTIAL_SOCKET")
@@ -140,8 +150,12 @@ async fn main() {
     };
 
     // Set permissive group-read perms (0660). The Dockerfile chowns
-    // the parent dir to `temps-git:git-users` so this picks up the
-    // right owner; mode change is the part we control here.
+    // the parent dir to `temps-git:git-users` and sets setgid (mode
+    // 2750) so the socket inherits `git-users` as its group. We still
+    // explicitly chgrp here as a safety net for images built before
+    // the setgid fix (existing containers can recover by killing the
+    // daemon and letting message_executor relaunch it, without
+    // rebuilding the image).
     if let Err(e) = std::fs::set_permissions(
         &socket_path,
         std::os::unix::fs::PermissionsExt::from_mode(0o660),
@@ -151,6 +165,23 @@ async fn main() {
             socket_path.display(),
             e
         );
+    }
+    match nix::unistd::Group::from_name("git-users") {
+        Ok(Some(group)) => {
+            if let Err(e) = std::os::unix::fs::chown(&socket_path, None, Some(group.gid.as_raw())) {
+                warn!(
+                    "Failed to chgrp credential socket {} to git-users: {}",
+                    socket_path.display(),
+                    e
+                );
+            }
+        }
+        Ok(None) => warn!(
+            "Group 'git-users' not found; user shell will not be able to \
+             connect to the credential socket. Check the sandbox image's \
+             groupadd step."
+        ),
+        Err(e) => warn!("Failed to look up 'git-users' group: {}", e),
     }
 
     info!(
@@ -191,9 +222,48 @@ fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+/// Spawn a background task that watches for SIGHUP and reloads the env
+/// file on each delivery. A failed reload is logged but does NOT
+/// terminate the daemon — the existing in-memory config keeps serving
+/// requests. This is the safer default: a malformed file should never
+/// take down the credential pipeline mid-session.
+fn spawn_sighup_reloader(config: Arc<RwLock<DaemonConfig>>, config_path: String) {
+    tokio::spawn(async move {
+        let mut hup = match signal(SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(
+                    "Failed to register SIGHUP handler: {}. Token reloads will require restart.",
+                    e
+                );
+                return;
+            }
+        };
+        loop {
+            if hup.recv().await.is_none() {
+                // Stream closed — Tokio is shutting down. Exit quietly.
+                return;
+            }
+            match DaemonConfig::load_from(Path::new(&config_path)) {
+                Ok(new_cfg) => {
+                    let mut guard = config.write().await;
+                    *guard = new_cfg;
+                    info!("Reloaded daemon config from {} on SIGHUP", config_path);
+                }
+                Err(e) => {
+                    warn!(
+                        "SIGHUP received but reloading {} failed: {}. Continuing with existing config.",
+                        config_path, e
+                    );
+                }
+            }
+        }
+    });
+}
+
 async fn handle_connection(
     mut stream: UnixStream,
-    config: Arc<DaemonConfig>,
+    config: Arc<RwLock<DaemonConfig>>,
     http: reqwest::Client,
     cache: Cache,
 ) -> std::io::Result<()> {
@@ -253,7 +323,7 @@ async fn handle_get(
     owner: &str,
     repo: &str,
     operation: Operation,
-    config: &DaemonConfig,
+    config: &RwLock<DaemonConfig>,
     http: &reqwest::Client,
     cache: &Cache,
 ) -> IpcResponse {
@@ -282,9 +352,23 @@ async fn handle_get(
         }
     }
 
+    // Snapshot the config under a short-lived read lock. Holding the
+    // lock across the HTTP call would block the SIGHUP reloader for the
+    // full request duration; the snapshot keeps lock contention to a
+    // few µs even under bursty mint traffic.
+    let (api_url, api_token) = {
+        let cfg = config.read().await;
+        (cfg.api_url.clone(), cfg.api_token.clone())
+    };
+
+    // Plugin routes are nested under `/api` in `temps-core/plugin.rs`'s
+    // `build_application`, so the actual mount point is
+    // `/api/workspace/git-credential`. Hitting the unprefixed path falls
+    // through to the SPA static-file fallback and returns HTML, which
+    // surfaces here as `error decoding response body`.
     let url = format!(
-        "{}/workspace/git-credential",
-        config.api_url.trim_end_matches('/')
+        "{}/api/workspace/git-credential",
+        api_url.trim_end_matches('/')
     );
     let body = MintRequestBody {
         host: host.to_string(),
@@ -298,7 +382,7 @@ async fn handle_get(
 
     let resp = match http
         .post(&url)
-        .bearer_auth(&config.api_token)
+        .bearer_auth(&api_token)
         .json(&body)
         .send()
         .await
