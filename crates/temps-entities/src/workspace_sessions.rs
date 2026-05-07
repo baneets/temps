@@ -58,13 +58,22 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub mcp_servers_config: Option<serde_json::Value>,
     /// Argon2 hash of the per-session preview password. Enforced by the
-    /// host-side Pingora before forwarding to the preview gateway. The
-    /// plaintext is only returned to the caller ONCE at session creation
-    /// (or on regenerate) and is never stored.
+    /// host-side Pingora before forwarding to the preview gateway. Kept
+    /// around for backward compatibility with sessions whose
+    /// `preview_password_encrypted` was never populated (those predate
+    /// reversible storage); for new writes we populate both columns so
+    /// the verify path keeps using argon2 while the UI can decrypt the
+    /// plaintext for display.
     pub preview_password_hash: Option<String>,
+    /// AES-256-GCM ciphertext of the plaintext preview password, encoded
+    /// as base64 by `EncryptionService`. Populated on session create and
+    /// on regenerate. When `Some`, the API returns the decrypted plaintext
+    /// in `preview_password` on every read so users no longer need to
+    /// regenerate to see their own password.
+    pub preview_password_encrypted: Option<String>,
     /// Last 4 chars of the plaintext password, surfaced in the UI so users
-    /// can tell which password they're looking at after the show-once
-    /// reveal is gone. Not sensitive on its own.
+    /// can tell which password they're looking at without expanding the
+    /// reveal. Not sensitive on its own.
     pub preview_password_hint: Option<String>,
     /// Per-session idle timeout in minutes. When null, the server-wide
     /// default (60min) applies. Sessions idle longer than this are marked

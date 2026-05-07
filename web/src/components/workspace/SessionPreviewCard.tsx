@@ -58,26 +58,29 @@ export function SessionPreviewCard({
 }: SessionPreviewCardProps) {
   const queryClient = useQueryClient()
 
-  // Card stays collapsed by default — opens automatically the first time we
-  // see a fresh plaintext password so the user doesn't miss the show-once reveal.
+  // Card stays collapsed by default — opens automatically the first time
+  // we see a fresh plaintext password (from create/regenerate) so the user
+  // doesn't miss the change.
   const [expanded, setExpanded] = useState<boolean>(
     defaultExpanded || !!session.preview_password,
   )
 
-  // The plaintext password lives in component state so the show-once reveal
-  // survives a refetch (which would null it out on the server side).
-  const [revealedPassword, setRevealedPassword] = useState<string | null>(
-    session.preview_password ?? null,
+  // Reveal toggle. Passwords are now stored encrypted-at-rest server-side,
+  // so the API returns the plaintext on every read. We default to hidden
+  // so the password isn't on screen by default; the user clicks Show to
+  // reveal it. After a regenerate we auto-reveal so the new value is
+  // immediately visible.
+  const [passwordVisible, setPasswordVisible] = useState<boolean>(
+    !!session.preview_password,
   )
-
-  // When a new session arrives with a fresh password, surface it and pop
-  // the card open so the user can copy it before it disappears.
   useEffect(() => {
     if (session.preview_password) {
-      setRevealedPassword(session.preview_password)
+      setPasswordVisible(true)
       setExpanded(true)
     }
   }, [session.preview_password])
+
+  const plaintext = session.preview_password ?? null
 
   const invalidate = () =>
     queryClient.invalidateQueries({
@@ -87,10 +90,10 @@ export function SessionPreviewCard({
 
   const regenerate = useMutation({
     ...workspaceRegeneratePreviewPasswordMutation(),
-    onSuccess: (updated) => {
-      if (updated.preview_password) {
-        setRevealedPassword(updated.preview_password)
-      }
+    onSuccess: () => {
+      // Reveal the new value automatically — the response repopulates
+      // session.preview_password through the query invalidation below.
+      setPasswordVisible(true)
       toast.success('Preview password regenerated')
       invalidate()
     },
@@ -239,7 +242,6 @@ export function SessionPreviewCard({
 
   const lifecycleBusy =
     stop.isPending || start.isPending || restart.isPending || refresh.isPending
-  const passwordRevealed = revealedPassword !== null
 
   // Free-form port input — lets users open arbitrary ports beyond the
   // common ones we surface as chips.
@@ -350,10 +352,28 @@ export function SessionPreviewCard({
         </div>
       </div>
 
-      {/* Preview URLs */}
+      {/* Preview URLs + password — grouped because anyone visiting a port
+          will be challenged by the preview gateway for this password. */}
       <div className="space-y-2">
-        <div className="text-xs font-medium text-muted-foreground">
-          Preview URLs
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-medium text-muted-foreground">
+            Preview URLs
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 text-[11px]"
+            onClick={() => regenerate.mutate({ path: sessionPath })}
+            disabled={regenerate.isPending || sessionClosed}
+            title="Issue a new preview password"
+          >
+            {regenerate.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RotateCcw className="h-3.5 w-3.5" />
+            )}
+            Regenerate password
+          </Button>
         </div>
         <div className="flex flex-wrap gap-2">
           {session.preview_urls.map((p) => (
@@ -389,6 +409,52 @@ export function SessionPreviewCard({
             </a>
           )}
         </div>
+
+        {/* Password row — sits directly under the port chips since they're
+            related: the gateway prompts for this on every preview visit.
+            The plaintext is now retrievable from the server (encrypted at
+            rest), so we can show it on demand with a hide/show toggle. */}
+        {plaintext ? (
+          <div className="space-y-1 rounded-md border bg-muted/30 p-2">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+              <KeyRound className="h-3 w-3" />
+              Preview password
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 rounded bg-muted px-2 py-1 text-xs font-mono break-all">
+                {passwordVisible ? plaintext : '•'.repeat(plaintext.length)}
+              </code>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7"
+                onClick={() => setPasswordVisible((v) => !v)}
+              >
+                {passwordVisible ? 'Hide' : 'Show'}
+              </Button>
+              <CopyButton value={plaintext} />
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <KeyRound className="h-3 w-3 shrink-0" />
+            {session.preview_password_hint ? (
+              <span>
+                Preview password ends in{' '}
+                <span className="font-mono">
+                  …{session.preview_password_hint}
+                </span>
+                . Click <span className="font-medium">Regenerate</span> to
+                view it.
+              </span>
+            ) : (
+              <span>
+                No preview password set — click{' '}
+                <span className="font-medium">Regenerate</span> to issue one.
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Idle timeout (per-session) */}
@@ -578,65 +644,6 @@ export function SessionPreviewCard({
         </p>
       </div>
 
-      {/* Show-once preview password */}
-      <div className="space-y-2 border-t pt-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <KeyRound className="h-3.5 w-3.5" />
-            Preview password
-          </div>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => regenerate.mutate({ path: sessionPath })}
-            disabled={regenerate.isPending || sessionClosed}
-          >
-            {regenerate.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RotateCcw className="h-3.5 w-3.5" />
-            )}
-            Regenerate
-          </Button>
-        </div>
-
-        {passwordRevealed ? (
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <code className="flex-1 rounded bg-muted px-2 py-1 text-xs font-mono break-all">
-                {revealedPassword}
-              </code>
-              <CopyButton value={revealedPassword!} />
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setRevealedPassword(null)}
-              >
-                Hide
-              </Button>
-            </div>
-            <p className="text-[11px] text-amber-600 dark:text-amber-400">
-              Save this password — it will not be shown again. Enter it on the
-              login page shown when you first open a preview URL.
-            </p>
-          </div>
-        ) : (
-          <div className="text-xs text-muted-foreground">
-            {session.preview_password_hint ? (
-              <>
-                Active password ends in{' '}
-                <span className="font-mono">
-                  …{session.preview_password_hint}
-                </span>
-                . Click <span className="font-medium">Regenerate</span> to
-                issue a new one.
-              </>
-            ) : (
-              <>No preview password set yet. Click Regenerate to issue one.</>
-            )}
-          </div>
-        )}
-      </div>
       </>
       )}
     </Card>

@@ -4,7 +4,9 @@ use sea_orm::{
     EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder,
 };
 use std::sync::Arc;
+use tracing::warn;
 
+use temps_core::EncryptionService;
 use temps_entities::{workspace_messages, workspace_sessions};
 
 use crate::error::WorkspaceError;
@@ -103,11 +105,57 @@ pub struct CreatedSession {
 /// Workspace service handles CRUD for sessions and messages.
 pub struct WorkspaceService {
     db: Arc<DatabaseConnection>,
+    /// Used to encrypt the plaintext preview password at rest so the API
+    /// can return it on every read instead of only once at create time.
+    /// Optional for tests that don't exercise the preview-password paths;
+    /// production wiring always supplies it via the workspace plugin.
+    encryption: Option<Arc<EncryptionService>>,
 }
 
 impl WorkspaceService {
+    /// Construct without an encryption service. Tests use this; production
+    /// code goes through `with_encryption` so reads can return plaintext.
     pub fn new(db: Arc<DatabaseConnection>) -> Self {
-        Self { db }
+        Self {
+            db,
+            encryption: None,
+        }
+    }
+
+    /// Construct with an encryption service. Required in production so
+    /// `preview_password_encrypted` is populated on writes and decryptable
+    /// on reads.
+    pub fn with_encryption(
+        db: Arc<DatabaseConnection>,
+        encryption: Arc<EncryptionService>,
+    ) -> Self {
+        Self {
+            db,
+            encryption: Some(encryption),
+        }
+    }
+
+    /// Decrypt a session's stored preview password, if one is stored
+    /// reversibly. Returns `None` for legacy sessions that only have the
+    /// argon2 hash, for sessions with no password set, or when the
+    /// encryption service is absent (test wiring).
+    ///
+    /// A decryption failure is logged at WARN and treated as `None` so a
+    /// single corrupt row doesn't fail the whole list endpoint.
+    pub fn decrypt_preview_password(&self, model: &workspace_sessions::Model) -> Option<String> {
+        let enc = self.encryption.as_ref()?;
+        let encrypted = model.preview_password_encrypted.as_deref()?;
+        match enc.decrypt_string(encrypted) {
+            Ok(plaintext) => Some(plaintext),
+            Err(e) => {
+                warn!(
+                    session_id = model.id,
+                    error = %e,
+                    "preview password decryption failed; treating as unavailable"
+                );
+                None
+            }
+        }
     }
 
     /// Create a new workspace session. Also generates the session's
@@ -187,6 +235,14 @@ impl WorkspaceService {
                 reason,
             })?;
 
+        // Encrypt the plaintext at rest so subsequent reads can return it
+        // without forcing a regenerate. The argon2 hash is still written
+        // alongside it so the preview gateway's verify path is unchanged.
+        // If encryption fails (only possible on a misconfigured master key)
+        // we fail the create — saving a half-populated row would silently
+        // break the "view password later" contract this column exists for.
+        let encrypted = self.encrypt_preview_password(&gp.plaintext, 0)?;
+
         let now = Utc::now();
         let session = workspace_sessions::ActiveModel {
             public_id: Set(crate::services::public_id::generate()),
@@ -214,6 +270,7 @@ impl WorkspaceService {
             estimated_cost_cents: Set(0),
             files_changed: Set(0),
             preview_password_hash: Set(Some(gp.hash)),
+            preview_password_encrypted: Set(encrypted),
             preview_password_hint: Set(Some(gp.hint)),
             ..Default::default()
         };
@@ -234,11 +291,38 @@ impl WorkspaceService {
         let session = self.get_session(session_id).await?;
         let gp = preview_password::generate()
             .map_err(|reason| WorkspaceError::PasswordHashFailed { session_id, reason })?;
+        let encrypted = self.encrypt_preview_password(&gp.plaintext, session_id)?;
         let mut active: workspace_sessions::ActiveModel = session.into();
         active.preview_password_hash = Set(Some(gp.hash));
+        active.preview_password_encrypted = Set(encrypted);
         active.preview_password_hint = Set(Some(gp.hint));
         active.update(self.db.as_ref()).await?;
         Ok(gp.plaintext)
+    }
+
+    /// Encrypt a plaintext preview password for at-rest storage.
+    ///
+    /// Returns `Ok(Some(ciphertext))` when the encryption service is wired
+    /// up, `Ok(None)` when it isn't (test wiring — the row will fall back
+    /// to argon2-only behavior, indistinguishable from a legacy session).
+    /// Returns `Err` only when the encryption service is present but
+    /// failed — a misconfigured master key — which we propagate as
+    /// `PasswordHashFailed` so the caller refuses to create the session
+    /// rather than silently dropping the encrypted column.
+    fn encrypt_preview_password(
+        &self,
+        plaintext: &str,
+        session_id: i32,
+    ) -> Result<Option<String>, WorkspaceError> {
+        let Some(enc) = self.encryption.as_ref() else {
+            return Ok(None);
+        };
+        enc.encrypt_string(plaintext)
+            .map(Some)
+            .map_err(|e| WorkspaceError::PasswordHashFailed {
+                session_id,
+                reason: format!("encrypt preview password: {}", e),
+            })
     }
 
     /// Get a session by ID.
@@ -677,6 +761,7 @@ mod tests {
             files_changed: 0,
             metadata: None,
             preview_password_hash: None,
+            preview_password_encrypted: None,
             preview_password_hint: None,
             idle_timeout_minutes: None,
             cpu_milli: None,

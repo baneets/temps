@@ -57,6 +57,14 @@ pub struct DockerRuntime {
     /// Wrapped in `Option` so non-overlay deployers (e.g. tests) can
     /// skip the wiring entirely.
     overlay_peers: Option<Arc<std::sync::RwLock<Vec<temps_network::Peer>>>>,
+    /// Root directory on the host where per-container secret files are
+    /// materialized for bind-mounting into `/run/secrets`. Defaults to
+    /// `$TEMPS_DATA_DIR/secrets` (falling back to `$HOME/.temps/secrets`
+    /// and finally `./.temps/secrets`) so secret mounts SURVIVE A HOST
+    /// REBOOT — historically this lived under `std::env::temp_dir()`,
+    /// which is tmpfs on most Linux distros and got wiped on every
+    /// reboot, forcing a redeploy. Override via [`Self::with_secrets_root`].
+    secrets_root: PathBuf,
 }
 
 /// Map a POSIX exit code (>= 128 means "killed by signal N - 128") to a human
@@ -124,13 +132,13 @@ impl DockerRuntime {
     /// into `/run/secrets`. Lives outside `TempDir` because Docker keeps the
     /// directory open for the container lifetime; cleanup happens in
     /// `remove_container`.
+    ///
+    /// Lives under `secrets_root` (defaults to `$TEMPS_DATA_DIR/secrets`)
+    /// rather than `/tmp` so the bind mount survives a host reboot —
+    /// `/tmp` is tmpfs on most Linux distros and gets wiped, leaving
+    /// containers with empty `/run/secrets` until the next redeploy.
     fn secrets_host_dir(&self, container_name: &str) -> PathBuf {
-        // Use std::env::temp_dir() so the path matches what the Docker daemon
-        // can see — both daemon and us run on the same host in the local
-        // (non-remote) deployer path.
-        std::env::temp_dir()
-            .join("temps-secrets")
-            .join(container_name)
+        self.secrets_root.join(container_name)
     }
 
     /// Resolves the numeric (uid, gid) that the container will run as,
@@ -179,6 +187,25 @@ impl DockerRuntime {
     }
 
     pub fn new(docker: Arc<Docker>, use_buildkit: bool, network_name: String) -> Self {
+        let secrets_root = default_secrets_root();
+        // Best-effort: ensure the root exists with restrictive perms so the
+        // first deploy after a fresh install doesn't race with the per-container
+        // mkdir. Failures are logged and not fatal — the per-deploy code path
+        // creates the leaf directory regardless.
+        if let Err(e) = std::fs::create_dir_all(&secrets_root) {
+            warn!(
+                "Failed to pre-create secrets root {}: {} (will retry per-deploy)",
+                secrets_root.display(),
+                e
+            );
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&secrets_root, std::fs::Permissions::from_mode(0o700));
+            }
+        }
         Self {
             docker,
             use_buildkit,
@@ -188,7 +215,15 @@ impl DockerRuntime {
             dns_servers: Vec::new(),
             overlay_dns_slot: None,
             overlay_peers: None,
+            secrets_root,
         }
+    }
+
+    /// Override the secrets host root. Tests use this to scope writes to
+    /// a temp dir; the agent/serve paths leave it at the default.
+    pub fn with_secrets_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.secrets_root = root.into();
+        self
     }
 
     /// Read the per-node Hickory resolver IP from a shared slot
@@ -1286,9 +1321,14 @@ impl ContainerDeployer for DockerRuntime {
         // and files are visible from container start (no race with start).
         //
         // Trade-off vs tmpfs: plaintext lives on the host filesystem under
-        // SecretsHostDir until the container is removed. The directory is
-        // mode 0700 root-owned; individual files are mode 0400. Cleanup is
-        // handled in `remove_container`.
+        // `secrets_root` ($TEMPS_DATA_DIR/secrets by default) until the
+        // container is removed. We deliberately use a persistent path
+        // rather than `std::env::temp_dir()` so the bind mount survives a
+        // host reboot — `/tmp` is tmpfs on most Linux distros, and the
+        // mount would otherwise point at an empty directory after a
+        // restart, forcing a redeploy. The directory is mode 0700
+        // root-owned; individual files are mode 0400. Cleanup is handled
+        // in `remove_container`.
         let secrets_bind = if request.secrets.is_empty() {
             None
         } else {
@@ -1889,6 +1929,31 @@ impl ContainerRuntime for DockerRuntime {
     }
 }
 
+/// Resolve the persistent root directory for materialized secret files.
+///
+/// Order of preference, mirroring the rest of the codebase
+/// (`temps-sandbox`, agent session storage):
+///   1. `$TEMPS_DATA_DIR/secrets`
+///   2. `$HOME/.temps/secrets`
+///   3. `./.temps/secrets` (last-resort fallback for headless container
+///      runtimes where neither env var is set)
+///
+/// Crucially, NONE of these resolve to `std::env::temp_dir()`. On most
+/// Linux distros `/tmp` is mounted as tmpfs and wiped at boot, which
+/// caused container `/run/secrets` mounts to point at empty/missing
+/// directories after a host reboot and forced a redeploy.
+fn default_secrets_root() -> PathBuf {
+    let base = std::env::var("TEMPS_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".temps")
+        });
+    base.join("secrets")
+}
+
 /// Writes secrets as files into a per-container host directory for Docker
 /// to bind-mount into `/run/secrets`. The directory is created (or recreated)
 /// fresh on each call so stale entries from a previous deployment of the same
@@ -1910,10 +1975,71 @@ fn write_secrets_to_host_dir(
     use std::fs;
     use std::io::Write;
 
+    // Ensure the parent (secrets root) exists. The runtime's `new()` already
+    // best-effort creates it, but a hostile chmod or fresh install between
+    // restarts could have left it missing — recreate so we don't fail with
+    // ENOENT. We deliberately do NOT chmod the parent here: that's the
+    // runtime's job, and on shared hosts the parent may be intentionally
+    // owned by a different user.
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     // Recreate fresh — wipes any stale files from a previous container with
     // the same name (rolling deploys, retries after failure, etc.).
+    //
+    // After a host reboot we may inherit a leaf directory whose contents
+    // were chowned to the previous container's USER (e.g. nonroot uid
+    // 65532) while the parent is owned by the temps user. `remove_dir_all`
+    // on such a tree fails with EACCES because we can't unlink files we
+    // don't own inside a directory we *do* own (sticky-bit semantics on
+    // some filesystems). Reset the leaf's perms to 0700 owned-by-us first
+    // so the recursive remove can succeed.
     if dir.exists() {
-        fs::remove_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Best-effort: if this chmod fails (we don't own the dir), the
+            // remove below will still surface the real error.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+        if let Err(e) = fs::remove_dir_all(dir) {
+            // If the leaf itself is owned by another uid (e.g. previous
+            // container's USER) and we can't traverse into it, fall back
+            // to renaming it aside so the deploy can proceed. The orphan
+            // is logged for operator cleanup; it's not in /tmp anymore so
+            // it won't auto-vanish on reboot, but it's also not blocking
+            // the deploy.
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                let orphan = dir.with_extension(format!(
+                    "orphan-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0)
+                ));
+                fs::rename(dir, &orphan).map_err(|rename_err| {
+                    std::io::Error::new(
+                        rename_err.kind(),
+                        format!(
+                            "failed to clear stale secrets dir {} \
+                             (rename to {} also failed: {}; original error: {})",
+                            dir.display(),
+                            orphan.display(),
+                            rename_err,
+                            e
+                        ),
+                    )
+                })?;
+                warn!(
+                    "Renamed unowned stale secrets dir to {} so deploy could proceed; \
+                     please remove manually",
+                    orphan.display()
+                );
+            } else {
+                return Err(e);
+            }
+        }
     }
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -1987,8 +2113,8 @@ fn write_secrets_to_host_dir(
                 );
                 // World-readable fallback. Parent dir already restricts
                 // access on the host side (only the Temps user can traverse
-                // into /tmp/temps-secrets); these bits are what the
-                // container sees.
+                // into the secrets root under $TEMPS_DATA_DIR/secrets);
+                // these bits are what the container sees.
                 fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
                 for key in secrets.keys() {
                     fs::set_permissions(dir.join(key), fs::Permissions::from_mode(0o444))?;
@@ -2106,6 +2232,42 @@ mod docker_tests {
         // Stale file from first call must be gone
         assert!(!dir.join("OLD").exists());
         assert!(dir.join("NEW").exists());
+    }
+
+    #[test]
+    fn test_default_secrets_root_uses_temps_data_dir() {
+        // Smoke test the env precedence. We can't unset HOME without
+        // breaking other tests, so verify TEMPS_DATA_DIR wins when set.
+        let tmp = TempDir::new().unwrap();
+        let prev = std::env::var("TEMPS_DATA_DIR").ok();
+        std::env::set_var("TEMPS_DATA_DIR", tmp.path());
+        let root = default_secrets_root();
+        assert_eq!(root, tmp.path().join("secrets"));
+        // Critically, this must NOT live under /tmp (unless TEMPS_DATA_DIR
+        // points there explicitly) — that was the bug we just fixed.
+        match prev {
+            Some(v) => std::env::set_var("TEMPS_DATA_DIR", v),
+            None => std::env::remove_var("TEMPS_DATA_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_default_secrets_root_is_persistent_path() {
+        // Without TEMPS_DATA_DIR, the resolved root must live under
+        // $HOME/.temps/secrets — i.e. NOT under std::env::temp_dir(),
+        // which is tmpfs on most Linux distros and was the source of
+        // the post-reboot redeploy regression.
+        let prev_data = std::env::var("TEMPS_DATA_DIR").ok();
+        std::env::remove_var("TEMPS_DATA_DIR");
+        let root = default_secrets_root();
+        assert!(
+            !root.starts_with(std::env::temp_dir()),
+            "secrets root unexpectedly resolved to a tmpfs path: {}",
+            root.display()
+        );
+        if let Some(v) = prev_data {
+            std::env::set_var("TEMPS_DATA_DIR", v);
+        }
     }
 
     #[test]

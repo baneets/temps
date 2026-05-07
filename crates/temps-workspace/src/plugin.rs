@@ -60,8 +60,14 @@ impl TempsPlugin for WorkspacePlugin {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
             let encryption_service = context.require_service::<EncryptionService>();
 
-            // Create workspace service
-            let workspace_service = Arc::new(WorkspaceService::new(db.clone()));
+            // Create workspace service. Threading the encryption service in
+            // here lets `WorkspaceService` populate `preview_password_encrypted`
+            // on create/regenerate and decrypt it for read-time API responses,
+            // so users don't have to regenerate to view their own password.
+            let workspace_service = Arc::new(WorkspaceService::with_encryption(
+                db.clone(),
+                encryption_service.clone(),
+            ));
             context.register_service(workspace_service.clone());
 
             // Create git credential service. Optional registration: only

@@ -13753,9 +13753,13 @@ export type WorkspaceSessionResponse = {
      */
     pids_limit?: number | null;
     /**
-     * Plaintext preview password — populated ONLY in the response to
-     * `POST /sessions` (creation) and `POST /sessions/:id/preview-password/regenerate`.
-     * Always `None` on list / get / update responses.
+     * Plaintext preview password. Populated by the server whenever the
+     * session row has a recoverable copy stored in
+     * `preview_password_encrypted`; this includes new sessions and any
+     * session whose password has been regenerated since the encrypted
+     * column was added. Legacy sessions that only have the argon2 hash
+     * return `None` here — the UI prompts for a regenerate to surface
+     * the plaintext.
      */
     preview_password?: string | null;
     /**

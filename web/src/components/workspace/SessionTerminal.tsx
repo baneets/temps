@@ -266,9 +266,25 @@ export const SessionTerminal = forwardRef<
 
       // Debounced fit on container resize. Skips degenerate (hidden)
       // measurements so we never ship a tiny size to the PTY.
+      //
+      // Short-circuit when the container's pixel dimensions haven't changed
+      // since the last fit. fit.fit() walks the canvas to remeasure cell
+      // metrics and reallocates the WASM grid — running it on every
+      // ResizeObserver callback during a drag pegs a CPU core. Since the
+      // container size is the only input that affects cols/rows, comparing
+      // it lets us skip the entire fit/sendResize chain when nothing has
+      // moved (which is most callbacks: the parent layout reflows by a
+      // few pixels constantly without changing our box).
+      let lastFitW = -1
+      let lastFitH = -1
       const refit = () => {
         if (!fit || !term) return
-        if (container.clientWidth < 20 || container.clientHeight < 20) return
+        const w = container.clientWidth
+        const h = container.clientHeight
+        if (w < 20 || h < 20) return
+        if (w === lastFitW && h === lastFitH) return
+        lastFitW = w
+        lastFitH = h
         try {
           fit.fit()
           sendResize()
@@ -276,9 +292,15 @@ export const SessionTerminal = forwardRef<
           /* fit can throw if container is detached mid-resize */
         }
       }
+      // Trailing-edge debounce at 150ms. Drag events fire at ~16ms (60fps);
+      // 60ms collapses only a few per burst, so fit/SIGWINCH fired 15+
+      // times per second of drag — each one a full tmux pane repaint that
+      // ghostty-web has to VT-parse and canvas-paint. 150ms means we fit
+      // once per drag (when the user pauses), eliminating the per-frame
+      // CPU spike and the corruption from tmux racing its own repaints.
       ro = new ResizeObserver(() => {
         if (resizeTimer) clearTimeout(resizeTimer)
-        resizeTimer = setTimeout(refit, 60)
+        resizeTimer = setTimeout(refit, 150)
       })
       ro.observe(container)
 

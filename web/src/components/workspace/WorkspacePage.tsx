@@ -61,6 +61,7 @@ import type {
 } from '@/api/client/types.gen'
 import { sessionStreamUrl } from './helpers'
 import { SessionPreviewCard } from './SessionPreviewCard'
+import { SessionPreviewPopover } from './SessionPreviewPopover'
 import { TerminalTabs, type TerminalTabsHandle } from './TerminalTabs'
 import { SandboxStatsBadge } from './SandboxStatsBadge'
 import { TerminalKeysMenu } from './TerminalKeysMenu'
@@ -594,6 +595,11 @@ export function WorkspacePage({ project }: WorkspacePageProps) {
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                {activeSessionQuery.data?.session && (
+                  <SessionPreviewPopover
+                    session={activeSessionQuery.data.session}
+                  />
+                )}
                 {viewMode === 'terminal' && (
                   <Button
                     size="icon"

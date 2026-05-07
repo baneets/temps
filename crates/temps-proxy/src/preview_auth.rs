@@ -874,6 +874,7 @@ mod tests {
             files_changed: 0,
             metadata: None,
             preview_password_hash: None,
+            preview_password_encrypted: None,
             preview_password_hint: None,
             idle_timeout_minutes: None,
             cpu_milli: None,
