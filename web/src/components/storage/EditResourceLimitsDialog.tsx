@@ -7,7 +7,7 @@ import type {
   ResourceLimitsUpdateResponse,
   ServiceResourceLimits,
 } from '@/api/client/types.gen'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -20,8 +20,9 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
+import { cn } from '@/lib/utils'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Info, Loader2 } from 'lucide-react'
+import { AlertTriangle, Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
@@ -74,10 +75,10 @@ export function EditResourceLimitsDialog({
   currentLimits,
 }: EditResourceLimitsDialogProps) {
   // -- Form state ---------------------------------------------------------
-  // Each cap is independently toggleable. Memory and swap travel together
-  // (Docker requires swap >= memory when both are set; we make swap
-  // implicit and equal to memory by default = "no swap"). We surface a
-  // separate switch for "allow swap" so power users can opt in.
+  // Each cap is independently toggleable. Docker's wire format wants
+  // `memory_swap` as the *total* (memory + swap); we hide that footgun by
+  // having the user enter additional swap MiB and adding memory at submit
+  // time. `swapMb` here is therefore "extra swap on top of the memory cap".
   const [memoryEnabled, setMemoryEnabled] = useState(false)
   const [memoryMb, setMemoryMb] = useState<string>(String(DEFAULT_MEMORY_MB))
   const [swapEnabled, setSwapEnabled] = useState(false)
@@ -97,12 +98,16 @@ export function EditResourceLimitsDialog({
     setMemoryEnabled(memory != null)
     setMemoryMb(memory != null ? String(memory) : String(DEFAULT_MEMORY_MB))
 
-    // Treat swap = memory as "swap disabled, not user-set" so we only
-    // turn the swap switch on when the operator has explicitly raised it
-    // above the memory cap.
-    const userSetSwap = swap != null && memory != null && swap > memory
-    setSwapEnabled(userSetSwap)
-    setSwapMb(userSetSwap ? String(swap) : String(memory ?? DEFAULT_MEMORY_MB))
+    // The stored `swap` value is Docker's `memory_swap` total (memory + swap).
+    // Convert back to "extra swap" for the form so the input matches the
+    // label. swap == memory means no swap; swap > memory means the operator
+    // explicitly added some.
+    const extraSwap =
+      swap != null && memory != null && swap > memory ? swap - memory : 0
+    setSwapEnabled(extraSwap > 0)
+    setSwapMb(
+      extraSwap > 0 ? String(extraSwap) : String(memory ?? DEFAULT_MEMORY_MB),
+    )
 
     setCpuEnabled(nano != null)
     setCpuCores(
@@ -123,9 +128,6 @@ export function EditResourceLimitsDialog({
         const s = Number(swapMb)
         if (!Number.isFinite(s) || s <= 0) {
           return 'Swap must be a positive number of MiB.'
-        }
-        if (s < m) {
-          return 'Swap (memory + swap) must be ≥ memory limit.'
         }
       }
     }
@@ -208,106 +210,122 @@ export function EditResourceLimitsDialog({
       toast.error(validation)
       return
     }
+    const memoryRounded = memoryEnabled ? Math.round(Number(memoryMb)) : null
+    const extraSwap =
+      memoryEnabled && swapEnabled ? Math.round(Number(swapMb)) : 0
     const body: ServiceResourceLimits = {
-      memory_mb: memoryEnabled ? Math.round(Number(memoryMb)) : null,
-      // When memory is on but swap isn't explicitly raised, set swap = memory
-      // so swap is fully disabled (Docker semantics: memory_swap == memory
-      // means "no swap"). Without this, kernel default swap remains in play
-      // and the cap has soft edges.
-      memory_swap_mb: memoryEnabled
-        ? swapEnabled
-          ? Math.round(Number(swapMb))
-          : Math.round(Number(memoryMb))
-        : null,
+      memory_mb: memoryRounded,
+      // Docker's `memory_swap` is the *total* (memory + swap). We compute
+      // it here so the user only enters the extra-swap amount they want.
+      // When swap is off, total == memory == "swap fully disabled" (Docker:
+      // memory_swap == memory means no swap).
+      memory_swap_mb:
+        memoryRounded != null ? memoryRounded + extraSwap : null,
       nano_cpus: cpuEnabled ? coresToNanoCpus(Number(cpuCores)) : null,
       cpu_shares: null,
     }
     mutation.mutate({ path: { id: serviceId }, body })
   }
 
-  const allUnlimited = !memoryEnabled && !cpuEnabled
+  // -- Diff vs. current limits (drives "no changes" disabled state) -----
+  const isDirty = useMemo(() => {
+    const currentMem = currentLimits?.memory_mb ?? null
+    const currentSwap = currentLimits?.memory_swap_mb ?? null
+    const currentNano = currentLimits?.nano_cpus ?? null
+    const newMem = memoryEnabled ? Math.round(Number(memoryMb)) || null : null
+    const newSwapTotal =
+      newMem != null
+        ? newMem +
+          (swapEnabled ? Math.round(Number(swapMb)) || 0 : 0)
+        : null
+    const newNano = cpuEnabled ? coresToNanoCpus(Number(cpuCores)) : null
+    return (
+      newMem !== currentMem ||
+      newSwapTotal !== currentSwap ||
+      newNano !== currentNano
+    )
+  }, [
+    currentLimits,
+    memoryEnabled,
+    memoryMb,
+    swapEnabled,
+    swapMb,
+    cpuEnabled,
+    cpuCores,
+  ])
+
+  // Pretty-print the currently applied value as a small chip on each row.
+  const currentMemoryLabel =
+    currentLimits?.memory_mb != null
+      ? `${currentLimits.memory_mb} MiB`
+      : 'Unlimited'
+  const currentCpuLabel =
+    currentLimits?.nano_cpus != null
+      ? `${formatCores(nanoCpusToCores(currentLimits.nano_cpus))} cores`
+      : 'Unlimited'
+  const currentSwapExtra =
+    currentLimits?.memory_mb != null &&
+    currentLimits?.memory_swap_mb != null &&
+    currentLimits.memory_swap_mb > currentLimits.memory_mb
+      ? currentLimits.memory_swap_mb - currentLimits.memory_mb
+      : 0
+
+  const memoryTotal = useMemo(() => {
+    const m = Number(memoryMb)
+    const s = swapEnabled ? Number(swapMb) : 0
+    if (!Number.isFinite(m) || !Number.isFinite(s)) return null
+    return Math.round(m + s)
+  }, [memoryMb, swapEnabled, swapMb])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Resource limits — {serviceName}</DialogTitle>
-          <DialogDescription>
-            Cap memory and CPU available to this service's container.
-            Changes apply live to running containers without a restart.
+          <DialogTitle className="text-base">
+            Resource limits
+            <span className="ml-2 font-normal text-muted-foreground">
+              {serviceName}
+            </span>
+          </DialogTitle>
+          <DialogDescription className="text-xs">
+            Live changes — no restart needed.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-5">
-          {/* OOM warning whenever a memory cap is on. Operators frequently
-              enable hard limits without realizing the kernel kills the
-              container outright when the working set exceeds them. */}
-          {memoryEnabled ? (
-            <Alert variant="destructive">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertTitle>OOM kills are possible</AlertTitle>
-              <AlertDescription>
-                If the container exceeds {memoryMb || '0'} MiB the kernel
-                will terminate it. The container restarts automatically, but
-                in-flight queries fail. Watch the runtime panel's
-                <span className="font-medium"> restart count </span>
-                after enabling.
-              </AlertDescription>
-            </Alert>
-          ) : (
-            <Alert>
-              <Info className="h-4 w-4" />
-              <AlertDescription>
-                Leave both switches off to run unconstrained — same as
-                today. Enable a cap only if a runaway workload has already
-                degraded the host.
-              </AlertDescription>
-            </Alert>
-          )}
-
           {/* Memory ---------------------------------------------------- */}
-          <div className="space-y-3 rounded-md border p-4">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="resource-memory-toggle" className="text-base">
-                  Memory limit
-                </Label>
-                <p className="text-sm text-muted-foreground">
-                  Hard cap on resident set. Container is OOM-killed past
-                  this.
-                </p>
-              </div>
-              <Switch
-                id="resource-memory-toggle"
-                checked={memoryEnabled}
-                onCheckedChange={setMemoryEnabled}
+          <LimitSection
+            label="Memory"
+            currentLabel={currentMemoryLabel}
+            enabled={memoryEnabled}
+            onToggle={setMemoryEnabled}
+            toggleId="resource-memory-toggle"
+            description="Hard cap. Container is OOM-killed past this."
+          >
+            <div className="space-y-3">
+              <PresetInput
+                id="resource-memory-mb"
+                value={memoryMb}
+                onChange={setMemoryMb}
+                presets={MEMORY_PRESETS}
+                unit="MiB"
+                min={64}
+                step={64}
               />
-            </div>
-            {memoryEnabled ? (
-              <div className="space-y-3 pt-2">
-                <div className="grid grid-cols-[1fr_auto] items-center gap-3">
-                  <Input
-                    id="resource-memory-mb"
-                    type="number"
-                    min={1}
-                    step={64}
-                    value={memoryMb}
-                    onChange={(e) => setMemoryMb(e.target.value)}
-                  />
-                  <span className="text-sm text-muted-foreground">MiB</span>
-                </div>
 
-                <div className="flex items-start justify-between gap-4 border-t pt-3">
+              {/* Swap sub-row — only meaningful when memory is on, so it's
+                  nested as part of the memory section. */}
+              <div className="rounded-md border-l-2 border-muted pl-3">
+                <div className="flex items-center justify-between gap-3">
                   <div>
                     <Label
                       htmlFor="resource-swap-toggle"
-                      className="text-sm"
+                      className="cursor-pointer text-sm"
                     >
                       Allow swap
                     </Label>
                     <p className="text-xs text-muted-foreground">
-                      Off (default): swap disabled. On: lets the container
-                      page out up to swap-MiB above the memory cap.
+                      Page out N MiB beyond the memory cap.
                     </p>
                   </div>
                   <Switch
@@ -316,67 +334,70 @@ export function EditResourceLimitsDialog({
                     onCheckedChange={setSwapEnabled}
                   />
                 </div>
-                {swapEnabled ? (
-                  <div className="grid grid-cols-[1fr_auto] items-center gap-3">
-                    <Input
+                {swapEnabled && (
+                  <div className="mt-3 space-y-2">
+                    <PresetInput
                       id="resource-swap-mb"
-                      type="number"
-                      min={1}
-                      step={64}
                       value={swapMb}
-                      onChange={(e) => setSwapMb(e.target.value)}
+                      onChange={setSwapMb}
+                      presets={SWAP_PRESETS}
+                      unit="MiB"
+                      min={64}
+                      step={64}
                     />
-                    <span className="text-sm text-muted-foreground">
-                      MiB total
-                    </span>
+                    {memoryTotal != null && (
+                      <p className="text-xs tabular-nums text-muted-foreground">
+                        Total memory + swap{' '}
+                        <span className="font-medium text-foreground">
+                          {memoryTotal} MiB
+                        </span>
+                      </p>
+                    )}
                   </div>
-                ) : null}
+                )}
               </div>
-            ) : null}
-          </div>
+            </div>
+          </LimitSection>
 
           {/* CPU ------------------------------------------------------- */}
-          <div className="space-y-3 rounded-md border p-4">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <Label htmlFor="resource-cpu-toggle" className="text-base">
-                  CPU limit
-                </Label>
-                <p className="text-sm text-muted-foreground">
-                  Cap CPU at N cores (fractional allowed, e.g. 0.5).
-                </p>
-              </div>
-              <Switch
-                id="resource-cpu-toggle"
-                checked={cpuEnabled}
-                onCheckedChange={setCpuEnabled}
-              />
-            </div>
-            {cpuEnabled ? (
-              <div className="grid grid-cols-[1fr_auto] items-center gap-3 pt-2">
-                <Input
-                  id="resource-cpu-cores"
-                  type="number"
-                  min={0.1}
-                  step={0.1}
-                  value={cpuCores}
-                  onChange={(e) => setCpuCores(e.target.value)}
-                />
-                <span className="text-sm text-muted-foreground">cores</span>
-              </div>
-            ) : null}
-          </div>
+          <LimitSection
+            label="CPU"
+            currentLabel={currentCpuLabel}
+            enabled={cpuEnabled}
+            onToggle={setCpuEnabled}
+            toggleId="resource-cpu-toggle"
+            description="Cap at N cores. Fractional allowed."
+          >
+            <PresetInput
+              id="resource-cpu-cores"
+              value={cpuCores}
+              onChange={setCpuCores}
+              presets={CPU_PRESETS}
+              unit="cores"
+              min={0.1}
+              step={0.1}
+              decimal
+            />
+          </LimitSection>
 
           {validation ? (
             <Alert variant="destructive">
               <AlertTriangle className="h-4 w-4" />
-              <AlertDescription>{validation}</AlertDescription>
+              <AlertDescription className="text-xs">
+                {validation}
+              </AlertDescription>
             </Alert>
           ) : null}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="gap-2 sm:gap-2">
+          <div className="mr-auto text-xs text-muted-foreground">
+            {currentSwapExtra > 0 && !swapEnabled && memoryEnabled && (
+              <span>+{currentSwapExtra} MiB swap currently allowed</span>
+            )}
+          </div>
           <Button
+            type="button"
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={mutation.isPending}
@@ -384,22 +405,152 @@ export function EditResourceLimitsDialog({
             Cancel
           </Button>
           <Button
+            type="button"
             onClick={handleSubmit}
-            disabled={mutation.isPending || validation != null}
+            disabled={
+              mutation.isPending || validation != null || !isDirty
+            }
           >
             {mutation.isPending ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Saving…
               </>
-            ) : allUnlimited ? (
-              'Save (unlimited)'
+            ) : !isDirty ? (
+              'No changes'
             ) : (
-              'Save limits'
+              'Save'
             )}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Helpers and small components
+// ---------------------------------------------------------------------------
+
+const MEMORY_PRESETS = [256, 512, 1024, 2048, 4096]
+const SWAP_PRESETS = [128, 256, 512, 1024]
+const CPU_PRESETS = [0.25, 0.5, 1, 2, 4]
+
+function formatCores(n: number): string {
+  return n % 1 === 0 ? n.toString() : n.toFixed(2).replace(/\.?0+$/, '')
+}
+
+/**
+ * One row per cap (Memory, CPU). Replaces the previous bordered card with
+ * a flat label/toggle pair plus a "Currently: X" chip so the operator can
+ * see the applied value without enabling the switch.
+ */
+function LimitSection({
+  label,
+  description,
+  currentLabel,
+  enabled,
+  onToggle,
+  toggleId,
+  children,
+}: {
+  label: string
+  description: string
+  currentLabel: string
+  enabled: boolean
+  onToggle: (v: boolean) => void
+  toggleId: string
+  children: React.ReactNode
+}) {
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-baseline gap-2">
+            <Label
+              htmlFor={toggleId}
+              className="cursor-pointer text-sm font-medium"
+            >
+              {label}
+            </Label>
+            <span className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+              now {currentLabel}
+            </span>
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {description}
+          </p>
+        </div>
+        <Switch
+          id={toggleId}
+          checked={enabled}
+          onCheckedChange={onToggle}
+        />
+      </div>
+      {enabled && <div className="pl-0">{children}</div>}
+    </section>
+  )
+}
+
+/**
+ * Numeric input with a row of small "preset" buttons below. Clicking a
+ * preset fills the input. Selected preset gets a subtle highlight so the
+ * operator knows which value they're at.
+ */
+function PresetInput({
+  id,
+  value,
+  onChange,
+  presets,
+  unit,
+  min,
+  step,
+  decimal = false,
+}: {
+  id: string
+  value: string
+  onChange: (v: string) => void
+  presets: number[]
+  unit: string
+  min: number
+  step: number
+  decimal?: boolean
+}) {
+  const numeric = Number(value)
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-[1fr_auto] items-center gap-3">
+        <Input
+          id={id}
+          type="number"
+          inputMode={decimal ? 'decimal' : 'numeric'}
+          min={min}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <span className="text-sm text-muted-foreground">{unit}</span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {presets.map((preset) => {
+          const isActive = Number.isFinite(numeric) && numeric === preset
+          return (
+            <button
+              key={preset}
+              type="button"
+              onClick={() => onChange(String(preset))}
+              className={cn(
+                'rounded border px-2 py-0.5 text-xs tabular-nums transition-colors',
+                isActive
+                  ? 'border-foreground/40 bg-foreground/5 text-foreground'
+                  : 'border-border text-muted-foreground hover:border-foreground/20 hover:text-foreground',
+              )}
+            >
+              {decimal ? formatCores(preset) : preset}
+            </button>
+          )
+        })}
+      </div>
+    </div>
   )
 }

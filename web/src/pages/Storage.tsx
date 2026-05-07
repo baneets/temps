@@ -1,9 +1,14 @@
-import { listServicesOptions } from '@/api/client/@tanstack/react-query.gen'
+import {
+  getServiceRuntimeOptions,
+  getServiceStatsOptions,
+  listServicesOptions,
+} from '@/api/client/@tanstack/react-query.gen'
 import { ExternalServiceInfo } from '@/api/client/types.gen'
 import {
   listServiceHealthStatuses,
   type HealthStatus,
 } from '@/lib/service-health'
+import { formatBytes } from '@/lib/utils'
 import { CreateServiceButton } from '@/components/storage/CreateServiceButton'
 import { DeleteServiceButton } from '@/components/storage/DeleteServiceButton'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
@@ -20,8 +25,10 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import {
   ChevronRight,
+  Cpu,
   Database,
   HardDrive,
+  MemoryStick,
   Pencil,
   RefreshCcw,
 } from 'lucide-react'
@@ -68,7 +75,7 @@ export function Storage() {
   })
 
   useEffect(() => {
-    setBreadcrumbs([{ label: 'Storage', href: '/storage' }])
+    setBreadcrumbs([{ label: 'Databases', href: '/storage' }])
   }, [setBreadcrumbs])
 
   // Keyboard shortcut: N to open the create service dropdown
@@ -77,7 +84,7 @@ export function Storage() {
     callback: () => setIsCreateDropdownOpen(true),
   })
 
-  usePageTitle('Storage')
+  usePageTitle('Databases')
 
   // Render external services content based on loading/error/empty state
   const renderExternalServicesContent = () => {
@@ -162,7 +169,7 @@ export function Storage() {
     <div className="flex-1 overflow-auto">
       <div className="sm:p-4 space-y-6 md:p-6">
         <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold sm:text-2xl">Storage</h1>
+          <h1 className="text-xl font-semibold sm:text-2xl">Databases</h1>
         </div>
 
         <Tabs value={activeTab} onValueChange={handleTabChange} className="space-y-6">
@@ -364,6 +371,9 @@ function ServicesDividerList({
                   </span>
                 </div>
               </div>
+              {service.status === 'running' && (
+                <ServiceMetricsCell serviceId={service.id} />
+              )}
               <ServiceActions
                 service={service}
                 onEdit={onEdit}
@@ -374,6 +384,123 @@ function ServicesDividerList({
           )
         })}
       </ul>
+    </div>
+  )
+}
+
+/**
+ * Compact CPU + memory readout (with applied caps) for one running service.
+ *
+ * Aggregates across all cluster members — sum of CPU% (rebased against the
+ * member's CPU cap so a "1 of 4 cores" cap reads 100% at saturation, not
+ * 25%) and sum of memory bytes / sum of memory caps.
+ *
+ * Two queries: stats polls every 10s (live), runtime polls every 60s
+ * (limits change rarely). The detail page polls faster — 10s is fine for
+ * "is this database loaded?" from a list view.
+ */
+function ServiceMetricsCell({ serviceId }: { serviceId: number }) {
+  const stats = useQuery({
+    ...getServiceStatsOptions({ path: { id: serviceId } }),
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+    staleTime: 8_000,
+  })
+  const runtime = useQuery({
+    ...getServiceRuntimeOptions({ path: { id: serviceId } }),
+    refetchInterval: 60_000,
+    staleTime: 50_000,
+  })
+
+  if (
+    stats.isPending ||
+    stats.isError ||
+    !stats.data?.members?.length
+  ) {
+    return null
+  }
+
+  // Rebase each member's CPU% against its cap so the headline number is
+  // "% of allocated", which is the only mental model that makes sense
+  // when caps are heterogeneous across cluster members.
+  const cpuPercent = stats.data.members.reduce((sum, m) => {
+    const hostPct = m.cpu_percent ?? 0
+    const onlineCpus = m.online_cpus ?? null
+    const memberRuntime = runtime.data?.members.find(
+      (r) => r.container_name === m.container_name,
+    )
+    const nano = memberRuntime?.resource_limits?.nano_cpus ?? null
+    const capCores = nano != null && nano > 0 ? nano / 1_000_000_000 : null
+    if (capCores != null && onlineCpus != null && capCores < onlineCpus) {
+      return sum + hostPct * (onlineCpus / capCores)
+    }
+    return sum + hostPct
+  }, 0)
+
+  const memBytes = stats.data.members.reduce(
+    (sum, m) => sum + (m.memory_usage_bytes ?? 0),
+    0,
+  )
+  const hasCpu = stats.data.members.some((m) => m.cpu_percent != null)
+  const hasMem = stats.data.members.some((m) => m.memory_usage_bytes != null)
+
+  // Sum applied caps across members. memory_mb is in MiB; convert to bytes
+  // so it composes with formatBytes. CPU cap in cores (sum across members).
+  const memLimitMib = runtime.data?.members.reduce(
+    (sum, r) => sum + (r.resource_limits?.memory_mb ?? 0),
+    0,
+  )
+  const memLimitBytes =
+    memLimitMib != null && memLimitMib > 0
+      ? memLimitMib * 1024 * 1024
+      : null
+  const cpuLimitCores = runtime.data?.members.reduce((sum, r) => {
+    const nano = r.resource_limits?.nano_cpus ?? 0
+    return sum + (nano > 0 ? nano / 1_000_000_000 : 0)
+  }, 0)
+  const hasCpuCap = cpuLimitCores != null && cpuLimitCores > 0
+  const hasMemCap = memLimitBytes != null && memLimitBytes > 0
+
+  if (!hasCpu && !hasMem) return null
+
+  return (
+    <div className="hidden shrink-0 items-center gap-3 text-xs text-muted-foreground sm:flex">
+      {hasCpu && (
+        <span
+          className="flex items-center gap-1 tabular-nums"
+          title={
+            hasCpuCap
+              ? `CPU usage of ${cpuLimitCores!.toFixed(cpuLimitCores! % 1 === 0 ? 0 : 2)} core cap`
+              : 'CPU usage (uncapped)'
+          }
+        >
+          <Cpu className="size-3.5" />
+          <span>{cpuPercent.toFixed(1)}%</span>
+          {hasCpuCap && (
+            <span className="text-muted-foreground/60">
+              / {cpuLimitCores!.toFixed(cpuLimitCores! % 1 === 0 ? 0 : 2)}c
+            </span>
+          )}
+        </span>
+      )}
+      {hasMem && (
+        <span
+          className="flex items-center gap-1 tabular-nums"
+          title={
+            hasMemCap
+              ? `Memory usage of ${formatBytes(memLimitBytes!, 0)} cap`
+              : 'Memory usage (uncapped)'
+          }
+        >
+          <MemoryStick className="size-3.5" />
+          <span>{formatBytes(memBytes, 1)}</span>
+          {hasMemCap && (
+            <span className="text-muted-foreground/60">
+              / {formatBytes(memLimitBytes!, 0)}
+            </span>
+          )}
+        </span>
+      )}
     </div>
   )
 }

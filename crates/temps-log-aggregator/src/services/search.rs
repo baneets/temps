@@ -3,9 +3,11 @@
 //! All searches read directly from compressed chunk files on disk/S3.
 //! The log_chunks table provides the index of which files to read.
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -13,6 +15,34 @@ use crate::error::LogAggregatorError;
 use crate::services::LogMetadataService;
 use crate::storage::LogStorage;
 use crate::types::*;
+
+/// Heap entry that orders LogSearchLine by timestamp only.
+///
+/// We need this because `LogSearchLine` doesn't implement Ord (it carries
+/// JSON values that aren't comparable). The heap's min/max behavior depends
+/// solely on the timestamp; ties keep insertion order, which is fine — the
+/// dedup pass upstream already collapsed identical lines.
+struct HeapEntry {
+    timestamp: DateTime<Utc>,
+    line: LogSearchLine,
+}
+
+impl PartialEq for HeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp == other.timestamp
+    }
+}
+impl Eq for HeapEntry {}
+impl PartialOrd for HeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for HeapEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.timestamp.cmp(&other.timestamp)
+    }
+}
 
 /// Maximum time range for full text search (hours)
 const MAX_FULLTEXT_HOURS: u32 = 24;
@@ -42,10 +72,24 @@ impl LogSearchService {
         // Validate required params
         self.validate_filter(filter)?;
 
-        let page_size = std::cmp::min(filter.page_size, 500) as u64;
+        // 2000 is the upper bound — keeps memory bounded for any single
+        // request while letting the UI fetch enough rope to feel useful.
+        // Frontend defaults to 500.
+        let page_size = std::cmp::min(filter.page_size, 2000) as u64;
 
         // Always search from chunk files — no log_events table needed
         self.archive_search(filter, page_size).await
+    }
+
+    /// Parse a pagination cursor of the form `<ts_millis>:<chunk_uuid>`.
+    ///
+    /// Cursor semantics: "give me lines strictly older than this timestamp".
+    /// The chunk UUID is purely informational and not currently used for
+    /// disambiguation — the timestamp is the only ordering key.
+    fn parse_cursor(cursor: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        let (ts_str, _) = cursor.split_once(':')?;
+        let ts_millis: i64 = ts_str.parse().ok()?;
+        chrono::DateTime::from_timestamp_millis(ts_millis)
     }
 
     /// Get context lines around a specific log line in a chunk.
@@ -135,15 +179,22 @@ impl LogSearchService {
         filter: &LogSearchFilter,
         page_size: u64,
     ) -> Result<LogSearchResult, LogAggregatorError> {
+        // When a cursor is set, narrow the effective end_time to the cursor's
+        // timestamp so we strictly paginate into older logs. The cursor was
+        // emitted as the oldest line of the previous page; "older than that"
+        // means strictly less, so we use < not <= when filtering lines below.
+        let cursor_ts = filter.cursor.as_deref().and_then(Self::parse_cursor);
+        let effective_end = cursor_ts.unwrap_or(filter.end_time).min(filter.end_time);
+
         // Find relevant chunks via metadata
         let service_filter = filter.services.first().map(|s| s.as_str());
-        let chunks = self
+        let mut chunks = self
             .metadata_service
             .find_chunks(
                 filter.project_id,
                 service_filter,
                 filter.start_time,
-                filter.end_time,
+                effective_end,
             )
             .await?;
 
@@ -156,13 +207,31 @@ impl LogSearchService {
             });
         }
 
+        // Process chunks newest-first so the bounded heap converges quickly:
+        // the first chunks we read already hold the most recent lines, and
+        // the heap rejects older lines once full.
+        chunks.sort_by(|a, b| b.ended_at.cmp(&a.ended_at));
+
         debug!(
             project_id = %filter.project_id,
             chunk_count = chunks.len(),
+            page_size,
+            has_cursor = cursor_ts.is_some(),
             "Starting archive search"
         );
 
-        let mut all_matches = Vec::new();
+        // Bounded min-heap of size `page_size + 1`. Top of heap is the
+        // oldest line in the heap; once the heap is full we drop any new
+        // line older than the top, and replace the top when a newer line
+        // arrives. We keep one extra slot so that on early termination we
+        // still have a "what's just past the page" line to confirm has_more
+        // and emit the cursor.
+        //
+        // Memory: O(page_size) regardless of total matches in window.
+        // Time: O(N log K) where N=total matches, K=page_size.
+        let heap_cap = page_size as usize + 1;
+        let mut heap: BinaryHeap<Reverse<HeapEntry>> = BinaryHeap::with_capacity(heap_cap);
+
         let mut total_scanned = 0u64;
         // Dedup key: (ts_nanos, container_id, stream, msg). Lines identical on all four
         // are considered the same event and collapsed. This defends against:
@@ -201,21 +270,36 @@ impl LogSearchService {
                     Ok((chunk_id, data)) => {
                         let content = String::from_utf8_lossy(&data);
                         for (line_idx, raw_line) in content.lines().enumerate() {
+                            let Ok(parsed) = serde_json::from_str::<LogLine>(raw_line) else {
+                                continue;
+                            };
+                            if !self.line_matches_filter(&parsed, filter) {
+                                continue;
+                            }
+                            // Cursor is exclusive: only return lines strictly
+                            // older than the cursor timestamp so the previous
+                            // page's oldest line isn't returned again.
+                            if let Some(c) = cursor_ts {
+                                if parsed.ts >= c {
+                                    continue;
+                                }
+                            }
+                            let dedup_key = (
+                                parsed.ts.timestamp_nanos_opt().unwrap_or(0),
+                                parsed.container_id.clone(),
+                                parsed.stream,
+                                parsed.msg.clone(),
+                            );
+                            if !seen.insert(dedup_key) {
+                                continue;
+                            }
+                            // total_scanned counts matches that survived all
+                            // filters (time + level + service + text). Users
+                            // care about "matches in window", not raw bytes.
                             total_scanned += 1;
-                            if let Ok(parsed) = serde_json::from_str::<LogLine>(raw_line) {
-                                if !self.line_matches_filter(&parsed, filter) {
-                                    continue;
-                                }
-                                let dedup_key = (
-                                    parsed.ts.timestamp_nanos_opt().unwrap_or(0),
-                                    parsed.container_id.clone(),
-                                    parsed.stream,
-                                    parsed.msg.clone(),
-                                );
-                                if !seen.insert(dedup_key) {
-                                    continue;
-                                }
-                                all_matches.push(LogSearchLine {
+                            let entry = HeapEntry {
+                                timestamp: parsed.ts,
+                                line: LogSearchLine {
                                     timestamp: parsed.ts,
                                     level: parsed.level,
                                     service: parsed.service,
@@ -224,7 +308,16 @@ impl LogSearchService {
                                     chunk_id,
                                     line_offset: line_idx as i32,
                                     deploy_id: parsed.deploy_id,
-                                });
+                                },
+                            };
+
+                            if heap.len() < heap_cap {
+                                heap.push(Reverse(entry));
+                            } else if let Some(Reverse(oldest)) = heap.peek() {
+                                if entry.timestamp > oldest.timestamp {
+                                    heap.pop();
+                                    heap.push(Reverse(entry));
+                                }
                             }
                         }
                     }
@@ -233,26 +326,38 @@ impl LogSearchService {
                     }
                 }
             }
-
-            // Early exit if we have enough results
-            if all_matches.len() > page_size as usize {
-                break;
-            }
         }
 
-        // Sort by timestamp ascending (oldest first, like a terminal)
-        all_matches.sort_by_key(|a| a.timestamp);
+        // The bounded heap kept the page_size + 1 *newest* matches in window
+        // regardless of how many total matches exist (memory bound). Now we
+        // need to (a) decide if there's more (heap overshot by one) and
+        // (b) drop the extra entry so the response carries exactly page_size
+        // lines, then (c) return them in CHRONOLOGICAL order (ASC) so the UI
+        // can render terminal-style with newest at the bottom.
+        let mut newest_first: Vec<LogSearchLine> =
+            heap.into_iter().map(|Reverse(e)| e.line).collect();
+        newest_first.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
-        let has_more = all_matches.len() > page_size as usize;
-        all_matches.truncate(page_size as usize);
+        let has_more = newest_first.len() > page_size as usize;
+        newest_first.truncate(page_size as usize);
 
+        // next_cursor points at the OLDEST line in this page. The next call
+        // narrows end_time to this timestamp and only returns lines strictly
+        // older — i.e. "load older". Read it off the newest-first vec while
+        // the oldest is still trivially `last()`, before we flip orientation.
         let next_cursor = if has_more {
-            all_matches
+            newest_first
                 .last()
                 .map(|l| format!("{}:{}", l.timestamp.timestamp_millis(), l.chunk_id))
         } else {
             None
         };
+
+        // Flip to ASC for the wire format: oldest first, newest last. Matches
+        // terminal/journalctl convention so the UI's auto-load-older pattern
+        // can prepend to the top while new content appears at the bottom.
+        let mut all_matches = newest_first;
+        all_matches.reverse();
 
         Ok(LogSearchResult {
             lines: all_matches,

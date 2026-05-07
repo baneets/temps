@@ -13,6 +13,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { DateRangePicker } from '@/components/ui/date-range-picker'
+import type { DateRange } from 'react-day-picker'
 import { cn } from '@/lib/utils'
 import {
   LogLevel,
@@ -24,13 +32,18 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import AnsiToHtml from 'ansi-to-html'
 import {
   AlertCircle,
-  ChevronLeft,
-  ChevronRight,
+  ArrowUp,
   Clock,
   Loader2,
   Search,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 
 const ansiConverter = new AnsiToHtml({
   fg: 'var(--foreground)',
@@ -49,41 +62,32 @@ const LEVEL_COLORS: Record<LogLevel, string> = {
   TRACE: 'bg-zinc-400/15 text-zinc-500 dark:text-zinc-500 border-zinc-400/20',
 }
 
-function TimeRangeSelect({
-  value,
-  onChange,
-}: {
-  value: string
-  onChange: (value: string) => void
-}) {
-  return (
-    <Select value={value} onValueChange={onChange}>
-      <SelectTrigger className="w-[160px]">
-        <Clock className="h-3.5 w-3.5 mr-2 text-muted-foreground" />
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="15m">Last 15 min</SelectItem>
-        <SelectItem value="1h">Last 1 hour</SelectItem>
-        <SelectItem value="6h">Last 6 hours</SelectItem>
-        <SelectItem value="24h">Last 24 hours</SelectItem>
-      </SelectContent>
-    </Select>
-  )
-}
+// Server enforces a 24h cap on full-text search (MAX_FULLTEXT_HOURS in
+// search.rs). The 7d/30d presets and any custom range over 24h are fine for
+// level/service filters but the search box must be disabled to avoid a 400
+// from the backend.
+const FULLTEXT_MAX_HOURS = 24
 
-function getTimeRange(range: string): { start: string; end: string } {
+const TIME_RANGES: Array<{ value: string; label: string; hours: number }> = [
+  { value: '15m', label: 'Last 15 min', hours: 0.25 },
+  { value: '1h', label: 'Last 1 hour', hours: 1 },
+  { value: '6h', label: 'Last 6 hours', hours: 6 },
+  { value: '24h', label: 'Last 24 hours', hours: 24 },
+  { value: '7d', label: 'Last 7 days', hours: 24 * 7 },
+  { value: '30d', label: 'Last 30 days', hours: 24 * 30 },
+]
+
+const CUSTOM_RANGE_VALUE = 'custom'
+
+function presetTimeRange(range: string): { start: string; end: string } {
   const now = new Date()
   const end = now.toISOString()
-  const ms: Record<string, number> = {
-    '15m': 15 * 60 * 1000,
-    '1h': 60 * 60 * 1000,
-    '6h': 6 * 60 * 60 * 1000,
-    '24h': 24 * 60 * 60 * 1000,
-  }
-  const start = new Date(now.getTime() - (ms[range] ?? ms['1h'])).toISOString()
+  const found = TIME_RANGES.find((r) => r.value === range)
+  const hours = found?.hours ?? 1
+  const start = new Date(now.getTime() - hours * 60 * 60 * 1000).toISOString()
   return { start, end }
 }
+
 
 function HistoryLogLine({ line }: { line: LogSearchLine }) {
   const d = new Date(line.timestamp)
@@ -116,7 +120,6 @@ function HistoryLogLine({ line }: { line: LogSearchLine }) {
         className="whitespace-pre-wrap break-all min-w-0 flex-1"
         dangerouslySetInnerHTML={{ __html: ansiConverter.toHtml(line.message) }}
       />
-
     </div>
   )
 }
@@ -132,11 +135,28 @@ export default function HistoryLogViewer({
   const [searchText, setSearchText] = useState('')
   const [debouncedText, setDebouncedText] = useState('')
   const [timeRange, setTimeRange] = useState('1h')
-  const [cursor, setCursor] = useState<string | undefined>()
-  const [cursorStack, setCursorStack] = useState<string[]>([])
+  // Custom range, only meaningful when timeRange === CUSTOM_RANGE_VALUE.
+  // Stored as DateRange (from react-day-picker) so the existing
+  // DateRangePicker component can both read and write it without translation.
+  const [customRange, setCustomRange] = useState<DateRange | undefined>()
+  // Older pages loaded on demand. The first page comes from useLogHistory.
+  // When the user clicks "Load older", we fetch the next page using the
+  // current oldest line's cursor and append the result here. Filter/range
+  // changes clear this back to []; see the filterKey effect below.
+  const [olderPages, setOlderPages] = useState<LogSearchLine[][]>([])
+  const [olderCursor, setOlderCursor] = useState<string | undefined>()
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState<string | undefined>()
+  const [olderExhausted, setOlderExhausted] = useState(false)
+
   const parentRef = useRef<HTMLDivElement>(null)
-  // Track filter key to reset pagination on filter changes
-  const filterKey = `${selectedEnv}-${selectedService}-${selectedLevels.join(',')}-${debouncedText}-${timeRange}`
+  // Include the custom range in the filterKey so picking a different window
+  // resets the older-pages rope. ms keys keep the string compact.
+  const customRangeKey =
+    timeRange === CUSTOM_RANGE_VALUE && customRange?.from && customRange?.to
+      ? `${customRange.from.getTime()}-${customRange.to.getTime()}`
+      : ''
+  const filterKey = `${selectedEnv}-${selectedService}-${selectedLevels.join(',')}-${debouncedText}-${timeRange}-${customRangeKey}`
   const prevFilterKeyRef = useRef(filterKey)
 
   // Debounce search text
@@ -145,34 +165,71 @@ export default function HistoryLogViewer({
     return () => clearTimeout(timer)
   }, [searchText])
 
-  // Reset pagination when filters change
+  // Reset the older-pages rope whenever any filter changes — otherwise we'd
+  // splice unrelated logs from a stale level/text/range into the current view.
   if (filterKey !== prevFilterKeyRef.current) {
     prevFilterKeyRef.current = filterKey
-    if (cursor !== undefined || cursorStack.length > 0) {
-      setCursor(undefined)
-      setCursorStack([])
-    }
+    setOlderPages([])
+    setOlderCursor(undefined)
+    setOlderExhausted(false)
+    setOlderError(undefined)
   }
 
-  // Environments
   const { data: environments } = useQuery({
     ...getEnvironmentsOptions({
       path: { project_id: project.id },
     }),
   })
 
-  // Auto-select first environment (store ID as string)
   useEffect(() => {
     if (environments?.length && !selectedEnv) {
       setSelectedEnv(String(environments[0].id))
     }
   }, [environments, selectedEnv])
 
-  // Memoize time range so it only recalculates when timeRange selection changes,
-  // not on every render (getTimeRange calls new Date() which would create new
-  // strings each render, causing infinite query invalidation).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const { start, end } = useMemo(() => getTimeRange(timeRange), [timeRange])
+  // Resolve {start, end} from either the active preset or a custom DateRange.
+  // For presets we recompute on every timeRange change (presetTimeRange calls
+  // new Date()), so the memo's job is to avoid creating new strings on every
+  // render — only when the inputs actually change. When custom is active but
+  // not yet fully picked (start or end missing) we fall back to a 1h window
+  // so the query stays well-formed instead of erroring.
+  const { start, end } = useMemo(() => {
+    if (timeRange === CUSTOM_RANGE_VALUE) {
+      if (customRange?.from && customRange?.to) {
+        return {
+          start: customRange.from.toISOString(),
+          end: customRange.to.toISOString(),
+        }
+      }
+      return presetTimeRange('1h')
+    }
+    return presetTimeRange(timeRange)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeRange, customRangeKey])
+
+  // Effective range duration for the fulltext-disabled gate. Custom ranges
+  // get their actual span; presets fall back to the table; unknown defaults
+  // to 1h so we never lock the user out unexpectedly.
+  const currentRangeHours = useMemo(() => {
+    if (timeRange === CUSTOM_RANGE_VALUE) {
+      if (customRange?.from && customRange?.to) {
+        const ms = customRange.to.getTime() - customRange.from.getTime()
+        return Math.max(0, ms / (60 * 60 * 1000))
+      }
+      return 1
+    }
+    return TIME_RANGES.find((r) => r.value === timeRange)?.hours ?? 1
+  }, [timeRange, customRange])
+  const fulltextDisabled = currentRangeHours > FULLTEXT_MAX_HOURS
+
+  // Hard-clear the search box when a long range is picked so the disabled
+  // input doesn't quietly send a stale text filter that the server rejects.
+  useEffect(() => {
+    if (fulltextDisabled && searchText.length > 0) {
+      setSearchText('')
+    }
+  }, [fulltextDisabled, searchText])
+
   const { data, isLoading, isFetching, error } = useLogHistory(
     {
       projectId: project.id,
@@ -181,14 +238,39 @@ export default function HistoryLogViewer({
       levels: selectedLevels.length > 0 ? selectedLevels : undefined,
       envs: selectedEnv ? [selectedEnv] : undefined,
       services: selectedService ? [selectedService] : undefined,
-      text: debouncedText || undefined,
-      cursor,
-      pageSize: 200,
+      text: !fulltextDisabled && debouncedText ? debouncedText : undefined,
+      // Frontend asks for 500 per page; server caps at 2000.
+      pageSize: 500,
     },
-    !!project.id
+    !!project.id,
   )
 
-  const lines = data?.lines ?? []
+  // Build the rendered rope in ASC order (oldest at index 0, newest at end)
+  // so the UI renders terminal-style with newest at the bottom.
+  //
+  // Wire shape from the server: each page is already ASC. The first page
+  // contains the *newest* slab in the time window. Older pages, fetched as
+  // the user scrolls up, contain progressively earlier slabs.
+  //
+  // olderPages is in fetch order: [page2, page3, ...]. page2 covers logs
+  // immediately older than page1; page3 covers logs immediately older than
+  // page2; etc. To get a single ASC vec we walk olderPages from the END
+  // backward (oldest fetched first) then append the first page at the end.
+  const lines = useMemo(() => {
+    const firstPage = data?.lines ?? []
+    if (olderPages.length === 0) return firstPage
+    const olderFlat: LogSearchLine[] = []
+    for (let i = olderPages.length - 1; i >= 0; i--) {
+      olderFlat.push(...olderPages[i])
+    }
+    return olderFlat.concat(firstPage)
+  }, [data?.lines, olderPages])
+
+  // The cursor we use for "load older" — once we've loaded extra pages,
+  // the server's last-emitted cursor lives in olderCursor; before that,
+  // it's data.next_cursor from the first-page response.
+  const effectiveNextCursor =
+    olderCursor !== undefined ? olderCursor : data?.next_cursor ?? null
 
   const virtualizer = useVirtualizer({
     count: lines.length,
@@ -197,218 +279,447 @@ export default function HistoryLogViewer({
     overscan: 20,
   })
 
-  // Scroll to bottom when new data loads (logs read oldest→newest, bottom is most recent)
-  useEffect(() => {
-    if (lines.length > 0) {
-      virtualizer.scrollToIndex(lines.length - 1, { align: 'end' })
-    }
-  }, [lines.length, virtualizer])
-
   const toggleLevel = useCallback((level: LogLevel) => {
     setSelectedLevels((prev) =>
-      prev.includes(level) ? prev.filter((l) => l !== level) : [...prev, level]
+      prev.includes(level) ? prev.filter((l) => l !== level) : [...prev, level],
     )
   }, [])
 
-  const handleNextPage = useCallback(() => {
-    if (data?.next_cursor) {
-      if (cursor) {
-        setCursorStack((prev) => [...prev, cursor])
+  const handleLoadOlder = useCallback(async () => {
+    if (!effectiveNextCursor || loadingOlder) return
+    setLoadingOlder(true)
+    setOlderError(undefined)
+    try {
+      const body: Record<string, unknown> = {
+        project_id: project.id,
+        start_time: start,
+        end_time: end,
+        cursor: effectiveNextCursor,
+        page_size: 500,
       }
-      setCursor(data.next_cursor)
-    }
-  }, [data?.next_cursor, cursor])
+      if (selectedLevels.length > 0) body.levels = selectedLevels
+      if (selectedEnv) body.envs = [selectedEnv]
+      if (selectedService) body.services = [selectedService]
+      if (!fulltextDisabled && debouncedText) body.text = debouncedText
 
-  const handlePrevPage = useCallback(() => {
-    setCursorStack((prev) => {
-      const newStack = [...prev]
-      const prevCursor = newStack.pop()
-      setCursor(prevCursor)
-      return newStack
+      const res = await fetch('/api/logs/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`)
+      }
+      const json = (await res.json()) as {
+        lines: LogSearchLine[]
+        next_cursor: string | null
+      }
+      if (json.lines.length === 0) {
+        setOlderExhausted(true)
+      } else {
+        setOlderPages((prev) => [...prev, json.lines])
+      }
+      setOlderCursor(json.next_cursor ?? undefined)
+      if (!json.next_cursor) {
+        setOlderExhausted(true)
+      }
+    } catch (e) {
+      setOlderError(e instanceof Error ? e.message : 'Failed to load older logs')
+    } finally {
+      setLoadingOlder(false)
+    }
+  }, [
+    effectiveNextCursor,
+    loadingOlder,
+    project.id,
+    start,
+    end,
+    selectedLevels,
+    selectedEnv,
+    selectedService,
+    fulltextDisabled,
+    debouncedText,
+  ])
+
+  const totalMatched = data?.total_scanned ?? 0
+  const showingCount = lines.length
+  const canLoadOlder = !!effectiveNextCursor && !olderExhausted
+
+  // Auto-load older logs when the sentinel enters the scroll viewport.
+  // Lines are ASC (newest at the bottom) so "older" lives at the TOP of
+  // the log pane — the sentinel sits above all rendered lines and fires
+  // when the user has scrolled close to the top of the rope. Stops when:
+  //   - we're already fetching (loadingOlder)
+  //   - the cursor is exhausted (canLoadOlder = false)
+  //   - the previous attempt errored (olderError) — user must click to retry
+  // The manual button stays mounted so error-retry and visual progress are
+  // both addressable; it just rarely needs to be clicked in practice.
+  const sentinelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    const root = parentRef.current
+    if (!sentinel || !root) return
+    if (!canLoadOlder || loadingOlder || olderError) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            void handleLoadOlder()
+          }
+        }
+      },
+      {
+        root,
+        // Pre-fire 200px before the sentinel reaches the top of the
+        // viewport so the next page is already arriving by the time the
+        // user scrolls to the top of the rope.
+        rootMargin: '200px 0px 0px 0px',
+        threshold: 0,
+      },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [canLoadOlder, loadingOlder, olderError, handleLoadOlder])
+
+  // Pin scroll to the bottom on the very first page render. After that, the
+  // user owns the scroll position — we don't auto-snap on subsequent
+  // updates (especially not on prepended older pages, where the goal is
+  // exactly the opposite: keep the user's reading position fixed even as
+  // new rows shift in above).
+  const initialScrolledRef = useRef(false)
+  useEffect(() => {
+    if (initialScrolledRef.current) return
+    const root = parentRef.current
+    if (!root) return
+    if ((data?.lines?.length ?? 0) === 0) return
+    // Defer to next frame so the virtualizer has measured first-page rows.
+    const id = requestAnimationFrame(() => {
+      root.scrollTop = root.scrollHeight
+      initialScrolledRef.current = true
     })
-  }, [])
+    return () => cancelAnimationFrame(id)
+  }, [data?.lines])
+
+  // Reset the "first scroll" flag when filters change, so a freshly-fetched
+  // first page anchors to the bottom again.
+  useEffect(() => {
+    initialScrolledRef.current = false
+  }, [filterKey])
+
+  // Preserve scroll position when older pages prepend at the top. Without
+  // this, scrollTop stays at its absolute pixel value while N new rows are
+  // inserted above it — which yanks the user's eye downward to whatever
+  // line is now at that pixel offset. Capture scrollHeight before the
+  // append, then bump scrollTop by the delta after the DOM settles.
+  const prevScrollHeightRef = useRef<number | null>(null)
+  const olderPagesCountRef = useRef(0)
+  useEffect(() => {
+    const root = parentRef.current
+    if (!root) return
+    const prev = olderPagesCountRef.current
+    const next = olderPages.length
+    olderPagesCountRef.current = next
+
+    // A fetch began (loadingOlder true) — snapshot scrollHeight.
+    if (loadingOlder && prevScrollHeightRef.current == null) {
+      prevScrollHeightRef.current = root.scrollHeight
+      return
+    }
+    // A new older page just landed — adjust scrollTop by the height delta.
+    if (next > prev && prevScrollHeightRef.current != null) {
+      const before = prevScrollHeightRef.current
+      prevScrollHeightRef.current = null
+      // Wait one frame for the virtualizer to grow the spacer for the
+      // newly-prepended rows, then offset scrollTop by the delta so the
+      // user's read position is visually stable.
+      requestAnimationFrame(() => {
+        const delta = root.scrollHeight - before
+        if (delta > 0) {
+          root.scrollTop = root.scrollTop + delta
+        }
+      })
+    }
+  }, [olderPages, loadingOlder])
 
   return (
-    <div className="p-4 space-y-4">
-      {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-        <Select
-          value={selectedEnv}
-          onValueChange={setSelectedEnv}
-        >
-          <SelectTrigger className="w-full sm:w-[200px]">
-            <SelectValue placeholder="All environments" />
-          </SelectTrigger>
-          <SelectContent>
-            {environments?.map((env) => (
-              <SelectItem key={env.id} value={String(env.id)}>
-                {env.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select
-          value={selectedService ?? 'all'}
-          onValueChange={(v) => setSelectedService(v === 'all' ? undefined : v)}
-        >
-          <SelectTrigger className="w-full sm:w-auto sm:max-w-[300px]">
-            <SelectValue placeholder="All services" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All services</SelectItem>
-            {Array.from(
-              new Set(
-                (data?.lines ?? [])
-                  .map((l) => l.service)
-                  .filter((s) => s && s !== 'unknown')
-              )
-            )
-              .sort()
-              .map((service) => (
-                <SelectItem key={service} value={service}>
-                  {service}
+    <TooltipProvider delayDuration={150}>
+      <div className="p-4 space-y-4">
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+          <Select value={selectedEnv} onValueChange={setSelectedEnv}>
+            <SelectTrigger className="w-full sm:w-[200px]">
+              <SelectValue placeholder="All environments" />
+            </SelectTrigger>
+            <SelectContent>
+              {environments?.map((env) => (
+                <SelectItem key={env.id} value={String(env.id)}>
+                  {env.name}
                 </SelectItem>
               ))}
-          </SelectContent>
-        </Select>
+            </SelectContent>
+          </Select>
 
-        <TimeRangeSelect value={timeRange} onChange={setTimeRange} />
-
-        <div className="relative flex-1 min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search log messages..."
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            className="pl-9 w-full"
-          />
-        </div>
-      </div>
-
-      {/* Level filter chips */}
-      <div className="flex gap-1.5 flex-wrap">
-        {LOG_LEVEL_OPTIONS.map((level) => (
-          <button
-            type="button"
-            key={level}
-            onClick={() => toggleLevel(level)}
-            className={cn(
-              'px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors',
-              selectedLevels.includes(level)
-                ? LEVEL_COLORS[level]
-                : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted'
-            )}
+          <Select
+            value={selectedService ?? 'all'}
+            onValueChange={(v) =>
+              setSelectedService(v === 'all' ? undefined : v)
+            }
           >
-            {level}
-          </button>
-        ))}
-        {selectedLevels.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setSelectedLevels([])}
-            className="px-2.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
-          >
-            Clear
-          </button>
-        )}
-      </div>
+            <SelectTrigger className="w-full sm:w-auto sm:max-w-[300px]">
+              <SelectValue placeholder="All services" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All services</SelectItem>
+              {Array.from(
+                new Set(
+                  (data?.lines ?? [])
+                    .map((l) => l.service)
+                    .filter((s) => s && s !== 'unknown'),
+                ),
+              )
+                .sort()
+                .map((service) => (
+                  <SelectItem key={service} value={service}>
+                    {service}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
 
-      {/* Error state */}
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>
-            Failed to load logs: {error.message}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* Results header */}
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <div className="flex items-center gap-2">
-          {isFetching && <Loader2 className="h-3 w-3 animate-spin" />}
-          <span>
-            {lines.length} log{lines.length !== 1 ? 's' : ''}
-            {data?.total_scanned
-              ? ` (${data.total_scanned.toLocaleString()} scanned)`
-              : ''}
-          </span>
-          {data?.search_mode && (
-            <Badge variant="outline" className="text-[10px] h-4">
-              {data.search_mode === 'archive' ? 'Full scan' : 'Indexed'}
-            </Badge>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            disabled={cursorStack.length === 0 && !cursor}
-            onClick={handlePrevPage}
-          >
-            <ChevronLeft className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            disabled={!data?.next_cursor}
-            onClick={handleNextPage}
-          >
-            <ChevronRight className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-
-      {/* Log lines */}
-      <div className="border rounded-lg bg-background">
-        {isLoading && !data ? (
-          <div className="h-[500px] flex items-center justify-center">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : lines.length === 0 ? (
-          <div className="h-[500px] flex items-center justify-center text-muted-foreground">
-            <div className="text-center">
-              <AlertCircle className="h-10 w-10 mx-auto mb-3 opacity-40" />
-              <p className="text-sm">No logs found for the selected filters</p>
-              <p className="text-xs mt-1">
-                Try adjusting the time range or clearing filters
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div
-            ref={parentRef}
-            className="h-[500px] overflow-auto select-text"
-          >
-            <div
-              style={{
-                height: `${virtualizer.getTotalSize()}px`,
-                width: '100%',
-                position: 'relative',
+          {/* Time range: presets + a Custom range… entry. When the user
+              picks Custom range… we seed the DateRangePicker with the
+              previously-active preset window (smooth handoff) and reveal
+              the picker next to the select. The DateRangePicker is
+              self-contained — its trigger button is what the user clicks
+              to actually edit the range, while this Select stays as the
+              single source of truth for which mode is active. */}
+          <div className="flex items-center gap-1">
+            <Select
+              value={timeRange}
+              onValueChange={(v) => {
+                if (
+                  v === CUSTOM_RANGE_VALUE &&
+                  (!customRange?.from || !customRange?.to)
+                ) {
+                  // Seed with the previous preset window so the calendar
+                  // opens at a sensible position. Only seeds when no custom
+                  // range is set yet — preserves a previously-picked window
+                  // across preset round-trips.
+                  const seedKey = TIME_RANGES.find((r) => r.value === timeRange)
+                    ? timeRange
+                    : '1h'
+                  const seed = presetTimeRange(seedKey)
+                  setCustomRange({
+                    from: new Date(seed.start),
+                    to: new Date(seed.end),
+                  })
+                }
+                setTimeRange(v)
               }}
             >
-              {virtualizer.getVirtualItems().map((virtualRow) => (
-                <div
-                  key={virtualRow.key}
-                  data-index={virtualRow.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: 'absolute',
-                    top: `${virtualRow.start}px`,
-                    left: 0,
-                    width: '100%',
-                  }}
-                >
-                  <HistoryLogLine line={lines[virtualRow.index]} />
-                </div>
-              ))}
-            </div>
+              <SelectTrigger className="w-[180px]">
+                <Clock className="h-3.5 w-3.5 mr-2 text-muted-foreground shrink-0" />
+                <SelectValue>
+                  {timeRange === CUSTOM_RANGE_VALUE
+                    ? 'Custom range'
+                    : TIME_RANGES.find((r) => r.value === timeRange)?.label}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {TIME_RANGES.map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+                <SelectItem value={CUSTOM_RANGE_VALUE}>
+                  Custom range…
+                </SelectItem>
+              </SelectContent>
+            </Select>
+
+            {timeRange === CUSTOM_RANGE_VALUE && (
+              <DateRangePicker
+                date={customRange}
+                onDateChange={setCustomRange}
+                showTime
+                className="w-[280px]"
+              />
+            )}
           </div>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="relative flex-1 min-w-[200px]">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder={
+                    fulltextDisabled
+                      ? 'Search disabled for ranges over 24h'
+                      : 'Search log messages...'
+                  }
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  className="pl-9 w-full"
+                  disabled={fulltextDisabled}
+                />
+              </div>
+            </TooltipTrigger>
+            {fulltextDisabled && (
+              <TooltipContent side="bottom">
+                Full-text search is limited to ranges of 24 hours or less.
+                Narrow the time range to search inside log messages.
+              </TooltipContent>
+            )}
+          </Tooltip>
+        </div>
+
+        {/* Level filter chips */}
+        <div className="flex gap-1.5 flex-wrap">
+          {LOG_LEVEL_OPTIONS.map((level) => (
+            <button
+              type="button"
+              key={level}
+              onClick={() => toggleLevel(level)}
+              className={cn(
+                'px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors',
+                selectedLevels.includes(level)
+                  ? LEVEL_COLORS[level]
+                  : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted',
+              )}
+            >
+              {level}
+            </button>
+          ))}
+          {selectedLevels.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedLevels([])}
+              className="px-2.5 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        {/* Error state */}
+        {error && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              Failed to load logs: {error.message}
+            </AlertDescription>
+          </Alert>
         )}
+
+        {/* Results header */}
+        <div className="flex items-center justify-between text-xs text-muted-foreground">
+          <div className="flex items-center gap-2">
+            {isFetching && <Loader2 className="h-3 w-3 animate-spin" />}
+            <span>
+              Showing {showingCount.toLocaleString()}
+              {totalMatched > showingCount
+                ? ` of ${totalMatched.toLocaleString()}+`
+                : ''}{' '}
+              {showingCount === 1 ? 'log' : 'logs'}
+            </span>
+          </div>
+        </div>
+
+        {/* Log lines */}
+        <div className="border rounded-lg bg-background">
+          {isLoading && !data ? (
+            <div className="h-[500px] flex items-center justify-center">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : lines.length === 0 ? (
+            <div className="h-[500px] flex items-center justify-center text-muted-foreground">
+              <div className="text-center">
+                <AlertCircle className="h-10 w-10 mx-auto mb-3 opacity-40" />
+                <p className="text-sm">No logs found for the selected filters</p>
+                <p className="text-xs mt-1">
+                  Try adjusting the time range or clearing filters
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div
+              ref={parentRef}
+              className="h-[500px] overflow-auto select-text"
+            >
+              {/* Sentinel ABOVE the virtualizer spacer. ASC ordering means
+                  older logs live at the top, so the auto-load-older trigger
+                  belongs at the top of the rope. IntersectionObserver fires
+                  handleLoadOlder when the sentinel scrolls into view. The
+                  button-shaped content is the manual fallback (error retry,
+                  accessibility). Must be inside parentRef so the observer's
+                  root can detect intersection during scroll. */}
+              <div
+                ref={sentinelRef}
+                className="border-b flex items-center justify-center px-3 py-2"
+              >
+                {olderError ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs gap-1.5 text-destructive"
+                    onClick={handleLoadOlder}
+                  >
+                    Retry — {olderError}
+                  </Button>
+                ) : olderExhausted || !canLoadOlder ? (
+                  <span className="text-xs text-muted-foreground">
+                    Beginning of logs in this time range
+                  </span>
+                ) : loadingOlder ? (
+                  <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Loading older logs...
+                  </span>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs gap-1.5"
+                    onClick={handleLoadOlder}
+                  >
+                    <ArrowUp className="h-3 w-3" />
+                    Load older
+                  </Button>
+                )}
+              </div>
+
+              {/* Virtualizer spacer: absolute-positioned rows live inside,
+                  laid out top→bottom in ASC timestamp order so the newest
+                  line ends up at the bottom of the scroll viewport. */}
+              <div
+                style={{
+                  height: `${virtualizer.getTotalSize()}px`,
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {virtualizer.getVirtualItems().map((virtualRow) => (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: `${virtualRow.start}px`,
+                      left: 0,
+                      width: '100%',
+                    }}
+                  >
+                    <HistoryLogLine line={lines[virtualRow.index]} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   )
 }

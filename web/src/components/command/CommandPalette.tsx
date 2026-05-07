@@ -37,6 +37,7 @@ import {
   GitBranch,
   Globe,
   HardDrive,
+  History,
   Home,
   Key,
   Mail,
@@ -382,7 +383,7 @@ const projectNavItems: NavigationItem[] = [
   {
     title: 'Log History',
     url: 'runtime?tab=history',
-    icon: ScrollText,
+    icon: History,
     keywords: ['logs', 'history', 'search', 'archive', 'past'],
   },
   {
@@ -538,7 +539,7 @@ const projectNavItems: NavigationItem[] = [
   {
     title: 'Request Logs',
     url: 'request-logs',
-    icon: ScrollText,
+    icon: Network,
     keywords: ['logs', 'requests', 'http', 'traffic'],
   },
 ]

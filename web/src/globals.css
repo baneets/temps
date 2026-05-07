@@ -411,3 +411,28 @@ body {
     @apply bg-background text-foreground;
   }
 }
+
+/* Fade-in for freshly-arrived log lines in the live viewer.
+   Applied only to rows in the most recently flushed batch — older rows
+   already in the DOM render with no animation cost. 120ms is short enough
+   to feel responsive but long enough that the eye registers the new row
+   appearing rather than the wall just getting taller. Respects reduced-
+   motion preferences. */
+@keyframes log-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.log-fresh-line {
+  animation: log-fade-in 120ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .log-fresh-line {
+    animation: none;
+  }
+}

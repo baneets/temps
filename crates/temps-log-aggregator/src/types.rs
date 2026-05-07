@@ -144,7 +144,7 @@ pub struct LogSearchFilter {
     /// Cursor for pagination
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
-    /// Page size (default: 100, max: 500)
+    /// Page size (default: 100, max: 2000)
     #[serde(default = "default_page_size")]
     pub page_size: u32,
 }

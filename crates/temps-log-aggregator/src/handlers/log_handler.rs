@@ -1286,11 +1286,14 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn test_search_logs_with_pagination() {
+        // Regression test: pagination via next_cursor must walk into older
+        // logs without overlap. Previously the server emitted next_cursor
+        // but never honored filter.cursor on the way back in, so every
+        // "next page" click returned page 1 again.
         let ctx = create_test_context().await;
         let project_id = next_test_project_id();
         let now = Utc::now();
 
-        // Seed many log lines
         let mut lines = Vec::new();
         for i in 0..15 {
             lines.push(make_log_line(
@@ -1307,8 +1310,7 @@ mod tests {
 
         let server = build_test_server(ctx.app_state.clone());
 
-        // Request a small page
-        let response = server
+        let page1 = server
             .post("/logs/search")
             .json(&serde_json::json!({
                 "project_id": project_id,
@@ -1317,15 +1319,182 @@ mod tests {
                 "page_size": 5,
             }))
             .await;
+        assert_eq!(page1.status_code(), StatusCode::OK);
+        let page1_body: serde_json::Value = page1.json();
+        let page1_lines = page1_body["lines"].as_array().unwrap();
+        assert_eq!(page1_lines.len(), 5);
+        let page1_cursor = page1_body["next_cursor"]
+            .as_str()
+            .expect("page 1 must emit a cursor when more matches exist (15 total, 5 per page)");
 
-        assert_eq!(response.status_code(), StatusCode::OK);
+        let page2 = server
+            .post("/logs/search")
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "start_time": (now - Duration::hours(1)).to_rfc3339(),
+                "end_time": (now + Duration::hours(1)).to_rfc3339(),
+                "page_size": 5,
+                "cursor": page1_cursor,
+            }))
+            .await;
+        assert_eq!(page2.status_code(), StatusCode::OK);
+        let page2_body: serde_json::Value = page2.json();
+        let page2_lines = page2_body["lines"].as_array().unwrap();
+        assert_eq!(page2_lines.len(), 5, "page 2 should have 5 more lines");
+
+        // No overlap: every page-2 message is distinct from every page-1 message.
+        let p1_msgs: std::collections::HashSet<&str> = page1_lines
+            .iter()
+            .map(|l| l["message"].as_str().unwrap())
+            .collect();
+        for l in page2_lines {
+            let m = l["message"].as_str().unwrap();
+            assert!(
+                !p1_msgs.contains(m),
+                "page 2 leaked a page-1 line: {} (cursor was ignored)",
+                m,
+            );
+        }
+
+        // Page 2 lines are strictly older than every page-1 line.
+        let p1_oldest = page1_lines
+            .iter()
+            .map(|l| l["timestamp"].as_str().unwrap())
+            .min()
+            .unwrap();
+        for l in page2_lines {
+            let ts = l["timestamp"].as_str().unwrap();
+            assert!(
+                ts < p1_oldest,
+                "page 2 line {} is not older than page-1 oldest {}",
+                ts,
+                p1_oldest,
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_search_logs_returns_chronological_order() {
+        // The page is bounded server-side to the *newest* page_size matches in
+        // the time window (heap-kept), but the wire format is ASC so the UI
+        // can render terminal-style with newest at the bottom. "Chronological"
+        // here means oldest first inside the page; "load older" pages pre-
+        // pend at the top of the rendered rope.
+        let ctx = create_test_context().await;
+        let project_id = next_test_project_id();
+        let now = Utc::now();
+
+        let mut lines = Vec::new();
+        for i in 0..10 {
+            lines.push(make_log_line(
+                project_id,
+                "api",
+                "prod",
+                LogLevel::Info,
+                &format!("event {}", i),
+                now - Duration::seconds(10 - i),
+                "container-order",
+            ));
+        }
+        seed_logs(&ctx, lines).await;
+
+        let server = build_test_server(ctx.app_state.clone());
+        let response = server
+            .post("/logs/search")
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "start_time": (now - Duration::hours(1)).to_rfc3339(),
+                "end_time": (now + Duration::hours(1)).to_rfc3339(),
+                "page_size": 100,
+            }))
+            .await;
 
         let body: serde_json::Value = response.json();
-        let lines_arr = body["lines"].as_array().unwrap();
-        assert!(
-            lines_arr.len() <= 5,
-            "Expected at most 5 lines with page_size=5, got {}",
-            lines_arr.len()
+        let arr = body["lines"].as_array().unwrap();
+        assert_eq!(arr.len(), 10);
+
+        // Each subsequent line must be strictly newer (ASC ordering).
+        for w in arr.windows(2) {
+            let a = w[0]["timestamp"].as_str().unwrap();
+            let b = w[1]["timestamp"].as_str().unwrap();
+            assert!(
+                a <= b,
+                "results not in ASC order: {} appeared before {}",
+                a,
+                b,
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_search_logs_wider_window_returns_more_recent_logs() {
+        // Regression test: the early-exit `break` after page_size matches
+        // ran chunks oldest-first, so a "Last 6 hours" query and a "Last 1
+        // hour" query returned essentially the same lines from the start
+        // of the window. The bigger window expansion was wasted because
+        // the scanner stopped reading once it had enough, and "enough"
+        // came from the oldest chunks.
+        let ctx = create_test_context().await;
+        let project_id = next_test_project_id();
+        let now = Utc::now();
+
+        // Seed 10 lines spread across 4 hours: half at -3h30m, half at -30m.
+        let mut lines = Vec::new();
+        for i in 0..10 {
+            let offset = if i < 5 {
+                Duration::minutes(-210)
+            } else {
+                Duration::minutes(-30)
+            };
+            lines.push(make_log_line(
+                project_id,
+                "api",
+                "prod",
+                LogLevel::Info,
+                &format!("evt-{}", i),
+                now + offset + Duration::seconds(i),
+                "container-window",
+            ));
+        }
+        seed_logs(&ctx, lines).await;
+
+        let server = build_test_server(ctx.app_state.clone());
+
+        // Last 1 hour: only the -30m batch is in window (5 lines).
+        let r1h = server
+            .post("/logs/search")
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "start_time": (now - Duration::hours(1)).to_rfc3339(),
+                "end_time": (now + Duration::minutes(1)).to_rfc3339(),
+                "page_size": 100,
+            }))
+            .await;
+        let body_1h: serde_json::Value = r1h.json();
+        let len_1h = body_1h["lines"].as_array().unwrap().len();
+        assert_eq!(
+            len_1h, 5,
+            "Last-1h window should hold exactly the -30m batch"
+        );
+
+        // Last 4 hours: both batches are in window (10 lines). If the early-exit
+        // bug were still present, this would also return ~5.
+        let r4h = server
+            .post("/logs/search")
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "start_time": (now - Duration::hours(4)).to_rfc3339(),
+                "end_time": (now + Duration::minutes(1)).to_rfc3339(),
+                "page_size": 100,
+            }))
+            .await;
+        let body_4h: serde_json::Value = r4h.json();
+        let len_4h = body_4h["lines"].as_array().unwrap().len();
+        assert_eq!(
+            len_4h, 10,
+            "Last-4h window should expand to include both batches",
         );
     }
 

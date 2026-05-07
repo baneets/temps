@@ -6,6 +6,7 @@ import {
   listContainersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -71,6 +72,20 @@ const MAX_VISIBLE_LOGS = 5000
 // in JS memory waiting to render. Trim to the most recent 1000 and surface
 // the dropped count so the user knows they're sampling, not recording.
 const MAX_PENDING_BUFFER = 1000
+// Minimum gap between Live-mode flushes. The previous behavior scheduled
+// a rAF on every WS frame; on a 1000+ lps firehose the eye perceives a
+// blurred wall of replacing text. 33ms (~30Hz) gives the user a perceivable
+// batch cadence — fast enough to feel live, slow enough that any one batch
+// is visually distinct from the next.
+const LIVE_FLUSH_MIN_GAP_MS = 33
+// Window over which we compute the live lines-per-second readout. 5s is
+// short enough to react to bursts but long enough that brief lulls don't
+// flap the displayed number.
+const LPS_WINDOW_MS = 5_000
+// Threshold above which we surface a `sampled` chip — once incoming exceeds
+// this, the visible buffer cap will roll lines off faster than the user can
+// read, so they should know they're not seeing every line.
+const LPS_SAMPLED_THRESHOLD = 60
 
 const INTERVAL_OPTIONS_MS = [5_000, 30_000, 60_000] as const
 type IntervalMs = (typeof INTERVAL_OPTIONS_MS)[number]
@@ -123,16 +138,18 @@ function formatIntervalLabel(ms: IntervalMs): string {
 function estimateLineHeight(content: string, containerWidth: number) {
   // Assuming average character width of 8px in monospace font
   const averageCharWidth = 9
-  const lineHeight = 20 // Base height for a single line
-  const minHeight = 24 // Minimum height to prevent overlap
+  // text-xs (12px) × leading-snug (1.375) ≈ 16.5px per text row.
+  const lineHeight = 17
+  const minHeight = 18
 
   if (!content || !containerWidth) return minHeight
 
-  // Account for padding (py-1 = 8px vertical padding)
-  const paddingHeight = 8
+  // Container is now px-3 (12px each side) and rows are py-0 — no extra
+  // vertical padding from the row wrapper, so paddingHeight stays 0.
+  const paddingHeight = 0
 
   // Calculate how many lines this content might wrap into
-  const effectiveWidth = containerWidth - 32 // Account for container padding (p-4 = 16px each side)
+  const effectiveWidth = containerWidth - 24 // px-3 = 12px each side
   const charactersPerLine = Math.max(
     1,
     Math.floor(effectiveWidth / averageCharWidth)
@@ -195,15 +212,34 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
   // mode (rAF for live, setInterval for interval, never for pause).
   const pendingLogsRef = useRef<string[]>([])
   const rafHandleRef = useRef<number | null>(null)
+  const flushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastFlushTsRef = useRef<number>(0)
   const intervalHandleRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Sliding window of WS message arrival timestamps used to compute live
+  // lines-per-second. Pushed on every enqueueLog; trimmed on demand. Stays
+  // a ref (not state) because we re-read the count once per second on the
+  // existing setNow tick — no need to render on every push.
+  const lpsSamplesRef = useRef<number[]>([])
+  const [lps, setLps] = useState(0)
+  // Index of the first row in the most recently flushed batch, captured at
+  // flush time. Rendered rows whose virtual index is >= this get a fade-in
+  // animation so the user perceives the new batch arriving as motion rather
+  // than a wall expanding silently.
+  const lastBatchStartRef = useRef<number>(0)
+  const [lastBatchStart, setLastBatchStart] = useState(0)
+  // Set by the Interval polling effect to its current poll function. The
+  // "Refresh now" button calls this to fire an immediate poll instead of
+  // waiting for the next tick. Null when not in Interval mode.
+  const pollNowRef = useRef<(() => void) | null>(null)
   // Live-mirror of mode/lastInterval so the WS callbacks (created once) can
   // read the latest value without being re-bound on every change.
   const modeRef = useRef<LogMode>(mode)
-  // Track whether the previous WS effect run was paused. When it was, the
-  // *next* run is "resuming from pause" and should keep the existing visible
-  // logs instead of wiping them. Genuine source changes (container, env,
-  // dates, tail, timestamps) still wipe.
-  const wasPausedRef = useRef(mode.kind === 'pause')
+  // Signature of the WS effect's *source* params (everything except mode).
+  // If the new run has the same signature, we're toggling modes and must
+  // NOT wipe the visible logs — otherwise switching Live → Interval blanks
+  // the pane until the next tick (5s of empty screen). Source-param
+  // changes (env, container, dates, tail, timestamps) still wipe.
+  const sourceSigRef = useRef<string>('')
   const virtualizer = useVirtualizer({
     count: logs.length,
     getScrollElement: () => parentRef.current,
@@ -324,21 +360,32 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     setDroppedSinceFlush(0)
     droppedSinceFlushRef.current = 0
     if (incoming.length === 0) return
+    lastFlushTsRef.current = Date.now()
     setLogs((prev) => {
       const merged = [...prev, ...incoming]
-      return merged.length > MAX_VISIBLE_LOGS
-        ? merged.slice(-MAX_VISIBLE_LOGS)
-        : merged
+      const trimmed =
+        merged.length > MAX_VISIBLE_LOGS
+          ? merged.slice(-MAX_VISIBLE_LOGS)
+          : merged
+      // Capture where this batch starts in the trimmed list so the row
+      // renderer can apply the fade-in animation to just the new rows.
+      // When we trim, the start is `length - incoming.length`; when we
+      // don't, it's `prev.length`.
+      const batchStart = Math.max(0, trimmed.length - incoming.length)
+      lastBatchStartRef.current = batchStart
+      setLastBatchStart(batchStart)
+      return trimmed
     })
   }, [])
 
-  // Enqueue a single line. In Live mode we schedule a rAF flush immediately
-  // so the existing per-frame behavior is preserved. In Pause/Interval modes
-  // the line just sits in the buffer until the corresponding mechanism drains
-  // it — *but* the buffer is capped at MAX_PENDING_BUFFER so a high-volume
-  // stream during a 30s tick can't accumulate megabytes in JS memory. When
-  // the cap is hit we drop the oldest pending line and bump the dropped
-  // counter so the user notices they're sampling.
+  // Enqueue a single line. In Live mode flushes are throttled to at most one
+  // every LIVE_FLUSH_MIN_GAP_MS so the visible cadence stays eye-paceable
+  // even on a firehose stream. In Pause/Interval modes the line just sits in
+  // the buffer until the corresponding mechanism drains it. The buffer is
+  // capped at MAX_PENDING_BUFFER so a high-volume stream during a 30s tick
+  // can't accumulate megabytes in JS memory. When the cap is hit we drop
+  // the oldest pending line and bump the dropped counter so the user
+  // notices they're sampling.
   const enqueueLog = useCallback(
     (line: string) => {
       const buf = pendingLogsRef.current
@@ -348,12 +395,36 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
         buf.splice(0, overflow)
         droppedSinceFlushRef.current += overflow
       }
+      // Track WS arrival time for the lps readout. Trimmed lazily on the
+      // 1Hz tick effect — pushing here is O(1).
+      lpsSamplesRef.current.push(Date.now())
+
       if (modeRef.current.kind === 'live') {
-        if (rafHandleRef.current != null) return
-        rafHandleRef.current = requestAnimationFrame(() => {
-          rafHandleRef.current = null
-          flushPending()
-        })
+        // Already a flush scheduled — let it pick up this line.
+        if (rafHandleRef.current != null || flushTimeoutRef.current != null)
+          return
+
+        const now = Date.now()
+        const sinceLast = now - lastFlushTsRef.current
+        if (sinceLast >= LIVE_FLUSH_MIN_GAP_MS) {
+          // Past the gap — flush on the next frame as before.
+          rafHandleRef.current = requestAnimationFrame(() => {
+            rafHandleRef.current = null
+            flushPending()
+          })
+        } else {
+          // Within the gap — defer the flush until the gap elapses, then
+          // run on the following animation frame so the DOM mutation
+          // aligns with paint timing.
+          const wait = LIVE_FLUSH_MIN_GAP_MS - sinceLast
+          flushTimeoutRef.current = setTimeout(() => {
+            flushTimeoutRef.current = null
+            rafHandleRef.current = requestAnimationFrame(() => {
+              rafHandleRef.current = null
+              flushPending()
+            })
+          }, wait)
+        }
       } else {
         // For Pause/Interval, keep counters fresh on a slow cadence — the
         // dedicated effect below ticks `now` once a second.
@@ -366,50 +437,137 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     [flushPending],
   )
 
-  // Drive the Interval mode flush + countdown. Also drives the 1Hz "now" tick
-  // so the "Next refresh in 0:03" / buffered counter UIs stay live.
+  // Drive the Interval mode poll + countdown. Also drives the 1Hz "now" tick
+  // so the "Next refresh in 0:03" / lps UIs stay live.
+  //
+  // Interval mode does NOT use the WebSocket. Instead it polls the
+  // /api/logs/search endpoint every N seconds and replaces the visible
+  // buffer with the most recent 500 lines. Snapshot semantics — what you
+  // see is "the last 500 lines as of N seconds ago," well-defined and
+  // free of duplicate bursts that an interval-flushed-WS produced.
   useEffect(() => {
-    // Always tick "now" at 1Hz so countdowns + buffered counts update.
-    const nowTimer = setInterval(() => setNow(Date.now()), 1000)
+    const nowTimer = setInterval(() => {
+      const t = Date.now()
+      setNow(t)
+      const cutoff = t - LPS_WINDOW_MS
+      const samples = lpsSamplesRef.current
+      let firstFresh = 0
+      while (firstFresh < samples.length && samples[firstFresh] < cutoff) {
+        firstFresh++
+      }
+      if (firstFresh > 0) samples.splice(0, firstFresh)
+      const windowSec = LPS_WINDOW_MS / 1000
+      setLps(samples.length / windowSec)
+    }, 1000)
     if (mode.kind !== 'interval') {
       setNextTickAt(null)
       return () => clearInterval(nowTimer)
     }
+    if (!selectedTarget) {
+      return () => clearInterval(nowTimer)
+    }
     const ms = mode.ms
+    // Abort signal so any in-flight fetch when mode/source changes mid-poll
+    // is cancelled — prevents a slow response from clobbering the buffer
+    // after the user has switched away.
+    const abort = new AbortController()
+    const poll = async () => {
+      try {
+        const now = new Date()
+        const start = new Date(now.getTime() - 60 * 60 * 1000) // last 1h
+        const body: Record<string, unknown> = {
+          project_id: project.id,
+          start_time: start.toISOString(),
+          end_time: now.toISOString(),
+          envs: [String(selectedTarget)],
+          page_size: 500,
+        }
+        const res = await fetch('/api/logs/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+          signal: abort.signal,
+        })
+        if (!res.ok) return
+        const json = (await res.json()) as {
+          lines: Array<{
+            timestamp: string
+            level: string
+            service: string
+            message: string
+          }>
+        }
+        // Lines arrive ASC (oldest first → newest last), matching the
+        // viewer's existing "newest at the bottom" assumption. We render
+        // a single-line representation so the new format slots into the
+        // existing string-based logs[] buffer without changes.
+        const formatted = json.lines.map((l) => {
+          if (showTimestamps) {
+            return `${l.timestamp} [${l.level}] ${l.service}: ${l.message}`
+          }
+          return `[${l.level}] ${l.service}: ${l.message}`
+        })
+        if (!abort.signal.aborted) {
+          setLogs(formatted)
+          // Captured-batch animation: treat the whole snapshot as a fresh
+          // batch so newly-rendered rows fade in.
+          lastBatchStartRef.current = 0
+          setLastBatchStart(0)
+        }
+      } catch {
+        // Ignore network errors; the next tick will retry.
+      }
+    }
+    // Expose the poll function so "Refresh now" can fire an immediate poll
+    // and reset the countdown without waiting for setInterval's next tick.
+    pollNowRef.current = () => {
+      void poll()
+      setNextTickAt(Date.now() + ms)
+    }
+    // Fire immediately so the user sees logs on entry instead of staring
+    // at a blank pane until the first tick elapses.
+    void poll()
     setNextTickAt(Date.now() + ms)
     intervalHandleRef.current = setInterval(() => {
-      flushPending()
+      void poll()
       setNextTickAt(Date.now() + ms)
     }, ms)
     return () => {
       clearInterval(nowTimer)
+      abort.abort()
+      pollNowRef.current = null
       if (intervalHandleRef.current != null) {
         clearInterval(intervalHandleRef.current)
         intervalHandleRef.current = null
       }
     }
-  }, [mode, flushPending])
+  }, [mode, project.id, selectedTarget, showTimestamps])
 
-  // When entering Pause from Live, cancel any pending rAF so the in-flight
-  // batch doesn't surprise-flush after the user just paused. The buffered
-  // counter immediately reflects whatever was already pending.
+  // When entering Pause from Live, cancel any pending rAF AND any deferred
+  // throttle timeout so neither fires after the user just paused. The
+  // buffered counter immediately reflects whatever was already pending.
   useEffect(() => {
     if (mode.kind === 'live') return
     if (rafHandleRef.current != null) {
       cancelAnimationFrame(rafHandleRef.current)
       rafHandleRef.current = null
     }
+    if (flushTimeoutRef.current != null) {
+      clearTimeout(flushTimeoutRef.current)
+      flushTimeoutRef.current = null
+    }
     setBufferedCount(pendingLogsRef.current.length)
   }, [mode])
 
-  // Manual "Resume" / "Refresh now" — flush whatever is buffered into the
-  // visible list immediately. Used by both the Pause-mode resume button and
-  // the Interval-mode "refresh now" button.
+  // Manual "Refresh now" — Interval mode triggers an immediate poll via the
+  // ref the Interval effect populated. Other modes drain the rAF buffer.
   const flushNow = useCallback(() => {
-    flushPending()
-    if (modeRef.current.kind === 'interval') {
-      setNextTickAt(Date.now() + modeRef.current.ms)
+    if (modeRef.current.kind === 'interval' && pollNowRef.current) {
+      pollNowRef.current()
+      return
     }
+    flushPending()
   }, [flushPending])
 
   // WebSocket connection effect
@@ -419,24 +577,44 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     // Wait for container to be selected - don't connect without a specific container
     if (!selectedContainer) return
 
+    // Build a source-only signature (everything that affects what stream we
+     // connect to, excluding mode). If only mode changed since the last run,
+     // we're toggling Live/Pause/Interval and must keep the visible logs.
+    const sourceSig = JSON.stringify({
+      p: project.id,
+      e: selectedTarget,
+      c: selectedContainer,
+      sd: startDate?.getTime() ?? null,
+      ed: endDate?.getTime() ?? null,
+      t: tail,
+      ts: showTimestamps,
+    })
+    const sourceUnchanged = sourceSigRef.current === sourceSig
+    sourceSigRef.current = sourceSig
+
     // Pause mode: don't open the WS at all. The cleanup from the previous
     // effect run (if any) has already closed any existing socket. We keep the
     // visible logs intact so the user can read what's on screen.
     if (mode.kind === 'pause') {
-      wasPausedRef.current = true
       return
     }
 
-    const resumingFromPause = wasPausedRef.current
-    wasPausedRef.current = false
+    // Interval mode: don't open the WS either. A separate polling effect
+    // calls /api/logs/search every N seconds and replaces the visible buffer
+    // with a fresh snapshot. Streaming + interval-replace is a worse UX
+    // (duplicate bursts on every interval reconnect) and wastes a connection.
+    if (mode.kind === 'interval') {
+      return
+    }
 
     // Capture the container this effect-instance is tailing. Used by the
     // socket handlers below to reject any late frames from a previous
     // socket whose handlers may still fire while React is unwinding.
     const targetContainer = selectedContainer
-    // Only wipe state when it's a genuine source change (container/env/dates/
-    // tail/timestamps changed). Resuming from Pause keeps what's on screen.
-    if (!resumingFromPause) {
+    // Only wipe state when it's a genuine source change. Mode toggles
+    // (Live → Interval, Pause → Live, etc.) keep the visible buffer so the
+    // user doesn't stare at a blank pane while waiting for the next tick.
+    if (!sourceUnchanged) {
       setLogs([])
       pendingLogsRef.current = []
       setBufferedCount(0)
@@ -446,6 +624,10 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     if (rafHandleRef.current != null) {
       cancelAnimationFrame(rafHandleRef.current)
       rafHandleRef.current = null
+    }
+    if (flushTimeoutRef.current != null) {
+      clearTimeout(flushTimeoutRef.current)
+      flushTimeoutRef.current = null
     }
     setRetryCount(0)
     setErrorMessage('')
@@ -473,10 +655,11 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
           Math.floor(endDate.getTime() / 1000).toString()
         )
       }
-      // On resume-from-Pause, ask for a small backlog so the user sees a
-      // smooth catch-up of recent activity rather than a wall of history or
-      // a confusing dead pause. On a genuine source change, use the full tail.
-      const effectiveTail = resumingFromPause ? Math.min(tail, 200) : tail
+      // When the source params didn't change (we're just toggling modes),
+      // ask for a small backlog so the user sees a smooth catch-up rather
+      // than a wall of history dumped on top of what's already on screen.
+      // On a genuine source change use the full tail.
+      const effectiveTail = sourceUnchanged ? Math.min(tail, 200) : tail
       if (effectiveTail) {
         params.append('tail', effectiveTail.toString())
       }
@@ -608,6 +791,10 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
       if (rafHandleRef.current != null) {
         cancelAnimationFrame(rafHandleRef.current)
         rafHandleRef.current = null
+      }
+      if (flushTimeoutRef.current != null) {
+        clearTimeout(flushTimeoutRef.current)
+        flushTimeoutRef.current = null
       }
       pendingLogsRef.current = []
 
@@ -767,16 +954,61 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     setCurrentMatchIndex(-1)
   }, [searchTerm])
 
+  // Auto-scroll-to-bottom when in follow mode. Two subtleties beyond a naive
+  // `scrollTop = scrollHeight`:
+  //
+  // 1. tanstack-virtual measures rows lazily as they scroll into view; a
+  //    multi-line JSON log can grow by 60+ pixels post-measurement. If we
+  //    only set scrollTop once on the `logs` change, the virtualizer's
+  //    follow-up reflow pushes us above the true bottom and the next
+  //    handleScroll incorrectly disengages follow mode. Schedule the snap
+  //    on rAF so it runs after the virtualizer commit.
+  //
+  // 2. Don't pin if we're already at the bottom — avoids cancelling
+  //    momentum-scroll on macOS when a flick happens to land at-bottom.
   useEffect(() => {
-    if (autoScroll && parentRef.current) {
-      parentRef.current.scrollTop = parentRef.current.scrollHeight
-    }
+    if (!autoScroll) return
+    const root = parentRef.current
+    if (!root) return
+    const id = requestAnimationFrame(() => {
+      // Re-check inside the rAF: the user may have scrolled away in the
+      // intervening tick, in which case we must not yank them back.
+      if (!autoScroll) return
+      const target = root.scrollHeight - root.clientHeight
+      if (root.scrollTop < target) {
+        root.scrollTop = target
+      }
+    })
+    return () => cancelAnimationFrame(id)
   }, [logs, autoScroll])
+
+  // Track whether the most recent scroll event was user-driven. handleScroll
+  // alone can't tell — content reflow inside the virtualizer dispatches the
+  // same event shape. We mark `userScrolledRef` on wheel / keydown / touch
+  // and only let those events disengage follow mode. Re-engagement (from
+  // false → true) still works on any scroll-to-bottom because that's the
+  // explicit signal "I want to follow again".
+  const userScrolledRef = useRef(false)
+  const markUserIntent = useCallback(() => {
+    userScrolledRef.current = true
+  }, [])
 
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
-    const isAtBottom = scrollHeight - scrollTop - clientHeight < 1
-    setAutoScroll(isAtBottom)
+    // Tolerance of 8px absorbs sub-pixel rounding plus the ~1–4px gap that
+    // the virtualizer's post-measurement reflow can leave behind.
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 8
+    if (isAtBottom) {
+      // User (or our own snap) is at the bottom — engage follow.
+      if (!autoScroll) setAutoScroll(true)
+      userScrolledRef.current = false
+      return
+    }
+    // Not at the bottom. Only disengage if the user actually moved us here —
+    // otherwise this is a reflow-induced scroll event and we ignore it.
+    if (userScrolledRef.current && autoScroll) {
+      setAutoScroll(false)
+    }
   }
 
   const handleSearch = useCallback((value: string) => {
@@ -804,15 +1036,17 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
   return (
     <div className="w-full">
       <div className="rounded-lg border bg-background shadow-sm">
-        {/* Add connection status alerts */}
-        {connectionStatus === 'connecting' && (
+        {/* Connection status alerts — only meaningful in Live mode where we
+            actually hold a WebSocket. Pause has no socket; Interval polls
+            HTTP and surfaces errors silently (the next tick retries). */}
+        {mode.kind === 'live' && connectionStatus === 'connecting' && (
           <Alert className="m-4">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>Connecting to log stream...</AlertDescription>
           </Alert>
         )}
 
-        {connectionStatus === 'error' && (
+        {mode.kind === 'live' && connectionStatus === 'error' && (
           <Alert variant="destructive" className="m-4">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
@@ -822,7 +1056,7 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
           </Alert>
         )}
 
-        {connectionStatus === 'permanent_error' && (
+        {mode.kind === 'live' && connectionStatus === 'permanent_error' && (
           <Alert variant="destructive" className="m-4">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription className="flex items-center justify-between">
@@ -840,8 +1074,8 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
         )}
 
         {/* Main Filters */}
-        <div className="p-4 space-y-4">
-          <div className="flex flex-col sm:flex-row gap-4">
+        <div className="px-3 py-2 space-y-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <Select
               value={selectedTarget?.toString()}
               onValueChange={(value) => {
@@ -913,25 +1147,9 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
                 className="pl-9 w-full"
               />
             </div>
-
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="show-timestamps"
-                checked={showTimestamps}
-                onCheckedChange={(checked) =>
-                  setShowTimestamps(checked === true)
-                }
-              />
-              <Label
-                htmlFor="show-timestamps"
-                className="text-sm font-normal cursor-pointer"
-              >
-                Show timestamps
-              </Label>
-            </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             {/* Mode segmented control */}
             <div className="inline-flex items-center rounded-md border bg-background p-0.5 text-sm">
               <Button
@@ -1010,7 +1228,20 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
                 <span>Paused · stream closed</span>
               )}
               {mode.kind === 'live' && (
-                <span>Live · {logs.length.toLocaleString()} lines</span>
+                <span className="flex items-center gap-2">
+                  <span>
+                    Live · {logs.length.toLocaleString()} lines
+                    {lps > 0.5 && ` · ~${Math.round(lps).toLocaleString()} lps`}
+                  </span>
+                  {lps >= LPS_SAMPLED_THRESHOLD && (
+                    <Badge
+                      variant="outline"
+                      className="h-5 gap-1 px-1.5 text-[10px] border-amber-500/40 text-amber-700 dark:text-amber-400 bg-amber-500/10"
+                    >
+                      sampled
+                    </Badge>
+                  )}
+                </span>
               )}
               {mode.kind === 'interval' && (
                 <>
@@ -1058,7 +1289,7 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
           </div>
 
           {showAdvanced && (
-            <div className="pt-4 border-t border-border">
+            <div className="pt-4 border-t border-border space-y-3">
               <FilterBar
                 onStartDateChange={setStartDate}
                 onEndDateChange={setEndDate}
@@ -1067,13 +1298,31 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
                 endDate={endDate}
                 tailLines={tail}
               />
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="show-timestamps"
+                  checked={showTimestamps}
+                  onCheckedChange={(checked) =>
+                    setShowTimestamps(checked === true)
+                  }
+                />
+                <Label
+                  htmlFor="show-timestamps"
+                  className="text-sm font-normal cursor-pointer"
+                >
+                  Show timestamps
+                </Label>
+              </div>
             </div>
           )}
         </div>
-        {/* Logs Display */}
+        {/* Logs Display — fills available viewport height. The 280px subtrahend
+            accounts for the page header, tab strip, and the two toolbar rows
+            above us. min-h floors the pane on short viewports so the empty
+            state is still legible. */}
         <div className="border-t border-border">
           {!selectedTarget ? (
-            <div className="h-[600px] flex items-center justify-center text-muted-foreground">
+            <div className="h-[calc(100vh-280px)] min-h-[300px] flex items-center justify-center text-muted-foreground">
               <div className="text-center">
                 <AlertCircle className="h-12 w-12 mx-auto mb-3 opacity-50" />
                 <p className="text-sm">Select an environment to view logs</p>
@@ -1083,10 +1332,35 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
             <div
               ref={parentRef}
               className={cn(
-                'h-[600px] overflow-auto p-4 font-mono text-xs bg-background text-foreground select-text',
-                connectionStatus === 'connecting' && 'opacity-50'
+                'h-[calc(100vh-280px)] min-h-[300px] overflow-auto px-3 py-2 font-mono text-xs bg-background text-foreground select-text',
+                mode.kind === 'live' &&
+                  connectionStatus === 'connecting' &&
+                  'opacity-50'
               )}
               onScroll={handleScroll}
+              // Mark user intent on any explicit scroll input so handleScroll
+              // can distinguish a real "user scrolled away" event from a
+              // virtualizer-reflow scroll event. Without this gate, every
+              // multi-line JSON log that grows post-measurement disengages
+              // follow mode unprompted.
+              onWheel={markUserIntent}
+              onTouchMove={markUserIntent}
+              onKeyDown={(e) => {
+                // Arrow keys, PageUp/Down, Home/End, Space — anything that
+                // moves the scrollbar from the keyboard.
+                if (
+                  e.key === 'ArrowUp' ||
+                  e.key === 'ArrowDown' ||
+                  e.key === 'PageUp' ||
+                  e.key === 'PageDown' ||
+                  e.key === 'Home' ||
+                  e.key === 'End' ||
+                  e.key === ' '
+                ) {
+                  markUserIntent()
+                }
+              }}
+              tabIndex={0}
             >
               <div
                 style={{
@@ -1095,25 +1369,34 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
                   position: 'relative',
                 }}
               >
-                {virtualizer.getVirtualItems().map((virtualRow) => (
-                  <div
-                    key={virtualRow.key}
-                    data-index={virtualRow.index}
-                    ref={virtualizer.measureElement}
-                    style={{
-                      position: 'absolute',
-                      top: `${virtualRow.start}px`,
-                      left: 0,
-                      width: '100%',
-                    }}
-                  >
-                    <LogLine
-                      content={logs[virtualRow.index]}
-                      isHighlighted={virtualRow.index === currentMatchIndex}
-                      searchTerm={searchTerm}
-                    />
-                  </div>
-                ))}
+                {virtualizer.getVirtualItems().map((virtualRow) => {
+                  // Rows in the most recent flush batch get a one-shot
+                  // fade-in. Once a row is no longer in the freshest batch
+                  // (a subsequent flush moved batchStart forward) the class
+                  // is removed, but the animation has already completed —
+                  // the visible result is unchanged.
+                  const isFresh = virtualRow.index >= lastBatchStart
+                  return (
+                    <div
+                      key={virtualRow.key}
+                      data-index={virtualRow.index}
+                      ref={virtualizer.measureElement}
+                      style={{
+                        position: 'absolute',
+                        top: `${virtualRow.start}px`,
+                        left: 0,
+                        width: '100%',
+                      }}
+                      className={cn(isFresh && 'log-fresh-line')}
+                    >
+                      <LogLine
+                        content={logs[virtualRow.index]}
+                        isHighlighted={virtualRow.index === currentMatchIndex}
+                        searchTerm={searchTerm}
+                      />
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
