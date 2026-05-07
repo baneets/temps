@@ -78,7 +78,7 @@ function formatTrendChange(trendPercentage: number | null | undefined): {
   }
 }
 
-const ITEMS_PER_PAGE = 8
+const ITEMS_PER_PAGE = 9
 
 // Mirrors the storage key used by ImprovedOnboardingDashboard. When the
 // dashboard reaches its 'complete' step it persists the state here; we
