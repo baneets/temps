@@ -25,6 +25,11 @@ pub struct EventFilters {
     pub environment_id: Option<i32>,
     pub search: Option<String>,
     pub limit: u64,
+    /// When `Some(true)`, exclude rows flagged as bots (`is_bot = true`).
+    /// When `Some(false)`, only include bot rows. `None` includes everything.
+    /// Currently only applied to the `Request` kind — other kinds don't
+    /// carry a bot flag.
+    pub hide_bots: Option<bool>,
 }
 
 impl EventFilters {
@@ -233,6 +238,7 @@ mod tests {
             environment_id: None,
             search: None,
             limit: 50,
+            hide_bots: None,
         };
         assert!(matches!(
             f.validate(),
@@ -251,6 +257,7 @@ mod tests {
             environment_id: None,
             search: None,
             limit: 50,
+            hide_bots: None,
         };
         assert!(f.validate().is_ok());
     }

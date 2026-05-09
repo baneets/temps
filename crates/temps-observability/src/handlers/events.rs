@@ -71,6 +71,10 @@ pub struct EventsQuery {
     pub search: Option<String>,
     /// Page size (default 50, max 200).
     pub limit: Option<u64>,
+    /// When `true`, exclude bot/crawler request rows. When `false`, only
+    /// include bot rows. Omitted means "include everything" (default).
+    /// Only affects the `Request` kind.
+    pub hide_bots: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -125,6 +129,7 @@ pub async fn observability_list_events(
         environment_id: query.environment_id,
         search: query.search,
         limit,
+        hide_bots: query.hide_bots,
     };
 
     let events = state.service.query(filters).await?;

@@ -247,6 +247,19 @@ impl ObservabilityService {
         if let Some(ref s) = filters.search {
             q = q.filter(proxy_logs::Column::Path.contains(s));
         }
+        if let Some(hide) = filters.hide_bots {
+            if hide {
+                // Treat NULL `is_bot` as not-a-bot so we don't hide rows
+                // that simply lack detection metadata (older rows).
+                q = q.filter(
+                    proxy_logs::Column::IsBot
+                        .eq(false)
+                        .or(proxy_logs::Column::IsBot.is_null()),
+                );
+            } else {
+                q = q.filter(proxy_logs::Column::IsBot.eq(true));
+            }
+        }
         let rows = q
             .order_by_desc(proxy_logs::Column::Timestamp)
             .limit(filters.limit)

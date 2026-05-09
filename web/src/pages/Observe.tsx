@@ -1,4 +1,6 @@
 import { ProjectResponse } from '@/api/client'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import {
@@ -22,6 +24,7 @@ import {
 } from '@/components/observe/types'
 import {
   AlertOctagon,
+  Bot,
   CircleDollarSign,
   Inbox,
   Network,
@@ -77,6 +80,7 @@ function sameKindSet(
  * "here's the link, look at the 500s after the deploy at 14:02".
  */
 export default function Observe({ project }: ObserveProps) {
+  usePageTitle(`Observe · ${project.name}`)
   const [searchParams, setSearchParams] = useSearchParams()
   const [selectedEvent, setSelectedEvent] =
     useState<ObservabilityEvent | null>(null)
@@ -98,6 +102,11 @@ export default function Observe({ project }: ObserveProps) {
         ? timeRangeParam
         : '24h'
 
+    // Bots hidden by default (mirrors ResourceMonitoring). Only the
+    // explicit `hide_bots=false` URL param flips it off so the default
+    // URL stays clean.
+    const hideBots = searchParams.get('hide_bots') !== 'false'
+
     return {
       kinds: kinds.length > 0 ? kinds : ([...DEFAULT_KINDS] as EventKind[]),
       timeRange,
@@ -105,6 +114,7 @@ export default function Observe({ project }: ObserveProps) {
       environmentId: searchParams.get('environment_id')
         ? Number(searchParams.get('environment_id'))
         : null,
+      hideBots,
     }
   }, [searchParams])
 
@@ -130,6 +140,13 @@ export default function Observe({ project }: ObserveProps) {
     } else {
       params.delete('environment_id')
     }
+    // Bots hidden is the default — only persist when the user has flipped
+    // it off so the URL doesn't carry redundant state.
+    if (next.hideBots) {
+      params.delete('hide_bots')
+    } else {
+      params.set('hide_bots', 'false')
+    }
     setSearchParams(params, { replace: true })
   }
 
@@ -145,6 +162,7 @@ export default function Observe({ project }: ObserveProps) {
     environmentId: filters.environmentId ?? undefined,
     search: filters.search || undefined,
     limit: 100,
+    hideBots: filters.hideBots,
   })
 
   const events = query.data?.events ?? []
@@ -153,7 +171,7 @@ export default function Observe({ project }: ObserveProps) {
 
   return (
     <>
-      <div className="flex h-full w-full flex-col bg-zinc-950">
+      <div className="flex h-full w-full flex-col bg-background">
         <CockpitHeader
           project={project}
           filters={filters}
@@ -281,9 +299,9 @@ function CockpitHeader({
   }
 
   return (
-    <div className="flex flex-col gap-3 border-b border-zinc-800 bg-zinc-950 p-4 text-zinc-200">
+    <div className="flex flex-col gap-3 border-b border-border bg-background p-4 text-foreground">
       <div className="flex flex-col gap-1">
-        <p className="text-xs uppercase tracking-wide text-zinc-500">
+        <p className="text-xs uppercase tracking-wide text-muted-foreground">
           Observe
         </p>
         <h1 className="text-lg font-semibold tracking-tight">
@@ -312,8 +330,8 @@ function CockpitHeader({
               className={cn(
                 'group flex flex-col gap-2 rounded-lg border p-3 text-left transition-colors',
                 active
-                  ? 'border-zinc-700 bg-zinc-900'
-                  : 'border-dashed border-zinc-800 bg-zinc-950 opacity-60 hover:opacity-100',
+                  ? 'border-border bg-card'
+                  : 'border-dashed border-border bg-background opacity-60 hover:opacity-100',
               )}
             >
               <div className="flex items-center justify-between gap-2">
@@ -323,7 +341,7 @@ function CockpitHeader({
                     {meta.label}
                   </span>
                 </div>
-                <span className="font-mono text-sm tabular-nums text-zinc-400">
+                <span className="font-mono text-sm tabular-nums text-muted-foreground">
                   {active ? total : 'off'}
                 </span>
               </div>
@@ -335,7 +353,7 @@ function CockpitHeader({
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="relative flex-1">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-zinc-500" />
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             type="search"
             placeholder="grep path / class / event…"
@@ -343,7 +361,7 @@ function CockpitHeader({
             onChange={(e) =>
               onChange({ ...filters, search: e.target.value })
             }
-            className="border-zinc-800 bg-zinc-900 pl-9 font-mono text-zinc-200 placeholder:text-zinc-600"
+            className="pl-9 font-mono"
           />
         </div>
         <Select
@@ -352,7 +370,7 @@ function CockpitHeader({
             onChange({ ...filters, timeRange: v as TimeRange })
           }
         >
-          <SelectTrigger className="w-full border-zinc-800 bg-zinc-900 font-mono text-zinc-200 sm:w-[160px]">
+          <SelectTrigger className="w-full font-mono sm:w-[160px]">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -363,6 +381,24 @@ function CockpitHeader({
             ))}
           </SelectContent>
         </Select>
+        <Button
+          type="button"
+          variant={filters.hideBots ? 'default' : 'outline'}
+          size="sm"
+          aria-pressed={filters.hideBots}
+          title={
+            filters.hideBots
+              ? 'Bot/crawler requests hidden — click to show'
+              : 'Bot/crawler requests visible — click to hide'
+          }
+          onClick={() =>
+            onChange({ ...filters, hideBots: !filters.hideBots })
+          }
+          className="gap-1.5"
+        >
+          <Bot className="size-3.5" />
+          {filters.hideBots ? 'Hide bots' : 'Show bots'}
+        </Button>
       </div>
     </div>
   )
@@ -442,14 +478,14 @@ function ConsoleRow({
       type="button"
       onClick={onClick}
       className={cn(
-        'group flex w-full items-baseline gap-3 border-b border-zinc-900 border-l-2 px-4 py-1.5 text-left text-zinc-300 hover:bg-zinc-900/60',
+        'group flex w-full items-baseline gap-3 border-b border-border border-l-2 px-4 py-1.5 text-left text-foreground hover:bg-muted/60',
         meta.gutter,
       )}
     >
       <time
         dateTime={event.ts}
         title={format(ts, 'yyyy-MM-dd HH:mm:ss.SSS')}
-        className="w-20 shrink-0 text-zinc-600 tabular-nums"
+        className="w-20 shrink-0 text-muted-foreground tabular-nums"
       >
         {format(ts, 'HH:mm:ss')}
       </time>
@@ -458,7 +494,7 @@ function ConsoleRow({
       </span>
       <span className="min-w-0 flex-1 truncate">{primary}</span>
       {suffix && (
-        <span className="shrink-0 text-zinc-500 tabular-nums">{suffix}</span>
+        <span className="shrink-0 text-muted-foreground tabular-nums">{suffix}</span>
       )}
     </button>
   )
@@ -525,12 +561,12 @@ function ListSkeleton() {
       {Array.from({ length: 12 }).map((_, i) => (
         <div
           key={i}
-          className="flex items-center gap-3 border-b border-zinc-900 px-4 py-2"
+          className="flex items-center gap-3 border-b border-border px-4 py-2"
         >
-          <Skeleton className="h-3 w-16 bg-zinc-800" />
-          <Skeleton className="h-5 w-5 rounded bg-zinc-800" />
-          <Skeleton className="h-4 flex-1 bg-zinc-800" />
-          <Skeleton className="h-5 w-12 rounded bg-zinc-800" />
+          <Skeleton className="h-3 w-16" />
+          <Skeleton className="h-5 w-5 rounded" />
+          <Skeleton className="h-4 flex-1" />
+          <Skeleton className="h-5 w-12 rounded" />
         </div>
       ))}
     </div>
@@ -539,7 +575,7 @@ function ListSkeleton() {
 
 function EmptyState() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 p-12 text-center text-zinc-500">
+    <div className="flex flex-1 flex-col items-center justify-center gap-2 p-12 text-center text-muted-foreground">
       <Inbox className="h-8 w-8" />
       <p className="text-sm">No events match the current filters.</p>
       <p className="text-xs">Try widening the time range or toggling kinds.</p>
@@ -553,7 +589,7 @@ function ErrorState({ message }: { message: string }) {
       <p className="text-sm font-medium text-rose-500">
         Failed to load events
       </p>
-      <p className="text-xs text-zinc-500">{message}</p>
+      <p className="text-xs text-muted-foreground">{message}</p>
     </div>
   )
 }

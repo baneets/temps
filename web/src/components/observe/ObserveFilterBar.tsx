@@ -43,6 +43,7 @@ export interface ObserveFilters {
   timeRange: TimeRange
   search: string
   environmentId: number | null
+  hideBots: boolean
 }
 
 export function ObserveFilterBar({

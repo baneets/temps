@@ -32298,6 +32298,12 @@ export type ObservabilityListEventsData = {
          * Page size (default 50, max 200).
          */
         limit?: number;
+        /**
+         * When `true`, exclude bot/crawler request rows. When `false`, only
+         * include bot rows. Omitted means "include everything" (default).
+         * Only affects the `Request` kind.
+         */
+        hide_bots?: boolean;
     };
     url: '/projects/{project_id}/observe/events';
 };

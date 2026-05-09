@@ -12,6 +12,7 @@ interface UseObserveQueryArgs {
   environmentId?: number
   search?: string
   limit?: number
+  hideBots?: boolean
 }
 
 /**
@@ -29,6 +30,7 @@ export function useObserveQuery(args: UseObserveQueryArgs) {
     environmentId,
     search,
     limit,
+    hideBots,
   } = args
 
   // Omit `kinds` when the user has every kind selected so the server
@@ -49,6 +51,10 @@ export function useObserveQuery(args: UseObserveQueryArgs) {
         environment_id: environmentId,
         search: search || undefined,
         limit,
+        // Only send `hide_bots` when actively filtering out bots — leaving
+        // it unset means "include everything" so we keep URL/query state
+        // minimal in the default-on-bots case.
+        hide_bots: hideBots ? true : undefined,
       },
     }),
     refetchInterval: 15_000,
