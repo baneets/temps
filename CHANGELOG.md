@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.8] - 2026-05-10
+
+### Fixed
+- **E2E deployment tests**: the polling loop in `.github/workflows/e2e-tests.yml` treated `state == "running"` as terminal success, racing the build and curling deployed apps before their containers existed (HTTP 000). It now waits for `state == "completed"` — the only terminal-success variant of `temps-entities::PipelineStatus` — and retries the HTTPS verify for up to 60s after completion to absorb route-table propagation. Surfaced after #80/#81 unblocked initial deployment creation. (#82)
+- **Initial deployment for new environments**: project creation now reliably triggers the first deployment when `automatic_deploy=true`, instead of leaving the environment without a current deployment. (#81)
+- **`automatic_deploy` flag honoured in CI E2E**: the test harness now sets `automatic_deploy=true` when creating projects so the auto-trigger path is exercised end-to-end. (#80)
+
+### Tests
+- **`merge_integration` observability tests**: `EventFilters` constructors now include `hide_bots: None` so the test crates compile against the updated struct. (#79)
+
 ## [0.1.0-beta.7] - 2026-05-09
 
 ### Added
