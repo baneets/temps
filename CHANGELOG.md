@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+-
+
+### Changed
+-
+
 ### Fixed
+-
+
+
+## [0.1.0-beta.9] - 2026-05-11
+
+### Fixed
+- **Bind-mounted sandbox `work_dir` was owned by root on the host, breaking host-side tooling**: `WorkspaceState::ensure_work_dir` created `<data>/workspaces/<id>/work` as whichever uid the `temps` server runs as (root in default Docker installs), then bind-mounted it into the sandbox where `SANDBOX_CHOWN` (`temps:temps`) reassigned ownership *inside* the namespace only. Anything running on the host that touched the directory (backups, `du -sh`, log shippers, the autopilot's `git status` polling) hit `Permission denied`. The workspace creation path now resolves the sandbox uid:gid via the sandbox-user constants and `chown`s the host directory at mount-prep time, before the bind-mount is established. Userns-remap installs still get the correct mapped owner because `SANDBOX_CHOWN` runs after. (#84)
 - **Sandbox `git pull` failed with `fatal: detected dubious ownership`**: `/home/temps/workspace` came up owned by uid `0:0` inside sandbox containers when the host-side `temps` server ran as root or the Docker daemon used userns-remap, so Git refused to operate on the bind-mount. The Dockerfile generator now bakes `git config --system --add safe.directory /home/temps/workspace` into the sandbox image while still root, so Git trusts the workspace regardless of stat owner — belt-and-suspenders against userns-remap and against post-start chown failures. Takes effect after sandbox images are rebuilt and pushed (`SANDBOX_CHANNEL=beta ./scripts/build-sandbox-images.sh`, then promote to `stable`). (#83)
 - **Silent sandbox-creation failures from swallowed exec errors**: `DockerSandboxProvider::create_sandbox` had three `let _ = start_exec(...)` post-start sites (home `chown`, work-dir `chown`, AI-CLI restore) that discarded both the exit code and stderr — so a chown that failed against a userns-remapped container left users with a "successfully created" sandbox that then exploded the first time Git or any uid-sensitive tool ran. Replaced with a new `run_root_exec` helper that drains the output stream, inspects the exit code, and logs stderr on non-zero. The two chown steps now fail sandbox creation visibly instead of leaving a silently broken workspace; the AI-CLI restore stays best-effort but its exit code is logged. (#83)
 
