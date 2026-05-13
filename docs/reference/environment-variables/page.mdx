@@ -32,15 +32,33 @@ These environment variables configure the Temps server itself:
 | `TEMPS_TLS_ADDRESS`     | `--tls-address`     | (optional)       | HTTPS server address and port                        |
 | `TEMPS_DATA_DIR`        | `--data-dir`        | `~/.temps`       | Data directory for keys and configuration            |
 | `TEMPS_LOG_LEVEL`       | `--log-level`       | `info`           | Log level: `trace`, `debug`, `info`, `warn`, `error` |
-| `TEMPS_CONSOLE_ADDRESS` | `--console-address` | (optional)       | Admin console address and port                       |
+| `TEMPS_CONSOLE_ADDRESS` | `--console-address` | (optional)       | Console listener (public ingest + admin if no split) |
+
+### Admin Listener (optional)
+
+When the admin listener is configured, admin/management routes bind to a separate address while `TEMPS_CONSOLE_ADDRESS` only serves public ingest endpoints (analytics events, error tracking ingest, AI gateway, worker route sync, email tracking pixels). See the [admin listener guide](/docs/admin-listener) for the full route classification and deployment patterns.
+
+| Variable                           | CLI Flag                  | Default    | Description                                                                                |
+| ---------------------------------- | ------------------------- | ---------- | ------------------------------------------------------------------------------------------ |
+| `TEMPS_CONSOLE_ADMIN_ADDRESS`      | `--console-admin-address` | (optional) | Dedicated bind for admin/management routes. Unset = single listener mode (backwards-compat) |
+| `TEMPS_ADMIN_ALLOWED_IPS`          | —                         | (optional) | Comma-separated IPs/CIDRs allowed to reach the admin listener (e.g. `10.0.0.0/8,127.0.0.1`) |
+| `TEMPS_ADMIN_ALLOWED_HOSTS`        | —                         | (optional) | Comma-separated `Host` header values allowed on the admin listener                          |
+| `TEMPS_ADMIN_TRUST_FORWARDED_FOR`  | —                         | `false`    | Honor `X-Forwarded-For` for the IP gate — only from loopback peers (anti-spoof)             |
 
 ### Example
 
 ```bash
+# Single listener (backwards-compatible default)
 export TEMPS_ADDRESS=0.0.0.0:8080
 export TEMPS_TLS_ADDRESS=0.0.0.0:8443
 export TEMPS_LOG_LEVEL=debug
 export TEMPS_DATA_DIR=/var/lib/temps
+
+# Two listeners with admin on loopback + IP allowlist
+export TEMPS_CONSOLE_ADDRESS=0.0.0.0:8080
+export TEMPS_CONSOLE_ADMIN_ADDRESS=127.0.0.1:8081
+export TEMPS_ADMIN_ALLOWED_IPS=127.0.0.1/32,10.0.0.0/8
+export TEMPS_ADMIN_ALLOWED_HOSTS=admin.temps.example.com
 ```
 
 ---

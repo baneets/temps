@@ -25,6 +25,9 @@ Temps provides multiple layers of security to protect your applications, data, a
 
 ## Access Control
 
+### Control Plane Admin Surface
+The Temps control plane can split its HTTP surface across two listeners so admin/management routes bind to a private interface while public ingest endpoints stay reachable. See the [Admin Listener](/docs/admin-listener) guide for configuration, deployment recipes (SSH tunnel, Tailscale, reverse proxy), and the route classification.
+
 ### IP Access Control
 Control who can access your applications:
 

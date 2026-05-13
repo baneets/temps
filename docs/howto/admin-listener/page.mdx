@@ -1,0 +1,228 @@
+export const metadata = {
+  title: "Admin Listener",
+  description:
+    "Split Temps onto two listeners so the admin/dashboard surface binds to a private interface while public ingest endpoints stay reachable. Includes CIDR + Host allowlists.",
+  alternates: {
+    canonical: "/docs/admin-listener",
+  },
+};
+
+export const sections = [
+  { title: "When to use this", id: "when" },
+  { title: "How it works", id: "how" },
+  { title: "Route classification", id: "routes" },
+  { title: "Configuration", id: "config" },
+  { title: "Recipes", id: "recipes" },
+  { title: "Testing your setup", id: "testing" },
+  { title: "Threat model", id: "threat" },
+];
+
+# Admin Listener
+
+The Temps control plane serves two very different kinds of traffic on the same port: **public ingest** (browser SDKs posting analytics events, deployed apps calling the AI gateway, worker nodes registering themselves) and **admin/management** (login, dashboard, project CRUD, settings). The admin listener lets you split those onto separate bind addresses so the admin surface can live on a private interface — loopback, a VPN, or a Tailscale interface — while the public surface stays reachable from the open internet. {{ className: 'lead' }}
+
+---
+
+## When to use this {{ anchor: true, id: 'when' }}
+
+Enable the admin listener if any of these apply:
+
+- You expose the Temps control plane on a public IP and don't want random scanners hitting `/api/auth/login`.
+- You front Temps with a reverse proxy and want admin access gated to a separate hostname or IP range.
+- Your compliance posture requires admin interfaces to be unreachable from the public internet.
+
+If you're running Temps on a private network with no public exposure, the default single-listener mode is fine — leave `TEMPS_CONSOLE_ADMIN_ADDRESS` unset.
+
+---
+
+## How it works {{ anchor: true, id: 'how' }}
+
+Each plugin in the Temps control plane declares two route sets:
+
+- `configure_routes` — the **admin** surface. Auth, dashboard queries, CRUD, settings, the SPA, Swagger UI.
+- `configure_public_routes` — the **public** surface. SDK ingest endpoints, webhook delivery targets, worker-facing APIs. These handlers authenticate themselves (API key, DSN token, Host-header lookup) — they don't rely on session auth.
+
+When `TEMPS_CONSOLE_ADMIN_ADDRESS` is set, the server binds both routers on separate `axum::serve` listeners. When it's unset, both routers are merged onto `TEMPS_CONSOLE_ADDRESS` for backwards compatibility.
+
+The admin gate (CIDR + Host allowlists) is layered on top of the admin listener as defense in depth. Denials return `404 Not Found`, not `403 Forbidden`, so a probing client cannot fingerprint the admin surface.
+
+---
+
+## Route classification {{ anchor: true, id: 'routes' }}
+
+### Public surface
+
+| Plugin                          | Endpoints                                                                              | Caller                       |
+| ------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------- |
+| `temps-analytics-events`        | `POST /api/_temps/event`                                                               | Browser SDK on customer site |
+| `temps-analytics-session-replay`| `POST /api/_temps/session-replay/init`, `POST /api/_temps/session-replay/events`       | Browser SDK                  |
+| `temps-analytics-performance`   | `POST /api/_temps/speed`, `POST /api/_temps/speed/update`                              | Browser SDK                  |
+| `temps-error-tracking`          | Sentry/OTLP ingest, sentry-cli release/source-map upload                               | App SDKs + CI/CD             |
+| `temps-email-tracking`          | `GET /api/t/pixel/...`, `GET /api/t/click/...`, `POST /api/t/webhook/ses`              | Recipient browsers + AWS SES |
+| `temps-ai-gateway`              | `POST /api/ai/v1/chat/completions`, `POST /api/ai/v1/embeddings`, `GET /api/ai/v1/models` | Deployed apps (API-key auth) |
+| `temps-revenue`, `temps-email`  | Stripe + email provider webhooks                                                       | External services            |
+| Multi-node                      | `POST /api/internal/nodes/register`, `POST /api/internal/nodes/{id}/heartbeat`, route sync | Worker nodes                 |
+
+### Admin surface
+
+Everything else — `/api/auth/*`, `/api/projects/...`, settings, deployments, alert rules, error-group queries, source-map management, AI gateway usage analytics, the dashboard SPA, Swagger UI at `/swagger-ui`.
+
+<Note>
+  **Webhooks are public on purpose.** GitHub, Stripe, and AWS SES must reach
+  webhook endpoints from arbitrary IPs. Each webhook handler verifies its own
+  signature, so the public listener doesn't weaken the security model.
+</Note>
+
+---
+
+## Configuration {{ anchor: true, id: 'config' }}
+
+| Variable                           | Type             | Default    | Effect                                                                                       |
+| ---------------------------------- | ---------------- | ---------- | -------------------------------------------------------------------------------------------- |
+| `TEMPS_CONSOLE_ADDRESS`            | `host:port`      | random     | Public listener (and admin listener when admin is not split out)                              |
+| `TEMPS_CONSOLE_ADMIN_ADDRESS`      | `host:port`      | unset      | Bind admin/management routes to this address. Enables two-listener mode.                      |
+| `TEMPS_ADMIN_ALLOWED_IPS`          | CSV of IP/CIDR   | empty      | Allowlist source addresses for the admin listener. Empty = no IP gate.                        |
+| `TEMPS_ADMIN_ALLOWED_HOSTS`        | CSV of hostnames | empty      | Allowlist `Host` header values on the admin listener. Empty = no Host gate. Port is stripped. |
+| `TEMPS_ADMIN_TRUST_FORWARDED_FOR`  | bool             | `false`    | Honor `X-Forwarded-For` for the IP gate, but only from loopback peers (anti-spoof).            |
+
+CIDR entries are standard (`10.0.0.0/8`, `2001:db8::/32`). Bare IPs become host routes (`/32` for v4, `/128` for v6). Invalid entries fail the server at startup with a typed error rather than silently allowing traffic.
+
+---
+
+## Recipes {{ anchor: true, id: 'recipes' }}
+
+### SSH tunnel for solo operators
+
+Admin only accessible via an SSH tunnel — simplest setup, no reverse proxy required.
+
+```bash
+# On the server
+export TEMPS_CONSOLE_ADDRESS=0.0.0.0:8080
+export TEMPS_CONSOLE_ADMIN_ADDRESS=127.0.0.1:8081
+export TEMPS_ADMIN_ALLOWED_IPS=127.0.0.1/32
+temps serve --database-url postgres://...
+```
+
+```bash
+# On your laptop
+ssh -L 8081:127.0.0.1:8081 user@temps.example.com
+# Now https://localhost:8081 reaches the admin UI through the tunnel
+```
+
+### Tailscale / WireGuard private network
+
+Admin reachable from anyone on your tailnet, public ingest stays on the internet.
+
+```bash
+export TEMPS_CONSOLE_ADDRESS=0.0.0.0:8080
+export TEMPS_CONSOLE_ADMIN_ADDRESS=100.64.0.1:8081      # Tailscale interface
+export TEMPS_ADMIN_ALLOWED_IPS=100.64.0.0/10            # Tailscale CGNAT range
+```
+
+### Reverse proxy with admin Host header
+
+You front Temps with Caddy/Nginx; admin is served on a separate hostname.
+
+```bash
+export TEMPS_CONSOLE_ADDRESS=127.0.0.1:8080
+export TEMPS_CONSOLE_ADMIN_ADDRESS=127.0.0.1:8081
+export TEMPS_ADMIN_ALLOWED_IPS=127.0.0.1/32             # only proxy can hit it
+export TEMPS_ADMIN_ALLOWED_HOSTS=admin.temps.example.com
+export TEMPS_ADMIN_TRUST_FORWARDED_FOR=true             # honor proxy's XFF
+```
+
+```caddy
+# Caddyfile
+admin.temps.example.com {
+    reverse_proxy 127.0.0.1:8081
+}
+temps.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+### Office IP allowlist
+
+Admin only accepts requests from your office static IP range.
+
+```bash
+export TEMPS_CONSOLE_ADDRESS=0.0.0.0:8080
+export TEMPS_CONSOLE_ADMIN_ADDRESS=0.0.0.0:8081
+export TEMPS_ADMIN_ALLOWED_IPS=203.0.113.0/24,127.0.0.1/32
+```
+
+---
+
+## Testing your setup {{ anchor: true, id: 'testing' }}
+
+After restart, check the logs:
+
+```
+Console PUBLIC API server listening on 0.0.0.0:8080
+Console ADMIN API server listening on 127.0.0.1:8081
+Admin gate enabled  allowed_ips=["127.0.0.1/32"]  allowed_hosts=[]
+```
+
+Then verify the split:
+
+```bash
+# Public listener: ingest endpoints work
+curl -i http://127.0.0.1:8080/api/_temps/event \
+  -H 'content-type: application/json' -d '{}'
+# → 400 (validation) or 204. Important: NOT 404.
+
+# Public listener: admin endpoints 404
+curl -i http://127.0.0.1:8080/api/auth/login
+# → 404 (admin router isn't mounted here)
+
+# Admin listener from loopback: works
+curl -i http://127.0.0.1:8081/api/auth/login
+# → 400/401 (route exists, auth fails as expected)
+
+# Admin listener from a non-allowlisted IP: blocked
+# (bind admin to 0.0.0.0:8081 and curl from another host)
+curl -i http://your-server-ip:8081/api/auth/login
+# → 404 (admin gate denied, masked as not-found)
+
+# Admin listener with wrong Host header (when allowed_hosts is set)
+curl -i -H 'Host: evil.example' http://127.0.0.1:8081/api/auth/login
+# → 404
+```
+
+Denied requests are logged at `WARN` level on the server:
+
+```
+admin gate denied: source IP not in allowlist  client_ip=203.0.113.5 path=/api/auth/login
+admin gate denied: Host header not in allowlist  host=evil.example path=/api/auth/login
+```
+
+---
+
+## Threat model {{ anchor: true, id: 'threat' }}
+
+What the admin listener defends against:
+
+- **Drive-by scanning** of `/api/auth/login` and other admin endpoints by internet-wide scanners.
+- **Credential-stuffing attacks** that don't know the admin surface exists.
+- **Operator mistakes** like a misconfigured CORS allowlist that would otherwise expose admin APIs.
+
+What it does **not** defend against:
+
+- **A user with valid session credentials** accessing admin endpoints from an allowlisted network. Use the regular permission system for authorization.
+- **Stolen API keys** used against the public AI gateway / event ingest endpoints — those handlers do their own auth.
+- **Source IP spoofing** when the gate is configured to trust `X-Forwarded-For`. The gate only honors XFF when the immediate peer is loopback, so set `TEMPS_ADMIN_TRUST_FORWARDED_FOR=true` only when you sit behind a trusted reverse proxy.
+
+The admin listener is **defense in depth**, not a replacement for authentication. Keep `TEMPS_AUTH_SECRET` strong, keep the user database backed up, and treat the admin URL as a secret regardless of where it binds.
+
+---
+
+## See also
+
+<div className="not-prose">
+  <Button href="/docs/environment-variables" variant="text" arrow="left">
+    Environment Variables
+  </Button>
+  <Button href="/docs/security" variant="text" arrow="right">
+    Security Features
+  </Button>
+</div>
