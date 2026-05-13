@@ -45,24 +45,30 @@ impl ScopedTokenRequest {
     /// minimum permission a `git clone` over HTTPS needs; we also include
     /// `metadata:read` because GitHub adds it implicitly anyway and being
     /// explicit avoids confusing 422s on some App configurations.
-    pub fn for_repo_read(repo_full_name: &str) -> Self {
+    ///
+    /// `repo_name` is the bare repo name (e.g. `temps-landing-new`), NOT
+    /// `owner/repo` — GitHub's access_tokens endpoint expects the unqualified
+    /// form because the owner is fixed by the installation.
+    pub fn for_repo_read(repo_name: &str) -> Self {
         let mut perms = std::collections::HashMap::new();
         perms.insert("contents".to_string(), "read".to_string());
         perms.insert("metadata".to_string(), "read".to_string());
         Self {
-            repositories: Some(vec![repo_full_name.to_string()]),
+            repositories: Some(vec![repo_name.to_string()]),
             permissions: Some(perms),
         }
     }
 
     /// Token for pushing to a single repo. `contents:write` covers
     /// `git push`; we keep `metadata:read` for parity with the read variant.
-    pub fn for_repo_write(repo_full_name: &str) -> Self {
+    ///
+    /// `repo_name` is the bare repo name (see [`Self::for_repo_read`]).
+    pub fn for_repo_write(repo_name: &str) -> Self {
         let mut perms = std::collections::HashMap::new();
         perms.insert("contents".to_string(), "write".to_string());
         perms.insert("metadata".to_string(), "read".to_string());
         Self {
-            repositories: Some(vec![repo_full_name.to_string()]),
+            repositories: Some(vec![repo_name.to_string()]),
             permissions: Some(perms),
         }
     }
@@ -761,10 +767,14 @@ impl GitProviderService for GitHubProvider {
             ))
         })?;
 
-        let repo_full_name = format!("{}/{}", owner, repo);
+        // GitHub's `POST /app/installations/{id}/access_tokens` expects bare
+        // repo names in `repositories`, NOT `owner/repo`. Passing the full
+        // name causes a 422 even when the App has access to the repo —
+        // `owner` is determined by the installation itself.
+        let _ = owner;
         let request = match operation {
-            ScopedTokenOp::Fetch => ScopedTokenRequest::for_repo_read(&repo_full_name),
-            ScopedTokenOp::Push => ScopedTokenRequest::for_repo_write(&repo_full_name),
+            ScopedTokenOp::Fetch => ScopedTokenRequest::for_repo_read(repo),
+            ScopedTokenOp::Push => ScopedTokenRequest::for_repo_write(repo),
         };
 
         let (token, expires_at) = self
@@ -2189,10 +2199,10 @@ mod scoped_token_tests {
     /// exactly this for every fetch.
     #[test]
     fn for_repo_read_narrows_repo_and_perms() {
-        let req = ScopedTokenRequest::for_repo_read("acme/web");
+        let req = ScopedTokenRequest::for_repo_read("web");
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
 
-        assert_eq!(v["repositories"], serde_json::json!(["acme/web"]));
+        assert_eq!(v["repositories"], serde_json::json!(["web"]));
         assert_eq!(v["permissions"]["contents"], "read");
         assert_eq!(v["permissions"]["metadata"], "read");
         // No write permissions sneaking in.
@@ -2203,22 +2213,28 @@ mod scoped_token_tests {
     /// every other dimension narrowed. Used for `git push` flows.
     #[test]
     fn for_repo_write_grants_write_only_on_contents() {
-        let req = ScopedTokenRequest::for_repo_write("acme/web");
+        let req = ScopedTokenRequest::for_repo_write("web");
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
 
-        assert_eq!(v["repositories"], serde_json::json!(["acme/web"]));
+        assert_eq!(v["repositories"], serde_json::json!(["web"]));
         assert_eq!(v["permissions"]["contents"], "write");
         assert_eq!(v["permissions"]["metadata"], "read");
         // Still capped at the two perms — no implicit pull_requests/issues.
         assert_eq!(v["permissions"].as_object().unwrap().len(), 2);
     }
 
-    /// Repos must be passed by full name, not bare slug. Regression guard
-    /// against any future helper that "just takes the repo name" — GitHub
-    /// 422s on bare names.
+    /// GitHub's `POST /app/installations/{id}/access_tokens` expects bare
+    /// repo names in `repositories`, NOT `owner/repo`. The owner is fixed
+    /// by the installation. Regression guard for the original bug where
+    /// we sent `kfsoftware/temps-landing-new` and GitHub 422'd even though
+    /// the App had access to the repo.
     #[test]
-    fn for_repo_uses_full_name() {
-        let req = ScopedTokenRequest::for_repo_read("acme/web");
-        assert_eq!(req.repositories.as_ref().unwrap()[0], "acme/web");
+    fn for_repo_uses_bare_repo_name() {
+        let req = ScopedTokenRequest::for_repo_read("temps-landing-new");
+        assert_eq!(req.repositories.as_ref().unwrap()[0], "temps-landing-new");
+        assert!(
+            !req.repositories.as_ref().unwrap()[0].contains('/'),
+            "GitHub rejects `owner/repo` form; pass bare repo name only"
+        );
     }
 }
