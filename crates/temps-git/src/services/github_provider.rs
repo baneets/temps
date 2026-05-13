@@ -42,9 +42,16 @@ pub struct ScopedTokenRequest {
 
 impl ScopedTokenRequest {
     /// Token for cloning / fetching a single repo. `contents:read` is the
-    /// minimum permission a `git clone` over HTTPS needs; we also include
-    /// `metadata:read` because GitHub adds it implicitly anyway and being
-    /// explicit avoids confusing 422s on some App configurations.
+    /// minimum permission a `git clone` over HTTPS needs.
+    ///
+    /// Only `contents` is listed: `metadata:read` is granted implicitly by
+    /// GitHub to every installation token that has any repository
+    /// permission, and listing it explicitly here causes GitHub to *strip
+    /// the entire `permissions` block* (silently returning an empty-
+    /// permissions token, which surfaces as `pull:false, push:false` on
+    /// every minted token). The endpoint validates each requested key
+    /// against the App's *declared* permissions, and `metadata` is not in
+    /// that set — it's implicit. Don't add it back.
     ///
     /// `repo_name` is the bare repo name (e.g. `temps-landing-new`), NOT
     /// `owner/repo` — GitHub's access_tokens endpoint expects the unqualified
@@ -52,7 +59,6 @@ impl ScopedTokenRequest {
     pub fn for_repo_read(repo_name: &str) -> Self {
         let mut perms = std::collections::HashMap::new();
         perms.insert("contents".to_string(), "read".to_string());
-        perms.insert("metadata".to_string(), "read".to_string());
         Self {
             repositories: Some(vec![repo_name.to_string()]),
             permissions: Some(perms),
@@ -60,13 +66,13 @@ impl ScopedTokenRequest {
     }
 
     /// Token for pushing to a single repo. `contents:write` covers
-    /// `git push`; we keep `metadata:read` for parity with the read variant.
+    /// `git push`. See [`Self::for_repo_read`] for why `metadata` is
+    /// deliberately NOT requested.
     ///
     /// `repo_name` is the bare repo name (see [`Self::for_repo_read`]).
     pub fn for_repo_write(repo_name: &str) -> Self {
         let mut perms = std::collections::HashMap::new();
         perms.insert("contents".to_string(), "write".to_string());
-        perms.insert("metadata".to_string(), "read".to_string());
         Self {
             repositories: Some(vec![repo_name.to_string()]),
             permissions: Some(perms),
@@ -2194,9 +2200,14 @@ mod scoped_token_tests {
     }
 
     /// `for_repo_read` must produce a body that both narrows to a single
-    /// repo AND drops permissions to `contents:read` + `metadata:read`.
-    /// This is the per-`git clone` shape: the credential daemon mints
-    /// exactly this for every fetch.
+    /// repo AND drops permissions to `contents:read` only.
+    ///
+    /// Critically: `metadata` MUST NOT appear in the permissions map.
+    /// GitHub strips the entire `permissions` block (silently!) when any
+    /// requested key isn't in the App's declared permission set, and
+    /// `metadata` is implicit, not declared. The strip surfaces as a token
+    /// with `push:false, pull:false` on every repo — the failure mode we
+    /// hit in production.
     #[test]
     fn for_repo_read_narrows_repo_and_perms() {
         let req = ScopedTokenRequest::for_repo_read("web");
@@ -2204,13 +2215,15 @@ mod scoped_token_tests {
 
         assert_eq!(v["repositories"], serde_json::json!(["web"]));
         assert_eq!(v["permissions"]["contents"], "read");
-        assert_eq!(v["permissions"]["metadata"], "read");
-        // No write permissions sneaking in.
-        assert!(v["permissions"].as_object().unwrap().len() == 2);
+        // metadata must NOT be present — see doc on for_repo_read.
+        assert!(v["permissions"].get("metadata").is_none());
+        // Exactly one permission: contents.
+        assert_eq!(v["permissions"].as_object().unwrap().len(), 1);
     }
 
     /// `for_repo_write` must elevate `contents` to `write` while leaving
     /// every other dimension narrowed. Used for `git push` flows.
+    /// Same `metadata` rule as the read variant — never list it explicitly.
     #[test]
     fn for_repo_write_grants_write_only_on_contents() {
         let req = ScopedTokenRequest::for_repo_write("web");
@@ -2218,9 +2231,8 @@ mod scoped_token_tests {
 
         assert_eq!(v["repositories"], serde_json::json!(["web"]));
         assert_eq!(v["permissions"]["contents"], "write");
-        assert_eq!(v["permissions"]["metadata"], "read");
-        // Still capped at the two perms — no implicit pull_requests/issues.
-        assert_eq!(v["permissions"].as_object().unwrap().len(), 2);
+        assert!(v["permissions"].get("metadata").is_none());
+        assert_eq!(v["permissions"].as_object().unwrap().len(), 1);
     }
 
     /// GitHub's `POST /app/installations/{id}/access_tokens` expects bare
