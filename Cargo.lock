@@ -11272,6 +11272,7 @@ dependencies = [
  "axum 0.8.6",
  "base64 0.22.1",
  "chrono",
+ "cookie 0.18.1",
  "futures",
  "hex",
  "hkdf",

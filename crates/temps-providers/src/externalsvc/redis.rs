@@ -2293,6 +2293,25 @@ mod tests {
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_redis_backup_and_restore_to_s3() {
+        // Whole-test wall-clock budget. Anything above this is a hang — fail
+        // loudly with a diagnostic instead of stalling the CI runner for 90 min.
+        // See incident: GitHub run 25806816492 (PR #89) burned 90 min on this
+        // test because blocking redis APIs starved the tokio worker pool.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+        // Per-Redis-operation timeout. ConnectionManager retries internally,
+        // so this needs only cover the cold-start window of the container.
+        const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(30);
+
+        tokio::time::timeout(TEST_TIMEOUT, run_redis_backup_and_restore_to_s3(REDIS_OP_TIMEOUT))
+            .await
+            .expect("test_redis_backup_and_restore_to_s3 exceeded 180s — likely hung on Redis/Docker/S3 wait");
+    }
+
+    /// Body of `test_redis_backup_and_restore_to_s3`, extracted so the outer
+    /// test can wrap it in `tokio::time::timeout` without a giant async block
+    /// at the call site.
+    #[cfg(feature = "docker-tests")]
+    async fn run_redis_backup_and_restore_to_s3(op_timeout: Duration) {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
         };
@@ -2333,8 +2352,17 @@ mod tests {
             }
         };
 
-        // Create Redis service
-        let redis_port = 16379u16; // Use unique port
+        // Pick a free port so parallel test runs (and leaked containers from
+        // previous runs) don't collide. Previously hardcoded to 16379, which
+        // caused silent hangs in CI when a leftover container held the port.
+        let redis_port = match find_available_port(16379) {
+            Some(p) => p,
+            None => {
+                println!("No available port in 16379..16479 range, skipping test");
+                let _ = minio.cleanup().await;
+                return;
+            }
+        };
         let redis_password = "redispass123";
         let service_name = format!(
             "test_redis_backup_{}",
@@ -2367,12 +2395,14 @@ mod tests {
             }
         }
 
-        // Wait for Redis to be ready
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-        // Connect to Redis and set some test data
+        // Connect to Redis using the async ConnectionManager. This must NOT
+        // be `redis::Client::get_connection()` — that's the blocking, no-
+        // timeout sync API, and it parks a tokio worker thread on a raw
+        // socket connect. Under parallel test load that exhausts the runtime
+        // worker pool and the whole test binary deadlocks (with no progress
+        // output) until CI kills it.
         let connection_url = format!("redis://:{}@localhost:{}", redis_password, redis_port);
-        let redis_client = match redis::Client::open(connection_url.as_str()) {
+        let redis_client = match Client::open(connection_url.as_str()) {
             Ok(client) => client,
             Err(e) => {
                 println!("Failed to create Redis client: {}. Skipping test", e);
@@ -2382,64 +2412,97 @@ mod tests {
             }
         };
 
-        let mut conn = match redis_client.get_connection() {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Failed to connect to Redis: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
+        let mut conn =
+            match tokio::time::timeout(op_timeout, ConnectionManager::new(redis_client.clone()))
+                .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    println!("Failed to connect to Redis: {}. Skipping test", e);
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+                Err(_) => {
+                    println!(
+                        "Redis connect timed out after {:?}. Skipping test",
+                        op_timeout
+                    );
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+            };
+
+        // Helper to run a Redis command with a bounded timeout and consistent
+        // skip-on-failure behaviour. Defined inline so it captures the cleanup
+        // closures by reference.
+        async fn redis_set(
+            conn: &mut ConnectionManager,
+            key: &str,
+            value: &str,
+            timeout: Duration,
+        ) -> Result<()> {
+            tokio::time::timeout(
+                timeout,
+                redis::cmd("SET")
+                    .arg(key)
+                    .arg(value)
+                    .query_async::<()>(conn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("SET {} timed out after {:?}", key, timeout))?
+            .map_err(|e| anyhow::anyhow!("SET {} failed: {}", key, e))
+        }
+
+        async fn redis_get_string(
+            conn: &mut ConnectionManager,
+            key: &str,
+            timeout: Duration,
+        ) -> Result<String> {
+            tokio::time::timeout(
+                timeout,
+                redis::cmd("GET").arg(key).query_async::<String>(conn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("GET {} timed out after {:?}", key, timeout))?
+            .map_err(|e| anyhow::anyhow!("GET {} failed: {}", key, e))
+        }
+
+        async fn redis_exists(
+            conn: &mut ConnectionManager,
+            key: &str,
+            timeout: Duration,
+        ) -> Result<bool> {
+            tokio::time::timeout(
+                timeout,
+                redis::cmd("EXISTS").arg(key).query_async::<bool>(conn),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("EXISTS {} timed out after {:?}", key, timeout))?
+            .map_err(|e| anyhow::anyhow!("EXISTS {} failed: {}", key, e))
+        }
 
         // Set test data
-        match redis::cmd("SET")
-            .arg("test_key1")
-            .arg("value1")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Set test_key1=value1"),
-            Err(e) => {
-                println!("Failed to set test key 1: {}. Skipping test", e);
+        for (k, v) in [
+            ("test_key1", "value1"),
+            ("test_key2", "value2"),
+            ("test_key3", "value3"),
+        ] {
+            if let Err(e) = redis_set(&mut conn, k, v, op_timeout).await {
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
             }
-        }
-
-        match redis::cmd("SET")
-            .arg("test_key2")
-            .arg("value2")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Set test_key2=value2"),
-            Err(e) => {
-                println!("Failed to set test key 2: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        }
-
-        match redis::cmd("SET")
-            .arg("test_key3")
-            .arg("value3")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Set test_key3=value3"),
-            Err(e) => {
-                println!("Failed to set test key 3: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
+            println!("✓ Set {}={}", k, v);
         }
 
         // Verify data exists
-        let value1: String = match redis::cmd("GET").arg("test_key1").query(&mut conn) {
+        let value1 = match redis_get_string(&mut conn, "test_key1", op_timeout).await {
             Ok(v) => v,
             Err(e) => {
-                println!("Failed to get test key 1: {}. Skipping test", e);
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
@@ -2447,9 +2510,6 @@ mod tests {
         };
         assert_eq!(value1, "value1");
         println!("✓ Verified test_key1={}", value1);
-
-        // Drop connection before backup
-        drop(conn);
 
         // Create mock database connection for backup/restore operations
         let mock_db = match create_mock_db().await {
@@ -2498,36 +2558,35 @@ mod tests {
         };
 
         // Delete keys to simulate data loss
-        let mut conn = match redis_client.get_connection() {
-            Ok(c) => c,
-            Err(e) => {
-                println!("Failed to reconnect to Redis: {}. Skipping test", e);
+        let del_result = tokio::time::timeout(
+            op_timeout,
+            redis::cmd("DEL")
+                .arg("test_key1")
+                .arg("test_key2")
+                .arg("test_key3")
+                .query_async::<()>(&mut conn),
+        )
+        .await;
+        match del_result {
+            Ok(Ok(_)) => println!("✓ Deleted all test keys (simulating data loss)"),
+            Ok(Err(e)) => {
+                println!("Failed to delete keys: {}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
             }
-        };
-
-        match redis::cmd("DEL")
-            .arg("test_key1")
-            .arg("test_key2")
-            .arg("test_key3")
-            .query::<()>(&mut conn)
-        {
-            Ok(_) => println!("✓ Deleted all test keys (simulating data loss)"),
-            Err(e) => {
-                println!("Failed to delete keys: {}. Skipping test", e);
+            Err(_) => {
+                println!("DEL timed out after {:?}. Skipping test", op_timeout);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
             }
         }
 
-        // Verify keys are gone
-        let exists: bool = match redis::cmd("EXISTS").arg("test_key1").query(&mut conn) {
-            Ok(e) => e,
+        let exists = match redis_exists(&mut conn, "test_key1", op_timeout).await {
+            Ok(v) => v,
             Err(e) => {
-                println!("Failed to check key existence: {}. Skipping test", e);
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
@@ -2535,8 +2594,6 @@ mod tests {
         };
         assert!(!exists, "test_key1 should not exist after deletion");
         println!("✓ Verified keys were deleted");
-
-        drop(conn);
 
         // Restore from S3 backup
         match redis_service
@@ -2558,25 +2615,36 @@ mod tests {
             }
         };
 
-        // Wait for Redis to be ready after restore
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        // Re-establish a fresh connection after restore — the prior socket
+        // may have been severed when the Redis process reloaded. The
+        // ConnectionManager would reconnect lazily on next command anyway,
+        // but doing it explicitly bounds the wait.
+        let mut conn =
+            match tokio::time::timeout(op_timeout, ConnectionManager::new(redis_client.clone()))
+                .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    println!("Failed to reconnect after restore: {}. Skipping test", e);
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+                Err(_) => {
+                    println!(
+                        "Reconnect after restore timed out after {:?}. Skipping test",
+                        op_timeout
+                    );
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+            };
 
-        // Verify restored data
-        let mut conn = match redis_client.get_connection() {
-            Ok(c) => c,
+        let exists1 = match redis_exists(&mut conn, "test_key1", op_timeout).await {
+            Ok(v) => v,
             Err(e) => {
-                println!("Failed to reconnect after restore: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-
-        // Verify keys exist
-        let exists1: bool = match redis::cmd("EXISTS").arg("test_key1").query(&mut conn) {
-            Ok(e) => e,
-            Err(e) => {
-                println!("Failed to check restored key1: {}. Skipping test", e);
+                println!("{}. Skipping test", e);
                 let _ = redis_service.remove().await;
                 let _ = minio.cleanup().await;
                 return;
@@ -2585,42 +2653,23 @@ mod tests {
         assert!(exists1, "test_key1 should exist after restore");
         println!("✓ Verified test_key1 exists after restore");
 
-        // Verify values
-        let value1: String = match redis::cmd("GET").arg("test_key1").query(&mut conn) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Failed to get restored value1: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-        assert_eq!(value1, "value1");
-        println!("✓ Verified test_key1={}", value1);
-
-        let value2: String = match redis::cmd("GET").arg("test_key2").query(&mut conn) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Failed to get restored value2: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-        assert_eq!(value2, "value2");
-        println!("✓ Verified test_key2={}", value2);
-
-        let value3: String = match redis::cmd("GET").arg("test_key3").query(&mut conn) {
-            Ok(v) => v,
-            Err(e) => {
-                println!("Failed to get restored value3: {}. Skipping test", e);
-                let _ = redis_service.remove().await;
-                let _ = minio.cleanup().await;
-                return;
-            }
-        };
-        assert_eq!(value3, "value3");
-        println!("✓ Verified test_key3={}", value3);
+        for (k, expected) in [
+            ("test_key1", "value1"),
+            ("test_key2", "value2"),
+            ("test_key3", "value3"),
+        ] {
+            let v = match redis_get_string(&mut conn, k, op_timeout).await {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("{}. Skipping test", e);
+                    let _ = redis_service.remove().await;
+                    let _ = minio.cleanup().await;
+                    return;
+                }
+            };
+            assert_eq!(v, expected);
+            println!("✓ Verified {}={}", k, v);
+        }
 
         // Cleanup
         drop(conn);

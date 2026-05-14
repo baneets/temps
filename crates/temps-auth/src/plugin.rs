@@ -166,7 +166,15 @@ impl TempsPlugin for AuthPlugin {
         let api_key_service = context.require_service::<crate::apikey_service::ApiKeyService>();
         let db = context.require_service::<sea_orm::DatabaseConnection>();
 
-        // Create the authentication middleware with the AuthState
+        // Request-metadata middleware (runs on BOTH admin and public routers
+        // because public ingest endpoints — session-replay init, analytics
+        // events — still need `Extension<RequestMetadata>`).
+        let request_metadata_middleware =
+            temps_core::RequestMetadataMiddleware::new(cookie_crypto.clone());
+        middleware_collection.add_temps_middleware(Arc::new(request_metadata_middleware));
+
+        // Auth middleware (admin router only — public routes authenticate
+        // themselves via API key / DSN / host lookups inside their handlers).
         let auth_middleware = crate::temps_middleware::AuthMiddleware::new(
             api_key_service,
             auth_service,
@@ -174,8 +182,6 @@ impl TempsPlugin for AuthPlugin {
             cookie_crypto,
             db,
         );
-
-        // Add the TempsMiddleware implementation
         middleware_collection.add_temps_middleware(Arc::new(auth_middleware));
 
         Some(middleware_collection)

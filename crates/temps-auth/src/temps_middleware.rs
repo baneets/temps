@@ -176,64 +176,11 @@ impl AuthMiddleware {
             }
         };
 
-        // Extract cookies for RequestMetadata
-        let visitor_id_cookie =
-            crate::middleware::extract_visitor_id_cookie(&req, &self.cookie_crypto);
-        let session_id_cookie =
-            crate::middleware::extract_session_id_cookie(&req, &self.cookie_crypto);
-
-        // Create base URL from request headers
-        let raw_host = req
-            .headers()
-            .get("host")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("localhost")
-            .to_string();
-
-        // Determine scheme
-        let scheme = if req
-            .headers()
-            .get("x-forwarded-proto")
-            .and_then(|h| h.to_str().ok())
-            == Some("https")
-        {
-            "https"
-        } else {
-            "http"
-        };
-        let is_secure = scheme == "https";
-        // `base_url` keeps the port so generated links point back at the same
-        // listener the client reached us on. `host` is port-stripped so it can
-        // be used as a route-table key (the proxy normalizes identically).
-        let base_url = format!("{}://{}", scheme, raw_host);
-        let host = temps_core::host_without_port(&raw_host).to_string();
-
-        // Create RequestMetadata
-        let metadata = temps_core::RequestMetadata {
-            ip_address: req
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|h| h.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .unwrap_or("unknown")
-                .to_string(),
-            user_agent: req
-                .headers()
-                .get("user-agent")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("unknown")
-                .to_string(),
-            headers: req.headers().clone(),
-            visitor_id_cookie,
-            session_id_cookie,
-            base_url,
-            scheme: scheme.to_string(),
-            host,
-            is_secure,
-        };
-
-        // Insert extensions
-        req.extensions_mut().insert(metadata);
+        // `RequestMetadata` is injected by
+        // `temps_core::RequestMetadataMiddleware` (Observability priority),
+        // which runs before this middleware on both the admin and public
+        // routers. Auth used to build it inline; that responsibility moved
+        // out so public ingest endpoints get metadata without auth.
 
         // Insert authenticated user and context. Anonymous requests stay
         // anonymous: there is no implicit promotion to a Reader role for

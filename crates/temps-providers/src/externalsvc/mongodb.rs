@@ -2893,6 +2893,22 @@ mod tests {
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_mongodb_backup_and_restore_to_s3() {
+        // Whole-test wall-clock budget. Anything above this is a hang — fail
+        // loudly with a diagnostic instead of stalling the CI runner for 90 min.
+        // See incident: GitHub run 25806816492 (PR #89) burned 90 min on this
+        // test plus the Redis counterpart because something downstream of the
+        // MinIO/Mongo container startup never returned.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+        tokio::time::timeout(TEST_TIMEOUT, run_mongodb_backup_and_restore_to_s3())
+            .await
+            .expect("test_mongodb_backup_and_restore_to_s3 exceeded 300s — likely hung on MinIO/Mongo/S3 wait");
+    }
+
+    /// Body of `test_mongodb_backup_and_restore_to_s3`, extracted so the outer
+    /// test can wrap it in `tokio::time::timeout`.
+    #[cfg(feature = "docker-tests")]
+    async fn run_mongodb_backup_and_restore_to_s3() {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
         };

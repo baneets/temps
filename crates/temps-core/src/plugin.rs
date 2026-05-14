@@ -129,6 +129,11 @@ pub struct PluginMiddleware {
     pub priority: MiddlewarePriority,
     /// Condition for when to execute
     pub condition: MiddlewareCondition,
+    /// Whether this middleware should also be applied to the public ingest
+    /// router (e.g. session-replay init, analytics events). Defaults to
+    /// `false` — only the admin router gets middleware unless explicitly
+    /// opted in. Request-metadata injection must opt in; auth must not.
+    pub apply_to_public: bool,
     /// The actual middleware function
     pub handler: MiddlewareHandler,
 }
@@ -140,6 +145,7 @@ impl std::fmt::Debug for PluginMiddleware {
             .field("plugin_name", &self.plugin_name)
             .field("priority", &self.priority)
             .field("condition", &self.condition)
+            .field("apply_to_public", &self.apply_to_public)
             .field("handler", &"<function>")
             .finish()
     }
@@ -161,6 +167,14 @@ pub trait TempsMiddleware: Send + Sync {
     /// Condition for when to execute
     fn condition(&self) -> MiddlewareCondition {
         MiddlewareCondition::Always
+    }
+
+    /// Whether this middleware should also be applied to the public ingest
+    /// router. Default is `false` — middleware only runs on the admin router
+    /// unless it explicitly opts in. Request-metadata injection opts in;
+    /// auth must stay opted out.
+    fn apply_to_public(&self) -> bool {
+        false
     }
 
     /// Initialize the middleware with access to the plugin context
@@ -194,6 +208,7 @@ impl TempsMiddlewareWrapper {
         let plugin_name = self.middleware.plugin_name().to_string();
         let priority = self.middleware.priority();
         let condition = self.middleware.condition();
+        let apply_to_public = self.middleware.apply_to_public();
 
         let middleware = self.middleware.clone();
         let handler = Arc::new(
@@ -212,6 +227,7 @@ impl TempsMiddlewareWrapper {
             plugin_name,
             priority,
             condition,
+            apply_to_public,
             handler,
         }
     }
@@ -255,6 +271,35 @@ impl PluginMiddlewareCollection {
             plugin_name: plugin_name.into(),
             priority,
             condition,
+            apply_to_public: false,
+            handler: Arc::new(handler),
+        });
+    }
+
+    /// Same as [`Self::add_middleware`] but also applies the middleware to
+    /// the public ingest router. Use for request-context injection that
+    /// public handlers (no auth) still depend on, e.g. `RequestMetadata`.
+    pub fn add_shared_middleware(
+        &mut self,
+        name: impl Into<String>,
+        plugin_name: impl Into<String>,
+        priority: MiddlewarePriority,
+        condition: MiddlewareCondition,
+        handler: impl Fn(
+                Request,
+                Next,
+            )
+                -> Pin<Box<dyn Future<Output = Result<Response, axum::http::StatusCode>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.middleware.push(PluginMiddleware {
+            name: name.into(),
+            plugin_name: plugin_name.into(),
+            priority,
+            condition,
+            apply_to_public: true,
             handler: Arc::new(handler),
         });
     }
@@ -748,6 +793,25 @@ impl PluginManager {
         }
 
         let middleware = self.collect_middleware(&plugin_context);
+
+        // Middleware that opts into `apply_to_public` (e.g. request metadata
+        // injection) must run on both routers — public ingest endpoints
+        // depend on the same `Extension<RequestMetadata>` as admin handlers,
+        // even though they skip auth. Other middleware (auth) stays
+        // admin-only.
+        let public_middleware: Vec<PluginMiddleware> = middleware
+            .iter()
+            .filter(|mw| mw.apply_to_public)
+            .map(|mw| PluginMiddleware {
+                name: mw.name.clone(),
+                plugin_name: mw.plugin_name.clone(),
+                priority: mw.priority,
+                condition: mw.condition.clone(),
+                apply_to_public: mw.apply_to_public,
+                handler: mw.handler.clone(),
+            })
+            .collect();
+        public_router = self.apply_middleware_to_router(public_router, public_middleware);
         admin_router = self.apply_middleware_to_router(admin_router, middleware);
 
         Ok(SplitApplication {
@@ -947,6 +1011,7 @@ macro_rules! middleware {
             plugin_name: $plugin.into(),
             priority: $priority,
             condition: $condition,
+            apply_to_public: false,
             handler: std::sync::Arc::new($handler),
         }
     };
@@ -1188,6 +1253,154 @@ mod split_application_tests {
         assert_eq!(
             probe_status(split.admin.clone(), "/public-marker").await,
             axum::http::StatusCode::NOT_FOUND
+        );
+    }
+
+    /// Plugin used to verify that shared middleware (`apply_to_public = true`)
+    /// is applied to both the admin and public routers, while admin-only
+    /// middleware stays off the public router. Replicates the original bug:
+    /// a public ingest handler that extracts `Extension<RequestMetadata>`
+    /// returned HTTP 500 because no middleware injected the extension on
+    /// the public side.
+    struct MetadataRequiringPlugin;
+
+    impl TempsPlugin for MetadataRequiringPlugin {
+        fn name(&self) -> &'static str {
+            "metadata-requiring"
+        }
+
+        fn register_services<'a>(
+            &'a self,
+            _ctx: &'a ServiceRegistrationContext,
+        ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn configure_routes(&self, _ctx: &PluginContext) -> Option<PluginRoutes> {
+            let router = Router::new().route(
+                "/admin-needs-metadata",
+                get(
+                    |axum::Extension(meta): axum::Extension<crate::RequestMetadata>| async move {
+                        meta.host
+                    },
+                ),
+            );
+            Some(PluginRoutes::new(router))
+        }
+
+        fn configure_public_routes(&self, _ctx: &PluginContext) -> Option<PluginRoutes> {
+            let router = Router::new().route(
+                "/public-needs-metadata",
+                get(
+                    |axum::Extension(meta): axum::Extension<crate::RequestMetadata>| async move {
+                        meta.host
+                    },
+                ),
+            );
+            Some(PluginRoutes::new(router))
+        }
+
+        fn configure_middleware(&self, _ctx: &PluginContext) -> Option<PluginMiddlewareCollection> {
+            let mut collection = PluginMiddlewareCollection::new();
+            let key = [9u8; 32];
+            let crypto = std::sync::Arc::new(crate::CookieCrypto::from_bytes(&key));
+            collection.add_temps_middleware(std::sync::Arc::new(
+                crate::RequestMetadataMiddleware::new(crypto),
+            ));
+            Some(collection)
+        }
+    }
+
+    /// Plugin used to assert that middleware NOT opted into `apply_to_public`
+    /// stays off the public router. Adds an admin-only middleware that
+    /// short-circuits with HTTP 418 so we can detect whether it ran.
+    struct AdminOnlyShortCircuitPlugin;
+
+    impl TempsPlugin for AdminOnlyShortCircuitPlugin {
+        fn name(&self) -> &'static str {
+            "admin-only-shortcircuit"
+        }
+
+        fn register_services<'a>(
+            &'a self,
+            _ctx: &'a ServiceRegistrationContext,
+        ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn configure_routes(&self, _ctx: &PluginContext) -> Option<PluginRoutes> {
+            let router = Router::new().route("/admin-probe", get(|| async { "admin-probe-ok" }));
+            Some(PluginRoutes::new(router))
+        }
+
+        fn configure_public_routes(&self, _ctx: &PluginContext) -> Option<PluginRoutes> {
+            let router = Router::new().route("/public-probe", get(|| async { "public-probe-ok" }));
+            Some(PluginRoutes::new(router))
+        }
+
+        fn configure_middleware(&self, _ctx: &PluginContext) -> Option<PluginMiddlewareCollection> {
+            let mut collection = PluginMiddlewareCollection::new();
+            // Plain `add_simple_middleware` -> `apply_to_public = false`. If
+            // the partition logic ever regresses and applies this to the
+            // public router, the probe will return 418 instead of 200.
+            collection.add_simple_middleware(
+                "shortcircuit",
+                "admin-only-shortcircuit",
+                MiddlewarePriority::Business,
+                |_req: Request, _next: Next| async move {
+                    Ok(axum::response::Response::builder()
+                        .status(axum::http::StatusCode::IM_A_TEAPOT)
+                        .body(axum::body::Body::empty())
+                        .unwrap())
+                },
+            );
+            Some(collection)
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_middleware_applies_to_public_router() {
+        // Regression: the public ingest endpoint `/api/_temps/session-replay/init`
+        // failed with "Missing request extension RequestMetadata" because
+        // the public router got no middleware. This test pins the wiring:
+        // a public route that extracts `Extension<RequestMetadata>` must
+        // return 200, not 500.
+        let mut manager = PluginManager::default();
+        manager.register_plugin(Box::new(MetadataRequiringPlugin));
+
+        let split = manager.build_split_application().unwrap();
+
+        assert_eq!(
+            probe_status(split.public.clone(), "/public-needs-metadata").await,
+            axum::http::StatusCode::OK,
+            "public route extracting RequestMetadata must succeed — \
+             RequestMetadataMiddleware must run on the public router"
+        );
+        assert_eq!(
+            probe_status(split.admin.clone(), "/admin-needs-metadata").await,
+            axum::http::StatusCode::OK,
+            "admin route extracting RequestMetadata must succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_only_middleware_does_not_apply_to_public_router() {
+        // The flip side of the bug: middleware that doesn't opt into
+        // `apply_to_public` (e.g. auth) must NOT run on public routes.
+        let mut manager = PluginManager::default();
+        manager.register_plugin(Box::new(AdminOnlyShortCircuitPlugin));
+
+        let split = manager.build_split_application().unwrap();
+
+        assert_eq!(
+            probe_status(split.admin.clone(), "/admin-probe").await,
+            axum::http::StatusCode::IM_A_TEAPOT,
+            "admin-only middleware should run on the admin router"
+        );
+        assert_eq!(
+            probe_status(split.public.clone(), "/public-probe").await,
+            axum::http::StatusCode::OK,
+            "admin-only middleware must NOT run on the public router"
         );
     }
 }
