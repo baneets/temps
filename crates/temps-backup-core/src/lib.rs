@@ -20,7 +20,9 @@
 
 pub mod config;
 pub mod engine;
+pub mod engine_v2;
 pub mod error;
+pub mod executor;
 pub mod notifier;
 pub mod queue;
 pub mod runner;
@@ -36,4 +38,13 @@ pub use queue::{
     reclaim_orphan_jobs_on_startup, BackupJobRow,
 };
 pub use runner::{BackupRunner, EnqueueJobParams};
+
+// v2 single-process executor — replaces the poll-claim-dispatch runner.
+// Old `BackupRunner` is still wired up; engines and callers will be
+// migrated to the executor one at a time.
+pub use engine_v2::{
+    BackupContext as ExecutorContext, BackupEngine as ExecutorEngine,
+    BackupError as ExecutorBackupError, BackupOutcome as ExecutorOutcome,
+};
+pub use executor::{BackupExecutor, BackupExecutorBuilder, SpawnError, SpawnParams};
 pub use timeouts::{default_max_runtime_secs, resolve_max_runtime};

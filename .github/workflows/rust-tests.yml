@@ -308,33 +308,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Each entry splits the test command into three parts so the retry
+        # logic can append `<test_name> --exact` *after* the libtest `--`
+        # separator without producing a second stray `--` (which silently
+        # disables the filter and reruns the whole binary). See the
+        # retry block at the bottom of this job — it assembles:
+        #
+        #   <cargo_args> -- <test_args> <test_name> --exact
+        #
+        # so all post-`--` flags live in `test_args`, never in `cargo_args`.
         include:
           - group: docker-providers
             # temps-providers with Docker tests enabled.
             # NOTE: orchestrator_* tests run in a dedicated `postgres-upgrades`
             # group below (serial, long timeout, real pg17→pg18 containers).
             # Skip them here so this group stays fast and parallel-safe.
-            command: >-
-              cargo test --no-fail-fast --lib
+            cargo_args: >-
+              test --no-fail-fast --lib
               -p temps-providers --features docker-tests
-              --
+            test_args: >-
               --skip orchestrator_
           - group: postgres-upgrades
             # PostgreSQL major-version upgrade orchestrator integration tests.
             # Each test pulls pg17 + pg18 images and runs a real dump/restore,
             # so they're 2–6 min apiece and must not contend for Docker.
             # --test-threads=1 guarantees serial execution.
-            command: >-
-              cargo test --no-fail-fast --lib
+            cargo_args: >-
+              test --no-fail-fast --lib
               -p temps-providers --features docker-tests
               orchestrator_
-              --
+            test_args: >-
               --nocapture
               --test-threads=1
           - group: docker-deployments
             # Crates that use TestDatabase and/or Docker
-            command: >-
-              cargo test --no-fail-fast
+            cargo_args: >-
+              test --no-fail-fast
               -p temps-deployments
               -p temps-backup
               -p temps-vulnerability-scanner
@@ -353,6 +362,7 @@ jobs:
               -p temps-logs
               -p temps-domains
               -p temps-projects
+            test_args: ""
 
     services:
       timescaledb:
@@ -422,8 +432,13 @@ jobs:
           CARGO_INCREMENTAL: 0
           TEMPS_TEST_DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
         run: |
-          # Run tests, capturing the names of any failures for targeted retry
-          if ${{ matrix.command }} 2>&1 | tee /tmp/test-output.txt; then
+          # Run tests, capturing the names of any failures for targeted retry.
+          # `cargo_args` covers everything cargo cares about (crate, features,
+          # filters); `test_args` is everything after `--` that libtest cares
+          # about (--skip, --nocapture, --test-threads). The retry block
+          # below assembles `<cargo_args> -- <test_args> <test_name> --exact`
+          # so the post-`--` flags don't collide with the per-test filter.
+          if cargo ${{ matrix.cargo_args }} -- ${{ matrix.test_args }} 2>&1 | tee /tmp/test-output.txt; then
             echo "All tests passed on first attempt"
             exit 0
           fi
@@ -432,7 +447,7 @@ jobs:
           failed_tests=$(grep '^test .* FAILED$' /tmp/test-output.txt | sed 's/^test \(.*\) \.\.\..*FAILED$/\1/' | tr '\n' ' ')
           if [ -z "$failed_tests" ]; then
             echo "Could not parse failed test names, re-running all tests"
-            ${{ matrix.command }}
+            cargo ${{ matrix.cargo_args }} -- ${{ matrix.test_args }}
             exit $?
           fi
 
@@ -443,19 +458,23 @@ jobs:
           echo ""
           sleep 10
 
-          # Retry only the failed tests (up to 2 more attempts)
-          attempt=2
+          # Retry only the failed tests (up to 2 more attempts each).
+          # Each retry passes a single libtest separator: `--` then test_args
+          # then the test filter and --exact. Crucially, cargo_args never
+          # contains its own `--`, so there's never a second separator.
           max_attempts=3
           for test_name in $failed_tests; do
-            echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
-            if ! ${{ matrix.command }} -- "$test_name" --exact; then
-              if [ $attempt -lt $max_attempts ]; then
-                attempt=$((attempt + 1))
-                echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
-                sleep 10
-                ${{ matrix.command }} -- "$test_name" --exact || exit 1
-              else
+            attempt=2
+            while [ $attempt -le $max_attempts ]; do
+              echo "--- Retrying: $test_name (attempt $attempt/$max_attempts) ---"
+              if cargo ${{ matrix.cargo_args }} -- ${{ matrix.test_args }} "$test_name" --exact; then
+                break
+              fi
+              if [ $attempt -eq $max_attempts ]; then
+                echo "❌ $test_name failed after $max_attempts attempts"
                 exit 1
               fi
-            fi
+              attempt=$((attempt + 1))
+              sleep 10
+            done
           done
