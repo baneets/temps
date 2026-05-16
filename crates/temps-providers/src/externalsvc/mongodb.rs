@@ -2907,8 +2907,12 @@ mod tests {
     /// Test backup and restore of MongoDB to/from S3 using real Docker containers
     /// This test uses MongoDB and MinIO (S3-compatible) containers
     /// Demonstrates the use of test_utils for backup/restore testing
+    ///
+    /// `flavor = "multi_thread"` is required because `MinioTestContainer`'s
+    /// `Drop` impl calls `tokio::task::block_in_place`, which panics on the
+    /// default current-thread runtime.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_mongodb_backup_and_restore_to_s3() {
         // Whole-test wall-clock budget. Anything above this is a hang — fail
         // loudly with a diagnostic instead of stalling the CI runner for 90 min.

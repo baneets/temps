@@ -1113,7 +1113,7 @@ impl ExternalServiceManager {
         slug_param: &str,
     ) -> Result<external_services::Model, ExternalServiceError> {
         let service = external_services::Entity::find()
-            .filter(external_services::Column::Name.eq(slug_param))
+            .filter(external_services::Column::Slug.eq(slug_param))
             .one(self.db.as_ref())
             .await?;
 
@@ -1539,9 +1539,16 @@ impl ExternalServiceManager {
                 reason: format!("Failed to encrypt config: {}", e),
             })?;
 
-        // Update service config in database
+        // Update service config (and optionally name/slug) in database.
+        // `name` was previously accepted by the request but silently dropped;
+        // applying it here keeps the API contract honest.
         let mut service_update: external_services::ActiveModel = service.clone().into();
         service_update.config = Set(Some(encrypted_config));
+        if let Some(new_name) = request.name {
+            let new_slug = Self::generate_slug(&new_name);
+            service_update.name = Set(new_name);
+            service_update.slug = Set(Some(new_slug));
+        }
         service_update.updated_at = Set(Utc::now());
         service_update.update(self.db.as_ref()).await?;
 
@@ -1974,7 +1981,14 @@ impl ExternalServiceManager {
         }
         let health = self.cluster_health(service).await;
         if health.monitor_error.is_some() {
-            return Ok(false);
+            // Monitor is unreachable. Fall back to the persisted role label
+            // so we still refuse to delete the node that was last known to
+            // be primary — otherwise the "monitor down" branch turns
+            // `remove_cluster_member` into an unconditional escape hatch
+            // and can silently delete the writable node. The operator
+            // override path is to first manually flip the role column or
+            // run `pg_autoctl perform failover` once the monitor recovers.
+            return Ok(is_role_primary(&member.role));
         }
         Ok(health
             .members
@@ -3994,7 +4008,6 @@ echo "[restore] Pre-seed complete"
     ) -> Result<(), ExternalServiceError> {
         info!("Initializing cluster for service {}", service_id);
         let service = self.get_service(service_id).await?;
-        let parameters = self.get_service_parameters(service_id).await?;
         let service_type = ServiceType::from_str(&service.service_type).map_err(|_| {
             ExternalServiceError::InvalidServiceType {
                 id: service_id,
@@ -4002,6 +4015,10 @@ echo "[restore] Pre-seed complete"
             }
         })?;
 
+        // Topology + role validation happens BEFORE parameter decryption so
+        // bad-input requests fail with the correct error variant (and a
+        // helpful message) instead of a generic "Service has no config".
+        // Older ordering decrypted first and ate the validation error.
         let cluster_instance = self
             .create_cluster_service_instance(service.name.clone(), service_type)
             .ok_or_else(|| ExternalServiceError::InitializationFailed {
@@ -4025,6 +4042,11 @@ echo "[restore] Pre-seed complete"
                 });
             }
         }
+
+        // Parameter decryption only after validation has passed; otherwise
+        // operators creating a cluster with an unsupported type or invalid
+        // role get a misleading "service has no config" surface error.
+        let parameters = self.get_service_parameters(service_id).await?;
 
         // Build member specs with ordinals and hostnames.
         //
@@ -8592,7 +8614,20 @@ fn cpu_percent_from_delta(
     // pinned 4-core container reads as 400%, not 100%.
     let cpus = current.online_cpus.unwrap_or(1).max(1) as f64;
 
-    if cpu_delta <= 0 || system_delta <= 0 {
+    // `system_delta <= 0` means we have no elapsed wall-clock CPU time to
+    // divide against — either Docker returned identical samples (just
+    // started, missing counters) or the counter wrapped. Either way we
+    // can't compute a meaningful percent.
+    if system_delta <= 0 {
+        return None;
+    }
+
+    // `cpu_delta < 0` indicates a counter reset (container restart between
+    // samples). `cpu_delta == 0` is the legitimate idle case — the
+    // container did zero CPU work during the sample window. Report 0.0%
+    // explicitly rather than `None`, otherwise idle services render as
+    // "—" in the UI and look like a sampling bug.
+    if cpu_delta < 0 {
         return None;
     }
 
@@ -8759,6 +8794,29 @@ mod tests {
         let prev = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
         let same = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
         assert!(cpu_percent_from_delta(&same, &prev).is_none());
+    }
+
+    /// Idle running container: zero cpu_delta but positive system_delta
+    /// (the host's wall clock kept ticking, the container did no work).
+    /// Must report 0.0% — returning None here is what caused idle
+    /// services to render as "—" in the UI instead of "0.0%".
+    #[test]
+    fn cpu_percent_delta_idle_container_reads_zero() {
+        let prev = cpu_stats_at(5_000_000_000, 10_000_000_000, 4);
+        // Same cpu_total, advanced system_total by 4s on 4 cores.
+        let curr = cpu_stats_at(5_000_000_000, 14_000_000_000, 4);
+        let pct = cpu_percent_from_delta(&curr, &prev).unwrap();
+        assert_eq!(pct, 0.0, "idle container must read 0.0%, got {pct}");
+    }
+
+    /// A backwards cpu_delta (counter reset / container restart between
+    /// samples) is still `None` — we can't compute a meaningful percent
+    /// across a restart.
+    #[test]
+    fn cpu_percent_delta_negative_cpu_returns_none() {
+        let prev = cpu_stats_at(10_000_000_000, 50_000_000_000, 4);
+        let curr = cpu_stats_at(1_000_000_000, 54_000_000_000, 4);
+        assert!(cpu_percent_from_delta(&curr, &prev).is_none());
     }
 
     #[test]
@@ -9037,8 +9095,22 @@ mod tests {
     async fn test_stop_and_start_service() {
         let (manager, _test_db) = setup_test_manager().await;
         let random_unused_port = get_unused_port();
-        // Create a service first
+        // Create a service first. Postgres requires database/username/password
+        // at the parameter-validation layer (parameter_strategies), so they
+        // must be present even when the test only cares about lifecycle.
         let mut params = HashMap::new();
+        params.insert(
+            "database".to_string(),
+            JsonValue::String("testdb".to_string()),
+        );
+        params.insert(
+            "username".to_string(),
+            JsonValue::String("testuser".to_string()),
+        );
+        params.insert(
+            "password".to_string(),
+            JsonValue::String("testpass".to_string()),
+        );
         params.insert(
             "port".to_string(),
             JsonValue::String(random_unused_port.to_string()),
@@ -9146,30 +9218,33 @@ mod tests {
         let service = manager.create_service(request).await.unwrap();
         let service_id = service.id;
 
-        // Update service parameters
-        let mut new_params = HashMap::new();
-        new_params.insert(
-            "database".to_string(),
-            JsonValue::String("updated_db".to_string()),
-        );
-        new_params.insert(
-            "username".to_string(),
-            JsonValue::String("updated_user".to_string()),
-        );
-        new_params.insert(
-            "password".to_string(),
-            JsonValue::String("updated_pass".to_string()),
-        );
-
+        // Update only updateable fields — Postgres marks `database`,
+        // `username`, `password`, and `host` as readonly (see
+        // parameter_strategies.rs), so the request must not touch them or
+        // the strategy rejects the whole update with a validation error.
+        // The test asserts the rename + docker_image path works.
         let update_request = UpdateExternalServiceRequest {
             name: Some("test-update-renamed".to_string()),
-            parameters: new_params,
-            docker_image: None,
+            parameters: HashMap::new(),
+            docker_image: Some("gotempsh/postgres-walg:18-bookworm".to_string()),
         };
 
         let updated_service = manager.update_service(service_id, update_request).await;
-        assert!(updated_service.is_ok());
-        assert_eq!(updated_service.unwrap().name, "test-update-renamed");
+        assert!(
+            updated_service.is_ok(),
+            "update_service failed: {:?}",
+            updated_service.err()
+        );
+        let updated = updated_service.unwrap();
+        assert_eq!(updated.name, "test-update-renamed");
+
+        // Sensitive readonly fields must NOT have been mutated.
+        let params_after = manager.get_service_parameters(service_id).await.unwrap();
+        assert_eq!(
+            params_after.get("database").and_then(|v| v.as_str()),
+            Some("original_db"),
+            "readonly `database` must be preserved across update"
+        );
 
         // Cleanup
         let _ = manager.delete_service(service_id).await;
@@ -9214,15 +9289,29 @@ mod tests {
     async fn test_get_service_by_slug() {
         let (manager, _test_db) = setup_test_manager().await;
 
-        // Create a service with a name that will be slugified
+        // Use a name that slugifies to something different (uppercase + hyphens)
+        // but still produces a Docker-compatible resource name. Whitespace in
+        // the name was previously tested here, but `*Service::new` interpolates
+        // the raw name into Docker volume/container names, which forbid
+        // whitespace — so the create call would explode before this test
+        // could even reach the slug lookup. Picking a Docker-safe name that
+        // still differs from its slug keeps slugification under test without
+        // colliding with Docker's resource-name regex.
         let mut params = HashMap::new();
         params.insert(
             "password".to_string(),
             JsonValue::String("test".to_string()),
         );
 
+        let raw_name = "Service-By-Slug-Test";
+        let expected_slug = ExternalServiceManager::generate_slug(raw_name);
+        assert_ne!(
+            raw_name, expected_slug,
+            "test relies on raw name differing from slug to prove the lookup uses the slug column"
+        );
+
         let request = CreateExternalServiceRequest {
-            name: "Service With Spaces".to_string(),
+            name: raw_name.to_string(),
             service_type: ServiceType::Redis,
             version: None,
             parameters: params,
@@ -9234,10 +9323,21 @@ mod tests {
         let service = manager.create_service(request).await.unwrap();
         let service_id = service.id;
 
-        // Get service by slug
-        let found_service = manager.get_service_by_slug("Service With Spaces").await;
-        assert!(found_service.is_ok());
-        assert_eq!(found_service.unwrap().id, service.id);
+        // Lookup must succeed by slug, not raw name.
+        let found_service = manager
+            .get_service_by_slug(&expected_slug)
+            .await
+            .expect("lookup by slug should succeed");
+        assert_eq!(found_service.id, service.id);
+
+        // Lookup by the raw name through the slug endpoint must NOT succeed —
+        // that would mean we're filtering by name instead of slug (the bug
+        // this test exists to guard against).
+        let by_name_through_slug = manager.get_service_by_slug(raw_name).await;
+        assert!(
+            by_name_through_slug.is_err(),
+            "get_service_by_slug must filter on the slug column, not name"
+        );
 
         // Cleanup
         let _ = manager.delete_service(service_id).await;

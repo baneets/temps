@@ -30,4 +30,3 @@ pub mod postgres_walg;
 pub mod redis;
 pub mod ring_buffer;
 pub mod s3_mirror;
-pub mod shell;

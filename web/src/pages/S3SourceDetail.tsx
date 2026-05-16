@@ -47,6 +47,7 @@ import {
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { listSourceBackupsWithScan, testS3SourceConnection } from '@/lib/s3-sources'
+import { runScheduleNow } from '@/lib/schedule-runs'
 import { cn } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
@@ -58,12 +59,13 @@ import {
   Loader2,
   MoreHorizontal,
   Pencil,
+  Play,
   Plug,
   Plus,
   ScanSearch,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 
 /** Format a wall-clock timeout from seconds into a human-readable string.
@@ -83,6 +85,7 @@ export function S3SourceDetail() {
   const { id } = useParams<{ id: string }>()
   const sourceId = id ? parseInt(id) : undefined
   const { setBreadcrumbs } = useBreadcrumbs()
+  const navigate = useNavigate()
 
   const [scheduleToDelete, setScheduleToDelete] =
     useState<BackupScheduleResponse | null>(null)
@@ -196,6 +199,18 @@ export function S3SourceDetail() {
     onSuccess: () => {
       refetchSchedules()
       toast.success('Backup schedule enabled')
+    },
+  })
+
+  const runNowMutation = useMutation({
+    mutationFn: (scheduleId: number) => runScheduleNow(scheduleId),
+    onSuccess: (_data, scheduleId) => {
+      toast.success('Backup run enqueued')
+      void navigate(`/backups/schedules/${scheduleId}`)
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      toast.error('Failed to start backup run', { description: message })
     },
   })
 
@@ -412,11 +427,20 @@ export function S3SourceDetail() {
                       <TableRow
                         key={schedule.id}
                         className={cn(
+                          'transition-colors hover:bg-accent/50',
                           !schedule.enabled && 'text-muted-foreground',
                         )}
                       >
                         <TableCell>
-                          <div className="flex items-center gap-3">
+                          {/* Anchor — supports ⌘-click / middle-click /
+                              right-click "Open in new tab". The whole-row
+                              click fallback got replaced because <a>
+                              inside <tr> with onClick eats modifier-key
+                              navigation. */}
+                          <Link
+                            to={`/backups/schedules/${schedule.id}`}
+                            className="flex items-center gap-3 hover:underline"
+                          >
                             <DatabaseBackup
                               className={cn(
                                 'h-4 w-4',
@@ -441,7 +465,7 @@ export function S3SourceDetail() {
                                 </div>
                               )}
                             </div>
-                          </div>
+                          </Link>
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline">
@@ -484,7 +508,9 @@ export function S3SourceDetail() {
                               )
                             : '-'}
                         </TableCell>
-                        <TableCell>
+                        <TableCell
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button variant="ghost" size="icon">
@@ -492,6 +518,19 @@ export function S3SourceDetail() {
                               </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  runNowMutation.mutate(schedule.id)
+                                }
+                                disabled={
+                                  !schedule.enabled ||
+                                  runNowMutation.isPending
+                                }
+                              >
+                                <Play className="mr-2 h-4 w-4" />
+                                Run now
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
                               <DropdownMenuItem asChild>
                                 <Link
                                   to={`/backups/s3-sources/${sourceId}/schedules/${schedule.id}/edit`}

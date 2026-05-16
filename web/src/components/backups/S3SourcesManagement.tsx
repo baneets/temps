@@ -48,7 +48,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import {
   DropdownMenu,
@@ -205,7 +205,6 @@ function S3SourceForm({
 }
 
 export function S3SourcesManagement() {
-  const navigate = useNavigate()
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const [selectedSource, setSelectedSource] = useState<
     (Partial<NewS3Source> & { id?: number }) | null
@@ -450,49 +449,46 @@ export function S3SourcesManagement() {
               return (
                 <li
                   key={source.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => navigate(`/backups/s3-sources/${source.id}`)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      navigate(`/backups/s3-sources/${source.id}`)
-                    }
-                  }}
-                  className="flex cursor-pointer items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors focus:outline-none focus:bg-muted/40"
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-muted/40 transition-colors"
                 >
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
-                    <Database className="size-4 text-muted-foreground" />
-                  </div>
-                  <div className="flex min-w-0 flex-1 items-center gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className="truncate text-sm font-medium">
-                          {source.name}
-                        </p>
-                        <Badge variant="secondary" className="font-mono text-xs">
-                          {source.bucket_name}
-                        </Badge>
-                        {isDefault && (
-                          <Badge
-                            variant="outline"
-                            className="gap-1 border-amber-400/40 text-amber-600 dark:text-amber-300"
-                          >
-                            <Star className="size-3 fill-current" />
-                            Default
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                        {source.region}
-                        {source.endpoint ? ` · ${source.endpoint}` : ''}
-                      </p>
-                    </div>
-                  </div>
-                  <div
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
+                  {/* Wrap icon + text in a Link so ⌘-click, middle-click, and
+                      right-click → "Open in new tab" all work natively. The
+                      row retains its hover highlight for visual continuity. */}
+                  <Link
+                    to={`/backups/s3-sources/${source.id}`}
+                    className="flex min-w-0 flex-1 items-center gap-4"
                   >
+                    <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <Database className="size-4 text-muted-foreground" />
+                    </div>
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="truncate text-sm font-medium">
+                            {source.name}
+                          </p>
+                          <Badge variant="secondary" className="font-mono text-xs">
+                            {source.bucket_name}
+                          </Badge>
+                          {isDefault && (
+                            <Badge
+                              variant="outline"
+                              className="gap-1 border-amber-400/40 text-amber-600 dark:text-amber-300"
+                            >
+                              <Star className="size-3 fill-current" />
+                              Default
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                          {source.region}
+                          {source.endpoint ? ` · ${source.endpoint}` : ''}
+                        </p>
+                      </div>
+                    </div>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground/50" />
+                  </Link>
+                  <div>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="icon" className="h-8 w-8">
@@ -565,7 +561,6 @@ export function S3SourcesManagement() {
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
-                  <ChevronRight className="size-4 shrink-0 text-muted-foreground/50" />
                 </li>
               )
             })}

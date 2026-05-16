@@ -174,6 +174,16 @@ fn format_chain<E: std::error::Error>(err: &E) -> String {
 pub async fn connect_with_self_signed_tls(
     config: &str,
 ) -> std::result::Result<Client, tokio_postgres::Error> {
+    // `ClientConfig::builder()` panics when no process-wide CryptoProvider
+    // is installed AND the rustls features can't auto-pick one (e.g. both
+    // `aws-lc-rs` and `ring` enabled, or neither). The main binary
+    // installs ring's provider during setup, but tests and short-lived
+    // tools that exercise this code path without going through setup
+    // would crash. Install lazily here — `install_default` returns Err if
+    // a provider is already installed, which we deliberately ignore.
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
+
     let rustls_config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))

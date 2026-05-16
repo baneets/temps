@@ -2,10 +2,13 @@ use crate::engines::dispatch::{resolve_engine_key, ResolveEngineError};
 use crate::handlers::audit::{
     AuditContext, BackupRunAudit, BackupScheduleStatusChangedAudit, BackupScheduleUpdatedAudit,
     ExternalServiceBackupRunAudit, S3SourceCreatedAudit, S3SourceDeletedAudit,
-    S3SourceUpdatedAudit,
+    S3SourceUpdatedAudit, ScheduleRunNowAudit,
 };
 use crate::handlers::types::BackupAppState;
-use crate::services::BackupError;
+use crate::services::{
+    BackupError, ChildBackupEntry, EnqueuedJob, ScheduleRunEntry, ScheduleRunJobEntry,
+    ScheduleRunListResponse, ScheduleRunResponse, ScheduleRunSummary, ScheduleRunSummaryList,
+};
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -57,6 +60,21 @@ impl From<BackupError> for Problem {
                 .with_title("Schedule Error")
                 .with_detail(msg.clone()),
 
+            BackupError::AlreadyInFlight { .. } => problemdetails::new(StatusCode::CONFLICT)
+                .with_title("Backup Already In Flight")
+                .with_detail(error.to_string()),
+
+            BackupError::ScheduleRunAlreadyInFlight { existing_run_id } => {
+                problemdetails::new(StatusCode::CONFLICT)
+                    .with_title("Schedule Run Already In Flight")
+                    .with_detail(format!(
+                        "A run for this schedule is already in flight \
+                         (existing run id: {}). Wait for it to finish \
+                         before triggering a new run.",
+                        existing_run_id
+                    ))
+            }
+
             BackupError::Database(_)
             | BackupError::S3(_)
             | BackupError::Configuration(_)
@@ -90,10 +108,14 @@ impl From<BackupError> for Problem {
         get_backup_schedule,
         delete_backup_schedule,
         list_backups_for_schedule,
+        list_schedule_runs,
+        list_schedule_run_jobs,
         run_backup_for_source,
+        run_schedule_now,
         list_source_backups,
         list_external_service_backups,
         get_backup,
+        list_backup_children,
         disable_backup_schedule,
         enable_backup_schedule,
         update_backup_schedule,
@@ -120,6 +142,15 @@ impl From<BackupError> for Problem {
             ServiceBackupEntryResponse,
             BackupAlertResponse,
             BackupAlertListResponse,
+            ScheduleRunEntry,
+            ScheduleRunListResponse,
+            ScheduleRunSummary,
+            ScheduleRunSummaryList,
+            ScheduleRunJobEntry,
+            ScheduleRunResponse,
+            EnqueuedJob,
+            ChildBackupEntryResponse,
+            ChildBackupListResponse,
         )
     ),
     info(
@@ -334,6 +365,70 @@ impl From<temps_entities::external_service_backups::Model> for ExternalServiceBa
             expires_at: backup.expires_at.map(|dt| dt.to_rfc3339()),
         }
     }
+}
+
+/// A single child backup entry in the `GET /backups/{id}/children` response.
+///
+/// Each entry corresponds to one `external_service_backups` row joined with
+/// `external_services`, providing service metadata without a second request.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChildBackupEntryResponse {
+    /// Row ID from `external_service_backups`.
+    pub id: i32,
+    /// FK to `external_services.id`.
+    pub service_id: i32,
+    /// Human-readable name of the external service (e.g. "redis-prod").
+    pub service_name: String,
+    /// Service type string (e.g. "postgres", "redis", "mongodb", "s3").
+    #[schema(example = "postgres")]
+    pub service_type: String,
+    /// Current state: "pending" | "running" | "completed" | "failed".
+    pub state: String,
+    /// Backup variant (e.g. "full", "incremental").
+    pub backup_type: String,
+    /// When the child backup started (RFC 3339).
+    #[schema(example = "2025-01-15T14:30:00.123Z")]
+    pub started_at: String,
+    /// When the child backup finished, if known.
+    #[schema(example = "2025-01-15T14:35:00.456Z")]
+    pub finished_at: Option<String>,
+    /// Size of the child backup in bytes, if available.
+    pub size_bytes: Option<i64>,
+    /// Object key or `s3://` URL where the backup data lives.
+    pub s3_location: String,
+    /// Engine-reported error message when `state = "failed"`.
+    pub error_message: Option<String>,
+    /// Compression algorithm used (e.g. "gzip", "lz4").
+    pub compression_type: String,
+}
+
+impl From<ChildBackupEntry> for ChildBackupEntryResponse {
+    fn from(entry: ChildBackupEntry) -> Self {
+        Self {
+            id: entry.id,
+            service_id: entry.service_id,
+            service_name: entry.service_name,
+            service_type: entry.service_type,
+            state: entry.state,
+            backup_type: entry.backup_type,
+            started_at: entry.started_at.to_rfc3339(),
+            finished_at: entry.finished_at.map(|dt| dt.to_rfc3339()),
+            size_bytes: entry.size_bytes,
+            s3_location: entry.s3_location,
+            error_message: entry.error_message,
+            compression_type: entry.compression_type,
+        }
+    }
+}
+
+/// Response body for `GET /backups/{id}/children`.
+///
+/// Returns an empty `children` list (not 404) when the parent backup has no
+/// child records (e.g. control-plane backups).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ChildBackupListResponse {
+    /// Zero or more child backup entries ordered by `external_service_backups.id` ASC.
+    pub children: Vec<ChildBackupEntryResponse>,
 }
 
 /// Response type for S3 source
@@ -894,12 +989,19 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
             "/backups/schedules/{id}/backups",
             get(list_backups_for_schedule),
         )
+        .route("/backups/schedules/{id}/runs", get(list_schedule_runs))
+        .route("/backups/schedules/{id}/run", post(run_schedule_now))
+        .route(
+            "/backups/schedule-runs/{id}/jobs",
+            get(list_schedule_run_jobs),
+        )
         .route("/backups/s3-sources/{id}/backups", get(list_source_backups))
         .route(
             "/backups/external-services/{id}/backups",
             get(list_external_service_backups),
         )
         .route("/backups/{id}", get(get_backup))
+        .route("/backups/{id}/children", get(list_backup_children))
         .route(
             "/backups/schedules/{id}/disable",
             patch(disable_backup_schedule),
@@ -1380,6 +1482,174 @@ async fn list_backups_for_schedule(
     Ok(Json(responses))
 }
 
+/// Query parameters for `GET /api/backups/schedules/{id}/runs`.
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+struct ListScheduleRunsParams {
+    /// Page number (1-based, defaults to 1, clamped to 1 if < 1).
+    #[serde(default = "default_page")]
+    page: i64,
+    /// Items per page (defaults to 20, clamped to 100 if > 100).
+    #[serde(default = "default_page_size")]
+    page_size: i64,
+}
+
+/// Query parameters for `GET /api/backups/schedule-runs/{id}/jobs`.
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+struct ListScheduleRunJobsParams {
+    /// Page number (1-based, defaults to 1).
+    #[serde(default = "default_page")]
+    page: i64,
+    /// Items per page (defaults to 50, clamped to 200 if > 200).
+    #[serde(default = "default_run_job_page_size")]
+    page_size: i64,
+}
+
+fn default_run_job_page_size() -> i64 {
+    50
+}
+
+/// Paginated run history for a backup schedule (one row per scheduler tick).
+///
+/// Returns one [`ScheduleRunSummary`] per scheduler tick, with child backup
+/// counts aggregated in a single SQL round-trip. Legacy `backups` rows (pre-
+/// fan-out) are surfaced as synthetic single-job runs so history does not
+/// disappear. Ordered by `started_at DESC` (newest first).
+///
+/// Use `GET /backups/schedule-runs/{run_id}/jobs` to drill into a single run.
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/schedules/{id}/runs",
+    params(ListScheduleRunsParams),
+    responses(
+        (status = 200, description = "Paginated run history for the schedule", body = ScheduleRunSummaryList),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Schedule not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_schedule_runs(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+    axum::extract::Query(params): axum::extract::Query<ListScheduleRunsParams>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+
+    let result = app_state
+        .backup_service
+        .list_schedule_runs(id, params.page, params.page_size)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(result))
+}
+
+/// List the individual backup jobs for a single scheduler run.
+///
+/// Returns each child `backups` row joined with its external service name and
+/// the most-recent `backup_jobs` engine key. Used by the schedule detail
+/// accordion to show per-job detail on row expand.
+///
+/// `page_size` defaults to 50 and is capped at 200.
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/schedule-runs/{id}/jobs",
+    responses(
+        (status = 200, description = "Jobs for this scheduler run", body = Vec<ScheduleRunJobEntry>),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_schedule_run_jobs(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i64>,
+    axum::extract::Query(params): axum::extract::Query<ListScheduleRunJobsParams>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+
+    let (jobs, _total) = app_state
+        .backup_service
+        .list_schedule_run_jobs(id, params.page, params.page_size)
+        .await
+        .map_err(Problem::from)?;
+
+    Ok(Json(jobs))
+}
+
+/// Immediately fan-out a run for the given schedule (Run Now).
+///
+/// Creates one `schedule_runs` row, one control-plane backup job, and one
+/// backup job per supported external service — all in a single transaction.
+/// Returns `202 Accepted` with a [`ScheduleRunResponse`] containing the new
+/// `schedule_run_id` and the list of enqueued jobs. Returns `409 Conflict` if
+/// a run for this schedule is already in flight or if the schedule is disabled.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/schedules/{id}/run",
+    responses(
+        (status = 202, description = "Fan-out run enqueued for async execution", body = ScheduleRunResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Schedule not found", body = ProblemDetails),
+        (status = 409, description = "Run already in flight or schedule disabled", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn run_schedule_now(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+    Extension(metadata): Extension<RequestMetadata>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsCreate);
+
+    let response = app_state
+        .backup_service
+        .run_schedule_now(&app_state.backup_runner, id, Some(auth.user_id()))
+        .await
+        .map_err(Problem::from)?;
+
+    // Audit the trigger. Use the first enqueued job's ids as representative
+    // (the control-plane job is always first in the vec).
+    let representative_backup_id = response.jobs.first().map(|j| j.backup_id).unwrap_or(0);
+    let representative_job_id = response.jobs.first().map(|j| j.job_id).unwrap_or(0);
+
+    let audit = ScheduleRunNowAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        schedule_id: id,
+        // The schedule name is not returned in the fan-out response. Use the
+        // run id as a unique identifier for the audit log.
+        schedule_name: format!("run-{}", response.schedule_run_id),
+        backup_id: representative_backup_id,
+        job_id: representative_job_id,
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to create audit log for run_schedule_now: {}", e);
+    }
+
+    tracing::info!(
+        schedule_id = id,
+        schedule_run_id = response.schedule_run_id,
+        job_count = response.jobs.len(),
+        "run_schedule_now: fan-out run enqueued",
+    );
+
+    Ok((StatusCode::ACCEPTED, Json(response)).into_response())
+}
+
 /// Run a backup immediately for an S3 source.
 ///
 /// Enqueues the backup for asynchronous execution via the `BackupRunner`
@@ -1539,6 +1809,51 @@ async fn get_backup(
         response.max_attempts = Some(job.max_attempts);
         response.max_runtime_secs = Some(job.max_runtime_secs);
     }
+
+    Ok(Json(response))
+}
+
+/// List the external-service child backups that belong to a parent backup.
+///
+/// Each entry in `children` corresponds to one `external_service_backups` row,
+/// joined with `external_services` so the caller receives the service name and
+/// type without a second request.
+///
+/// Returns an empty `{ "children": [] }` — **not 404** — when the parent
+/// backup exists but has no children (e.g. control-plane backups).
+/// Returns 404 when the parent backup itself does not exist.
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/{id}/children",
+    params(
+        ("id" = i32, Path, description = "Integer row id of the parent backup")
+    ),
+    responses(
+        (status = 200, description = "Child backup list (may be empty)", body = ChildBackupListResponse),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Parent backup not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_backup_children(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+
+    let children = app_state
+        .backup_service
+        .list_child_backups(id)
+        .await
+        .map_err(Problem::from)?;
+
+    let response = ChildBackupListResponse {
+        children: children.into_iter().map(Into::into).collect(),
+    };
 
     Ok(Json(response))
 }

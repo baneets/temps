@@ -51,7 +51,10 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::ring_buffer::RingBuffer;
-use super::shell::{detect_shell, ShellKind};
+// Shell detection was removed: the runtime `command -v bash` probe
+// returned Bash on a sidecar that only had dash, producing
+// `sh: 1: set: Illegal option -o pipefail` in prod. The POSIX `&& gzip`
+// form below is universal, so we no longer need the probe.
 use temps_backup_core::{BackupContext, BackupEngine, BackupEngineError, StepCursor, StepEvent};
 
 /// How frequently the engine emits a `Heartbeat` during long-running operations.
@@ -586,7 +589,18 @@ async fn step_pg_dumpall(
 
     // Sidecar container config (same strategy as BackupService::backup_postgres_database).
     let container_name = format!("temps-cp-backup-{}", Uuid::new_v4());
-    let image_tag = format!("timescale/timescaledb-ha:{}", pg_version);
+    // Use the official Debian-based `postgres:{major}` image as the sidecar.
+    // `pg_version` is the version-tag string returned by `detect_postgres_version`
+    // (e.g. `"pg18"`), so we strip the `pg` prefix to map to the official tag
+    // (e.g. `postgres:18`). The official image is:
+    //   - Always published on Docker Hub for every supported major
+    //   - Guaranteed to ship `pg_dumpall` matching the server version
+    //   - Compatible with TimescaleDB dumps (pg_dumpall produces plain SQL)
+    // Previous attempt used `timescale/timescaledb-ha:{tag}` which does not
+    // publish a `pgXX-latest` tag — Docker normalises a bare `:pgXX` reference
+    // to `:pgXX-latest` in some daemon versions, producing a confusing 404.
+    let major = pg_version.trim_start_matches("pg");
+    let image_tag = format!("postgres:{}", major);
 
     let config = Config {
         image: Some(image_tag),
@@ -658,41 +672,28 @@ async fn step_pg_dumpall(
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 
-    // Detect whether the sidecar ships bash. With bash we use `set -o
-    // pipefail` so a `pg_dumpall | gzip` pipeline surfaces pg_dumpall's
-    // failure (otherwise gzip succeeds on empty input and we'd write a
-    // 20-byte empty-gzip "backup"). Without bash — `dash`/`ash`/busybox —
-    // we use the POSIX-portable `pg_dumpall > tmp && gzip tmp` form;
-    // `&&` short-circuits so a pg_dumpall failure skips gzip and the
-    // compound exit code is pg_dumpall's real one.
-    let shell_kind = detect_shell(&docker, &container_name).await;
+    // Use the POSIX-portable `pg_dumpall > tmp && gzip tmp` form. `&&`
+    // short-circuits, so a pg_dumpall failure skips gzip and the
+    // compound exit code is pg_dumpall's real one — no risk of an
+    // empty-gzip-header "successful" backup. Trade-off: transient 2×
+    // disk while both `.sql` and `.sql.gz` co-exist (`gzip <file>`
+    // removes the source on success). Works in every shell, so we don't
+    // need to detect bash vs dash.
     let uncompressed_in_container = container_dump_path
         .strip_suffix(".gz")
         .unwrap_or(&container_dump_path)
         .to_string();
 
-    let pg_dump_cmd = match shell_kind {
-        ShellKind::Bash => format!(
-            "set -o pipefail; pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
-            shell_escape_local(&host),
-            shell_escape_local(&port_str),
-            shell_escape_local(&username),
-            shell_escape_local(&database),
-            stderr_path,
-            container_dump_path,
-        ),
-        ShellKind::Sh => format!(
-            "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} > {} && gzip {}",
-            shell_escape_local(&host),
-            shell_escape_local(&port_str),
-            shell_escape_local(&username),
-            shell_escape_local(&database),
-            stderr_path,
-            shell_escape_local(&uncompressed_in_container),
-            shell_escape_local(&uncompressed_in_container),
-        ),
-    };
-    let shell_cmd: &'static str = shell_kind.as_str();
+    let pg_dump_cmd = format!(
+        "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} > {} && gzip {}",
+        shell_escape_local(&host),
+        shell_escape_local(&port_str),
+        shell_escape_local(&username),
+        shell_escape_local(&database),
+        stderr_path,
+        shell_escape_local(&uncompressed_in_container),
+        shell_escape_local(&uncompressed_in_container),
+    );
 
     // Capture both stdout and stderr. The shell command already redirects
     // stderr to a file inside the container (`2>{stderr_path}`) for
@@ -702,7 +703,7 @@ async fn step_pg_dumpall(
         .create_exec(
             &container_name,
             CreateExecOptions {
-                cmd: Some(vec![shell_cmd, "-c", &pg_dump_cmd]),
+                cmd: Some(vec!["sh", "-c", &pg_dump_cmd]),
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
                 env: Some(vec![pgpassword_env.as_str()]),
@@ -1172,18 +1173,42 @@ async fn detect_postgres_version(
                 job_id,
                 "ControlPlaneEngine: could not detect PG version, defaulting to pg18"
             );
-            return Ok("pg18-latest".to_string());
+            return Ok(timescale_image_tag_for_major(18));
         }
     };
 
-    // Parse major version from e.g. "18.1 (Ubuntu 18.1-1.pgdg22.04+1)".
+    Ok(timescale_image_tag_for_version_str(&version_str))
+}
+
+/// Return the version-tag string we use to identify which Postgres major
+/// version the sidecar should match (e.g. `"pg18"`).
+///
+/// The caller strips the `pg` prefix and uses the bare major in
+/// `format!("postgres:{}", major)` so the sidecar pulls the official
+/// `postgres:{major}` image from Docker Hub. We keep the `pgXX` form here
+/// (instead of returning the bare integer) so the helper is symmetrical
+/// with what `current_setting('server_version')` callers expect downstream.
+///
+/// Historical note: an earlier revision targeted `timescale/timescaledb-ha:pgXX`
+/// directly, but some Docker daemons normalised a bare `:pgXX` reference
+/// to `:pgXX-latest`, producing a 404 since TimescaleDB-HA does not publish
+/// that tag. Switching to `postgres:{major}` avoids the issue entirely —
+/// pg_dumpall is in the official image and produces plain SQL that works
+/// against any backup target.
+fn timescale_image_tag_for_major(major: u32) -> String {
+    format!("pg{}", major)
+}
+
+/// Parse a Postgres `server_version` string and return the matching
+/// TimescaleDB-HA image tag. Falls back to `pg18` if the major version
+/// can't be parsed.
+fn timescale_image_tag_for_version_str(version_str: &str) -> String {
     let major: u32 = version_str
         .split('.')
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(18);
-
-    Ok(format!("pg{}-latest", major))
+    timescale_image_tag_for_major(major)
 }
 
 /// Build an S3 client from the `s3_source_id` in the database.
@@ -1915,5 +1940,45 @@ mod tests {
             heartbeat_count
         );
         assert!(got_completed, "expected a StepCompleted event");
+    }
+
+    // ── TimescaleDB image tag format ──────────────────────────────────────────
+    //
+    // Regression coverage for a real bug: the engine was producing tags
+    // like `pg18-latest`, which doesn't exist on Docker Hub. Scheduled
+    // backups silently failed every night with "No such image:
+    // timescale/timescaledb-ha:pg18-latest".
+
+    #[test]
+    fn timescale_tag_for_major_has_no_latest_suffix() {
+        // The valid Docker Hub tag form is `pg{major}` — moving alias
+        // for the most recent patch release. Appending `-latest`
+        // (or any other suffix) resolves to a 404.
+        assert_eq!(timescale_image_tag_for_major(17), "pg17");
+        assert_eq!(timescale_image_tag_for_major(18), "pg18");
+        assert!(
+            !timescale_image_tag_for_major(18).contains("latest"),
+            "tag must NOT contain 'latest' — Docker Hub returns 404"
+        );
+    }
+
+    #[test]
+    fn timescale_tag_parses_full_version_strings() {
+        // Postgres `server_version` typically looks like
+        //   "18.1 (Ubuntu 18.1-1.pgdg22.04+1)"
+        // or just "17.4". We only need the major number.
+        assert_eq!(
+            timescale_image_tag_for_version_str("18.1 (Ubuntu 18.1-1.pgdg22.04+1)"),
+            "pg18"
+        );
+        assert_eq!(timescale_image_tag_for_version_str("17.4"), "pg17");
+        assert_eq!(timescale_image_tag_for_version_str("16"), "pg16");
+    }
+
+    #[test]
+    fn timescale_tag_falls_back_to_pg18_on_garbage() {
+        // Unparsable input must NOT panic and must NOT produce `pg-latest`.
+        assert_eq!(timescale_image_tag_for_version_str(""), "pg18");
+        assert_eq!(timescale_image_tag_for_version_str("garbage"), "pg18");
     }
 }

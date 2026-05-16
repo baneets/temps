@@ -237,6 +237,7 @@ mod tests {
             name: format!("backup-{}", id),
             backup_id: format!("uuid-{}", id),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "full".into(),
             state: "running".into(),
             started_at: Utc::now() - chrono::Duration::hours(2),

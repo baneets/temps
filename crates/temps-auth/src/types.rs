@@ -1,3 +1,4 @@
+use crate::avatar::generate_avatar_data_url;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -172,10 +173,7 @@ impl From<temps_entities::users::Model> for RouteUser {
             name: db_user.name.clone(),
             username: db_user.name.clone(),
             email: db_user.email.clone(),
-            image: format!(
-                "https://ui-avatars.com/api/?name={}&background=random",
-                urlencoding::encode(&db_user.name)
-            ),
+            image: generate_avatar_data_url(&db_user.name),
             mfa_enabled: db_user.mfa_enabled,
             email_verified: db_user.email_verified,
             created_at: db_user.created_at.timestamp_millis(),

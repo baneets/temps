@@ -17,6 +17,14 @@ import {
 } from '@/components/ui/card'
 import { CopyButton } from '@/components/ui/copy-button'
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -25,6 +33,7 @@ import {
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { listBackupChildrenOptions } from '@/lib/backup-children'
 import { cn, formatBytes } from '@/lib/utils'
 import { useQuery } from '@tanstack/react-query'
 import { format, formatDistanceToNow } from 'date-fns'
@@ -33,6 +42,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   Clock,
+  Database,
   FileArchive,
   HardDrive,
   Loader2,
@@ -213,6 +223,13 @@ export function BackupDetail() {
   const { data: users } = useQuery({
     ...listUsersOptions({ query: { include_deleted: false } }),
   })
+
+  // Fetch child external-service backups using the integer row id once the
+  // parent backup has loaded. The query is a no-op until `backup` is defined.
+  const { data: childrenData } = useQuery({
+    ...listBackupChildrenOptions(backup?.id),
+  })
+  const children = childrenData?.children ?? []
 
   useEffect(() => {
     setBreadcrumbs([
@@ -561,6 +578,97 @@ export function BackupDetail() {
             </dl>
           </CardContent>
         </Card>
+
+        {/* Services in this backup — only shown when children exist */}
+        {children.length > 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Services in this backup</CardTitle>
+              <CardDescription>
+                External services whose data was captured in this backup run.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Service</TableHead>
+                      <TableHead>Type</TableHead>
+                      <TableHead>State</TableHead>
+                      <TableHead className="hidden sm:table-cell">Size</TableHead>
+                      <TableHead className="hidden md:table-cell">Duration</TableHead>
+                      <TableHead className="hidden lg:table-cell">Error</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {children.map((child) => {
+                      const childStarted = new Date(child.started_at)
+                      const childFinished = child.finished_at
+                        ? new Date(child.finished_at)
+                        : null
+                      const childDurationMs = childFinished
+                        ? childFinished.getTime() - childStarted.getTime()
+                        : null
+                      return (
+                        <TableRow key={child.id}>
+                          <TableCell>
+                            <Link
+                              to={`/storage/${child.service_id}`}
+                              className="flex items-center gap-2 hover:underline"
+                            >
+                              <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+                              <span className="font-medium">{child.service_name}</span>
+                            </Link>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="capitalize">
+                              {child.service_type}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge state={child.state} />
+                          </TableCell>
+                          <TableCell className="hidden sm:table-cell text-sm text-muted-foreground">
+                            {child.size_bytes !== null
+                              ? formatBytes(child.size_bytes)
+                              : '—'}
+                          </TableCell>
+                          <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
+                            {childDurationMs !== null
+                              ? formatDuration(childDurationMs)
+                              : '—'}
+                          </TableCell>
+                          <TableCell className="hidden lg:table-cell max-w-[200px]">
+                            {child.error_message ? (
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="block truncate text-xs text-destructive cursor-help">
+                                      {child.error_message}
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent
+                                    side="top"
+                                    className="max-w-sm whitespace-pre-wrap break-words"
+                                  >
+                                    {child.error_message}
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      )
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
 
         {/* Tags */}
         {backup.tags.length > 0 ? (

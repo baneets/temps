@@ -131,6 +131,14 @@ const EditBackupSchedule = lazy(() =>
     default: m.EditBackupSchedule,
   }))
 )
+const ScheduleDetail = lazy(() =>
+  import('./pages/ScheduleDetail').then((m) => ({ default: m.ScheduleDetail }))
+)
+const ScheduleRunDetail = lazy(() =>
+  import('./pages/ScheduleRunDetail').then((m) => ({
+    default: m.ScheduleRunDetail,
+  }))
+)
 const NewProject = lazy(() =>
   import('./pages/NewProject').then((m) => ({ default: m.NewProject }))
 )
@@ -426,6 +434,8 @@ const FullAppRoutes = () => {
                 <Route path="/backups/s3-sources/new" element={<CreateS3Source />} />
                 <Route path="/backups/s3-sources/:id/schedules/new" element={<CreateBackupSchedule />} />
                 <Route path="/backups/s3-sources/:id/schedules/:scheduleId/edit" element={<EditBackupSchedule />} />
+                <Route path="/backups/schedules/:id" element={<ScheduleDetail />} />
+                <Route path="/backups/schedules/:scheduleId/runs/:runId" element={<ScheduleRunDetail />} />
                 <Route path="/backups/s3-sources/:id/backups/:backupId" element={<BackupDetail />} />
                 <Route path="/backups/s3-sources/:id" element={<S3SourceDetail />} />
                 {/* Backward-compat: old /settings/<resource> links → new top-level */}

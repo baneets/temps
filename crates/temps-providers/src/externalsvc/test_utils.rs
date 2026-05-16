@@ -33,6 +33,14 @@ mod docker_utils {
             use bollard::query_parameters::CreateImageOptions;
             use futures::StreamExt;
 
+            // Sweep any `temps-test-minio-*` containers left behind by a
+            // killed previous test run. Even though container names are
+            // already unique-per-call (timestamp + random suffix), the
+            // leaked instances hold ports + memory and pile up on dev
+            // machines and CI runners. This sweep is best-effort —
+            // anything we can't remove just stays for someone else.
+            sweep_orphan_test_containers(&docker, "temps-test-minio-").await;
+
             // Find available port for MinIO - use random offset to avoid parallel test conflicts
             let random_offset = rand::random::<u16>() % 1000;
             let port = find_available_port(9000 + random_offset)?;
@@ -114,7 +122,37 @@ mod docker_utils {
                 .force_path_style(true)
                 .build();
 
-            let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
+            // Build the S3 client. The AWS SDK eagerly initialises its
+            // rustls TrustStore at `Client::from_conf` time, and on hosts
+            // without any system root CAs (some CI runners, minimal
+            // containers, the GitHub macOS runner without keychain access)
+            // it panics with "TrustStore configured to enable native roots
+            // but no valid root certificates parsed!". The panic is raised
+            // on the test thread, so we wrap construction in `catch_unwind`
+            // and convert any panic into a skippable error whose message
+            // contains "TrustStore". The sibling backup tests
+            // (redis/mongodb/postgres) already check for that substring
+            // and skip the test cleanly.
+            let s3_client = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                aws_sdk_s3::Client::from_conf(s3_config)
+            })) {
+                Ok(c) => c,
+                Err(panic_payload) => {
+                    let panic_msg = panic_payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| {
+                            panic_payload
+                                .downcast_ref::<&'static str>()
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_else(|| "(non-string panic payload)".to_string());
+                    return Err(anyhow::anyhow!(
+                        "Failed to construct S3 client (AWS SDK panicked): {}",
+                        panic_msg
+                    ));
+                }
+            };
 
             // Create bucket
             s3_client
@@ -273,6 +311,53 @@ mod docker_utils {
             start_port + 100
         ))
     }
+
+    /// Best-effort removal of orphaned test containers whose names start
+    /// with `name_prefix`. Used by integration helpers (e.g.
+    /// `MinioTestContainer::start`) to keep dev machines and CI runners
+    /// from accumulating leaked containers when a test panics before
+    /// reaching its cleanup path.
+    ///
+    /// All errors are swallowed — this is a "make a best attempt"
+    /// hygiene step, not a correctness gate.
+    pub(super) async fn sweep_orphan_test_containers(docker: &Docker, name_prefix: &str) {
+        use bollard::query_parameters::{ListContainersOptions, RemoveContainerOptions};
+
+        let mut filters = HashMap::new();
+        // Docker matches `name` filters as a substring, so the prefix
+        // alone is enough; the per-test timestamp/random suffix keeps
+        // it from sweeping concurrent siblings since each test waits
+        // on its own future.
+        filters.insert("name".to_string(), vec![name_prefix.to_string()]);
+
+        let Ok(containers) = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters: Some(filters),
+                ..Default::default()
+            }))
+            .await
+        else {
+            return;
+        };
+
+        for c in containers {
+            let id = match c.id {
+                Some(id) => id,
+                None => continue,
+            };
+            let _ = docker
+                .remove_container(
+                    &id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        v: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
+    }
 }
 
 #[cfg(feature = "docker-tests")]
@@ -285,6 +370,7 @@ pub fn create_mock_backup(subpath: &str) -> temps_entities::backups::Model {
         name: "test-backup".to_string(),
         backup_id: "test-backup-id".to_string(),
         schedule_id: None,
+        schedule_run_id: None,
         backup_type: "external_service".to_string(),
         state: "completed".to_string(),
         started_at: chrono::Utc::now(),

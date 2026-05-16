@@ -380,6 +380,12 @@ UPDATE backups
             source: e,
         })?;
 
+    // After committing the individual job result, attempt to close the parent
+    // schedule_runs row if every sibling is now terminal. This is best-effort:
+    // a failure here is logged by the caller but does not roll back the
+    // completed backup row.
+    mark_schedule_run_finished_if_done(db, backup_id).await?;
+
     Ok(())
 }
 
@@ -471,6 +477,62 @@ UPDATE backups
             operation: "mark_job_failed:commit",
             source: e,
         })?;
+
+    // After committing the individual failure, close the parent schedule_runs
+    // row if every sibling has also reached a terminal state.
+    mark_schedule_run_finished_if_done(db, backup_id).await?;
+
+    Ok(())
+}
+
+// ── Schedule-run completion ───────────────────────────────────────────────────
+
+/// Mark the parent `schedule_runs` row as finished when all its child backups
+/// have reached a terminal state.
+///
+/// This is called from both `mark_job_completed` and `mark_job_failed` after
+/// the parent `backups` row has been updated. The UPDATE is a no-op if:
+///
+/// - The backup row has no `schedule_run_id` (legacy one-shot row).
+/// - The `schedule_runs` row is already finished.
+/// - At least one sibling backup is still `"pending"` or `"running"`.
+///
+/// The single-statement UPDATE is safe against races: the `NOT EXISTS` sub-
+/// query is evaluated atomically within the same snapshot as the UPDATE. Two
+/// concurrent workers cannot both see an empty pending set and both write
+/// `finished_at`.
+pub async fn mark_schedule_run_finished_if_done(
+    db: &DatabaseConnection,
+    backup_id: i32,
+) -> Result<(), BackupRunnerError> {
+    let sql = r#"
+UPDATE schedule_runs sr
+   SET finished_at = NOW()
+ WHERE sr.id = (
+     SELECT b.schedule_run_id
+       FROM backups b
+      WHERE b.id = $1
+        AND b.schedule_run_id IS NOT NULL
+   )
+   AND sr.finished_at IS NULL
+   AND NOT EXISTS (
+       SELECT 1
+         FROM backups b2
+        WHERE b2.schedule_run_id = sr.id
+          AND b2.state IN ('pending', 'running')
+   )
+    "#;
+
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        vec![SValue::from(backup_id)],
+    ))
+    .await
+    .map_err(|e| BackupRunnerError::Database {
+        operation: "mark_schedule_run_finished_if_done",
+        source: e,
+    })?;
 
     Ok(())
 }

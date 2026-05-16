@@ -39,7 +39,11 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use super::ring_buffer::RingBuffer;
-use super::shell::{detect_shell, ShellKind};
+// Shell detection (`use super::shell::*`) was removed: the runtime probe
+// proved unreliable in production (a sidecar with only `dash` was
+// returning `Bash`, then the bash-pipefail command exploded with
+// `sh: 1: set: Illegal option -o pipefail`). The POSIX two-stage form
+// below works in every shell, so we no longer need to detect.
 use temps_backup_core::{BackupContext, BackupEngine, BackupEngineError, StepCursor, StepEvent};
 use temps_core::EncryptionService;
 
@@ -302,6 +306,11 @@ async fn step_dump(
     use bollard::models::ContainerCreateBody as Config;
     use bollard::query_parameters::RemoveContainerOptions;
 
+    error!(
+        job_id,
+        "PostgresPgDumpEngine dump: step_dump ENTRY (diagnostic)"
+    );
+
     // Idempotence: if temp file already exists and is non-empty, skip re-dump.
     if let Some(temp_path) = durable_state.get(DS_TEMP_PATH).and_then(|v| v.as_str()) {
         let path = std::path::Path::new(temp_path);
@@ -442,48 +451,46 @@ async fn step_dump(
         format!("'{}'", s.replace('\'', "'\\''"))
     }
 
-    // Detect whether the sidecar has bash. Two failure modes a naive
-    // `pg_dumpall ... 2>file | gzip > out` pipeline creates:
-    //   1. `pg_dumpall` errors → gzip still exits 0 on empty input → pipeline
-    //      reports success, producing a 20-byte empty-gzip-header artifact.
-    //   2. `set -o pipefail` fixes (1), but is a bashism. Some sidecar images
-    //      run `dash`/`ash` (`sh: 1: set: Illegal option -o pipefail`).
+    // Naive `pg_dumpall ... 2>file | gzip > out` masks failures: `gzip`
+    // exits 0 on empty input, so the pipeline reports success even when
+    // `pg_dumpall` errored. `set -o pipefail` would fix it but is a
+    // bashism (`sh: 1: set: Illegal option -o pipefail` under `dash`).
     //
-    // If bash exists, we use the efficient pipeline with `set -o pipefail`
-    // (single in-flight stream, no intermediate file). Otherwise we fall
-    // back to a POSIX-portable two-stage `&&` form: dump to an uncompressed
-    // file, then `gzip` it; `&&` short-circuits so a `pg_dumpall` failure
-    // skips `gzip` and the compound exit code is `pg_dumpall`'s real one.
-    // The trade-off in the sh-fallback path is transient 2x disk usage
-    // while both `.sql` and `.sql.gz` co-exist.
-    let shell_kind = detect_shell(&deps.docker, &sidecar_name).await;
+    // We use a POSIX-portable two-stage `&&` form that works in every
+    // shell — `dash`, `ash`, `bash`, busybox: dump to an uncompressed
+    // file first, then `gzip` it. `&&` short-circuits so a `pg_dumpall`
+    // failure skips `gzip` and the compound exit code is `pg_dumpall`'s
+    // real one. Trade-off: transient 2× disk usage while both `.sql`
+    // and `.sql.gz` co-exist (`gzip <file>` removes the source on
+    // success). The earlier shell-detection branch proved unreliable
+    // in prod (probe returned Bash on a sidecar that had only dash),
+    // so we removed it.
     let uncompressed_in_container = container_dump_path
         .strip_suffix(".gz")
         .unwrap_or(&container_dump_path)
         .to_string();
 
-    let dump_cmd = match shell_kind {
-        ShellKind::Bash => format!(
-            "set -o pipefail; pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} | gzip > {}",
-            shell_escape(&db_container),
-            shell_escape(&port_str),
-            shell_escape(&pg_params.username),
-            shell_escape(&pg_params.database),
-            stderr_path_container,
-            container_dump_path,
-        ),
-        ShellKind::Sh => format!(
-            "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} > {} && gzip {}",
-            shell_escape(&db_container),
-            shell_escape(&port_str),
-            shell_escape(&pg_params.username),
-            shell_escape(&pg_params.database),
-            stderr_path_container,
-            shell_escape(&uncompressed_in_container),
-            shell_escape(&uncompressed_in_container),
-        ),
-    };
-    let shell_cmd: &'static str = shell_kind.as_str();
+    let dump_cmd = format!(
+        "pg_dumpall --clean --if-exists --no-password --host={} --port={} --username={} --database={} 2>{} > {} && gzip {}",
+        shell_escape(&db_container),
+        shell_escape(&port_str),
+        shell_escape(&pg_params.username),
+        shell_escape(&pg_params.database),
+        stderr_path_container,
+        shell_escape(&uncompressed_in_container),
+        shell_escape(&uncompressed_in_container),
+    );
+
+    // Log the exact dump_cmd so we can reproduce any shell-parsing failure
+    // outside the engine. Removing this once the dash-pipefail mystery is
+    // diagnosed.
+    info!(
+        job_id,
+        sidecar = %sidecar_name,
+        image = %sidecar_image,
+        dump_cmd = %dump_cmd,
+        "PostgresPgDumpEngine dump: about to exec sh -c"
+    );
 
     // Capture stdout + stderr from the exec stream (no `2>&1` in cmd — we
     // split the streams). The shell redirect (`2>{stderr_path}`) captures
@@ -493,7 +500,7 @@ async fn step_dump(
         .create_exec(
             &sidecar_name,
             CreateExecOptions {
-                cmd: Some(vec![shell_cmd, "-c", &dump_cmd]),
+                cmd: Some(vec!["sh", "-c", &dump_cmd]),
                 attach_stdout: Some(true),
                 attach_stderr: Some(true),
                 env: Some(vec![password_env.as_str()]),

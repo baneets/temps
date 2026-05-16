@@ -384,6 +384,27 @@ pub enum BackupError {
 
     #[error("Notification error: {0}")]
     NotificationError(String),
+
+    /// A backup job for the same engine + target is already in flight.
+    ///
+    /// Returned by `run_schedule_now` when the runner's concurrency guard fires.
+    /// Surfaces as `409 Conflict` in handlers.
+    #[error(
+        "A backup is already in flight (existing job id: {existing_job_id}); \
+         refuse to enqueue a duplicate"
+    )]
+    AlreadyInFlight { existing_job_id: i64 },
+
+    /// A `schedule_runs` row for this schedule already has `finished_at IS NULL`
+    /// (at least one child backup is still pending or running).
+    ///
+    /// Returned by [`BackupService::run_schedule_now`] when the fan-out detects
+    /// an in-flight run. Surfaces as `409 Conflict` in handlers.
+    #[error(
+        "A run for this schedule is already in flight (existing run id: {existing_run_id}); \
+         wait for it to finish before triggering a new run"
+    )]
+    ScheduleRunAlreadyInFlight { existing_run_id: i64 },
 }
 
 impl From<aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::put_object::PutObjectError>>
@@ -479,6 +500,255 @@ pub struct ServiceBackupEntry {
     pub s3_source_name: String,
     /// Row ID from `external_service_backups`.
     pub external_service_backup_id: i32,
+}
+
+/// A single run-history entry for the schedule detail page (deliverable 1).
+///
+/// Combines one `backups` row with the most-recent `backup_jobs` row for that
+/// backup via a lateral JOIN.  Fields from `backup_jobs` are `None` for legacy
+/// backup rows that pre-date ADR-014.
+#[derive(Debug, FromQueryResult, serde::Serialize, utoipa::ToSchema)]
+pub struct ScheduleRunEntry {
+    /// DB id of the `backups` row.
+    pub backup_id: i32,
+    /// UUID string (`backups.backup_id`).
+    pub backup_uuid: String,
+    /// Current state: `"pending"`, `"running"`, `"completed"`, `"failed"`.
+    pub state: String,
+    /// When the backup was started (ISO 8601 / RFC 3339).
+    #[schema(value_type = String)]
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// When the backup finished, if known.
+    #[schema(value_type = Option<String>)]
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Final size in bytes once completed. `None` while running.
+    pub size_bytes: Option<i64>,
+    /// Engine-reported error message when `state = "failed"`.
+    pub error_message: Option<String>,
+    /// S3 object key or URL where the backup data lives.
+    pub s3_location: String,
+    /// Most recent `backup_jobs.id` for this backup. `None` for legacy rows.
+    pub job_id: Option<i64>,
+    /// Last completed step reported by the engine (e.g. `"upload"`).
+    /// `None` when no step has been persisted yet.
+    pub current_step: Option<String>,
+    /// Number of claim-and-run attempts so far. `None` for legacy rows.
+    pub attempts: Option<i32>,
+}
+
+/// Paginated run-history response for a backup schedule (deliverable 1).
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ScheduleRunListResponse {
+    /// Run entries, newest first.
+    pub runs: Vec<ScheduleRunEntry>,
+    /// Total number of runs across all pages.
+    pub total: i64,
+    /// Current page (1-based).
+    pub page: i64,
+    /// Number of items per page (clamped to 1–100).
+    pub page_size: i64,
+}
+
+// ── Fan-out run types (schedule_runs table) ───────────────────────────────────
+
+/// How a scheduler run was triggered.
+///
+/// Used by [`enqueue_scheduled_run`] to set `schedule_runs.triggered_by`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerSource {
+    /// Triggered by the cron scheduler (`process_scheduled_backups`).
+    Cron,
+    /// Triggered by a manual "Run now" API call.
+    Manual,
+}
+
+impl TriggerSource {
+    /// Returns the database string representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TriggerSource::Cron => "cron",
+            TriggerSource::Manual => "manual",
+        }
+    }
+}
+
+/// A single job that was successfully enqueued during a fan-out run.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct EnqueuedJob {
+    /// FK to `backups.id` for this job.
+    pub backup_id: i32,
+    /// FK to `backup_jobs.id` for this job.
+    pub job_id: i64,
+    /// Engine key (e.g. `"control_plane"`, `"redis"`, `"postgres_pgdump"`).
+    pub engine: String,
+    /// FK to `external_services.id` when this is an external-service job.
+    /// `None` for the control-plane job.
+    pub target_service_id: Option<i32>,
+}
+
+/// Optional schedule fan-out context for a pending external-service backup.
+///
+/// [`BackupService::enqueue_pending_external_service_backup`] (and its
+/// convenience wrapper `create_pending_external_service_backup_row`) accept
+/// this so both the manual-trigger handler and the schedule fan-out share
+/// the same row-insert + enqueue logic. Manual triggers pass `None`;
+/// scheduler fan-out passes `Some` with the parent `schedule_runs.id` and
+/// `backup_schedules.id`. The fields are written verbatim onto the
+/// `backups` row.
+#[derive(Debug, Clone, Copy)]
+pub struct ScheduleRunContext {
+    pub schedule_id: i32,
+    pub schedule_run_id: i64,
+}
+
+/// Outcome of [`BackupService::enqueue_scheduled_run`].
+///
+/// The cron caller treats both variants as `Ok` and logs accordingly.
+/// The "Run now" handler returns `409 Conflict` on `AlreadyInFlight`.
+#[derive(Debug)]
+pub enum ScheduleRunOutcome {
+    /// A new `schedule_runs` row was inserted and all eligible jobs were
+    /// enqueued. `run_id` is the `schedule_runs.id` of the new row.
+    Started {
+        /// The newly created `schedule_runs.id`.
+        run_id: i64,
+        /// All jobs that were successfully enqueued in this fan-out.
+        jobs: Vec<EnqueuedJob>,
+    },
+    /// A `schedule_runs` row for this schedule already exists with
+    /// `finished_at IS NULL` (i.e., at least one child backup is still
+    /// pending or running). The existing run id is returned so callers can
+    /// log it or return it in a 409 response.
+    AlreadyInFlight {
+        /// The `schedule_runs.id` of the existing in-flight run.
+        existing_run_id: i64,
+    },
+}
+
+/// Summary of one scheduler tick (or one "Run now" click), returned by
+/// [`BackupService::list_schedule_runs`].
+///
+/// The `aggregate_state` is computed at read time from child backup counts:
+/// - `"running"` — at least one child is `"pending"` or `"running"`.
+/// - `"failed"` — at least one child is `"failed"` and none are running.
+/// - `"completed"` — all children are `"completed"`.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ScheduleRunSummary {
+    /// `schedule_runs.id` for this tick.
+    pub run_id: i64,
+    /// FK to `backup_schedules.id`.
+    pub schedule_id: i32,
+    /// How the run was triggered: `"cron"` or `"manual"`.
+    pub triggered_by: String,
+    /// When the fan-out started (ISO 8601 / RFC 3339).
+    pub started_at: String,
+    /// When all children reached a terminal state. `None` while any child is
+    /// still `"pending"` or `"running"`.
+    pub finished_at: Option<String>,
+    /// Aggregate state computed from child counts (see struct docs).
+    pub aggregate_state: String,
+    /// Total number of child backup jobs in this run.
+    pub total_jobs: i64,
+    /// Number of children in `state = "completed"`.
+    pub completed_jobs: i64,
+    /// Number of children in `state = "failed"`.
+    pub failed_jobs: i64,
+    /// Number of children in `state = "running"`.
+    pub running_jobs: i64,
+    /// Number of children in `state = "pending"`.
+    pub pending_jobs: i64,
+}
+
+/// Paginated list of schedule run summaries returned by the new
+/// [`BackupService::list_schedule_runs`].
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ScheduleRunSummaryList {
+    /// Run summaries, newest first. Includes synthetic single-job rows for
+    /// legacy `backups` rows that have `schedule_id` set but no
+    /// `schedule_run_id` (pre-fan-out history).
+    pub runs: Vec<ScheduleRunSummary>,
+    /// Total number of run entries across all pages.
+    pub total: i64,
+    /// Current page (1-based).
+    pub page: i64,
+    /// Number of items per page.
+    pub page_size: i64,
+}
+
+/// A single job entry inside an expanded schedule run, returned by
+/// [`BackupService::list_schedule_run_jobs`].
+#[derive(Debug, FromQueryResult, serde::Serialize, utoipa::ToSchema)]
+pub struct ScheduleRunJobEntry {
+    /// `backups.id` for this job.
+    pub backup_id: i32,
+    /// `backups.backup_id` UUID string.
+    pub backup_uuid: String,
+    /// Engine key (e.g. `"control_plane"`, `"redis"`).
+    pub engine: String,
+    /// Name of the external service, or `"control plane"` for the
+    /// control-plane job.
+    pub service_name: String,
+    /// `external_services.id` — `NULL` for the control-plane job.
+    pub service_id: Option<i32>,
+    /// Current state of this child backup.
+    pub state: String,
+    /// When this child backup started (ISO 8601 / RFC 3339).
+    #[schema(value_type = String)]
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// When this child backup finished, if known.
+    #[schema(value_type = Option<String>)]
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Size in bytes once completed; `None` while running.
+    pub size_bytes: Option<i64>,
+    /// Engine-reported error message when `state = "failed"`.
+    pub error_message: Option<String>,
+    /// FK to `s3_sources.id` — needed for the backup detail link.
+    pub s3_source_id: i32,
+}
+
+/// HTTP response body for `POST /api/backups/schedules/{id}/run` (fan-out).
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ScheduleRunResponse {
+    /// The `schedule_runs.id` of the newly created run.
+    pub schedule_run_id: i64,
+    /// All jobs that were enqueued in this fan-out.
+    pub jobs: Vec<EnqueuedJob>,
+}
+
+/// A single child backup entry returned by
+/// [`BackupService::list_child_backups`].
+///
+/// Populated from a JOIN of `external_service_backups` and
+/// `external_services` so every field is available in one SQL round-trip.
+#[derive(Debug, FromQueryResult, serde::Serialize, utoipa::ToSchema)]
+pub struct ChildBackupEntry {
+    /// Row ID from `external_service_backups`.
+    pub id: i32,
+    /// FK to `external_services.id`.
+    pub service_id: i32,
+    /// Human-readable name of the external service (e.g. "redis-prod").
+    pub service_name: String,
+    /// Service type string (e.g. "postgres", "redis", "mongodb", "s3").
+    #[schema(example = "postgres")]
+    pub service_type: String,
+    /// Current state: "pending" | "running" | "completed" | "failed".
+    pub state: String,
+    /// Backup variant (e.g. "full", "incremental").
+    pub backup_type: String,
+    /// When the child backup started (ISO 8601 / RFC 3339).
+    #[schema(value_type = String)]
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// When the child backup finished, if known.
+    #[schema(value_type = Option<String>)]
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Size of the child backup in bytes, if available.
+    pub size_bytes: Option<i64>,
+    /// Object key or `s3://` URL where the backup data lives.
+    pub s3_location: String,
+    /// Engine-reported error message when `state = "failed"`.
+    pub error_message: Option<String>,
+    /// Compression algorithm used (e.g. "gzip", "lz4").
+    pub compression_type: String,
 }
 
 #[derive(Clone)]
@@ -648,6 +918,7 @@ impl BackupService {
             name: sea_orm::Set(format!("Backup {}", backup_id)),
             backup_id: sea_orm::Set(backup_id.clone()),
             schedule_id: sea_orm::Set(schedule_id),
+            schedule_run_id: sea_orm::NotSet,
             backup_type: sea_orm::Set(backup_type.to_string()),
             state: sea_orm::Set("completed".to_string()),
             started_at: sea_orm::Set(chrono::Utc::now()),
@@ -3702,6 +3973,712 @@ impl BackupService {
         Ok(backups)
     }
 
+    /// Paginated run history for a backup schedule (deliverable 1).
+    /// List run history for a backup schedule, one row per scheduler tick.
+    ///
+    /// Returns one [`ScheduleRunSummary`] per `schedule_runs` row linked to
+    /// the schedule, with child backup counts aggregated in a single SQL
+    /// round-trip. The `aggregate_state` is computed in Rust from the counts:
+    ///
+    /// - `"running"` — `pending_jobs + running_jobs > 0`
+    /// - `"failed"` — `failed_jobs > 0` and `running_jobs + pending_jobs == 0`
+    /// - `"completed"` — all children completed
+    ///
+    /// Legacy `backups` rows that have `schedule_id` set but no
+    /// `schedule_run_id` (pre-fan-out history) are surfaced as synthetic
+    /// single-job runs in the same list so old history does not disappear.
+    ///
+    /// `page` is 1-based and clamped to `1` when `< 1`.
+    /// `page_size` is clamped to `100` when `> 100` and defaults to `20`.
+    pub async fn list_schedule_runs(
+        &self,
+        schedule_id: i32,
+        page: i64,
+        page_size: i64,
+    ) -> Result<ScheduleRunSummaryList, BackupError> {
+        // Verify the schedule exists first so we return 404 instead of an
+        // empty page when the caller passes an unknown id.
+        self.get_backup_schedule(schedule_id).await?;
+
+        // Clamp pagination parameters.
+        let page = page.max(1);
+        let page_size = page_size.clamp(1, 100);
+        let offset = (page - 1) * page_size;
+
+        // ── Count total run rows (real + synthetic legacy) ────────────────────
+
+        #[derive(FromQueryResult)]
+        struct CountRow {
+            total: i64,
+        }
+
+        // Real runs: schedule_runs rows.
+        // Legacy rows: backups with schedule_id set but schedule_run_id NULL.
+        let count_sql = r#"
+SELECT (
+    SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = $1
+) + (
+    SELECT COUNT(*) FROM backups
+     WHERE schedule_id = $1
+       AND schedule_run_id IS NULL
+) AS total
+        "#;
+
+        let total = CountRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            count_sql,
+            vec![Value::from(schedule_id)],
+        ))
+        .one(self.db.as_ref())
+        .await
+        .map_err(BackupError::Database)?
+        .map(|r| r.total)
+        .unwrap_or(0);
+
+        // ── Fetch page — one row per tick + synthetic legacy rows ─────────────
+
+        #[derive(FromQueryResult)]
+        struct RunRow {
+            run_id: i64,
+            schedule_id: i32,
+            triggered_by: String,
+            started_at: chrono::DateTime<chrono::Utc>,
+            finished_at: Option<chrono::DateTime<chrono::Utc>>,
+            total_jobs: i64,
+            completed_jobs: i64,
+            failed_jobs: i64,
+            running_jobs: i64,
+            pending_jobs: i64,
+        }
+
+        // Real rows: one per schedule_runs row, child counts via LEFT JOIN.
+        // Legacy rows (backups with schedule_id set, schedule_run_id NULL):
+        // synthesised as if they were a run with a single job whose state
+        // is the backup's own state. We use the backups.id negated as the
+        // synthetic run_id to avoid collisions with real schedule_runs.id
+        // (both are distinct integer ranges; negative is never a real run id).
+        let sql = r#"
+SELECT
+    sr.id                AS run_id,
+    sr.schedule_id       AS schedule_id,
+    sr.triggered_by      AS triggered_by,
+    sr.started_at        AS started_at,
+    sr.finished_at       AS finished_at,
+    COUNT(b.id)                                                   AS total_jobs,
+    COUNT(b.id) FILTER (WHERE b.state = 'completed')              AS completed_jobs,
+    COUNT(b.id) FILTER (WHERE b.state = 'failed')                 AS failed_jobs,
+    COUNT(b.id) FILTER (WHERE b.state = 'running')                AS running_jobs,
+    COUNT(b.id) FILTER (WHERE b.state = 'pending')                AS pending_jobs
+FROM schedule_runs sr
+LEFT JOIN backups b ON b.schedule_run_id = sr.id
+WHERE sr.schedule_id = $1
+GROUP BY sr.id
+
+UNION ALL
+
+-- Synthetic rows for legacy backups (pre-fan-out, no schedule_run_id).
+SELECT
+    (-b.id)::BIGINT      AS run_id,
+    b.schedule_id        AS schedule_id,
+    'cron'               AS triggered_by,
+    b.started_at         AS started_at,
+    b.finished_at        AS finished_at,
+    1                    AS total_jobs,
+    CASE WHEN b.state = 'completed' THEN 1 ELSE 0 END AS completed_jobs,
+    CASE WHEN b.state = 'failed'    THEN 1 ELSE 0 END AS failed_jobs,
+    CASE WHEN b.state = 'running'   THEN 1 ELSE 0 END AS running_jobs,
+    CASE WHEN b.state = 'pending'   THEN 1 ELSE 0 END AS pending_jobs
+FROM backups b
+WHERE b.schedule_id = $1
+  AND b.schedule_run_id IS NULL
+
+ORDER BY started_at DESC
+LIMIT  $2
+OFFSET $3
+        "#;
+
+        let raw_rows = RunRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![
+                Value::from(schedule_id),
+                Value::from(page_size),
+                Value::from(offset),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await
+        .map_err(BackupError::Database)?;
+
+        // ── Compute aggregate_state in Rust ───────────────────────────────────
+
+        let runs = raw_rows
+            .into_iter()
+            .map(|r| {
+                let aggregate_state = if r.pending_jobs + r.running_jobs > 0 {
+                    "running".to_string()
+                } else if r.failed_jobs > 0 {
+                    "failed".to_string()
+                } else {
+                    "completed".to_string()
+                };
+
+                ScheduleRunSummary {
+                    run_id: r.run_id,
+                    schedule_id: r.schedule_id,
+                    triggered_by: r.triggered_by,
+                    started_at: r.started_at.to_rfc3339(),
+                    finished_at: r.finished_at.map(|t| t.to_rfc3339()),
+                    aggregate_state,
+                    total_jobs: r.total_jobs,
+                    completed_jobs: r.completed_jobs,
+                    failed_jobs: r.failed_jobs,
+                    running_jobs: r.running_jobs,
+                    pending_jobs: r.pending_jobs,
+                }
+            })
+            .collect();
+
+        Ok(ScheduleRunSummaryList {
+            runs,
+            total,
+            page,
+            page_size,
+        })
+    }
+
+    /// List the individual backup jobs belonging to a single scheduler run.
+    ///
+    /// Used by the schedule detail page's expandable accordion for per-run
+    /// drill-down. Returns each child `backups` row joined with its
+    /// `external_services` row (for the service name) and the most recent
+    /// `backup_jobs` row (for the engine key).
+    ///
+    /// `page_size` defaults to 50 and is capped at 200 — a single scheduler
+    /// tick produces at most 1 + N external services rows (small N).
+    pub async fn list_schedule_run_jobs(
+        &self,
+        run_id: i64,
+        page: i64,
+        page_size: i64,
+    ) -> Result<(Vec<ScheduleRunJobEntry>, i64), BackupError> {
+        let page = page.max(1);
+        let page_size = page_size.clamp(1, 200);
+        let offset = (page - 1) * page_size;
+
+        #[derive(FromQueryResult)]
+        struct CountRow {
+            total: i64,
+        }
+
+        let count_sql = r#"
+SELECT COUNT(*) AS total FROM backups WHERE schedule_run_id = $1
+        "#;
+
+        let total = CountRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            count_sql,
+            vec![Value::from(run_id)],
+        ))
+        .one(self.db.as_ref())
+        .await
+        .map_err(BackupError::Database)?
+        .map(|r| r.total)
+        .unwrap_or(0);
+
+        // The most recent backup_jobs row gives us the engine key.
+        // external_service_backups joins to external_services for the name.
+        let sql = r#"
+SELECT
+    b.id                                            AS backup_id,
+    b.backup_id                                     AS backup_uuid,
+    COALESCE(j.engine, 'control_plane')             AS engine,
+    COALESCE(es.name, 'control plane')              AS service_name,
+    esb.service_id                                  AS service_id,
+    b.state                                         AS state,
+    b.started_at                                    AS started_at,
+    b.finished_at                                   AS finished_at,
+    b.size_bytes                                    AS size_bytes,
+    b.error_message                                 AS error_message,
+    b.s3_source_id                                  AS s3_source_id
+FROM backups b
+LEFT JOIN LATERAL (
+    SELECT engine FROM backup_jobs
+     WHERE backup_id = b.id
+     ORDER BY id DESC
+     LIMIT 1
+) j ON TRUE
+LEFT JOIN external_service_backups esb ON esb.backup_id = b.id
+LEFT JOIN external_services es ON es.id = esb.service_id
+WHERE b.schedule_run_id = $1
+ORDER BY b.id
+LIMIT  $2
+OFFSET $3
+        "#;
+
+        let rows = ScheduleRunJobEntry::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![
+                Value::from(run_id),
+                Value::from(page_size),
+                Value::from(offset),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await
+        .map_err(BackupError::Database)?;
+
+        Ok((rows, total))
+    }
+
+    /// Immediately enqueue a fan-out run for the given schedule (Run Now).
+    ///
+    /// Delegates to [`enqueue_scheduled_run`] with `TriggerSource::Manual`.
+    /// Returns `409 Conflict` (via [`BackupError::ScheduleRunAlreadyInFlight`])
+    /// when a run for this schedule already has `finished_at IS NULL`.
+    ///
+    /// Returns [`BackupError::Validation`] when the schedule is disabled.
+    pub async fn run_schedule_now(
+        &self,
+        runner: &temps_backup_core::BackupRunner,
+        schedule_id: i32,
+        triggered_by_user_id: Option<i32>,
+    ) -> Result<ScheduleRunResponse, BackupError> {
+        let schedule = self.get_backup_schedule(schedule_id).await?;
+
+        if !schedule.enabled {
+            return Err(BackupError::Validation(format!(
+                "Schedule {} is disabled; enable it before triggering a manual run",
+                schedule_id
+            )));
+        }
+
+        match self
+            .enqueue_scheduled_run(
+                runner,
+                &schedule,
+                TriggerSource::Manual,
+                triggered_by_user_id,
+            )
+            .await?
+        {
+            ScheduleRunOutcome::Started { run_id, jobs } => {
+                info!(
+                    schedule_id = schedule.id,
+                    schedule_name = %schedule.name,
+                    run_id,
+                    job_count = jobs.len(),
+                    "run_schedule_now: fan-out run started",
+                );
+                Ok(ScheduleRunResponse {
+                    schedule_run_id: run_id,
+                    jobs,
+                })
+            }
+            ScheduleRunOutcome::AlreadyInFlight { existing_run_id } => {
+                Err(BackupError::ScheduleRunAlreadyInFlight { existing_run_id })
+            }
+        }
+    }
+
+    /// Fan-out a scheduler tick into one `schedule_runs` row + one control-plane
+    /// backup job + one backup job per supported external service.
+    ///
+    /// ## Fan-out logic (in one transaction)
+    ///
+    /// 1. Check for an existing in-flight run (any `schedule_runs` row for this
+    ///    schedule with `finished_at IS NULL`). If found, return
+    ///    [`ScheduleRunOutcome::AlreadyInFlight`] immediately.
+    /// 2. Insert a `schedule_runs` row. Capture `run_id`.
+    /// 3. Insert a control-plane `backups` row with `schedule_run_id = run_id`.
+    ///    Enqueue a `backup_jobs` row for `engine = "control_plane"`.
+    /// 4. Load every `external_services` row and attempt to resolve its engine
+    ///    key via [`resolve_engine_key`]. Skip rows where resolution returns
+    ///    `Err` (unsupported type) — log at `warn` with the service id and type.
+    /// 5. For each supported service, insert an `external_service_backups` row +
+    ///    parent `backups` row (`schedule_run_id = run_id`), then enqueue a
+    ///    `backup_jobs` row. Individual `AlreadyInFlight` responses from the
+    ///    concurrency guard are logged at `info` and skipped — the rest of the
+    ///    fan-out continues.
+    /// 6. Advance `backup_schedules.next_run`, `last_run`, `last_job_id`.
+    /// 7. Commit and return [`ScheduleRunOutcome::Started`].
+    ///
+    /// The cron caller treats both outcome variants as `Ok` and logs the run id.
+    /// The "Run now" handler converts `AlreadyInFlight` to a `409 Conflict`.
+    /// Close any `schedule_runs` rows for this schedule that have
+    /// `finished_at IS NULL` but no longer have any pending/running children.
+    ///
+    /// Earlier code revisions could leave the parent row open if a worker
+    /// crashed between writing the last child's terminal state and calling
+    /// `mark_schedule_run_finished_if_done`. Without this reconciler the
+    /// concurrency guard would refuse all future "Run now" requests for the
+    /// schedule. The UPDATE is idempotent and a no-op for healthy schedules.
+    ///
+    /// Sets `finished_at` to the latest child `finished_at` so duration
+    /// metrics remain accurate; falls back to `NOW()` if every child is
+    /// missing a `finished_at` (shouldn't happen, but safer than NULL).
+    async fn reconcile_drifted_schedule_runs(&self, schedule_id: i32) -> Result<(), BackupError> {
+        use sea_orm::ConnectionTrait;
+
+        let sql = r#"
+UPDATE schedule_runs sr
+   SET finished_at = COALESCE(
+       (SELECT MAX(b.finished_at)
+          FROM backups b
+         WHERE b.schedule_run_id = sr.id),
+       NOW()
+   )
+ WHERE sr.schedule_id = $1
+   AND sr.finished_at IS NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM backups b
+        WHERE b.schedule_run_id = sr.id
+          AND b.state IN ('pending', 'running')
+   )
+   AND EXISTS (
+       SELECT 1 FROM backups b
+        WHERE b.schedule_run_id = sr.id
+   )
+        "#;
+
+        self.db
+            .execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                sql,
+                vec![Value::from(schedule_id)],
+            ))
+            .await
+            .map_err(BackupError::Database)?;
+
+        Ok(())
+    }
+
+    pub async fn enqueue_scheduled_run(
+        &self,
+        runner: &temps_backup_core::BackupRunner,
+        schedule: &temps_entities::backup_schedules::Model,
+        triggered_by: TriggerSource,
+        triggered_by_user_id: Option<i32>,
+    ) -> Result<ScheduleRunOutcome, BackupError> {
+        use sea_orm::{Set, TransactionTrait};
+
+        let now = chrono::Utc::now();
+
+        // Compute next_run before opening the transaction so a parse error
+        // fails fast without wasted DB work.
+        let cron_schedule = Schedule::from_str(&schedule.schedule_expression).map_err(|e| {
+            BackupError::Validation(format!(
+                "Invalid cron expression for schedule {}: {}",
+                schedule.id, e
+            ))
+        })?;
+        let next_run = cron_schedule.upcoming(Utc).next();
+
+        // ── Step 1: in-flight check (before opening the write transaction) ────
+        //
+        // A run is only "in flight" if at least one child backup is still
+        // `pending` or `running`. We do NOT rely on `schedule_runs.finished_at`
+        // alone — that field can drift to NULL if a prior worker crashed
+        // between writing the last child's terminal state and calling
+        // `mark_schedule_run_finished_if_done`, leaving the schedule
+        // permanently un-runnable. Checking children directly is also the
+        // authoritative source of truth used by the aggregate-state SQL in
+        // `list_schedule_runs`, so the guard and the UI agree by construction.
+        //
+        // While we're here, opportunistically close any drifted `schedule_runs`
+        // rows so the guard, the UI, and `finished_at`-based queries stay in
+        // sync after we let this new run through.
+        self.reconcile_drifted_schedule_runs(schedule.id).await?;
+
+        #[derive(FromQueryResult)]
+        struct InFlightRow {
+            id: i64,
+        }
+
+        let in_flight_sql = r#"
+SELECT sr.id FROM schedule_runs sr
+ WHERE sr.schedule_id = $1
+   AND EXISTS (
+       SELECT 1 FROM backups b
+        WHERE b.schedule_run_id = sr.id
+          AND b.state IN ('pending', 'running')
+   )
+ LIMIT 1
+        "#;
+
+        if let Some(existing) = InFlightRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            in_flight_sql,
+            vec![Value::from(schedule.id)],
+        ))
+        .one(self.db.as_ref())
+        .await
+        .map_err(BackupError::Database)?
+        {
+            return Ok(ScheduleRunOutcome::AlreadyInFlight {
+                existing_run_id: existing.id,
+            });
+        }
+
+        // ── Step 2: connect to Docker for engine resolution ───────────────────
+        // We connect once per tick, not per service, to amortise the socket
+        // setup cost. `connect_with_local_defaults()` is fast (no round-trip).
+        let docker =
+            bollard::Docker::connect_with_local_defaults().map_err(|e| BackupError::Internal {
+                message: format!(
+                    "enqueue_scheduled_run: failed to connect to Docker for engine resolution \
+                     (schedule {}): {}",
+                    schedule.id, e
+                ),
+            })?;
+
+        // Load external services upfront so we can resolve engine keys before
+        // opening the transaction.
+        let external_services = temps_entities::external_services::Entity::find()
+            .all(self.db.as_ref())
+            .await
+            .map_err(BackupError::Database)?;
+
+        // Resolve engine keys outside the transaction (async Docker probes).
+        let mut resolved_services: Vec<(temps_entities::external_services::Model, &'static str)> =
+            Vec::with_capacity(external_services.len());
+
+        for svc in external_services {
+            match crate::engines::dispatch::resolve_engine_key(&svc, &docker).await {
+                Ok(engine_key) => {
+                    resolved_services.push((svc, engine_key));
+                }
+                Err(e) => {
+                    warn!(
+                        service_id = svc.id,
+                        service_type = %svc.service_type,
+                        error = %e,
+                        "enqueue_scheduled_run: skipping unsupported external service",
+                    );
+                }
+            }
+        }
+
+        // ── Step 3: open the write transaction ────────────────────────────────
+
+        let txn = self.db.begin().await?;
+
+        // Insert the schedule_runs row.
+        let run_insert_sql = r#"
+INSERT INTO schedule_runs (schedule_id, triggered_by, triggered_by_user_id, started_at, created_at)
+VALUES ($1, $2, $3, NOW(), NOW())
+RETURNING id
+        "#;
+
+        #[derive(FromQueryResult)]
+        struct RunIdRow {
+            id: i64,
+        }
+
+        let run_id = RunIdRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            run_insert_sql,
+            vec![
+                Value::from(schedule.id),
+                Value::from(triggered_by.as_str().to_owned()),
+                Value::from(triggered_by_user_id),
+            ],
+        ))
+        .one(&txn)
+        .await
+        .map_err(BackupError::Database)?
+        .ok_or_else(|| BackupError::Internal {
+            message: format!(
+                "enqueue_scheduled_run: INSERT into schedule_runs returned no id \
+                 for schedule {}",
+                schedule.id
+            ),
+        })?
+        .id;
+
+        let mut jobs: Vec<EnqueuedJob> = Vec::new();
+
+        // ── Step 4: control-plane backup ──────────────────────────────────────
+
+        let cp_uuid = Uuid::new_v4().to_string();
+        let cp_backup = temps_entities::backups::ActiveModel {
+            id: sea_orm::NotSet,
+            name: Set(format!("Backup {}", cp_uuid)),
+            backup_id: Set(cp_uuid.clone()),
+            schedule_id: Set(Some(schedule.id)),
+            schedule_run_id: Set(Some(run_id)),
+            backup_type: Set(schedule.backup_type.clone()),
+            state: Set("pending".to_string()),
+            started_at: Set(now),
+            finished_at: Set(None),
+            s3_source_id: Set(schedule.s3_source_id),
+            s3_location: Set(String::new()),
+            compression_type: Set("gzip".to_string()),
+            created_by: Set(0),
+            tags: Set("[]".to_string()),
+            size_bytes: Set(None),
+            file_count: Set(None),
+            error_message: Set(None),
+            expires_at: Set(None),
+            checksum: Set(None),
+            last_heartbeat_at: Set(None),
+            metadata: Set(serde_json::json!({
+                "engine": "control_plane",
+                "async_runner": true,
+                "scheduled": triggered_by == TriggerSource::Cron,
+                "schedule_id": schedule.id,
+                "run_id": run_id,
+                "timestamp": now.to_rfc3339(),
+            })
+            .to_string()),
+        };
+
+        let cp_backup_row = cp_backup.insert(&txn).await?;
+
+        let cp_job_params = temps_backup_core::EnqueueJobParams {
+            backup_id: cp_backup_row.id,
+            engine: "control_plane".to_string(),
+            target_kind: "control_plane".to_string(),
+            target_id: None,
+            params: serde_json::json!({
+                "s3_source_id": schedule.s3_source_id,
+                "schedule_id": schedule.id,
+                "run_id": run_id,
+            }),
+            max_attempts: None,
+            max_runtime_secs: schedule.max_runtime_secs,
+        };
+
+        match runner.enqueue_job_in_txn(&txn, cp_job_params).await {
+            Ok(job_id) => {
+                jobs.push(EnqueuedJob {
+                    backup_id: cp_backup_row.id,
+                    job_id,
+                    engine: "control_plane".to_string(),
+                    target_service_id: None,
+                });
+            }
+            Err(temps_backup_core::BackupRunnerError::AlreadyInFlight {
+                existing_job_id, ..
+            }) => {
+                info!(
+                    schedule_id = schedule.id,
+                    existing_job_id,
+                    "enqueue_scheduled_run: control-plane already in flight, skipping",
+                );
+            }
+            Err(e) => {
+                return Err(BackupError::Internal {
+                    message: format!(
+                        "enqueue_scheduled_run: failed to enqueue control-plane job \
+                         for schedule {}: {}",
+                        schedule.id, e
+                    ),
+                });
+            }
+        }
+
+        // ── Step 5: external service backups ──────────────────────────────────
+
+        for (svc, engine_key) in &resolved_services {
+            // Build the per-service job params. Same shape as the manual
+            // trigger plus schedule context so the engine can stamp logs
+            // and the UI can drill into the run.
+            let svc_job_params = temps_backup_core::EnqueueJobParams {
+                backup_id: 0, // filled in by the unified helper
+                engine: engine_key.to_string(),
+                target_kind: "external_service".to_string(),
+                target_id: Some(svc.id),
+                params: serde_json::json!({
+                    "service_id": svc.id,
+                    "s3_source_id": schedule.s3_source_id,
+                    "backup_type": schedule.backup_type,
+                    "schedule_id": schedule.id,
+                    "run_id": run_id,
+                }),
+                max_attempts: None,
+                max_runtime_secs: schedule.max_runtime_secs,
+            };
+
+            // Reuse the same row-insert + enqueue path as the manual handler
+            // so the row shapes, metadata, compression flag, and concurrency
+            // guard behaviour stay in lock-step regardless of trigger source.
+            match self
+                .enqueue_pending_external_service_backup(
+                    Some(&txn),
+                    svc.id,
+                    schedule.s3_source_id,
+                    &schedule.backup_type,
+                    0, // created_by: scheduler-owned row
+                    "gzip",
+                    Some(ScheduleRunContext {
+                        schedule_id: schedule.id,
+                        schedule_run_id: run_id,
+                    }),
+                    runner,
+                    svc_job_params,
+                )
+                .await
+            {
+                Ok((parent_row, _esb_row, job_id)) => {
+                    jobs.push(EnqueuedJob {
+                        backup_id: parent_row.id,
+                        job_id,
+                        engine: engine_key.to_string(),
+                        target_service_id: Some(svc.id),
+                    });
+                }
+                Err(BackupError::Validation(msg)) if msg.contains("already in progress") => {
+                    info!(
+                        schedule_id = schedule.id,
+                        service_id = svc.id,
+                        service_name = %svc.name,
+                        engine = engine_key,
+                        reason = %msg,
+                        "enqueue_scheduled_run: service already in flight, skipping",
+                    );
+                }
+                Err(e) => {
+                    // Non-fatal for a single service: log and continue the fan-out.
+                    warn!(
+                        schedule_id = schedule.id,
+                        service_id = svc.id,
+                        service_name = %svc.name,
+                        engine = engine_key,
+                        error = %e,
+                        "enqueue_scheduled_run: failed to enqueue external service job, skipping",
+                    );
+                }
+            }
+        }
+
+        // ── Step 6: advance schedule metadata ─────────────────────────────────
+
+        let last_job_id = jobs.first().map(|j| j.job_id);
+        let mut schedule_update: temps_entities::backup_schedules::ActiveModel =
+            schedule.clone().into_active_model();
+        schedule_update.next_run = Set(next_run);
+        schedule_update.last_run = Set(Some(now));
+        schedule_update.last_job_id = Set(last_job_id);
+        schedule_update.update(&txn).await?;
+
+        // ── Commit ────────────────────────────────────────────────────────────
+
+        txn.commit().await?;
+
+        info!(
+            schedule_id = schedule.id,
+            schedule_name = %schedule.name,
+            run_id,
+            job_count = jobs.len(),
+            triggered_by = triggered_by.as_str(),
+            "enqueue_scheduled_run: fan-out committed",
+        );
+
+        Ok(ScheduleRunOutcome::Started { run_id, jobs })
+    }
+
     /// Insert a `backups` row and a `backup_jobs` row in a single transaction,
     /// returning the `backups` model and the new job id.
     ///
@@ -3742,6 +4719,7 @@ impl BackupService {
             name: Set(format!("Backup {}", backup_uuid)),
             backup_id: Set(backup_uuid.clone()),
             schedule_id: Set(None),
+            schedule_run_id: sea_orm::NotSet,
             backup_type: Set(backup_type.to_string()),
             state: Set("pending".to_string()),
             started_at: Set(now),
@@ -3819,53 +4797,131 @@ impl BackupService {
     ///
     /// The runner's `mark_job_completed` fills in `s3_location`, `size_bytes`,
     /// and `state='completed'` on `Done`.
-    pub async fn create_pending_external_service_backup_row(
+    /// Insert one pending `backups` + `external_service_backups` row pair and
+    /// enqueue the matching `backup_jobs` row — all in a single transaction.
+    ///
+    /// This is the single canonical entry point for "create a pending backup
+    /// for an external service." Both the manual `POST /external-services/{id}/run`
+    /// handler and the schedule fan-out (`enqueue_scheduled_run`) call this so
+    /// the row shapes, metadata layout, compression flag, and concurrency
+    /// guard behaviour are identical regardless of how the backup was triggered.
+    ///
+    /// `schedule_ctx = None` produces a manual one-shot backup with
+    /// `schedule_id IS NULL` and `schedule_run_id IS NULL`.
+    /// `schedule_ctx = Some(_)` links the backup to its scheduler tick so the
+    /// run-detail page and aggregate-state SQL can find it.
+    ///
+    /// On success, returns `(backups_row, esb_row, job_id)`. On
+    /// `AlreadyInFlight`, the parent and child rows are rolled back together
+    /// with the job — no orphan rows.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_pending_external_service_backup(
         &self,
+        txn: Option<&sea_orm::DatabaseTransaction>,
         service_id: i32,
         s3_source_id: i32,
         backup_type: &str,
         created_by: i32,
+        compression_type: &str,
+        schedule_ctx: Option<ScheduleRunContext>,
         runner: &temps_backup_core::BackupRunner,
         job_params: temps_backup_core::EnqueueJobParams,
-    ) -> Result<(temps_entities::external_service_backups::Model, i64), BackupError> {
-        use sea_orm::Set;
+    ) -> Result<
+        (
+            temps_entities::backups::Model,
+            temps_entities::external_service_backups::Model,
+            i64,
+        ),
+        BackupError,
+    > {
+        use sea_orm::{Set, TransactionTrait};
 
-        // Verify the service exists before opening the transaction.
-        temps_entities::external_services::Entity::find_by_id(service_id)
-            .one(self.db.as_ref())
-            .await?
-            .ok_or_else(|| BackupError::NotFound {
-                resource: "ExternalService".to_string(),
-                detail: format!("External service with ID {} not found", service_id),
-            })?;
-
-        // Verify S3 source exists before opening the transaction.
-        temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
-            .one(self.db.as_ref())
-            .await?
-            .ok_or_else(|| BackupError::NotFound {
-                resource: "S3Source".to_string(),
-                detail: format!("S3 source {} not found", s3_source_id),
-            })?;
+        // If the caller didn't bring its own transaction, open a private one
+        // for the lifetime of this call. We can't return early with the new
+        // transaction (lifetime mismatch with the borrowed one), so we use a
+        // small helper closure pattern below.
+        let owned_txn: Option<sea_orm::DatabaseTransaction> = if txn.is_none() {
+            Some(self.db.begin().await?)
+        } else {
+            None
+        };
+        let txn_ref: &sea_orm::DatabaseTransaction =
+            txn.unwrap_or_else(|| owned_txn.as_ref().unwrap());
 
         let backup_uuid = Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
 
-        let txn = self.db.begin().await?;
+        // Build metadata that mirrors what the legacy fan-out and manual paths
+        // wrote, plus the engine key from `job_params` so consumers can show
+        // the engine without looking up the `backup_jobs` row.
+        let mut backups_metadata = serde_json::Map::new();
+        backups_metadata.insert(
+            "engine".to_string(),
+            serde_json::Value::String(job_params.engine.clone()),
+        );
+        backups_metadata.insert("async_runner".to_string(), serde_json::Value::Bool(true));
+        backups_metadata.insert(
+            "external_service_id".to_string(),
+            serde_json::Value::Number(service_id.into()),
+        );
+        backups_metadata.insert(
+            "service_id".to_string(),
+            serde_json::Value::Number(service_id.into()),
+        );
+        backups_metadata.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String(now.to_rfc3339()),
+        );
+        if let Some(ctx) = schedule_ctx {
+            backups_metadata.insert(
+                "schedule_id".to_string(),
+                serde_json::Value::Number(ctx.schedule_id.into()),
+            );
+            backups_metadata.insert(
+                "run_id".to_string(),
+                serde_json::Value::Number(ctx.schedule_run_id.into()),
+            );
+        }
+
+        let mut esb_metadata = serde_json::Map::new();
+        esb_metadata.insert(
+            "engine".to_string(),
+            serde_json::Value::String(job_params.engine.clone()),
+        );
+        esb_metadata.insert("async_runner".to_string(), serde_json::Value::Bool(true));
+        esb_metadata.insert(
+            "backup_uuid".to_string(),
+            serde_json::Value::String(backup_uuid.clone()),
+        );
+        esb_metadata.insert(
+            "timestamp".to_string(),
+            serde_json::Value::String(now.to_rfc3339()),
+        );
+        if let Some(ctx) = schedule_ctx {
+            esb_metadata.insert(
+                "schedule_id".to_string(),
+                serde_json::Value::Number(ctx.schedule_id.into()),
+            );
+            esb_metadata.insert(
+                "run_id".to_string(),
+                serde_json::Value::Number(ctx.schedule_run_id.into()),
+            );
+        }
 
         // Insert parent `backups` row.
         let parent = temps_entities::backups::ActiveModel {
             id: sea_orm::NotSet,
             name: Set(format!("Backup {}", backup_uuid)),
             backup_id: Set(backup_uuid.clone()),
-            schedule_id: Set(None),
+            schedule_id: Set(schedule_ctx.map(|c| c.schedule_id)),
+            schedule_run_id: Set(schedule_ctx.map(|c| c.schedule_run_id)),
             backup_type: Set(backup_type.to_string()),
             state: Set("pending".to_string()),
             started_at: Set(now),
             finished_at: Set(None),
             s3_source_id: Set(s3_source_id),
             s3_location: Set(String::new()),
-            compression_type: Set("none".to_string()),
+            compression_type: Set(compression_type.to_string()),
             created_by: Set(created_by),
             tags: Set("[]".to_string()),
             size_bytes: Set(None),
@@ -3874,14 +4930,9 @@ impl BackupService {
             expires_at: Set(None),
             checksum: Set(None),
             last_heartbeat_at: Set(None),
-            metadata: Set(serde_json::json!({
-                "external_service_id": service_id,
-                "async_runner": true,
-                "timestamp": now.to_rfc3339(),
-            })
-            .to_string()),
+            metadata: Set(serde_json::Value::Object(backups_metadata).to_string()),
         }
-        .insert(&txn)
+        .insert(txn_ref)
         .await?;
 
         // Insert child `external_service_backups` row.
@@ -3896,28 +4947,23 @@ impl BackupService {
             size_bytes: Set(None),
             s3_location: Set(String::new()),
             error_message: Set(None),
-            metadata: Set(serde_json::json!({
-                "async_runner": true,
-                "backup_uuid": backup_uuid,
-                "timestamp": now.to_rfc3339(),
-            })),
+            metadata: Set(serde_json::Value::Object(esb_metadata)),
             checksum: Set(None),
-            compression_type: Set("none".to_string()),
+            compression_type: Set(compression_type.to_string()),
             created_by: Set(created_by),
             expires_at: Set(None),
         }
-        .insert(&txn)
+        .insert(txn_ref)
         .await?;
 
-        // Enqueue the backup_jobs row inside the same transaction. If this fails
-        // (e.g., AlreadyInFlight, DB error), dropping `txn` rolls back both the
-        // `backups` and `external_service_backups` rows — no orphans.
+        // Enqueue the backup_jobs row in the same transaction so a failure
+        // (e.g., `AlreadyInFlight`) rolls back the parent + child rows.
         let job_params_with_id = temps_backup_core::EnqueueJobParams {
             backup_id: parent.id,
             ..job_params
         };
         let job_id = runner
-            .enqueue_job_in_txn(&txn, job_params_with_id)
+            .enqueue_job_in_txn(txn_ref, job_params_with_id)
             .await
             .map_err(|e| match e {
                 temps_backup_core::BackupRunnerError::AlreadyInFlight {
@@ -3937,7 +4983,11 @@ impl BackupService {
                 },
             })?;
 
-        txn.commit().await?;
+        // If we opened our own transaction, commit it. Borrowed transactions
+        // are committed by the caller.
+        if let Some(t) = owned_txn {
+            t.commit().await?;
+        }
 
         info!(
             backup_id = %backup_uuid,
@@ -3946,8 +4996,58 @@ impl BackupService {
             parent_row_id = parent.id,
             child_row_id = child.id,
             job_id,
+            schedule_id = schedule_ctx.map(|c| c.schedule_id),
+            schedule_run_id = schedule_ctx.map(|c| c.schedule_run_id),
             "BackupService: created pending external service backup rows and enqueued job atomically",
         );
+
+        Ok((parent, child, job_id))
+    }
+
+    /// Backwards-compatible wrapper used by the manual-trigger handler. Calls
+    /// the unified [`enqueue_pending_external_service_backup`] with no
+    /// schedule context and `compression_type = "none"`, matching the legacy
+    /// row shape exactly.
+    pub async fn create_pending_external_service_backup_row(
+        &self,
+        service_id: i32,
+        s3_source_id: i32,
+        backup_type: &str,
+        created_by: i32,
+        runner: &temps_backup_core::BackupRunner,
+        job_params: temps_backup_core::EnqueueJobParams,
+    ) -> Result<(temps_entities::external_service_backups::Model, i64), BackupError> {
+        // Verify the service exists before opening the transaction.
+        temps_entities::external_services::Entity::find_by_id(service_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "ExternalService".to_string(),
+                detail: format!("External service with ID {} not found", service_id),
+            })?;
+
+        // Verify S3 source exists before opening the transaction.
+        temps_entities::s3_sources::Entity::find_by_id(s3_source_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "S3Source".to_string(),
+                detail: format!("S3 source {} not found", s3_source_id),
+            })?;
+
+        let (_parent, child, job_id) = self
+            .enqueue_pending_external_service_backup(
+                None,
+                service_id,
+                s3_source_id,
+                backup_type,
+                created_by,
+                "none",
+                None,
+                runner,
+                job_params,
+            )
+            .await?;
 
         Ok((child, job_id))
     }
@@ -4530,6 +5630,69 @@ impl BackupService {
         Ok((entries, total))
     }
 
+    /// Return every `external_service_backups` child row that belongs to the
+    /// given parent `backups.id`, joined with `external_services` so the caller
+    /// can display the service name and type without a second round-trip.
+    ///
+    /// Returns an empty `Vec` when the parent backup has no children (control-
+    /// plane backups have no children by definition).  Returns `NotFound` when
+    /// the parent `backups` row does not exist.
+    ///
+    /// SQL uses a single JOIN — no N+1.
+    pub async fn list_child_backups(
+        &self,
+        parent_backup_id: i32,
+    ) -> Result<Vec<ChildBackupEntry>, BackupError> {
+        use sea_orm::EntityTrait;
+
+        // Verify the parent backup exists first so we return 404 instead of an
+        // empty list when the caller passes an unknown integer id.
+        let _parent = temps_entities::backups::Entity::find_by_id(parent_backup_id)
+            .one(self.db.as_ref())
+            .await?
+            .ok_or_else(|| BackupError::NotFound {
+                resource: "Backup".to_string(),
+                detail: format!("Parent backup with id {} not found", parent_backup_id),
+            })?;
+
+        let sql = r#"
+SELECT
+    esb.id            AS id,
+    esb.service_id    AS service_id,
+    esb.state         AS state,
+    esb.backup_type   AS backup_type,
+    esb.started_at    AS started_at,
+    esb.finished_at   AS finished_at,
+    esb.size_bytes    AS size_bytes,
+    esb.s3_location   AS s3_location,
+    esb.error_message AS error_message,
+    esb.compression_type AS compression_type,
+    es.name           AS service_name,
+    es.service_type   AS service_type
+FROM external_service_backups esb
+JOIN external_services es ON es.id = esb.service_id
+WHERE esb.backup_id = $1
+ORDER BY esb.id ASC
+        "#;
+
+        let rows = ChildBackupEntry::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![Value::Int(Some(parent_backup_id))],
+        ))
+        .all(self.db.as_ref())
+        .await
+        .map_err(BackupError::Database)?;
+
+        debug!(
+            parent_backup_id,
+            count = rows.len(),
+            "list_child_backups: returned children"
+        );
+
+        Ok(rows)
+    }
+
     /// Get a backup by ID
     pub async fn get_backup(&self, backup_id: &str) -> Result<Option<Backup>, BackupError> {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -4727,6 +5890,7 @@ impl BackupService {
             name: sea_orm::Set(format!("Backup {}", backup_id)),
             backup_id: sea_orm::Set(backup_id.clone()),
             schedule_id: sea_orm::Set(None),
+            schedule_run_id: sea_orm::NotSet,
             backup_type: sea_orm::Set(backup_type.to_string()),
             state: sea_orm::Set("running".to_string()),
             started_at: sea_orm::Set(now),
@@ -4965,6 +6129,7 @@ impl BackupService {
             name: Set(format!("Backup {}", backup_uuid)),
             backup_id: Set(backup_uuid.clone()),
             schedule_id: Set(Some(schedule.id)),
+            schedule_run_id: sea_orm::NotSet,
             backup_type: Set(schedule.backup_type.clone()),
             state: Set("pending".to_string()),
             started_at: Set(now),
@@ -5178,12 +6343,12 @@ impl BackupService {
     }
 
     /// Iterate over all enabled schedules whose `next_run` has elapsed and
-    /// enqueue a backup job for each one (ADR-014 Phase 3).
+    /// fan-out a `schedule_runs` row + backup jobs for each one.
     ///
-    /// Enqueueing is transactional and takes milliseconds — the runner picks up
-    /// and executes each job asynchronously. No `tokio::spawn` per schedule is
-    /// needed; sequential iteration is fast because we never `.await` backup
-    /// execution inside this method.
+    /// Each call to `enqueue_scheduled_run` is transactional and completes in
+    /// milliseconds — the runner picks up and executes each job asynchronously.
+    /// Sequential iteration is fast because we never `.await` backup execution
+    /// inside this method.
     async fn process_scheduled_backups(
         &self,
         now: DateTime<Utc>,
@@ -5202,13 +6367,25 @@ impl BackupService {
                 continue;
             }
 
-            match self.enqueue_scheduled_backup(runner, &schedule).await {
-                Ok(job_id) => {
+            match self
+                .enqueue_scheduled_run(runner, &schedule, TriggerSource::Cron, None)
+                .await
+            {
+                Ok(ScheduleRunOutcome::Started { run_id, ref jobs }) => {
                     info!(
                         schedule_id = schedule.id,
                         schedule_name = %schedule.name,
-                        job_id,
-                        "scheduled backup enqueued",
+                        run_id,
+                        job_count = jobs.len(),
+                        "scheduled run enqueued",
+                    );
+                }
+                Ok(ScheduleRunOutcome::AlreadyInFlight { existing_run_id }) => {
+                    info!(
+                        schedule_id = schedule.id,
+                        schedule_name = %schedule.name,
+                        existing_run_id,
+                        "scheduled run skipped: previous run still in flight",
                     );
                 }
                 Err(e) => {
@@ -5216,7 +6393,7 @@ impl BackupService {
                         schedule_id = schedule.id,
                         schedule_name = %schedule.name,
                         error = %e,
-                        "scheduled backup enqueue failed",
+                        "scheduled run enqueue failed",
                     );
                 }
             }
@@ -6923,6 +8100,7 @@ mod tests {
             name: Set(backup_result.name.clone()),
             backup_id: Set(backup_result.backup_id.clone()),
             schedule_id: Set(None),
+            schedule_run_id: sea_orm::NotSet,
             backup_type: Set(backup_result.backup_type.clone()),
             state: Set(backup_result.state.clone()),
             started_at: Set(backup_result.started_at),
@@ -7244,6 +8422,7 @@ mod tests {
             name: "Backup xyz".to_string(),
             backup_id: "xyz".to_string(),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "full".to_string(),
             state: "pending".to_string(),
             started_at: Utc::now(),
@@ -7363,6 +8542,7 @@ mod tests {
             name: "Backup abc-123".to_string(),
             backup_id: "abc-123".to_string(),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "full".to_string(),
             state: "pending".to_string(),
             started_at: Utc::now(),
@@ -7704,6 +8884,365 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), BackupError::NotFound { .. }),
             "Expected NotFound variant"
+        );
+    }
+
+    // ── list_schedule_runs ────────────────────────────────────────────────────
+
+    /// Helper: build a minimal `ScheduleRunSummary` row value for MockDatabase.
+    ///
+    /// The new fan-out shape returns one row per scheduler tick with aggregate
+    /// child counts. The row schema must match `RunRow` (defined in the
+    /// `list_schedule_runs` SQL); fields here mirror that.
+    fn make_run_entry_row(
+        run_id: i64,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> std::collections::BTreeMap<String, sea_orm::Value> {
+        use sea_orm::Value as SVal;
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("run_id".to_string(), SVal::BigInt(Some(run_id)));
+        row.insert("schedule_id".to_string(), SVal::Int(Some(1)));
+        row.insert(
+            "triggered_by".to_string(),
+            SVal::String(Some(Box::new("cron".to_string()))),
+        );
+        row.insert(
+            "started_at".to_string(),
+            SVal::ChronoDateTimeUtc(Some(Box::new(started_at))),
+        );
+        row.insert("finished_at".to_string(), SVal::ChronoDateTimeUtc(None));
+        row.insert("total_jobs".to_string(), SVal::BigInt(Some(1)));
+        row.insert("completed_jobs".to_string(), SVal::BigInt(Some(1)));
+        row.insert("failed_jobs".to_string(), SVal::BigInt(Some(0)));
+        row.insert("running_jobs".to_string(), SVal::BigInt(Some(0)));
+        row.insert("pending_jobs".to_string(), SVal::BigInt(Some(0)));
+        row
+    }
+
+    /// `list_schedule_runs` must return rows ordered newest-first by the SQL
+    /// (which uses `ORDER BY started_at DESC`).
+    ///
+    /// The MockDatabase returns rows in the order the test supplies them; we
+    /// supply them newest-first and assert that the response preserves that
+    /// order and that pagination metadata is correct.
+    #[tokio::test]
+    async fn test_list_schedule_runs_returns_rows_ordered_desc() {
+        let now = chrono::Utc::now();
+        let older = now - chrono::Duration::hours(2);
+
+        let schedule = make_test_schedule(1, 1);
+
+        // MockDatabase query sequence:
+        // 1. get_backup_schedule SELECT (returns the schedule)
+        // 2. COUNT(*) query
+        // 3. Paginated rows query (returns two entries)
+        let count_row = {
+            let mut r = std::collections::BTreeMap::new();
+            r.insert("total".to_string(), sea_orm::Value::BigInt(Some(2)));
+            r
+        };
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // get_backup_schedule
+                .append_query_results(vec![vec![schedule]])
+                // COUNT query
+                .append_query_results(vec![vec![count_row]])
+                // paginated rows — newest first (run_id=2 is more recent)
+                .append_query_results(vec![vec![
+                    make_run_entry_row(2, now),
+                    make_run_entry_row(1, older),
+                ]])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let response = svc
+            .list_schedule_runs(1, 1, 20)
+            .await
+            .expect("list_schedule_runs must succeed");
+
+        assert_eq!(response.total, 2, "total must match COUNT result");
+        assert_eq!(response.runs.len(), 2, "must return 2 run entries");
+        // First entry is the most recent (run_id=2).
+        assert_eq!(response.runs[0].run_id, 2, "first entry must be newest");
+        assert_eq!(response.runs[1].run_id, 1, "second entry must be older");
+    }
+
+    /// `list_schedule_runs` must clamp `page < 1` to 1, so the offset never
+    /// goes negative.
+    #[tokio::test]
+    async fn test_list_schedule_runs_clamps_page_below_one() {
+        let schedule = make_test_schedule(1, 1);
+        let count_row = {
+            let mut r = std::collections::BTreeMap::new();
+            r.insert("total".to_string(), sea_orm::Value::BigInt(Some(0)));
+            r
+        };
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![schedule]])
+                .append_query_results(vec![vec![count_row]])
+                .append_query_results(vec![Vec::<
+                    std::collections::BTreeMap<String, sea_orm::Value>,
+                >::new()])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        // page=-5 must be treated as page=1 (offset=0).
+        let result = svc.list_schedule_runs(1, -5, 20).await;
+        assert!(result.is_ok(), "negative page must not error: {:?}", result);
+    }
+
+    /// `list_schedule_runs` must clamp `page_size > 100` to 100 so the client
+    /// cannot request an unbounded result set.
+    #[tokio::test]
+    async fn test_list_schedule_runs_clamps_page_size_above_100() {
+        let schedule = make_test_schedule(1, 1);
+        let count_row = {
+            let mut r = std::collections::BTreeMap::new();
+            r.insert("total".to_string(), sea_orm::Value::BigInt(Some(0)));
+            r
+        };
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![vec![schedule]])
+                .append_query_results(vec![vec![count_row]])
+                .append_query_results(vec![Vec::<
+                    std::collections::BTreeMap<String, sea_orm::Value>,
+                >::new()])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        // page_size=999 must be clamped to 100. The call itself must succeed.
+        let result = svc.list_schedule_runs(1, 1, 999).await;
+        assert!(
+            result.is_ok(),
+            "oversized page_size must not error: {:?}",
+            result
+        );
+    }
+
+    /// `list_schedule_runs` with an unknown schedule_id must return `NotFound`.
+    #[tokio::test]
+    async fn test_list_schedule_runs_not_found() {
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // get_backup_schedule returns empty → schedule does not exist
+                .append_query_results(vec![Vec::<temps_entities::backup_schedules::Model>::new()])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let result = svc.list_schedule_runs(9999, 1, 20).await;
+        assert!(result.is_err(), "unknown schedule must return an error");
+        assert!(
+            matches!(result.unwrap_err(), BackupError::NotFound { .. }),
+            "expected BackupError::NotFound for unknown schedule"
+        );
+    }
+
+    // ── list_child_backups ────────────────────────────────────────────────────
+
+    /// Helper: build a minimal backup model for MockDatabase.
+    fn make_test_backup_model(id: i32) -> temps_entities::backups::Model {
+        use chrono::Utc;
+        temps_entities::backups::Model {
+            id,
+            name: format!("Backup {}", id),
+            backup_id: format!("uuid-{}", id),
+            schedule_id: None,
+            schedule_run_id: None,
+            backup_type: "full".to_string(),
+            state: "completed".to_string(),
+            started_at: Utc::now(),
+            finished_at: Some(Utc::now()),
+            s3_source_id: 1,
+            s3_location: "s3://bucket/path".to_string(),
+            error_message: None,
+            metadata: "{}".to_string(),
+            checksum: None,
+            compression_type: "lz4".to_string(),
+            created_by: 1,
+            expires_at: None,
+            size_bytes: Some(1024),
+            file_count: None,
+            tags: "[]".to_string(),
+            last_heartbeat_at: None,
+        }
+    }
+
+    /// Helper: build a minimal `ChildBackupEntry` BTreeMap row for MockDatabase.
+    fn make_child_backup_row(
+        id: i32,
+        service_id: i32,
+        state: &str,
+    ) -> std::collections::BTreeMap<String, sea_orm::Value> {
+        use sea_orm::Value as SVal;
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("id".to_string(), SVal::Int(Some(id)));
+        row.insert("service_id".to_string(), SVal::Int(Some(service_id)));
+        row.insert(
+            "service_name".to_string(),
+            SVal::String(Some(Box::new(format!("service-{}", service_id)))),
+        );
+        row.insert(
+            "service_type".to_string(),
+            SVal::String(Some(Box::new("postgres".to_string()))),
+        );
+        row.insert(
+            "state".to_string(),
+            SVal::String(Some(Box::new(state.to_string()))),
+        );
+        row.insert(
+            "backup_type".to_string(),
+            SVal::String(Some(Box::new("full".to_string()))),
+        );
+        row.insert(
+            "started_at".to_string(),
+            SVal::ChronoDateTimeUtc(Some(Box::new(chrono::Utc::now()))),
+        );
+        row.insert("finished_at".to_string(), SVal::ChronoDateTimeUtc(None));
+        row.insert("size_bytes".to_string(), SVal::BigInt(Some(2048)));
+        row.insert(
+            "s3_location".to_string(),
+            SVal::String(Some(Box::new("s3://bucket/child".to_string()))),
+        );
+        row.insert("error_message".to_string(), SVal::String(None));
+        row.insert(
+            "compression_type".to_string(),
+            SVal::String(Some(Box::new("lz4".to_string()))),
+        );
+        row
+    }
+
+    /// `list_child_backups` returns all children ordered by `id ASC` when the
+    /// parent backup exists and has two completed child rows.
+    #[tokio::test]
+    async fn test_list_child_backups_returns_ordered_rows() {
+        let parent = make_test_backup_model(10);
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // find_by_id for the parent backup
+                .append_query_results(vec![vec![parent]])
+                // child rows query — two entries, ordered by id ASC (service 1 then 2)
+                .append_query_results(vec![vec![
+                    make_child_backup_row(1, 1, "completed"),
+                    make_child_backup_row(2, 2, "completed"),
+                ]])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let children = svc
+            .list_child_backups(10)
+            .await
+            .expect("list_child_backups must succeed");
+
+        assert_eq!(children.len(), 2, "must return 2 children");
+        assert_eq!(children[0].id, 1, "first child must have id=1");
+        assert_eq!(children[1].id, 2, "second child must have id=2");
+        assert_eq!(children[0].state, "completed");
+        assert_eq!(children[0].service_type, "postgres");
+    }
+
+    /// `list_child_backups` returns an empty Vec when the parent backup exists
+    /// but has no child rows (e.g. a control-plane backup).
+    #[tokio::test]
+    async fn test_list_child_backups_returns_empty_for_no_children() {
+        let parent = make_test_backup_model(99);
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // find_by_id returns the parent
+                .append_query_results(vec![vec![parent]])
+                // child rows query returns nothing
+                .append_query_results(vec![Vec::<
+                    std::collections::BTreeMap<String, sea_orm::Value>,
+                >::new()])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let children = svc
+            .list_child_backups(99)
+            .await
+            .expect("list_child_backups must succeed for parent with no children");
+
+        assert!(children.is_empty(), "must return empty Vec");
+    }
+
+    /// `list_child_backups` returns `NotFound` when the parent backup does not
+    /// exist, so the handler can surface a 404 instead of an empty list.
+    #[tokio::test]
+    async fn test_list_child_backups_returns_not_found_for_missing_parent() {
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                // find_by_id returns nothing → parent does not exist
+                .append_query_results(vec![Vec::<temps_entities::backups::Model>::new()])
+                .into_connection(),
+        );
+
+        let svc = BackupService::new(
+            db.clone(),
+            create_mock_external_service_manager(db),
+            create_mock_notification_service(),
+            create_mock_config_service(),
+            Arc::new(EncryptionService::new("test_encryption_key_1234567890ab").unwrap()),
+        );
+
+        let result = svc.list_child_backups(9999).await;
+        assert!(result.is_err(), "missing parent must return an error");
+        assert!(
+            matches!(result.unwrap_err(), BackupError::NotFound { .. }),
+            "expected BackupError::NotFound for unknown parent backup"
         );
     }
 }

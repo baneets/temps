@@ -121,13 +121,19 @@ pub enum PgAutoFailoverState {
 }
 
 impl PgAutoFailoverState {
-    /// `true` when this node is currently the writable primary.
+    /// `true` when this node is currently the **writable** primary.
+    ///
+    /// `WaitPrimary` is deliberately excluded: in pg_auto_failover that
+    /// state means "candidate primary, waiting for the monitor to assign a
+    /// secondary" — the node is not yet writable. Treating it as primary
+    /// was the recurring bug called out at the top of this file. The
+    /// reconciler relies on this returning `false` so it doesn't flip the
+    /// `service_members.role` label or republish the primary DNS A record
+    /// while the node is still settling.
     pub fn is_primary(self) -> bool {
         matches!(
             self,
-            PgAutoFailoverState::Primary
-                | PgAutoFailoverState::Single
-                | PgAutoFailoverState::WaitPrimary
+            PgAutoFailoverState::Primary | PgAutoFailoverState::Single
         )
     }
 
@@ -254,8 +260,10 @@ mod tests {
 
     #[test]
     fn pg_state_classification() {
-        // Primary-side
-        for s in ["primary", "single", "wait_primary"] {
+        // Primary-side: only the writable states. `wait_primary` is a
+        // candidate-primary that hasn't yet accepted writes, so it must
+        // NOT classify as primary (see comment on `is_primary`).
+        for s in ["primary", "single"] {
             let parsed: PgAutoFailoverState = s.parse().unwrap();
             assert!(parsed.is_primary(), "{s} should be primary");
             assert!(parsed.is_data_member());
@@ -276,8 +284,11 @@ mod tests {
             assert_eq!(parsed.to_cluster_role(), Some(ClusterRole::Replica));
         }
 
-        // Transient/unknown — must NOT flip the role
+        // Transient/unknown — must NOT flip the role. `wait_primary` lives
+        // here too: it's a transition state that should leave the existing
+        // label alone until the node either becomes `primary` or fails out.
         for s in [
+            "wait_primary",
             "draining",
             "demoted",
             "demote_timeout",

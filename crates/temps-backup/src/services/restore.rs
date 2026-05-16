@@ -963,6 +963,7 @@ async fn run_restore_inner(
             name: "orphan backup".to_string(),
             backup_id: "".to_string(),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "full".to_string(),
             state: "completed".to_string(),
             started_at: Utc::now(),

@@ -1,3 +1,4 @@
+use crate::avatar::generate_avatar_data_url;
 use base64::Engine;
 use chrono::Utc;
 use qrcode::QrCode;
@@ -120,10 +121,7 @@ impl From<temps_entities::users::Model> for ServiceUser {
             id: db_user.id,
             name: db_user.name.clone(),
             email: db_user.email,
-            image: format!(
-                "https://ui-avatars.com/api/?name={}&background=random",
-                urlencoding::encode(&db_user.name)
-            ),
+            image: generate_avatar_data_url(&db_user.name),
             mfa_enabled: db_user.mfa_enabled,
             email_verified: db_user.email_verified,
             deleted_at: db_user.deleted_at,

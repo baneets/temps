@@ -21,6 +21,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::RunnerConfig;
 use crate::engine::{BackupContext, BackupEngine, BackupEngineError, StepCursor, StepEvent};
 use crate::error::BackupRunnerError;
+use crate::notifier::{BackupFailureContext, BackupFailureNotifier};
 use crate::queue::{
     backoff_delay, claim_one_job, extend_lease, mark_job_completed, mark_job_failed,
     persist_step_completed, schedule_retry, BackupJobRow,
@@ -73,10 +74,13 @@ pub struct BackupRunner {
     config: RunnerConfig,
     /// Engines keyed by `BackupEngine::engine()`. Populated by `register_engine`.
     engines: HashMap<&'static str, Arc<dyn BackupEngine>>,
+    /// Optional notification hook, fired on every terminal failure via a
+    /// detached `tokio::spawn`. Set via [`BackupRunner::with_notifier`].
+    notifier: Option<Arc<dyn BackupFailureNotifier>>,
 }
 
 impl BackupRunner {
-    /// Create a runner with an empty engine registry.
+    /// Create a runner with an empty engine registry and no failure notifier.
     ///
     /// Call `register_engine` for each engine implementation before calling
     /// `run_forever`. In Phase 0 no engines are registered.
@@ -85,7 +89,26 @@ impl BackupRunner {
             db,
             config,
             engines: HashMap::new(),
+            notifier: None,
         }
+    }
+
+    /// Attach a failure notifier to this runner (builder pattern).
+    ///
+    /// When set, the runner fires [`BackupFailureNotifier::notify_failed`] in a
+    /// detached `tokio::spawn` every time a job reaches the terminal `failed`
+    /// state. Notification failures are logged internally and never surface to
+    /// the queue write path.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let notifier: Arc<dyn BackupFailureNotifier> = Arc::new(MyNotifier::new(...));
+    /// let runner = BackupRunner::new(db, config).with_notifier(notifier);
+    /// ```
+    pub fn with_notifier(mut self, notifier: Arc<dyn BackupFailureNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
     }
 
     /// Register an engine implementation with the runner.
@@ -344,6 +367,20 @@ RETURNING id
         Ok(row.id)
     }
 
+    /// Fire the failure notifier for a terminal job failure, if one is configured.
+    ///
+    /// Spawns a detached `tokio::spawn` so notification I/O (SMTP, webhook)
+    /// never delays the queue write that already succeeded.  If no notifier is
+    /// set this is a no-op.
+    fn fire_failure_notification(self: &Arc<Self>, ctx: BackupFailureContext) {
+        if let Some(notifier) = &self.notifier {
+            let n = Arc::clone(notifier);
+            tokio::spawn(async move {
+                n.notify_failed(ctx).await;
+            });
+        }
+    }
+
     /// Start the poll loop.
     ///
     /// Runs forever until the `cancel` token is fired. Designed to be called
@@ -430,17 +467,22 @@ RETURNING id
                 );
                 // Fail the job so it does not retry forever.
                 if let Some(token) = row.claim_token {
-                    let _ = mark_job_failed(
-                        self.db.as_ref(),
-                        row.id,
-                        token,
-                        row.backup_id,
-                        &format!(
-                            "No engine registered for key '{}'. Registered: [{}]",
-                            row.engine, registered
-                        ),
-                    )
-                    .await;
+                    let err_msg = format!(
+                        "No engine registered for key '{}'. Registered: [{}]",
+                        row.engine, registered
+                    );
+                    let _ =
+                        mark_job_failed(self.db.as_ref(), row.id, token, row.backup_id, &err_msg)
+                            .await;
+                    self.fire_failure_notification(BackupFailureContext {
+                        job_id: row.id,
+                        backup_id: row.backup_id,
+                        engine: row.engine.clone(),
+                        attempts: row.attempts,
+                        max_attempts: row.max_attempts,
+                        error_message: err_msg,
+                        failed_at: Utc::now(),
+                    });
                 }
                 return Ok(());
             }
@@ -536,6 +578,15 @@ RETURNING id
                         &msg,
                     )
                     .await;
+                    self.fire_failure_notification(BackupFailureContext {
+                        job_id,
+                        backup_id,
+                        engine: row.engine.clone(),
+                        attempts: attempt,
+                        max_attempts: row.max_attempts,
+                        error_message: msg,
+                        failed_at: Utc::now(),
+                    });
                     return;
                 }
 
@@ -556,6 +607,15 @@ RETURNING id
                             "Engine stream ended without Done event",
                         )
                         .await;
+                        self.fire_failure_notification(BackupFailureContext {
+                            job_id,
+                            backup_id,
+                            engine: row.engine.clone(),
+                            attempts: attempt,
+                            max_attempts: row.max_attempts,
+                            error_message: "Engine stream ended without Done event".to_string(),
+                            failed_at: Utc::now(),
+                        });
                     } else {
                         let delay = backoff_delay(attempt);
                         let next_at = Utc::now() + delay;
@@ -616,15 +676,25 @@ RETURNING id
                     );
 
                     if is_permanent || attempt >= row.max_attempts {
+                        let err_msg = engine_err.to_string();
                         let _ = engine.rollback(&ctx, cursor.clone()).await;
                         let _ = mark_job_failed(
                             self.db.as_ref(),
                             job_id,
                             claim_token,
                             backup_id,
-                            &engine_err.to_string(),
+                            &err_msg,
                         )
                         .await;
+                        self.fire_failure_notification(BackupFailureContext {
+                            job_id,
+                            backup_id,
+                            engine: row.engine.clone(),
+                            attempts: attempt,
+                            max_attempts: row.max_attempts,
+                            error_message: err_msg,
+                            failed_at: Utc::now(),
+                        });
                     } else {
                         let delay = backoff_delay(attempt);
                         let next_at = Utc::now() + delay;
@@ -1082,6 +1152,123 @@ mod tests {
             exec_count, 2,
             "Preflight error must call mark_job_failed (2 UPDATEEs), got {} UPDATE statements",
             exec_count
+        );
+    }
+
+    // ── BackupFailureNotifier is called on terminal failure ───────────────────
+
+    /// Verify that a `BackupFailureNotifier` registered via `with_notifier` is
+    /// invoked when `dispatch` reaches a terminal failure path.
+    ///
+    /// A `MockNotifier` captures the `BackupFailureContext` into a shared
+    /// `Arc<Mutex<Option<BackupFailureContext>>>`. After `dispatch` completes
+    /// we assert the captured context has the expected `engine` and
+    /// `error_message` values.
+    #[tokio::test]
+    async fn test_notifier_called_on_terminal_failure() {
+        use crate::notifier::{BackupFailureContext, BackupFailureNotifier};
+        use futures::stream;
+        use sea_orm::MockExecResult;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct MockNotifier {
+            captured: Arc<Mutex<Option<BackupFailureContext>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl BackupFailureNotifier for MockNotifier {
+            async fn notify_failed(&self, ctx: BackupFailureContext) {
+                let mut guard = self.captured.lock().unwrap();
+                *guard = Some(ctx);
+            }
+        }
+
+        struct PreflightFailEngine2;
+
+        #[async_trait::async_trait]
+        impl BackupEngine for PreflightFailEngine2 {
+            fn engine(&self) -> &'static str {
+                "test_notifier_engine"
+            }
+            fn steps(&self) -> &'static [&'static str] {
+                &["preflight"]
+            }
+            fn execute<'a>(
+                &'a self,
+                ctx: &'a BackupContext,
+                _cursor: StepCursor,
+            ) -> futures::stream::BoxStream<'a, Result<StepEvent, crate::engine::BackupEngineError>>
+            {
+                let job_id = ctx.job_id;
+                Box::pin(stream::once(async move {
+                    Err(crate::engine::BackupEngineError::Preflight {
+                        job_id,
+                        reason: "s3 bucket unreachable".to_string(),
+                    })
+                }))
+            }
+        }
+
+        let captured: Arc<Mutex<Option<BackupFailureContext>>> = Arc::new(Mutex::new(None));
+        let notifier = MockNotifier {
+            captured: Arc::clone(&captured),
+        };
+
+        let db = Arc::new(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_exec_results(vec![
+                    MockExecResult {
+                        last_insert_id: 0,
+                        rows_affected: 1,
+                    },
+                    MockExecResult {
+                        last_insert_id: 0,
+                        rows_affected: 1,
+                    },
+                ])
+                .into_connection(),
+        );
+
+        let config = crate::config::RunnerConfig::default();
+        let runner =
+            Arc::new(BackupRunner::new(Arc::clone(&db), config).with_notifier(Arc::new(notifier)));
+
+        let row = BackupJobRow {
+            id: 55,
+            backup_id: 12,
+            engine: "test_notifier_engine".to_string(),
+            target_kind: "external_service".to_string(),
+            target_id: Some(1),
+            params: serde_json::Value::Object(Default::default()),
+            state: "running".to_string(),
+            step: None,
+            step_state: serde_json::Value::Object(Default::default()),
+            attempts: 1,
+            max_attempts: 1, // at max_attempts so terminal failure fires
+            claim_token: Some(uuid::Uuid::new_v4()),
+            max_runtime_secs: 86_400,
+        };
+
+        let engine: Arc<dyn BackupEngine> = Arc::new(PreflightFailEngine2);
+        Arc::clone(&runner).dispatch(row, engine).await;
+
+        // Give the spawned notifier task a moment to execute.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let ctx_opt = captured.lock().unwrap().take();
+        assert!(
+            ctx_opt.is_some(),
+            "MockNotifier must be called when the job reaches terminal failure",
+        );
+        let ctx = ctx_opt.unwrap();
+        assert_eq!(ctx.job_id, 55, "job_id must match");
+        assert_eq!(ctx.backup_id, 12, "backup_id must match");
+        assert_eq!(ctx.engine, "test_notifier_engine", "engine must match");
+        assert!(
+            ctx.error_message.contains("s3 bucket unreachable"),
+            "error_message must contain the engine error: got '{}'",
+            ctx.error_message,
         );
     }
 }

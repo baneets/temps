@@ -367,6 +367,26 @@ async fn step_walg_push(
     // Container naming matches temps-providers/src/externalsvc/postgres.rs:269-271.
     let container_name = format!("postgres-{}", service.name);
 
+    // WAL-G memory tuning — without these, a base backup of a small DB can
+    // burn 1–2 GB of RSS and get OOM-killed (exit 137) by Docker. WAL-G keeps
+    // each in-flight tar bundle fully buffered in memory; the defaults
+    // (`WALG_UPLOAD_CONCURRENCY=16`, `WALG_TAR_SIZE_THRESHOLD=1GB`) multiply
+    // to ~16 GB peak. The values below cap RSS at roughly
+    //   WALG_UPLOAD_CONCURRENCY * WALG_TAR_SIZE_THRESHOLD ≈ 4 × 128 MiB = 512 MiB
+    // which is plenty for sub-100GB clusters and survives the default 1 GiB
+    // container memory limit. Users with very large DBs can override these
+    // by setting the env variables on the service or the worker.
+    //
+    // Numbers chosen:
+    //   - UPLOAD_CONCURRENCY=4: still parallel enough to saturate a 1 Gbps
+    //     uplink with small tars; default 16 is over-aggressive for small DBs.
+    //   - UPLOAD_DISK_CONCURRENCY=1: serial disk read keeps the page cache
+    //     hot and avoids thrashing on rotational disks.
+    //   - TAR_SIZE_THRESHOLD=134217728 (128 MiB): smaller tars = smaller peak
+    //     buffer per uploader. Trade-off: more S3 PUTs per backup, but each
+    //     one is faster to retry.
+    //   - UPLOAD_QUEUE=2: at most two tar bundles waiting for upload at any
+    //     time. Default is larger and adds to peak memory unnecessarily.
     let mut walg_env: Vec<String> = vec![
         format!("WALG_S3_PREFIX={}", walg_prefix),
         format!("AWS_ACCESS_KEY_ID={}", access_key),
@@ -377,6 +397,10 @@ async fn step_walg_push(
         format!("PGDATABASE={}", pg_params.database),
         "PGHOST=localhost".to_string(),
         "PGPORT=5432".to_string(),
+        "WALG_UPLOAD_CONCURRENCY=4".to_string(),
+        "WALG_UPLOAD_DISK_CONCURRENCY=1".to_string(),
+        "WALG_UPLOAD_QUEUE=2".to_string(),
+        "WALG_TAR_SIZE_THRESHOLD=134217728".to_string(),
     ];
     if let Some(ep) = &s3_source.endpoint {
         let url = if ep.starts_with("http") {

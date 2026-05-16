@@ -2290,8 +2290,14 @@ mod tests {
         assert!(connection_url.contains("6379"));
     }
 
+    // `flavor = "multi_thread"` is required because the test uses
+    // `MinioTestContainer`, whose `Drop` impl calls
+    // `tokio::task::block_in_place` to synchronously stop/remove the
+    // container. `block_in_place` panics under the default current-thread
+    // runtime, and panicking inside Drop while a Tokio runtime is shutting
+    // down has historically wedged the whole test binary in CI.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_redis_backup_and_restore_to_s3() {
         // Whole-test wall-clock budget. Anything above this is a hang — fail
         // loudly with a diagnostic instead of stalling the CI runner for 90 min.

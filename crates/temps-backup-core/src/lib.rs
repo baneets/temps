@@ -21,6 +21,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod notifier;
 pub mod queue;
 pub mod runner;
 pub mod timeouts;
@@ -29,6 +30,7 @@ pub mod timeouts;
 pub use config::RunnerConfig;
 pub use engine::{BackupContext, BackupEngine, BackupEngineError, StepCursor, StepEvent};
 pub use error::BackupRunnerError;
-pub use queue::{backoff_delay, BackupJobRow};
+pub use notifier::{BackupFailureContext, BackupFailureNotifier};
+pub use queue::{backoff_delay, mark_schedule_run_finished_if_done, BackupJobRow};
 pub use runner::{BackupRunner, EnqueueJobParams};
 pub use timeouts::{default_max_runtime_secs, resolve_max_runtime};

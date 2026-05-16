@@ -247,6 +247,44 @@ impl AuditOperation for ExternalServiceBackupRunAudit {
     }
 }
 
+/// Audit record emitted when an operator triggers an immediate (manual) run of
+/// a backup schedule via `POST /api/backups/schedules/{id}/run`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleRunNowAudit {
+    pub context: AuditContext,
+    /// ID of the schedule that was triggered.
+    pub schedule_id: i32,
+    /// Human-readable name of the schedule.
+    pub schedule_name: String,
+    /// ID of the newly created backup row.
+    pub backup_id: i32,
+    /// Job ID assigned by the runner.
+    pub job_id: i64,
+}
+
+impl AuditOperation for ScheduleRunNowAudit {
+    fn operation_type(&self) -> String {
+        "BACKUP_SCHEDULE_RUN_NOW".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
 impl AuditOperation for RestoreRunAudit {
     fn operation_type(&self) -> String {
         "EXTERNAL_SERVICE_RESTORE_RUN".to_string()

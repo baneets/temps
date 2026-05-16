@@ -959,6 +959,12 @@ impl PostgresService {
         );
         env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
         env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        // `POSTGRES_DB` is the canonical name (matches the official Postgres
+        // Docker image and what every app library expects). `POSTGRES_NAME`
+        // is kept as a back-compat alias for older deployments that already
+        // wired their app config to that key — drop it once a migration
+        // window has passed.
+        env_vars.insert("POSTGRES_DB".to_string(), resource_name.to_string());
         env_vars.insert("POSTGRES_NAME".to_string(), resource_name.to_string());
         env_vars.insert("POSTGRES_USER".to_string(), config.username.clone());
         env_vars.insert("POSTGRES_PASSWORD".to_string(), config.password.clone());
@@ -2783,6 +2789,11 @@ impl ExternalService for PostgresService {
         env_vars.insert("POSTGRES_URL".to_string(), url);
         env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
         env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        // `POSTGRES_DB` is the canonical name (matches the official Postgres
+        // Docker image and what every app library expects). `POSTGRES_NAME`
+        // is kept as a back-compat alias for older deployments — see the
+        // sibling provision_resource() impl for the full rationale.
+        env_vars.insert("POSTGRES_DB".to_string(), database.clone());
         env_vars.insert("POSTGRES_NAME".to_string(), database.clone());
         env_vars.insert("POSTGRES_USER".to_string(), username.clone());
         env_vars.insert("POSTGRES_PASSWORD".to_string(), password.clone());
@@ -3018,6 +3029,11 @@ impl ExternalService for PostgresService {
         env_vars.insert("POSTGRES_URL".to_string(), url);
         env_vars.insert("POSTGRES_HOST".to_string(), effective_host);
         env_vars.insert("POSTGRES_PORT".to_string(), effective_port);
+        // `POSTGRES_DB` is the canonical name (matches the official Postgres
+        // Docker image and what every app library expects). `POSTGRES_NAME`
+        // is kept as a back-compat alias — see the sibling
+        // provision_resource() impl for the full rationale.
+        env_vars.insert("POSTGRES_DB".to_string(), database.clone());
         env_vars.insert("POSTGRES_NAME".to_string(), database.clone());
         env_vars.insert("POSTGRES_USER".to_string(), username.clone());
         env_vars.insert("POSTGRES_PASSWORD".to_string(), password.clone());
@@ -3609,18 +3625,38 @@ mod tests {
     #[cfg(feature = "docker-tests")]
     #[tokio::test]
     async fn test_port_change_after_creation() {
+        // Use OS-assigned ports so this test doesn't collide with anything
+        // else on the runner. Hardcoded ports (6543/6544 previously) flaked
+        // whenever another parallel test or background process held the
+        // socket. We only need two distinct free ports; the test doesn't
+        // actually *bind* the container to them, just verifies that
+        // get_local_address reflects the configured value.
+        use std::net::TcpListener;
+        let pick = || {
+            TcpListener::bind("127.0.0.1:0")
+                .expect("failed to bind for port allocation")
+                .local_addr()
+                .expect("failed to read local addr")
+                .port()
+        };
+        let initial_port = pick();
+        let new_port = loop {
+            let p = pick();
+            if p != initial_port {
+                break p;
+            }
+        };
+
         let docker = Arc::new(Docker::connect_with_local_defaults().unwrap());
         let service = PostgresService::new("test-port-change".to_string(), docker);
 
-        // Create initial config with a specific port
-        let initial_port = "6543";
         let config1 = ServiceConfig {
             name: "test-postgres".to_string(),
             service_type: super::ServiceType::Postgres,
             version: None,
             parameters: serde_json::json!({
                 "host": "localhost",
-                "port": initial_port,
+                "port": initial_port.to_string(),
                 "database": "testdb",
                 "username": "testuser",
                 "password": "testpass123",
@@ -3636,17 +3672,19 @@ mod tests {
 
         // Verify initial port is set
         let local_addr = service.get_local_address(config1.clone()).unwrap();
-        assert!(local_addr.contains("6543"), "Initial port should be 6543");
+        let initial_port_str = initial_port.to_string();
+        assert!(
+            local_addr.contains(&initial_port_str),
+            "Initial port should be {initial_port_str}, got '{local_addr}'"
+        );
 
-        // Create new config with different port
-        let new_port = "6544";
         let config2 = ServiceConfig {
             name: "test-postgres".to_string(),
             service_type: super::ServiceType::Postgres,
             version: None,
             parameters: serde_json::json!({
                 "host": "localhost",
-                "port": new_port,
+                "port": new_port.to_string(),
                 "database": "testdb",
                 "username": "testuser",
                 "password": "testpass123",
@@ -3658,7 +3696,11 @@ mod tests {
 
         // Verify new port configuration is recognized
         let new_local_addr = service.get_local_address(config2).unwrap();
-        assert!(new_local_addr.contains("6544"), "New port should be 6544");
+        let new_port_str = new_port.to_string();
+        assert!(
+            new_local_addr.contains(&new_port_str),
+            "New port should be {new_port_str}, got '{new_local_addr}'"
+        );
 
         // Cleanup
         let _ = service.cleanup().await;
@@ -4292,9 +4334,37 @@ mod tests {
         );
     }
 
+    // `flavor = "multi_thread"` is required because `MinioTestContainer`'s
+    // `Drop` impl calls `tokio::task::block_in_place`, which panics on the
+    // default current-thread runtime.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_postgres_backup_and_restore_to_s3() {
+        // Whole-test wall-clock budget. Anything above this is a hang — fail
+        // loudly with a diagnostic instead of stalling the CI runner for 90 min.
+        // See incident: GitHub run 25940925537 (PR #89) burned 86 min on this
+        // test because it never returned. Sister tests in redis.rs and
+        // mongodb.rs already wrap themselves the same way.
+        //
+        // The body pulls the wal-g image, boots Postgres, creates a table,
+        // runs a full base backup to MinIO, then a full restore — comfortably
+        // under 5 minutes on cold runners but can hang indefinitely on a
+        // wedged Docker daemon if left unbounded.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+        tokio::time::timeout(TEST_TIMEOUT, run_postgres_backup_and_restore_to_s3())
+            .await
+            .expect(
+                "test_postgres_backup_and_restore_to_s3 exceeded 300s — likely hung on \
+                 Postgres/Docker/wal-g wait",
+            );
+    }
+
+    /// Body of `test_postgres_backup_and_restore_to_s3`, extracted so the
+    /// outer test can wrap it in `tokio::time::timeout` without a giant
+    /// async block at the call site.
+    #[cfg(feature = "docker-tests")]
+    async fn run_postgres_backup_and_restore_to_s3() {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
         };
@@ -4948,6 +5018,7 @@ mod tests {
             name: "b".into(),
             backup_id: "id".into(),
             schedule_id: None,
+            schedule_run_id: None,
             backup_type: "external_service".into(),
             state: "completed".into(),
             started_at: chrono::Utc::now(),

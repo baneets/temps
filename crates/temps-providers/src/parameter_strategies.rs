@@ -976,8 +976,13 @@ fn find_available_port(start_port: u16) -> Option<u16> {
 fn generate_secure_password() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
+    // Charset must be a subset of what `is_valid_pg_password` accepts.
+    // `$` is intentionally excluded because the cluster startup script
+    // uses shell expansion on env-injected passwords — see the matching
+    // rule in `is_valid_pg_password`. Including it caused ~35% of
+    // auto-generated passwords to fail their own validation.
     let charset: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*_-+=";
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^&*_-+=";
     (0..32)
         .map(|_| charset[rng.gen_range(0..charset.len())] as char)
         .collect()

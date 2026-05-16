@@ -1206,6 +1206,76 @@ export type ChatMessage = {
     tool_calls?: Array<unknown> | null;
 };
 
+/**
+ * A single child backup entry in the `GET /backups/{id}/children` response.
+ *
+ * Each entry corresponds to one `external_service_backups` row joined with
+ * `external_services`, providing service metadata without a second request.
+ */
+export type ChildBackupEntryResponse = {
+    /**
+     * Backup variant (e.g. "full", "incremental").
+     */
+    backup_type: string;
+    /**
+     * Compression algorithm used (e.g. "gzip", "lz4").
+     */
+    compression_type: string;
+    /**
+     * Engine-reported error message when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * When the child backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * Row ID from `external_service_backups`.
+     */
+    id: number;
+    /**
+     * Object key or `s3://` URL where the backup data lives.
+     */
+    s3_location: string;
+    /**
+     * FK to `external_services.id`.
+     */
+    service_id: number;
+    /**
+     * Human-readable name of the external service (e.g. "redis-prod").
+     */
+    service_name: string;
+    /**
+     * Service type string (e.g. "postgres", "redis", "mongodb", "s3").
+     */
+    service_type: string;
+    /**
+     * Size of the child backup in bytes, if available.
+     */
+    size_bytes?: number | null;
+    /**
+     * When the child backup started (RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Current state: "pending" | "running" | "completed" | "failed".
+     */
+    state: string;
+};
+
+/**
+ * Response body for `GET /backups/{id}/children`.
+ *
+ * Returns an empty `children` list (not 404) when the parent backup has no
+ * child records (e.g. control-plane backups).
+ */
+export type ChildBackupListResponse = {
+    /**
+     * Zero or more child backup entries ordered by `external_service_backups.id` ASC.
+     */
+    children: Array<ChildBackupEntryResponse>;
+};
+
 export type CliDeviceApproveRequest = {
     user_code: string;
 };
@@ -10414,6 +10484,83 @@ export type ScanResponse = {
     updated_at: string;
 };
 
+/**
+ * A single run-history entry for the schedule detail page (deliverable 1).
+ *
+ * Combines one `backups` row with the most-recent `backup_jobs` row for that
+ * backup via a lateral JOIN.  Fields from `backup_jobs` are `None` for legacy
+ * backup rows that pre-date ADR-014.
+ */
+export type ScheduleRunEntry = {
+    /**
+     * Number of claim-and-run attempts so far. `None` for legacy rows.
+     */
+    attempts?: number | null;
+    /**
+     * DB id of the `backups` row.
+     */
+    backup_id: number;
+    /**
+     * UUID string (`backups.backup_id`).
+     */
+    backup_uuid: string;
+    /**
+     * Last completed step reported by the engine (e.g. `"upload"`).
+     * `None` when no step has been persisted yet.
+     */
+    current_step?: string | null;
+    /**
+     * Engine-reported error message when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * When the backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * Most recent `backup_jobs.id` for this backup. `None` for legacy rows.
+     */
+    job_id?: number | null;
+    /**
+     * S3 object key or URL where the backup data lives.
+     */
+    s3_location: string;
+    /**
+     * Final size in bytes once completed. `None` while running.
+     */
+    size_bytes?: number | null;
+    /**
+     * When the backup was started (ISO 8601 / RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Current state: `"pending"`, `"running"`, `"completed"`, `"failed"`.
+     */
+    state: string;
+};
+
+/**
+ * Paginated run-history response for a backup schedule (deliverable 1).
+ */
+export type ScheduleRunListResponse = {
+    /**
+     * Current page (1-based).
+     */
+    page: number;
+    /**
+     * Number of items per page (clamped to 1–100).
+     */
+    page_size: number;
+    /**
+     * Run entries, newest first.
+     */
+    runs: Array<ScheduleRunEntry>;
+    /**
+     * Total number of runs across all pages.
+     */
+    total: number;
+};
+
 export type ScreenshotSettings = {
     enabled?: boolean;
     provider?: string;
@@ -17807,6 +17954,97 @@ export type EnableBackupScheduleResponses = {
 
 export type EnableBackupScheduleResponse = EnableBackupScheduleResponses[keyof EnableBackupScheduleResponses];
 
+export type RunScheduleNowData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}/run';
+};
+
+export type RunScheduleNowErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Backup already in flight or schedule disabled
+     */
+    409: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type RunScheduleNowError = RunScheduleNowErrors[keyof RunScheduleNowErrors];
+
+export type RunScheduleNowResponses = {
+    /**
+     * Backup enqueued for async execution
+     */
+    202: BackupResponse;
+};
+
+export type RunScheduleNowResponse = RunScheduleNowResponses[keyof RunScheduleNowResponses];
+
+export type ListScheduleRunsData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: {
+        /**
+         * Page number (1-based, defaults to 1, clamped to 1 if < 1).
+         */
+        page?: number;
+        /**
+         * Items per page (defaults to 20, clamped to 100 if > 100).
+         */
+        page_size?: number;
+    };
+    url: '/backups/schedules/{id}/runs';
+};
+
+export type ListScheduleRunsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListScheduleRunsError = ListScheduleRunsErrors[keyof ListScheduleRunsErrors];
+
+export type ListScheduleRunsResponses = {
+    /**
+     * Paginated run history for the schedule
+     */
+    200: ScheduleRunListResponse;
+};
+
+export type ListScheduleRunsResponse = ListScheduleRunsResponses[keyof ListScheduleRunsResponses];
+
 export type GetBackupData = {
     body?: never;
     path: {
@@ -17841,6 +18079,48 @@ export type GetBackupResponses = {
 };
 
 export type GetBackupResponse = GetBackupResponses[keyof GetBackupResponses];
+
+export type ListBackupChildrenData = {
+    body?: never;
+    path: {
+        /**
+         * Integer row id of the parent backup
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/backups/{id}/children';
+};
+
+export type ListBackupChildrenErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Parent backup not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListBackupChildrenError = ListBackupChildrenErrors[keyof ListBackupChildrenErrors];
+
+export type ListBackupChildrenResponses = {
+    /**
+     * Child backup list (may be empty)
+     */
+    200: ChildBackupListResponse;
+};
+
+export type ListBackupChildrenResponse = ListBackupChildrenResponses[keyof ListBackupChildrenResponses];
 
 export type BlobDeleteData = {
     body: DeleteBlobRequest;

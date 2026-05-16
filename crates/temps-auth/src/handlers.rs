@@ -4,6 +4,7 @@ use crate::audit::{
     MfaVerifiedAudit, PasswordResetAudit, RoleAssignedAudit, RoleRemovedAudit, UpdatedFields,
     UserCreatedAudit, UserDeletedAudit, UserRestoredAudit, UserUpdatedAudit,
 };
+use crate::avatar::generate_avatar_data_url;
 use crate::user_service::UserServiceError;
 use crate::{permission_guard, RequireAuth};
 use axum::extract::Path;
@@ -63,10 +64,7 @@ pub async fn get_current_user(RequireAuth(auth): RequireAuth) -> impl IntoRespon
         username: user.name.clone(),
         name: user.name.clone(),
         email: Some(user.email.clone()),
-        avatar_url: format!(
-            "https://ui-avatars.com/api/?name={}&background=random",
-            urlencoding::encode(&user.name)
-        ),
+        avatar_url: generate_avatar_data_url(&user.name),
         mfa_enabled: user.mfa_enabled,
         role: auth.effective_role.to_string(),
     };

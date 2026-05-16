@@ -5,6 +5,7 @@ mod apikey_service;
 mod apikey_types;
 mod audit;
 mod auth_service;
+mod avatar;
 pub mod cli_auth_handler;
 pub mod cli_device_handler;
 pub mod context;

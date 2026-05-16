@@ -23,8 +23,8 @@ use crate::{
     },
     handlers::{self, create_backup_app_state, BackupAppState},
     services::{
-        reconcile_orphan_backups, sweep_backup_alerts, sweep_stalled_backups, BackupService,
-        RestoreService,
+        reconcile_orphan_backups, sweep_backup_alerts, sweep_stalled_backups,
+        BackupNotificationAdapter, BackupService, RestoreService,
     },
 };
 use temps_providers::externalsvc::postgres_upgrade::{
@@ -67,11 +67,12 @@ impl TempsPlugin for BackupPlugin {
             let config_service = context.require_service::<temps_config::ConfigService>();
             let encryption_service = context.require_service::<temps_core::EncryptionService>();
 
-            // Create BackupService
+            // Create BackupService — clone notification_service so we can also
+            // pass it to the BackupNotificationAdapter wired into the runner.
             let backup_service = Arc::new(BackupService::new(
                 db.clone(),
                 external_service_manager.clone(),
-                notification_service,
+                notification_service.clone(),
                 config_service.clone(),
                 encryption_service.clone(),
             ));
@@ -186,6 +187,19 @@ impl TempsPlugin for BackupPlugin {
                  control_plane, redis, postgres_pgdump, postgres_walg, \
                  postgres_cluster, mongodb, s3_mirror (ADR-014 Phase 1–4)",
             );
+
+            // Wire the failure notifier (deliverable 3).
+            // The adapter lives in temps-backup (where NotificationService is
+            // available) and is set on the runner via the builder.  Failure
+            // notifications are fire-and-forget; the adapter logs errors internally.
+            // Cast Arc<temps_notifications::NotificationService> to
+            // Arc<dyn temps_core::notifications::NotificationService> so the
+            // adapter's constructor receives the trait object it expects.
+            let core_notif_svc: Arc<dyn temps_core::notifications::NotificationService> =
+                notification_service.clone();
+            let notifier: Arc<dyn temps_backup_core::BackupFailureNotifier> =
+                Arc::new(BackupNotificationAdapter::new(core_notif_svc, db.clone()));
+            let runner = runner.with_notifier(notifier);
 
             let runner = Arc::new(runner);
 

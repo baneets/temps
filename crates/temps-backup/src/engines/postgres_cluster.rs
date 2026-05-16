@@ -453,6 +453,10 @@ async fn step_walg_push(
         .unwrap_or("postgres")
         .to_string();
 
+    // WAL-G memory tuning — see comment on the same block in
+    // `postgres_walg.rs` for the full rationale. Caps RSS at ~512 MiB peak
+    // (UPLOAD_CONCURRENCY × TAR_SIZE_THRESHOLD) so the sidecar isn't
+    // OOM-killed under the default 1 GiB container memory limit.
     let mut walg_env: Vec<String> = vec![
         format!("WALG_S3_PREFIX={}", walg_prefix),
         format!("AWS_ACCESS_KEY_ID={}", access_key),
@@ -463,6 +467,10 @@ async fn step_walg_push(
         format!("PGDATABASE={}", database),
         "PGHOST=localhost".to_string(),
         "PGPORT=5432".to_string(),
+        "WALG_UPLOAD_CONCURRENCY=4".to_string(),
+        "WALG_UPLOAD_DISK_CONCURRENCY=1".to_string(),
+        "WALG_UPLOAD_QUEUE=2".to_string(),
+        "WALG_TAR_SIZE_THRESHOLD=134217728".to_string(),
     ];
     if let Some(ep) = &s3_source.endpoint {
         let url = if ep.starts_with("http") {

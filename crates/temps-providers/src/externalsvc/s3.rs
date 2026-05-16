@@ -2485,8 +2485,11 @@ mod tests {
         }
     }
 
+    // `flavor = "multi_thread"` is required because `MinioTestContainer`'s
+    // `Drop` impl calls `tokio::task::block_in_place`, which panics on the
+    // default current-thread runtime.
     #[cfg(feature = "docker-tests")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_s3_backup_and_restore_to_s3() {
         use super::super::test_utils::{
             create_mock_backup, create_mock_db, create_mock_external_service, MinioTestContainer,
