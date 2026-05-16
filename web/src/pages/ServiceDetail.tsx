@@ -60,6 +60,7 @@ import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { maskValue, shouldMaskValue } from '@/lib/masking'
 import { formatBytes } from '@/lib/utils'
+import { iconForServiceType } from '@/lib/serviceIcons'
 import {
   useMutation,
   useQuery,
@@ -76,10 +77,11 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowUpCircle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Database,
-  DatabaseBackup,
   Eye,
   EyeOff,
   HardDrive,
@@ -87,11 +89,14 @@ import {
   MoreVertical,
   Pencil,
   Plus,
+  Radio,
   RefreshCcw,
   RotateCcw,
   Server,
   Trash2,
+  XCircle,
 } from 'lucide-react'
+import { format } from 'date-fns'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -114,6 +119,26 @@ import { toast } from 'sonner'
  *     to stored `role` so the UI doesn't suddenly say "replica" for
  *     every node when the monitor blips
  */
+/**
+ * Compact wall-clock duration: `<1s`, `42s`, `1m 5s`, `2h 13m`.
+ * Sub-second durations render as `<1s` so a backup that legitimately
+ * finished doesn't look like a zero-duration ghost row.
+ */
+function formatShortDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '<1s'
+  const seconds = Math.floor(ms / 1000)
+  if (seconds === 0) return '<1s'
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remSeconds = seconds % 60
+  if (minutes < 60) {
+    return remSeconds ? `${minutes}m ${remSeconds}s` : `${minutes}m`
+  }
+  const hours = Math.floor(minutes / 60)
+  const remMinutes = minutes % 60
+  return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`
+}
+
 function memberDisplayRole(member: {
   role: string
   live_state?: string | null
@@ -1173,54 +1198,145 @@ export function ServiceDetail() {
               ) : (
                 <ul role="list" className="divide-y divide-border">
                   {paginatedBackups.map((backup) => {
-                    const key = backup.backup_id || String(backup.external_service_backup_id)
-                    const isFailed = backup.state === 'failed'
-                    const isRunning = backup.state === 'running'
+                    const key =
+                      backup.backup_id || String(backup.external_service_backup_id)
+                    const state = backup.state || 'unknown'
+                    const isCompleted = state === 'completed'
+                    const isFailed = state === 'failed'
+                    const isRunning = state === 'running' || state === 'pending'
+
+                    // Duration only when we have both endpoints. Sub-second
+                    // backups render as `<1s` rather than `0s` so the user
+                    // sees "yes, it really did finish".
+                    const startedMs = new Date(backup.started_at).getTime()
+                    const finishedMs = backup.finished_at
+                      ? new Date(backup.finished_at).getTime()
+                      : null
+                    const durationLabel =
+                      finishedMs && finishedMs > startedMs
+                        ? formatShortDuration(finishedMs - startedMs)
+                        : null
+
+                    const linkTo = backup.backup_id
+                      ? `/backups/s3-sources/${backup.s3_source_id}/backups/${backup.backup_id}`
+                      : `/backups/s3-sources/${backup.s3_source_id}`
+
+                    // All backups in this list belong to the current
+                    // service, so the icon is the service type (postgres
+                    // -> Database, mongodb -> Leaf, redis -> Server, …).
+                    // Using `service.service.service_type` directly keeps
+                    // the row in lock-step with the page header even when
+                    // the backend hasn't surfaced an `engine` field on
+                    // this entry yet (legacy rows).
+                    const ServiceIcon = iconForServiceType(
+                      service.service.service_type,
+                    )
+
                     return (
-                      <li
-                        key={key}
-                        className="flex items-center gap-4 py-3"
-                      >
-                        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
-                          <DatabaseBackup className="size-4 text-muted-foreground" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <p className="truncate text-sm font-medium">
-                              <TimeAgo date={backup.started_at} />
-                            </p>
-                            {backup.backup_type && (
-                              <Badge variant="outline" className="text-xs">
-                                {backup.backup_type}
-                              </Badge>
-                            )}
-                            {isRunning && (
-                              <Badge variant="secondary" className="gap-1 text-xs">
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                                Running
-                              </Badge>
-                            )}
-                            {isFailed && (
-                              <Badge variant="destructive" className="text-xs">
-                                Failed
-                              </Badge>
-                            )}
-                          </div>
-                          <p className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
-                            {backup.s3_source_name}
-                            {backup.size_bytes
-                              ? ` · ${formatBytes(backup.size_bytes)}`
-                              : ''}
-                          </p>
-                        </div>
+                      <li key={key}>
                         <Link
-                          to={
-                            backup.backup_id
-                              ? `/backups/s3-sources/${backup.s3_source_id}/backups/${backup.backup_id}`
-                              : `/backups/s3-sources/${backup.s3_source_id}`
-                          }
+                          to={linkTo}
+                          className="flex items-center gap-3 py-3 transition-colors hover:bg-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:rounded-md sm:gap-4 -mx-2 px-2"
                         >
-                          <Button variant="ghost" size="sm" className="gap-2">
+                          <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted">
+                            <ServiceIcon className="size-4 text-muted-foreground" />
+                          </div>
+
+                          {/* Title + meta. Lead with the human-readable
+                              service/source line, secondary line packs the
+                              actionable detail (exact time, duration, size,
+                              short UUID, error preview). */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <p className="truncate text-sm font-medium">
+                                <TimeAgo date={backup.started_at} />
+                              </p>
+                              <span
+                                className="hidden text-xs text-muted-foreground sm:inline"
+                                aria-hidden
+                              >
+                                ·
+                              </span>
+                              <span className="font-mono text-xs text-muted-foreground tabular-nums hidden sm:inline">
+                                {format(
+                                  new Date(backup.started_at),
+                                  'MMM d, p',
+                                )}
+                              </span>
+                              {backup.backup_type ? (
+                                <Badge variant="outline" className="text-xs">
+                                  {backup.backup_type}
+                                </Badge>
+                              ) : null}
+                              {isCompleted ? (
+                                <Badge
+                                  variant="outline"
+                                  className="gap-1 border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 text-xs"
+                                >
+                                  <CheckCircle2 className="h-3 w-3" />
+                                  Completed
+                                </Badge>
+                              ) : isRunning ? (
+                                <Badge
+                                  variant="secondary"
+                                  className="gap-1 text-xs"
+                                >
+                                  <Radio className="h-3 w-3 animate-pulse" />
+                                  {state === 'pending' ? 'Pending' : 'Running'}
+                                </Badge>
+                              ) : isFailed ? (
+                                <Badge variant="destructive" className="gap-1 text-xs">
+                                  <XCircle className="h-3 w-3" />
+                                  Failed
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="text-xs">
+                                  {state}
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground tabular-nums">
+                              <span className="truncate">
+                                {backup.s3_source_name}
+                              </span>
+                              {backup.size_bytes && backup.size_bytes > 0 ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <HardDrive className="h-3 w-3" />
+                                  {formatBytes(backup.size_bytes)}
+                                </span>
+                              ) : null}
+                              {durationLabel ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <Clock className="h-3 w-3" />
+                                  {durationLabel}
+                                </span>
+                              ) : null}
+                              {backup.backup_id ? (
+                                <span className="font-mono">
+                                  #{backup.backup_id.slice(0, 8)}
+                                </span>
+                              ) : null}
+                            </div>
+                            {/* Error preview — only when the backup actually
+                                failed. Truncates to a single line; full
+                                message is on the BackupDetail page. */}
+                            {isFailed && backup.error_message ? (
+                              <p
+                                className="mt-1 truncate text-xs text-destructive"
+                                title={backup.error_message}
+                              >
+                                {backup.error_message}
+                              </p>
+                            ) : null}
+                          </div>
+
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="hidden gap-2 sm:flex"
+                            tabIndex={-1}
+                            asChild={false}
+                          >
                             View
                             <ArrowLeft className="h-4 w-4 rotate-180" />
                           </Button>

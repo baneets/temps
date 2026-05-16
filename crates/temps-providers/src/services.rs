@@ -8271,7 +8271,12 @@ echo "[restore] Pre-seed complete"
             // streaming interval.
             let stats = match sample_container_stats_twice(&self.docker, &name).await {
                 Some((first, second)) => {
-                    compute_stats_sample(role.clone(), name.clone(), &first, Some(&second))
+                    // `first` is the earlier sample, `second` is the later one.
+                    // `compute_stats_sample` wants (current=later, previous=earlier)
+                    // so the delta is positive — passing them reversed makes
+                    // `cpu_delta` negative and CPU reads back as `None` (the UI
+                    // shows "—" while memory still works from `current`).
+                    compute_stats_sample(role.clone(), name.clone(), &second, Some(&first))
                 }
                 None => ContainerStatsSample {
                     role,
@@ -8920,6 +8925,57 @@ mod tests {
         );
         // cache > usage → fall through to raw usage rather than wrap.
         assert_eq!(memory_usage_excluding_cache(&mem).unwrap(), 1024 * 1024);
+    }
+
+    fn stats_response_at(
+        total: u64,
+        system: u64,
+        online_cpus: u32,
+    ) -> bollard::models::ContainerStatsResponse {
+        bollard::models::ContainerStatsResponse {
+            cpu_stats: Some(bollard::models::ContainerCpuStats {
+                cpu_usage: Some(bollard::models::ContainerCpuUsage {
+                    total_usage: Some(total),
+                    ..Default::default()
+                }),
+                system_cpu_usage: Some(system),
+                online_cpus: Some(online_cpus),
+                ..Default::default()
+            }),
+            memory_stats: Some(mem_stats(
+                100 * 1024 * 1024,
+                1024 * 1024 * 1024,
+                Some(("inactive_file", 10 * 1024 * 1024)),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Regression: `compute_stats_sample(current=later, previous=earlier)` is
+    /// the correct argument order. The earlier production bug had the call
+    /// site swapped, which made `cpu_delta` negative and read back as `None`
+    /// — UI showed "—" for CPU while memory still rendered (it doesn't need
+    /// the delta).
+    #[test]
+    fn compute_stats_sample_correct_argument_order_reports_positive_cpu() {
+        let earlier = stats_response_at(0, 0, 2);
+        let later = stats_response_at(1_000_000_000, 4_000_000_000, 2);
+
+        let sample = compute_stats_sample("primary".into(), "test".into(), &later, Some(&earlier));
+        assert_eq!(sample.cpu_percent, Some(50.0));
+        assert_eq!(sample.online_cpus, Some(2));
+    }
+
+    /// Reversed args (the pre-fix bug shape) produce `None`, not garbage.
+    /// Documenting this so the kill-switch is obvious if someone reintroduces
+    /// the swap.
+    #[test]
+    fn compute_stats_sample_swapped_arguments_reads_none() {
+        let earlier = stats_response_at(0, 0, 2);
+        let later = stats_response_at(1_000_000_000, 4_000_000_000, 2);
+
+        let sample = compute_stats_sample("primary".into(), "test".into(), &earlier, Some(&later));
+        assert_eq!(sample.cpu_percent, None);
     }
 
     // ── End container stats helpers ──────────────────────────────────────────

@@ -1086,6 +1086,18 @@ export type BuildConfiguration = {
 };
 
 /**
+ * Response body for cancel endpoints.
+ */
+export type CancelBackupResponse = {
+    /**
+     * Number of rows that were actually flipped to `failed`. `0` is a valid
+     * success and means the backup was already terminal — the call is
+     * idempotent.
+     */
+    cancelled: number;
+};
+
+/**
  * Challenge configuration (future feature)
  * For CAPTCHA, JS challenges, proof-of-work, etc.
  */
@@ -4179,6 +4191,29 @@ export type EndpointDto = {
     target_ip?: string | null;
     target_port?: number | null;
     ttl: number;
+};
+
+/**
+ * A single job that was successfully enqueued during a fan-out run.
+ */
+export type EnqueuedJob = {
+    /**
+     * FK to `backups.id` for this job.
+     */
+    backup_id: number;
+    /**
+     * Engine key (e.g. `"control_plane"`, `"redis"`, `"postgres_pgdump"`).
+     */
+    engine: string;
+    /**
+     * FK to `backup_jobs.id` for this job.
+     */
+    job_id: number;
+    /**
+     * FK to `external_services.id` when this is an external-service job.
+     * `None` for the control-plane job.
+     */
+    target_service_id?: number | null;
 };
 
 export type EnrichVisitorRequest = {
@@ -10540,6 +10575,58 @@ export type ScheduleRunEntry = {
 };
 
 /**
+ * A single job entry inside an expanded schedule run, returned by
+ * [`BackupService::list_schedule_run_jobs`].
+ */
+export type ScheduleRunJobEntry = {
+    /**
+     * `backups.id` for this job.
+     */
+    backup_id: number;
+    /**
+     * `backups.backup_id` UUID string.
+     */
+    backup_uuid: string;
+    /**
+     * Engine key (e.g. `"control_plane"`, `"redis"`).
+     */
+    engine: string;
+    /**
+     * Engine-reported error message when `state = "failed"`.
+     */
+    error_message?: string | null;
+    /**
+     * When this child backup finished, if known.
+     */
+    finished_at?: string | null;
+    /**
+     * FK to `s3_sources.id` — needed for the backup detail link.
+     */
+    s3_source_id: number;
+    /**
+     * `external_services.id` — `NULL` for the control-plane job.
+     */
+    service_id?: number | null;
+    /**
+     * Name of the external service, or `"control plane"` for the
+     * control-plane job.
+     */
+    service_name: string;
+    /**
+     * Size in bytes once completed; `None` while running.
+     */
+    size_bytes?: number | null;
+    /**
+     * When this child backup started (ISO 8601 / RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Current state of this child backup.
+     */
+    state: string;
+};
+
+/**
  * Paginated run-history response for a backup schedule (deliverable 1).
  */
 export type ScheduleRunListResponse = {
@@ -10557,6 +10644,102 @@ export type ScheduleRunListResponse = {
     runs: Array<ScheduleRunEntry>;
     /**
      * Total number of runs across all pages.
+     */
+    total: number;
+};
+
+/**
+ * HTTP response body for `POST /api/backups/schedules/{id}/run` (fan-out).
+ */
+export type ScheduleRunResponse = {
+    /**
+     * All jobs that were enqueued in this fan-out.
+     */
+    jobs: Array<EnqueuedJob>;
+    /**
+     * The `schedule_runs.id` of the newly created run.
+     */
+    schedule_run_id: number;
+};
+
+/**
+ * Summary of one scheduler tick (or one "Run now" click), returned by
+ * [`BackupService::list_schedule_runs`].
+ *
+ * The `aggregate_state` is computed at read time from child backup counts:
+ * - `"running"` — at least one child is `"pending"` or `"running"`.
+ * - `"failed"` — at least one child is `"failed"` and none are running.
+ * - `"completed"` — all children are `"completed"`.
+ */
+export type ScheduleRunSummary = {
+    /**
+     * Aggregate state computed from child counts (see struct docs).
+     */
+    aggregate_state: string;
+    /**
+     * Number of children in `state = "completed"`.
+     */
+    completed_jobs: number;
+    /**
+     * Number of children in `state = "failed"`.
+     */
+    failed_jobs: number;
+    /**
+     * When all children reached a terminal state. `None` while any child is
+     * still `"pending"` or `"running"`.
+     */
+    finished_at?: string | null;
+    /**
+     * Number of children in `state = "pending"`.
+     */
+    pending_jobs: number;
+    /**
+     * `schedule_runs.id` for this tick.
+     */
+    run_id: number;
+    /**
+     * Number of children in `state = "running"`.
+     */
+    running_jobs: number;
+    /**
+     * FK to `backup_schedules.id`.
+     */
+    schedule_id: number;
+    /**
+     * When the fan-out started (ISO 8601 / RFC 3339).
+     */
+    started_at: string;
+    /**
+     * Total number of child backup jobs in this run.
+     */
+    total_jobs: number;
+    /**
+     * How the run was triggered: `"cron"` or `"manual"`.
+     */
+    triggered_by: string;
+};
+
+/**
+ * Paginated list of schedule run summaries returned by the new
+ * [`BackupService::list_schedule_runs`].
+ */
+export type ScheduleRunSummaryList = {
+    /**
+     * Current page (1-based).
+     */
+    page: number;
+    /**
+     * Number of items per page.
+     */
+    page_size: number;
+    /**
+     * Run summaries, newest first. Includes synthetic single-job rows for
+     * legacy `backups` rows that have `schedule_id` set but no
+     * `schedule_run_id` (pre-fan-out history).
+     */
+    runs: Array<ScheduleRunSummary>;
+    /**
+     * Total number of run entries across all pages.
      */
     total: number;
 };
@@ -17710,6 +17893,80 @@ export type TestS3SourceConnectionResponses = {
 
 export type TestS3SourceConnectionResponse = TestS3SourceConnectionResponses[keyof TestS3SourceConnectionResponses];
 
+export type CancelScheduleRunData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedule-runs/{id}/cancel';
+};
+
+export type CancelScheduleRunErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule run not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CancelScheduleRunError = CancelScheduleRunErrors[keyof CancelScheduleRunErrors];
+
+export type CancelScheduleRunResponses = {
+    /**
+     * Cancel processed (idempotent)
+     */
+    200: CancelBackupResponse;
+};
+
+export type CancelScheduleRunResponse = CancelScheduleRunResponses[keyof CancelScheduleRunResponses];
+
+export type ListScheduleRunJobsData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedule-runs/{id}/jobs';
+};
+
+export type ListScheduleRunJobsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListScheduleRunJobsError = ListScheduleRunJobsErrors[keyof ListScheduleRunJobsErrors];
+
+export type ListScheduleRunJobsResponses = {
+    /**
+     * Jobs for this scheduler run
+     */
+    200: Array<ScheduleRunJobEntry>;
+};
+
+export type ListScheduleRunJobsResponse = ListScheduleRunJobsResponses[keyof ListScheduleRunJobsResponses];
+
 export type ListBackupSchedulesData = {
     body?: never;
     path?: never;
@@ -17977,7 +18234,7 @@ export type RunScheduleNowErrors = {
      */
     404: ProblemDetails;
     /**
-     * Backup already in flight or schedule disabled
+     * Run already in flight or schedule disabled
      */
     409: ProblemDetails;
     /**
@@ -17990,9 +18247,9 @@ export type RunScheduleNowError = RunScheduleNowErrors[keyof RunScheduleNowError
 
 export type RunScheduleNowResponses = {
     /**
-     * Backup enqueued for async execution
+     * Fan-out run enqueued for async execution
      */
-    202: BackupResponse;
+    202: ScheduleRunResponse;
 };
 
 export type RunScheduleNowResponse = RunScheduleNowResponses[keyof RunScheduleNowResponses];
@@ -18040,7 +18297,7 @@ export type ListScheduleRunsResponses = {
     /**
      * Paginated run history for the schedule
      */
-    200: ScheduleRunListResponse;
+    200: ScheduleRunSummaryList;
 };
 
 export type ListScheduleRunsResponse = ListScheduleRunsResponses[keyof ListScheduleRunsResponses];
@@ -18079,6 +18336,45 @@ export type GetBackupResponses = {
 };
 
 export type GetBackupResponse = GetBackupResponses[keyof GetBackupResponses];
+
+export type CancelBackupData = {
+    body?: never;
+    path: {
+        id: number;
+    };
+    query?: never;
+    url: '/backups/{id}/cancel';
+};
+
+export type CancelBackupErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Backup not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CancelBackupError = CancelBackupErrors[keyof CancelBackupErrors];
+
+export type CancelBackupResponses = {
+    /**
+     * Cancel processed (idempotent)
+     */
+    200: CancelBackupResponse;
+};
+
+export type CancelBackupResponse2 = CancelBackupResponses[keyof CancelBackupResponses];
 
 export type ListBackupChildrenData = {
     body?: never;

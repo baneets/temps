@@ -48,21 +48,30 @@ import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { listSourceBackupsWithScan, testS3SourceConnection } from '@/lib/s3-sources'
 import { runScheduleNow } from '@/lib/schedule-runs'
-import { cn } from '@/lib/utils'
+import { cn, formatBytes } from '@/lib/utils'
+import { iconForServiceType } from '@/lib/serviceIcons'
+import { Input } from '@/components/ui/input'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   ArrowLeft,
   CalendarDays,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Database,
   DatabaseBackup,
+  HardDrive,
   Loader2,
   MoreHorizontal,
   Pencil,
   Play,
   Plug,
   Plus,
+  Radio,
   ScanSearch,
+  Search,
+  XCircle,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -230,6 +239,53 @@ export function S3SourceDetail() {
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
       ),
     [backupIndex],
+  )
+
+  // Client-side filter + pagination over the recent-backups list. The list
+  // is DB-first (ADR-014 §"Fast listings") and capped, so doing this on the
+  // client is fine — no backend pagination needed yet. If/when the cap goes
+  // away, swap this for `?page=&page_size=` on the API.
+  const [backupSearch, setBackupSearch] = useState('')
+  const [backupPage, setBackupPage] = useState(1)
+  const BACKUP_PAGE_SIZE = 10
+
+  const filteredBackups = useMemo(() => {
+    const q = backupSearch.trim().toLowerCase()
+    if (!q) return sortedBackups
+    return sortedBackups.filter((b) => {
+      // Match on the user-visible fields so a user can find a backup by
+      // service name, engine, state, format, or any prefix of the UUID.
+      return (
+        b.name.toLowerCase().includes(q) ||
+        (b.origin_service_name ?? '').toLowerCase().includes(q) ||
+        (b.engine ?? '').toLowerCase().includes(q) ||
+        b.state.toLowerCase().includes(q) ||
+        b.backup_id.toLowerCase().includes(q) ||
+        (b.format ?? '').toLowerCase().includes(q)
+      )
+    })
+  }, [sortedBackups, backupSearch])
+
+  const backupTotalPages = Math.max(
+    1,
+    Math.ceil(filteredBackups.length / BACKUP_PAGE_SIZE),
+  )
+  // Clamp the page if the filter just shrunk the result set below the
+  // current page.
+  useEffect(() => {
+    if (backupPage > backupTotalPages) setBackupPage(backupTotalPages)
+  }, [backupPage, backupTotalPages])
+
+  const pagedBackups = useMemo(() => {
+    const start = (backupPage - 1) * BACKUP_PAGE_SIZE
+    return filteredBackups.slice(start, start + BACKUP_PAGE_SIZE)
+  }, [filteredBackups, backupPage])
+
+  const backupRangeStart =
+    filteredBackups.length === 0 ? 0 : (backupPage - 1) * BACKUP_PAGE_SIZE + 1
+  const backupRangeEnd = Math.min(
+    backupPage * BACKUP_PAGE_SIZE,
+    filteredBackups.length,
   )
 
   const handleToggleSchedule = (schedule: BackupScheduleResponse) => {
@@ -596,32 +652,198 @@ export function S3SourceDetail() {
             </Button>
           </CardHeader>
           <CardContent>
+            {/* Search bar — instant client filter across name, service,
+                engine, state, UUID, format. */}
+            {!isLoadingBackups && sortedBackups.length > 0 && (
+              <div className="relative mb-4">
+                <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  type="search"
+                  placeholder="Search by service, engine, state, or UUID…"
+                  value={backupSearch}
+                  onChange={(e) => {
+                    setBackupSearch(e.target.value)
+                    setBackupPage(1)
+                  }}
+                  className="pl-9"
+                />
+              </div>
+            )}
+
             {isLoadingBackups ? (
-              <div className="flex items-center justify-center py-6">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+              <div className="space-y-2">
+                {[...Array(5)].map((_, i) => (
+                  <div
+                    key={i}
+                    className="h-16 animate-pulse rounded-lg border bg-muted/40"
+                  />
+                ))}
               </div>
             ) : sortedBackups.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No backups found for this S3 source.
               </p>
+            ) : filteredBackups.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No backups match &ldquo;{backupSearch}&rdquo;.
+              </p>
             ) : (
               <div className="space-y-2">
-                {sortedBackups.map((backup) => (
-                  <Link
-                    key={backup.backup_id}
-                    to={`/backups/s3-sources/${id}/backups/${backup.backup_id}`}
-                    className="block"
-                  >
-                    <div className="flex items-center justify-between p-4 border rounded-lg hover:bg-muted/50 transition-colors">
-                      <div className="flex items-center gap-4">
-                        <DatabaseBackup className="h-4 w-4" />
-                        <div className="text-sm">
-                          {format(new Date(backup.created_at), 'PPP p')}
+                {pagedBackups.map((backup) => {
+                  // The same `state` strings the BackupDetail page uses.
+                  const state = backup.state || 'unknown'
+                  const isCompleted = state === 'completed'
+                  const isFailed = state === 'failed'
+                  const isRunning = state === 'running' || state === 'pending'
+                  const isOrphan = backup.source === 's3_scan'
+
+                  // Prefer the friendly service name; fall back to the
+                  // engine label so users always see *something* useful.
+                  const displayName =
+                    backup.origin_service_name ||
+                    backup.engine ||
+                    backup.name ||
+                    'Backup'
+
+                  // Per-row icon based on the engine that produced the
+                  // backup. `iconForServiceType` understands the engine
+                  // vocabulary (`postgres_walg`, `s3_mirror`, …) and the
+                  // service-type vocabulary (`postgres`, `s3`, …); falls
+                  // back to a generic Database icon for unknown values.
+                  const ServiceIcon = iconForServiceType(backup.engine)
+
+                  return (
+                    <Link
+                      key={`${backup.source}-${backup.backup_id || backup.location}`}
+                      to={`/backups/s3-sources/${id}/backups/${backup.backup_id}`}
+                      className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-lg"
+                    >
+                      <div className="flex flex-col gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50 sm:flex-row sm:items-center sm:justify-between sm:p-4">
+                        {/* Left: name + meta */}
+                        <div className="flex min-w-0 items-center gap-3">
+                          <div
+                            className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground"
+                            aria-hidden
+                          >
+                            <ServiceIcon className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="truncate font-medium">
+                                {displayName}
+                              </span>
+                              {backup.engine ? (
+                                <Badge
+                                  variant="outline"
+                                  className="font-mono text-xs"
+                                >
+                                  {backup.engine}
+                                </Badge>
+                              ) : null}
+                              {backup.format === 'walg' ? (
+                                <Badge variant="secondary" className="text-xs">
+                                  PITR
+                                </Badge>
+                              ) : null}
+                              {isOrphan ? (
+                                <Badge variant="outline" className="text-xs">
+                                  orphan
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                              <span className="font-mono">
+                                {format(
+                                  new Date(backup.created_at),
+                                  'MMM d, yyyy p',
+                                )}
+                              </span>
+                              {backup.size_bytes != null &&
+                              backup.size_bytes > 0 ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <HardDrive className="h-3 w-3" />
+                                  {formatBytes(backup.size_bytes)}
+                                </span>
+                              ) : null}
+                              {backup.backup_id ? (
+                                <span className="font-mono">
+                                  #{backup.backup_id.slice(0, 8)}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: status badge. Same vocabulary as the
+                            BackupDetail StatusBadge so users can scan both
+                            pages with the same mental model. */}
+                        <div className="flex items-center gap-2 sm:shrink-0">
+                          {isCompleted ? (
+                            <Badge
+                              variant="outline"
+                              className="border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 gap-1"
+                            >
+                              <CheckCircle2 className="h-3 w-3" />
+                              Completed
+                            </Badge>
+                          ) : isFailed ? (
+                            <Badge variant="destructive" className="gap-1">
+                              <XCircle className="h-3 w-3" />
+                              Failed
+                            </Badge>
+                          ) : isRunning ? (
+                            <Badge variant="secondary" className="gap-1">
+                              <Radio className="h-3 w-3 animate-pulse" />
+                              {state === 'pending' ? 'Pending' : 'Running'}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-xs">
+                              {state}
+                            </Badge>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  </Link>
-                ))}
+                    </Link>
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Pagination footer — only when more than one page. */}
+            {filteredBackups.length > BACKUP_PAGE_SIZE && (
+              <div className="mt-4 flex flex-col items-center justify-between gap-2 border-t pt-4 sm:flex-row">
+                <span className="hidden text-xs text-muted-foreground sm:inline">
+                  Showing {backupRangeStart}–{backupRangeEnd} of{' '}
+                  {filteredBackups.length}
+                </span>
+                <span className="text-xs text-muted-foreground sm:hidden">
+                  {backupPage} / {backupTotalPages}
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setBackupPage((p) => Math.max(1, p - 1))}
+                    disabled={backupPage === 1}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    <span className="hidden sm:inline">Previous</span>
+                  </Button>
+                  <span className="hidden text-xs text-muted-foreground sm:inline">
+                    Page {backupPage} of {backupTotalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setBackupPage((p) => Math.min(backupTotalPages, p + 1))
+                    }
+                    disabled={backupPage === backupTotalPages}
+                  >
+                    <span className="hidden sm:inline">Next</span>
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             )}
           </CardContent>

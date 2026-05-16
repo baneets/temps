@@ -6,41 +6,7 @@ import {
 } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import type { EnvVarIntegrationInfo } from '@/lib/resolved-env-vars'
-import { resolvePluginIcon } from '@/lib/pluginIcons'
-import {
-  Database,
-  HardDrive,
-  Leaf,
-  Server,
-  type LucideIcon,
-} from 'lucide-react'
-
-/**
- * Map backend service_type values to a Lucide icon. Any unknown type falls
- * through to resolvePluginIcon (which can interpret a kebab-case name) and
- * finally to Puzzle.
- */
-function iconForServiceType(serviceType: string): LucideIcon {
-  const normalized = serviceType.toLowerCase()
-  switch (normalized) {
-    case 'postgres':
-    case 'postgresql':
-    case 'mysql':
-    case 'mariadb':
-      return Database
-    case 'mongodb':
-    case 'mongo':
-      return Leaf
-    case 'redis':
-      return Server
-    case 'rustfs':
-    case 'minio':
-    case 's3':
-      return HardDrive
-    default:
-      return resolvePluginIcon(normalized)
-  }
-}
+import { iconForServiceType } from '@/lib/serviceIcons'
 
 interface IntegrationBadgeProps {
   service: EnvVarIntegrationInfo
