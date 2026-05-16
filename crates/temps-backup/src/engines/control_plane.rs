@@ -602,8 +602,23 @@ async fn step_pg_dumpall(
     let major = pg_version.trim_start_matches("pg");
     let image_tag = format!("postgres:{}", major);
 
+    // Ensure the sidecar image is locally cached before `create_container`.
+    // Fresh control-plane hosts (especially in prod after a clean install)
+    // don't have `postgres:{major}` pre-pulled, so the create call would 404
+    // with "No such image". `inspect_image` is the cheap "do I have this?"
+    // probe; on miss we stream the pull. Pull failures bubble up as
+    // StepFailed with the tag in the message.
+    if docker.inspect_image(&image_tag).await.is_err() {
+        info!(
+            job_id,
+            image_tag = %image_tag,
+            "ControlPlaneEngine pg_dumpall: image not cached, pulling"
+        );
+        pull_image(job_id, &docker, &image_tag).await?;
+    }
+
     let config = Config {
-        image: Some(image_tag),
+        image: Some(image_tag.clone()),
         entrypoint: Some(vec!["/bin/sleep".to_string()]),
         cmd: Some(vec!["86400".to_string()]),
         env: Some(env_vars),
@@ -1209,6 +1224,58 @@ fn timescale_image_tag_for_version_str(version_str: &str) -> String {
         .and_then(|s| s.parse().ok())
         .unwrap_or(18);
     timescale_image_tag_for_major(major)
+}
+
+/// Pull a Docker image, streaming progress events to the trace log.
+///
+/// Used before `create_container` for the sidecar image so a fresh host
+/// (no pre-pulled layers) doesn't 404 on `create_container` with
+/// "No such image". Splits `image:tag` so Bollard can ask the registry
+/// for the correct manifest; falls back to `:latest` when the caller
+/// passed a bare image name (shouldn't happen for our sidecars, but
+/// matches the legacy provider's behaviour).
+async fn pull_image(
+    job_id: i64,
+    docker: &bollard::Docker,
+    image_tag: &str,
+) -> Result<(), BackupEngineError> {
+    use bollard::query_parameters::CreateImageOptionsBuilder;
+    use futures::stream::StreamExt as FuturesStreamExt;
+
+    let (image, tag) = match image_tag.split_once(':') {
+        Some((i, t)) => (i, t),
+        None => (image_tag, "latest"),
+    };
+
+    let options = CreateImageOptionsBuilder::new()
+        .from_image(image)
+        .tag(tag)
+        .build();
+
+    let mut stream = docker.create_image(Some(options), None, None);
+
+    while let Some(result) = FuturesStreamExt::next(&mut stream).await {
+        match result {
+            Ok(info) => {
+                if let Some(status) = info.status {
+                    debug!(job_id, image_tag, "Docker pull: {}", status);
+                }
+            }
+            Err(e) => {
+                return Err(BackupEngineError::StepFailed {
+                    job_id,
+                    step: "pg_dumpall".into(),
+                    reason: format!("failed to pull sidecar image '{}': {}", image_tag, e),
+                });
+            }
+        }
+    }
+
+    info!(
+        job_id,
+        image_tag, "ControlPlaneEngine pg_dumpall: pull complete"
+    );
+    Ok(())
 }
 
 /// Build an S3 client from the `s3_source_id` in the database.
