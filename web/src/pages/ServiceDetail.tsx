@@ -490,7 +490,20 @@ export function ServiceDetail() {
     if (service.service.status === 'running') {
       setIsStopDialogOpen(true)
     } else if (service.service.status === 'stopped') {
-      startService.mutate({ path: { id: parseInt(id!) } })
+      // Start can take 5–15s for Postgres (reconcile + recreate path).
+      // toast.promise surfaces all three states without blocking the UI,
+      // matching the rollback/promote patterns elsewhere in the app.
+      toast.promise(
+        startService.mutateAsync({ path: { id: parseInt(id!) } }),
+        {
+          loading: `Starting ${service.service.name}…`,
+          success: `${service.service.name} started`,
+          error: (err: Error) =>
+            err?.message
+              ? `Failed to start ${service.service.name}: ${err.message}`
+              : `Failed to start ${service.service.name}`,
+        }
+      )
     }
   }
 

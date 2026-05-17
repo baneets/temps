@@ -107,7 +107,10 @@ function StatusIcon({ state }: { state: BackupState }) {
 }
 
 function StatusBadge({ state }: { state: BackupState }) {
-  const base = 'gap-1.5 capitalize'
+  // Leading-icon padding per design guidelines: vertical = left padding,
+  // larger right padding for visual balance. Shared across every variant
+  // so all the state pills size identically in the table.
+  const base = 'gap-1.5 py-1 pl-1 pr-2 capitalize font-normal'
   switch (state) {
     case 'completed':
       return (
@@ -123,8 +126,17 @@ function StatusBadge({ state }: { state: BackupState }) {
         </Badge>
       )
     case 'failed':
+      // Muted red — tinted background + outlined border + colored text.
+      // The solid `destructive` variant clashes with the destructive-red
+      // error message that always sits in the next column for failed rows.
       return (
-        <Badge variant="destructive" className={base}>
+        <Badge
+          variant="outline"
+          className={cn(
+            base,
+            'border-destructive/30 bg-destructive/10 text-destructive dark:bg-destructive/20 dark:text-red-300',
+          )}
+        >
           <StatusIcon state={state} />
           Failed
         </Badge>
@@ -144,7 +156,13 @@ function StatusBadge({ state }: { state: BackupState }) {
       )
     default:
       return (
-        <Badge variant="secondary" className={base}>
+        <Badge
+          variant="outline"
+          className={cn(
+            base,
+            'border-muted-foreground/20 bg-muted/50 text-muted-foreground',
+          )}
+        >
           <StatusIcon state={state} />
           {state}
         </Badge>
@@ -696,6 +714,23 @@ export function BackupDetail() {
                       const childDurationMs = childFinished
                         ? childFinished.getTime() - childStarted.getTime()
                         : null
+                      // When the parent backup has finalized but the child is
+                      // still pending/running, the engine bailed before
+                      // updating the child row (typical: pre-flight S3 check
+                      // failed, parent was marked failed but children were
+                      // never visited). Surface the parent's state + error
+                      // instead of showing a stale "Pending" forever.
+                      const parentFinalized =
+                        state === 'failed' || state === 'cancelled'
+                      const childStale =
+                        child.state === 'pending' || child.state === 'running'
+                      const effectiveState =
+                        parentFinalized && childStale ? state : child.state
+                      const effectiveError =
+                        child.error_message ??
+                        (parentFinalized && childStale
+                          ? backup.error_message ?? null
+                          : null)
                       return (
                         <TableRow key={child.id}>
                           <TableCell>
@@ -713,7 +748,7 @@ export function BackupDetail() {
                             </Badge>
                           </TableCell>
                           <TableCell>
-                            <StatusBadge state={child.state} />
+                            <StatusBadge state={effectiveState} />
                           </TableCell>
                           <TableCell className="hidden sm:table-cell text-sm text-muted-foreground">
                             {child.size_bytes !== null
@@ -726,19 +761,19 @@ export function BackupDetail() {
                               : '—'}
                           </TableCell>
                           <TableCell className="hidden lg:table-cell max-w-[200px]">
-                            {child.error_message ? (
+                            {effectiveError ? (
                               <TooltipProvider>
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <span className="block truncate text-xs text-destructive cursor-help">
-                                      {child.error_message}
+                                      {effectiveError}
                                     </span>
                                   </TooltipTrigger>
                                   <TooltipContent
                                     side="top"
                                     className="max-w-sm whitespace-pre-wrap break-words"
                                   >
-                                    {child.error_message}
+                                    {effectiveError}
                                   </TooltipContent>
                                 </Tooltip>
                               </TooltipProvider>
