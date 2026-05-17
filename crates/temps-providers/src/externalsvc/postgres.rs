@@ -275,6 +275,7 @@ impl PostgresService {
         docker: &Docker,
         config: &PostgresConfig,
         resource_limits: &ServiceResourceLimits,
+        enable_archiving: bool,
     ) -> Result<()> {
         // Pull image first
         info!("Pulling PostgreSQL image {}", config.docker_image);
@@ -423,16 +424,13 @@ impl PostgresService {
             exposed_ports: Some(Vec::from(["5432/tcp".to_string()])),
             env: Some(env_vars.iter().map(|s| s.to_string()).collect()),
             labels: Some(container_labels),
-            // archive_mode starts OFF. The combination
-            // `archive_mode=on, archive_command=''` causes Postgres to retain
-            // every WAL segment forever waiting for an archiver that never
-            // accepts — that's the silent disk-filler we hit in production
-            // (191 GB pg_wal). enable_wal_archiving() flips archive_mode=on
-            // ATOMICALLY with archive_command when an S3 source is linked, and
-            // restarts the container so the postmaster-context setting takes
-            // effect. Keeping wal_level=replica means we can still enable
-            // streaming replication / archiving later without a full restart
-            // of the surrounding fleet.
+            // archive_mode is computed from on-disk truth, not stored state:
+            // `/var/lib/postgresql/walg.env` exists on the volume iff WAL-G
+            // archiving has been configured for this service. The
+            // reconcile-on-start path in `start()` recomputes and recreates
+            // the container if this value drifts. This makes the bad combo
+            // (archive_mode=on, archive_command='') unrepresentable for any
+            // service that's been Stop+Start'd at least once.
             cmd: Some(vec![
                 "postgres".to_string(),
                 "-c".to_string(),
@@ -440,7 +438,10 @@ impl PostgresService {
                 "-c".to_string(),
                 "wal_level=replica".to_string(),
                 "-c".to_string(),
-                "archive_mode=off".to_string(),
+                format!(
+                    "archive_mode={}",
+                    if enable_archiving { "on" } else { "off" }
+                ),
                 "-c".to_string(),
                 "archive_timeout=60".to_string(),
             ]),
@@ -704,6 +705,16 @@ impl PostgresService {
     /// - Is accessible via `volumes_from` in helper containers
     /// - Is NOT inside PGDATA (so pg_basebackup/wal-g don't back it up — credentials
     ///   should not be stored inside backups)
+    ///
+    /// Flow:
+    ///   1. Write `walg.env` onto the volume. From this moment, the volume
+    ///      records "WAL-G is configured" — `compute_desired_enable_archiving`
+    ///      will return true on every subsequent start.
+    ///   2. Write `archive_command` via ALTER SYSTEM so an immediate
+    ///      `wal-g wal-push` works on the running container (SIGHUP-reloadable).
+    ///   3. Recreate the container so `archive_mode=on` lands in CMD args.
+    ///      `archive_mode` is postmaster-context — recreate is the only way
+    ///      to flip it. Volume is preserved; PGDATA is intact.
     async fn enable_wal_archiving(
         &self,
         container_name: &str,
@@ -712,34 +723,18 @@ impl PostgresService {
     ) -> Result<()> {
         use bollard::exec::{CreateExecOptions, StartExecOptions};
 
-        // Write credentials file (shared helper — same file is used by
-        // restore_command during recovery).
+        // Step 1: write walg.env onto the volume. This is the durable truth
+        // source `compute_desired_enable_archiving` reads on every start.
         self.write_walg_env_file(container_name, walg_env).await?;
         let walg_env_path = "/var/lib/postgresql/walg.env";
 
-        // Enable archive_command via ALTER SYSTEM.
-        // The archive_command sources the env file, then runs wal-g wal-push.
-        // Using 'source' (POSIX: '.') to load env vars into the shell before wal-g runs.
-        //
-        // Note: ALTER SYSTEM writes to postgresql.auto.conf. If archive_command was previously
-        // set there (e.g., from a restore), this overwrites it. pg_reload_conf() applies
-        // archive_command without restart because it's SIGHUP-reloadable.
-        //
-        // archive_mode is `postmaster` context — it requires a full restart to take
-        // effect. We set it here ATOMICALLY with archive_command, then restart the
-        // container below. This is the only place that flips archive_mode=on, and
-        // it always pairs with a non-empty archive_command, so the bad combo
-        // (mode=on, command='') is unrepresentable.
+        // Step 2: set archive_command via ALTER SYSTEM. SIGHUP-reloadable —
+        // takes effect immediately. archive_mode comes in step 3 via CMD.
         let archive_command = format!(". {} && wal-g wal-push %p", walg_env_path);
-
-        // Use three separate -c flags because ALTER SYSTEM cannot run inside a
-        // transaction block, and psql wraps multiple statements in a single -c
-        // into a transaction.
         let alter_command_sql = format!(
             "ALTER SYSTEM SET archive_command = '{}'",
             archive_command.replace('\'', "''")
         );
-        let alter_mode_sql = "ALTER SYSTEM SET archive_mode = 'on'";
         let reload_sql = "SELECT pg_reload_conf()";
 
         let password_env = format!("PGPASSWORD={}", postgres_config.password);
@@ -756,8 +751,6 @@ impl PostgresService {
                         &postgres_config.database,
                         "-c",
                         &alter_command_sql,
-                        "-c",
-                        alter_mode_sql,
                         "-c",
                         reload_sql,
                     ]),
@@ -784,7 +777,7 @@ impl PostgresService {
             if inspect.running == Some(false) {
                 if inspect.exit_code != Some(0) {
                     return Err(anyhow::anyhow!(
-                        "ALTER SYSTEM SET archive_command/archive_mode failed (exit code {:?})",
+                        "ALTER SYSTEM SET archive_command failed (exit code {:?})",
                         inspect.exit_code
                     ));
                 }
@@ -794,186 +787,232 @@ impl PostgresService {
         }
 
         info!(
-            "Wrote archive_command + archive_mode=on in container '{}' (archive_command: {}). Restarting container so archive_mode takes effect.",
-            container_name, archive_command
+            "Wrote walg.env + archive_command in container '{}'. Recreating container so archive_mode=on lands in CMD.",
+            container_name
         );
 
-        // Restart the container so archive_mode=on takes effect. archive_mode is
-        // postmaster-context — pg_reload_conf() does NOT pick it up. Without
-        // this restart we'd leave the service in the bad combo
-        // (archive_mode written but inactive) until something else restarts it.
-        // restart_container is graceful — Postgres receives SIGTERM, flushes
-        // checkpoint, then comes back up clean.
+        // Step 3: recreate so archive_mode=on lands in CMD args. We go through
+        // `stop()` → `docker.remove_container` → `create_container(.., true)`
+        // → `docker.start_container` → `wait_for_container_health`. Same path
+        // `start()`'s reconcile branch uses.
+        self.stop().await?;
         self.docker
-            .restart_container(
+            .remove_container(
                 container_name,
-                None::<bollard::query_parameters::RestartContainerOptions>,
+                Some(bollard::query_parameters::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
             )
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to restart container '{}' after enabling archiving: {}",
+                    "Failed to remove container '{}' before re-creating with archive_mode=on: {}",
                     container_name,
                     e
                 )
             })?;
 
+        let limits = self.resource_limits.read().await.clone();
+        self.create_container(&self.docker, postgres_config, &limits, true)
+            .await?;
+        self.docker
+            .start_container(
+                container_name,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to start container '{}' after recreating with archive_mode=on: {}",
+                    container_name,
+                    e
+                )
+            })?;
+        self.wait_for_container_health(&self.docker, container_name)
+            .await?;
+
         info!(
-            "Restarted container '{}' — archive_mode=on now active",
+            "Recreated container '{}' with archive_mode=on. WAL-G archiving active.",
             container_name
         );
 
         Ok(())
     }
 
-    /// Detect and repair the `archive_mode=on, archive_command=''` combo on
-    /// an already-running container.
+    /// Compute the desired `archive_mode` for this service's container CMD.
     ///
-    /// Earlier versions of this code set `archive_mode=on` in the container
-    /// CMD unconditionally. Any service whose `archive_command` was never set
-    /// (no S3 source linked, or never reached `enable_wal_archiving`) ends up
-    /// accumulating WAL forever because Postgres holds segments waiting for
-    /// an archiver that never accepts them.
+    /// Truth source: `/var/lib/postgresql/walg.env` existing on the
+    /// service's data volume. WAL-G archiving is enabled iff that credential
+    /// file is present — it's written by `enable_wal_archiving()` and lives
+    /// on the persistent volume, so it survives container recreates, Temps
+    /// restarts, and node failovers.
     ///
-    /// This method:
-    ///   1. Reads `pg_settings` to check the current state.
-    ///   2. If `archive_mode=on` AND `archive_command` is empty, sets
-    ///      `archive_mode=off` via `ALTER SYSTEM` so the next restart picks
-    ///      it up. We DO NOT restart here — the next operator-initiated
-    ///      restart or container-recreate will activate the fix. Restarting
-    ///      unprompted in a hot path is too invasive.
-    ///   3. Leaves config alone if either setting is in a sensible state.
-    ///
-    /// Safe to call repeatedly: no-op when config is already correct.
-    async fn heal_orphan_archive_mode(&self, container_name: &str) -> Result<()> {
-        use bollard::exec::{CreateExecOptions, StartExecOptions};
-        use futures::TryStreamExt;
+    /// On any inspection error, returns `false` (archiving off) — the safer
+    /// default. A spurious `false` causes archiving to be disabled until the
+    /// operator notices; a spurious `true` would cause WAL bloat, which is
+    /// the exact bug we're trying to avoid.
+    async fn compute_desired_enable_archiving(&self) -> bool {
+        let container_name = self.get_container_name();
+        let volume_name = format!("{}_data", container_name);
+        self.walg_env_exists_on_volume(&volume_name).await
+    }
 
-        // We need to read the password from our stored config. If config
-        // isn't loaded (e.g., the service was imported from an existing
-        // container), skip — we can't auth into it to fix it.
-        let cfg = match self.config.read().await.clone() {
-            Some(c) => c,
-            None => return Ok(()),
+    /// Returns true iff `/var/lib/postgresql/walg.env` exists on the named
+    /// Docker volume. Runs a one-shot `busybox` container with the volume
+    /// mounted read-only. Any error (image pull, exec failure) returns
+    /// false — we err on the side of not enabling archiving.
+    async fn walg_env_exists_on_volume(&self, volume_name: &str) -> bool {
+        use bollard::query_parameters::{
+            CreateContainerOptions, CreateImageOptions, RemoveContainerOptions,
+            StartContainerOptions, WaitContainerOptions,
+        };
+        use futures::StreamExt;
+
+        // Pull busybox; cheap (~700 KB) and cached after first use.
+        let mut pull_stream = self.docker.create_image(
+            Some(CreateImageOptions {
+                from_image: Some("busybox".to_string()),
+                tag: Some("latest".to_string()),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(result) = pull_stream.next().await {
+            if result.is_err() {
+                // Best-effort; treat unavailability as "no archiving".
+                return false;
+            }
+        }
+
+        let probe_name = format!("temps-walg-probe-{}", uuid::Uuid::new_v4());
+        let host_config = bollard::models::HostConfig {
+            mounts: Some(vec![bollard::models::Mount {
+                target: Some("/var/lib/postgresql".to_string()),
+                source: Some(volume_name.to_string()),
+                typ: Some(bollard::models::MountTypeEnum::VOLUME),
+                read_only: Some(true),
+                ..Default::default()
+            }]),
+            auto_remove: Some(false),
+            ..Default::default()
         };
 
-        // Step 1: read current settings.
-        let read_sql =
-            "SELECT name, setting FROM pg_settings WHERE name IN ('archive_mode', 'archive_command')";
-
-        let password_env = format!("PGPASSWORD={}", cfg.password);
-        let read_exec = self
+        let create_result = self
             .docker
-            .create_exec(
-                container_name,
-                CreateExecOptions {
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(probe_name.clone()),
+                    ..Default::default()
+                }),
+                bollard::models::ContainerCreateBody {
+                    image: Some("busybox:latest".to_string()),
                     cmd: Some(vec![
-                        "psql",
-                        "-U",
-                        &cfg.username,
-                        "-d",
-                        &cfg.database,
-                        "-tAF",
-                        "|",
-                        "-c",
-                        read_sql,
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "test -f /var/lib/postgresql/walg.env".to_string(),
                     ]),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    env: Some(vec![&password_env]),
+                    host_config: Some(host_config),
                     ..Default::default()
                 },
             )
-            .await?;
+            .await;
 
-        let mut archive_mode_on = false;
-        let mut archive_command_empty = true;
-        if let bollard::exec::StartExecResults::Attached { mut output, .. } = self
+        if create_result.is_err() {
+            return false;
+        }
+
+        // Best effort cleanup: always try to remove the probe container.
+        let cleanup = |name: String| async move {
+            let _ = self
+                .docker
+                .remove_container(
+                    &name,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        };
+
+        if self
             .docker
-            .start_exec(
-                &read_exec.id,
-                Some(StartExecOptions {
-                    detach: false,
-                    ..Default::default()
-                }),
-            )
-            .await?
+            .start_container(&probe_name, None::<StartContainerOptions>)
+            .await
+            .is_err()
         {
-            let mut stdout = String::new();
-            while let Some(chunk) = output.try_next().await? {
-                if let bollard::container::LogOutput::StdOut { message } = chunk {
-                    stdout.push_str(&String::from_utf8_lossy(&message));
-                }
-            }
-            for line in stdout.lines() {
-                let mut parts = line.splitn(2, '|');
-                match (parts.next(), parts.next()) {
-                    (Some("archive_mode"), Some(setting)) => {
-                        archive_mode_on = setting.trim().eq_ignore_ascii_case("on")
-                            || setting.trim().eq_ignore_ascii_case("always");
-                    }
-                    (Some("archive_command"), Some(setting)) => {
-                        let trimmed = setting.trim();
-                        archive_command_empty =
-                            trimmed.is_empty() || trimmed.eq_ignore_ascii_case("(disabled)");
-                    }
-                    _ => {}
-                }
-            }
+            cleanup(probe_name).await;
+            return false;
         }
 
-        if !(archive_mode_on && archive_command_empty) {
-            return Ok(()); // Healthy or already-mid-config — leave alone.
-        }
-
-        warn!(
-            "Container '{}' has archive_mode=on but archive_command=''. \
-             This causes WAL bloat. Setting archive_mode=off via ALTER SYSTEM \
-             (effective on next container restart).",
-            container_name
-        );
-
-        // Step 2: fix it. ALTER SYSTEM writes postgresql.auto.conf; the
-        // setting becomes effective on the next restart since archive_mode
-        // is postmaster-context. We do NOT restart now — the container is
-        // healthy and this is a hot start path.
-        let fix_sql = "ALTER SYSTEM SET archive_mode = 'off'";
-        let fix_exec = self
+        let mut wait_stream = self
             .docker
-            .create_exec(
-                container_name,
-                CreateExecOptions {
-                    cmd: Some(vec![
-                        "psql",
-                        "-U",
-                        &cfg.username,
-                        "-d",
-                        &cfg.database,
-                        "-c",
-                        fix_sql,
-                    ]),
-                    attach_stdout: Some(false),
-                    attach_stderr: Some(false),
-                    env: Some(vec![&password_env]),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        self.docker
-            .start_exec(
-                &fix_exec.id,
-                Some(StartExecOptions {
-                    detach: true,
-                    ..Default::default()
-                }),
-            )
-            .await?;
+            .wait_container(&probe_name, None::<WaitContainerOptions>);
 
-        info!(
-            "Set archive_mode=off via ALTER SYSTEM on container '{}'. Takes effect on next restart.",
-            container_name
-        );
-        Ok(())
+        let mut exit_code: Option<i64> = None;
+        while let Some(item) = wait_stream.next().await {
+            if let Ok(resp) = item {
+                exit_code = Some(resp.status_code);
+                break;
+            }
+        }
+
+        cleanup(probe_name).await;
+
+        // `test -f` exits 0 when the file is present.
+        matches!(exit_code, Some(0))
+    }
+
+    /// Returns true when the running container's CMD specifies an
+    /// `archive_mode` value that disagrees with what we'd emit now.
+    /// Returns false when the value matches OR when we can't determine it
+    /// (don't recreate on inspection failure — stability over correctness
+    /// for this branch).
+    async fn container_cmd_archive_mode_differs(
+        &self,
+        container: &bollard::models::ContainerSummary,
+        desired: bool,
+    ) -> bool {
+        let id = match container.id.as_deref() {
+            Some(id) => id,
+            None => return false,
+        };
+        let info = match self
+            .docker
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(i) => i,
+            Err(_) => return false,
+        };
+        let cmd = info
+            .config
+            .as_ref()
+            .and_then(|c| c.cmd.as_ref())
+            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        // Find `archive_mode=<value>` token.
+        let actual_on = cmd.iter().any(|tok| {
+            let t = tok.trim();
+            t.eq_ignore_ascii_case("archive_mode=on")
+                || t.eq_ignore_ascii_case("archive_mode=always")
+        });
+        let actual_off = cmd
+            .iter()
+            .any(|tok| tok.trim().eq_ignore_ascii_case("archive_mode=off"));
+
+        if !actual_on && !actual_off {
+            // Container predates our CMD-baking — don't recreate.
+            return false;
+        }
+        let actual = actual_on; // true = on, false = off
+        actual != desired
     }
 
     async fn wait_for_container_health(&self, docker: &Docker, container_id: &str) -> Result<()> {
@@ -2765,8 +2804,10 @@ impl ExternalService for PostgresService {
         *self.config.write().await = Some(postgres_config.clone());
         *self.resource_limits.write().await = resource_limits.clone();
 
-        // Create Docker container
-        self.create_container(&self.docker, &postgres_config, &resource_limits)
+        // Create Docker container. New services always start with archiving
+        // off — `enable_wal_archiving()` recreates with archiving on when
+        // WAL-G is later configured.
+        self.create_container(&self.docker, &postgres_config, &resource_limits, false)
             .await?;
 
         // Serialize the full runtime config to save to database
@@ -3028,6 +3069,16 @@ impl ExternalService for PostgresService {
         let container_name = self.get_container_name();
         info!("Starting PostgreSQL container {}", container_name);
 
+        // Reconcile-on-start. The desired `archive_mode` is derived from
+        // on-disk truth: `/var/lib/postgresql/walg.env` exists on the
+        // service's volume iff WAL-G archiving has been configured. If the
+        // existing container's CMD doesn't match (e.g., it was created by an
+        // older version that baked archive_mode=on unconditionally), we
+        // recreate the container here. This is the only path that auto-
+        // repairs config drift — and it's operator-initiated (Stop+Start),
+        // so the downtime is expected.
+        let desired_enable_archiving = self.compute_desired_enable_archiving().await;
+
         // Check if container exists and get its status
         let containers = self
             .docker
@@ -3041,8 +3092,42 @@ impl ExternalService for PostgresService {
             }))
             .await?;
 
-        if containers.is_empty() {
-            // Container doesn't exist, create and start it
+        let mut need_create = containers.is_empty();
+        if let Some(container) = containers.first() {
+            // Inspect the existing CMD. If it disagrees with what we'd emit
+            // now, force a recreate by stopping + removing the old container
+            // and falling through to the create branch.
+            let drift = self
+                .container_cmd_archive_mode_differs(container, desired_enable_archiving)
+                .await;
+            if drift {
+                info!(
+                    "Container {} has archive_mode CMD drift (desired={}). \
+                     Recreating to apply correct config.",
+                    container_name, desired_enable_archiving
+                );
+                let _ = self
+                    .docker
+                    .stop_container(
+                        &container_name,
+                        None::<bollard::query_parameters::StopContainerOptions>,
+                    )
+                    .await;
+                self.docker
+                    .remove_container(
+                        &container_name,
+                        Some(bollard::query_parameters::RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .context("Failed to remove drifted container during reconcile")?;
+                need_create = true;
+            }
+        }
+
+        if need_create {
             let config = self
                 .config
                 .read()
@@ -3051,10 +3136,11 @@ impl ExternalService for PostgresService {
                 .ok_or_else(|| anyhow::anyhow!("PostgreSQL configuration not found"))?
                 .clone();
             let limits = self.resource_limits.read().await.clone();
-            self.create_container(&self.docker, &config, &limits)
+            self.create_container(&self.docker, &config, &limits, desired_enable_archiving)
                 .await?;
         } else {
-            // Container exists, check if it's running
+            // Container exists and CMD matches desired state. Just start it
+            // if it isn't already running.
             let container = &containers[0];
             let is_running = matches!(
                 container.state,
@@ -3062,7 +3148,6 @@ impl ExternalService for PostgresService {
             );
 
             if !is_running {
-                // Only start if container is not running
                 let start_result = self
                     .docker
                     .start_container(
@@ -3074,7 +3159,7 @@ impl ExternalService for PostgresService {
                 match start_result {
                     Ok(_) => info!("Started existing PostgreSQL container {}", container_name),
                     Err(e) => {
-                        // Check if error is "container already started", which is not a real error
+                        // "already started" is benign — we raced ourselves.
                         let error_msg = e.to_string();
                         if !error_msg.contains("already started") {
                             return Err(e)
@@ -3091,24 +3176,6 @@ impl ExternalService for PostgresService {
         // Wait for container to be healthy
         self.wait_for_container_health(&self.docker, &container_name)
             .await?;
-
-        // Self-heal the "archive_mode=on, archive_command=''" combo.
-        //
-        // This is the WAL-bloat bug we caused in earlier versions: the
-        // container CMD baked in archive_mode=on unconditionally, so any
-        // Postgres service whose archive_command was never set (no S3 source
-        // ever linked) accumulates WAL forever. New services no longer hit
-        // this (CMD now sets archive_mode=off). Existing services with the
-        // bad config will see this branch on next start and be fixed.
-        //
-        // We *only* touch archive_mode when archive_command is empty. If a
-        // user has manually set archive_command, we leave their config alone.
-        if let Err(e) = self.heal_orphan_archive_mode(&container_name).await {
-            warn!(
-                "Failed to self-heal archive_mode for container {}: {} (non-fatal)",
-                container_name, e
-            );
-        }
 
         Ok(())
     }
@@ -3324,7 +3391,10 @@ impl ExternalService for PostgresService {
             );
             self.stop().await?;
             let limits = self.resource_limits.read().await.clone();
-            self.create_container(&self.docker, &new_pg_config, &limits)
+            // Preserve archiving state across the image swap by reading
+            // `walg.env` from the existing volume — same rule as `start()`.
+            let enable_archiving = self.compute_desired_enable_archiving().await;
+            self.create_container(&self.docker, &new_pg_config, &limits, enable_archiving)
                 .await?;
             info!("PostgreSQL image swap completed successfully");
         } else {
@@ -3334,7 +3404,8 @@ impl ExternalService for PostgresService {
             self.run_pg_upgrade(&old_pg_config, &new_pg_config, old_version, new_version)
                 .await?;
             let limits = self.resource_limits.read().await.clone();
-            self.create_container(&self.docker, &new_pg_config, &limits)
+            let enable_archiving = self.compute_desired_enable_archiving().await;
+            self.create_container(&self.docker, &new_pg_config, &limits, enable_archiving)
                 .await?;
             info!("PostgreSQL major version upgrade completed successfully");
         }
@@ -3566,9 +3637,11 @@ impl ExternalService for PostgresService {
         *new_service.config.write().await = Some(source_config.clone());
         *new_service.resource_limits.write().await = cloned_limits.clone();
 
-        // Create the new container+volume.
+        // Create the new container+volume. Restored services start with
+        // archiving off — the operator decides whether to wire WAL-G to the
+        // new service explicitly.
         new_service
-            .create_container(&self.docker, &source_config, &cloned_limits)
+            .create_container(&self.docker, &source_config, &cloned_limits, false)
             .await?;
 
         // Build a ServiceConfig that parses cleanly back into PostgresConfig.
@@ -3670,7 +3743,7 @@ impl ExternalService for PostgresService {
             *new_service.config.write().await = Some(source_config.clone());
             *new_service.resource_limits.write().await = cloned_limits.clone();
             new_service
-                .create_container(&self.docker, &source_config, &cloned_limits)
+                .create_container(&self.docker, &source_config, &cloned_limits, false)
                 .await?;
 
             let new_service_config = ServiceConfig {

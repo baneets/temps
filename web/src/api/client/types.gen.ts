@@ -632,6 +632,8 @@ export type AppSettingsResponse = {
     security_headers: SecurityHeadersSettings;
 };
 
+export type ArchiveMode = 'off' | 'on' | 'always' | 'unknown';
+
 export type AssignRoleRequest = {
     role_type: string;
     user_id: number;
@@ -840,31 +842,16 @@ export type BackupAlertListResponse = {
  * Alerts are auto-opened by the watcher and auto-resolved when the triggering
  * condition clears. No manual dismiss is required or supported.
  *
- * The optional `schedule_s3_source_id` and `backup_id` / `backup_s3_source_id`
- * fields are included so the UI can deep-link the alert row to its target —
- * for `overdue_schedule`, the S3 source detail page that hosts the schedule;
- * for `stalled_job`, the backup detail page.
+ * The optional `schedule_s3_source_id` field is included so the UI can
+ * deep-link an `overdue_schedule` alert to the S3 source detail page that
+ * hosts the schedule. `stalled_job` alerts no longer carry a deep-link
+ * target — the alert message text contains the backup id for display.
  */
 export type BackupAlertResponse = {
-    /**
-     * FK to `backups.id` — the parent backup row the stalled job belongs to.
-     * Set for `stalled_job` alerts.
-     */
-    backup_id?: number | null;
-    /**
-     * FK to `backups.s3_source_id`. Lets the UI build the deep-link
-     * `/backups/s3-sources/{backup_s3_source_id}/backups/{backup_id}`.
-     * Set for `stalled_job` alerts.
-     */
-    backup_s3_source_id?: number | null;
     /**
      * Database id of the alert row.
      */
     id: number;
-    /**
-     * FK to `backup_jobs.id`. Set for `stalled_job` alerts.
-     */
-    job_id?: number | null;
     /**
      * `"overdue_schedule"` or `"stalled_job"`.
      */
@@ -8697,6 +8684,42 @@ export type PortMapping = {
     protocol: Protocol;
 };
 
+export type PostgresWalHealth = {
+    /**
+     * Number of `archive_status*.ready` files — un-shipped WAL segments.
+     */
+    archive_backlog: number;
+    /**
+     * The literal `archive_command` setting. May be empty or `/bin/true`
+     * when archiving is effectively disabled despite `archive_mode = on`.
+     */
+    archive_command?: string | null;
+    archive_mode: ArchiveMode;
+    archiver_failed_count?: number | null;
+    archiver_last_failed_at?: string | null;
+    /**
+     * `max_wal_size` setting in bytes (parsed from `pg_settings`).
+     */
+    max_wal_size_bytes: number;
+    /**
+     * Age of the oldest WAL file in `pg_wal/` (seconds).
+     */
+    oldest_wal_age_secs: number;
+    /**
+     * Total size of files under `pg_wal/`, from `pg_ls_waldir()`.
+     */
+    pg_wal_bytes: number;
+    /**
+     * When the snapshot was taken.
+     */
+    probed_at: string;
+    stale_slots: Array<StaleSlot>;
+    /**
+     * Computed warnings, ordered by severity (critical first).
+     */
+    warnings: Array<WalWarning>;
+};
+
 /**
  * Union type for preset configurations
  * Use the appropriate configuration type based on your preset
@@ -12078,6 +12101,12 @@ export type SpeedMetricsPayload = {
     viewportWidth?: number | null;
 };
 
+export type StaleSlot = {
+    active: boolean;
+    retained_bytes: number;
+    slot_name: string;
+};
+
 export type StartAnalysisRequest = {
     error_group_id: number;
     user_context?: string | null;
@@ -14124,6 +14153,34 @@ export type VulnerabilityResponse = {
     type?: string | null;
     vulnerability_id: string;
 };
+
+/**
+ * One actionable warning surfaced to the UI.
+ *
+ * Each variant carries the data needed to render a remediation hint without
+ * the frontend re-querying anything.
+ */
+export type WalWarning = {
+    kind: 'wal_bloat';
+    max_wal_size_bytes: number;
+    pg_wal_bytes: number;
+    ratio: number;
+} | {
+    active: boolean;
+    kind: 'stale_slot';
+    retained_bytes: number;
+    slot_name: string;
+} | {
+    kind: 'archive_backlog';
+    ready_count: number;
+} | {
+    kind: 'archive_mode_without_command';
+} | {
+    kind: 'wal_not_recycled';
+    oldest_age_secs: number;
+};
+
+export type WalWarningSeverity = 'warning' | 'critical';
 
 /**
  * Configuration for a generic webhook notification provider
@@ -22068,6 +22125,38 @@ export type UpgradeServiceResponses = {
 };
 
 export type UpgradeServiceResponse = UpgradeServiceResponses[keyof UpgradeServiceResponses];
+
+export type GetPostgresWalHealthData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/external-services/{id}/wal-health';
+};
+
+export type GetPostgresWalHealthErrors = {
+    /**
+     * Service not found, or no WAL snapshot available
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetPostgresWalHealthResponses = {
+    /**
+     * Latest WAL health snapshot
+     */
+    200: PostgresWalHealth;
+};
+
+export type GetPostgresWalHealthResponse = GetPostgresWalHealthResponses[keyof GetPostgresWalHealthResponses];
 
 export type ListRootContainersData = {
     body?: never;

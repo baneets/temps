@@ -140,7 +140,7 @@ function describeWarning(w: WalWarning): WarningView {
     case 'archive_mode_without_command':
       return {
         title: 'archive_mode is on, but archive_command is empty',
-        body: 'WAL is being held forever waiting for a destination that never accepts it. Temps writes archive_mode=off on the next service start, but the setting only takes effect after a container restart — restart the service from the actions menu when you can.',
+        body: 'WAL is being held forever waiting for a destination that never accepts it. Stop and start this service from the actions menu — Temps reconciles archive_mode on start and the container will come back up with archive_mode=off (or =on if you’ve since configured WAL-G).',
       }
     case 'wal_not_recycled':
       return {

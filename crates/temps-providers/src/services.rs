@@ -6700,7 +6700,67 @@ echo "[restore] Pre-seed complete"
         service_update.updated_at = Set(Utc::now());
         service_update.update(self.db.as_ref()).await?;
 
+        // Refresh the WAL health snapshot immediately for Postgres services.
+        // The reconcile-on-start path may have recreated the container with a
+        // different archive_mode; without this refresh, the UI would keep
+        // showing the pre-recreate snapshot for up to one health-monitor
+        // cycle (~30s). Failure is non-fatal — the background monitor will
+        // converge on its own.
+        if service_type_enum == ServiceType::Postgres {
+            if let Err(e) = self.refresh_postgres_wal_health(service_id).await {
+                tracing::debug!(
+                    "Failed to refresh WAL health snapshot for service {} after start: {} (non-fatal)",
+                    service_id,
+                    e
+                );
+            }
+        }
+
         self.get_service_info(service_id).await
+    }
+
+    /// Wipe `health_metadata.postgres_wal` then immediately run the WAL probe
+    /// and persist the fresh snapshot. Called from `start_service` after a
+    /// Postgres recreate so the UI doesn't show pre-recreate data while the
+    /// background monitor catches up.
+    async fn refresh_postgres_wal_health(
+        &self,
+        service_id: i32,
+    ) -> Result<(), ExternalServiceError> {
+        use crate::externalsvc::postgres_wal_health;
+
+        // Reload the service row (status is now 'running'); skip if it isn't
+        // actually a standalone Postgres service.
+        let service = self.get_service(service_id).await?;
+        if service.service_type != "postgres" || service.topology != "standalone" {
+            return Ok(());
+        }
+
+        // Clear the stale snapshot first. Even if the probe below fails, the
+        // UI will see "no snapshot yet" rather than wrong data.
+        let cleared = clear_health_metadata_key(service.health_metadata.as_ref(), "postgres_wal");
+        let mut active: external_services::ActiveModel = service.clone().into();
+        active.health_metadata = Set(cleared);
+        active.update(self.db.as_ref()).await?;
+
+        // Probe fresh against the new container. Best-effort.
+        let service_config = self.get_service_config(service_id).await?;
+        let Some(conn_str) = postgres_wal_health::build_conn_str(&service_config.parameters) else {
+            return Ok(());
+        };
+        let Some(snapshot) = postgres_wal_health::probe_wal_health(&conn_str).await else {
+            return Ok(());
+        };
+
+        // Reload again, merge the fresh snapshot under postgres_wal.
+        let service = self.get_service(service_id).await?;
+        let merged =
+            merge_health_metadata_key(service.health_metadata.as_ref(), "postgres_wal", &snapshot);
+        let mut active: external_services::ActiveModel = service.into();
+        active.health_metadata = Set(Some(merged));
+        active.update(self.db.as_ref()).await?;
+
+        Ok(())
     }
 
     pub async fn stop_service(
@@ -8633,6 +8693,42 @@ async fn sample_container_stats_twice(
 ///
 /// Formula (matches `docker stats`):
 /// ```
+/// Remove a single key from an `external_services.health_metadata` JSONB
+/// blob. Returns `None` when the result would be an empty object (so the
+/// column goes back to NULL instead of `{}`).
+fn clear_health_metadata_key(
+    existing: Option<&sea_orm::JsonValue>,
+    key: &str,
+) -> Option<sea_orm::JsonValue> {
+    let map = match existing {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => return None,
+    };
+    let mut next = map.clone();
+    next.remove(key);
+    if next.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(next))
+    }
+}
+
+/// Merge a single typed snapshot under `key` into an
+/// `external_services.health_metadata` JSONB blob, preserving sibling keys.
+fn merge_health_metadata_key<T: serde::Serialize>(
+    existing: Option<&sea_orm::JsonValue>,
+    key: &str,
+    snapshot: &T,
+) -> sea_orm::JsonValue {
+    let value = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+    let mut map = match existing {
+        Some(serde_json::Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    map.insert(key.to_string(), value);
+    serde_json::Value::Object(map)
+}
+
 /// cpu_delta    = current.total_usage     - previous.total_usage
 /// system_delta = current.system_cpu_usage - previous.system_cpu_usage
 /// percent      = (cpu_delta / system_delta) * online_cpus * 100
