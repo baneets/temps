@@ -49,7 +49,8 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { listSourceBackupsWithScan, testS3SourceConnection } from '@/lib/s3-sources'
 import { runScheduleNow } from '@/lib/schedule-runs'
 import { cn, formatBytes } from '@/lib/utils'
-import { iconForServiceType } from '@/lib/serviceIcons'
+import { iconForServiceType, serviceTypeRouteForEngine } from '@/lib/serviceIcons'
+import { ServiceLogo } from '@/components/ui/service-logo'
 import { Input } from '@/components/ui/input'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
@@ -705,12 +706,15 @@ export function S3SourceDetail() {
                     backup.name ||
                     'Backup'
 
-                  // Per-row icon based on the engine that produced the
-                  // backup. `iconForServiceType` understands the engine
-                  // vocabulary (`postgres_walg`, `s3_mirror`, …) and the
-                  // service-type vocabulary (`postgres`, `s3`, …); falls
-                  // back to a generic Database icon for unknown values.
-                  const ServiceIcon = iconForServiceType(backup.engine)
+                  // Per-row icon. Prefer the real brand logo
+                  // (`<ServiceLogo>`) when the engine maps to a known
+                  // service type — Postgres elephant, Redis cube, etc. —
+                  // so backups visually match the storage-list rows. Fall
+                  // back to the generic Lucide icon (`ServerCog` for the
+                  // control plane, `Database` for unknown engines) in a
+                  // muted square so something is always shown.
+                  const brandService = serviceTypeRouteForEngine(backup.engine)
+                  const FallbackIcon = iconForServiceType(backup.engine)
 
                   return (
                     <Link
@@ -721,12 +725,19 @@ export function S3SourceDetail() {
                       <div className="flex flex-col gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50 sm:flex-row sm:items-center sm:justify-between sm:p-4">
                         {/* Left: name + meta */}
                         <div className="flex min-w-0 items-center gap-3">
-                          <div
-                            className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground"
-                            aria-hidden
-                          >
-                            <ServiceIcon className="h-4 w-4" />
-                          </div>
+                          {brandService ? (
+                            <ServiceLogo
+                              service={brandService}
+                              className="size-8 shrink-0"
+                            />
+                          ) : (
+                            <div
+                              className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground"
+                              aria-hidden
+                            >
+                              <FallbackIcon className="h-4 w-4" />
+                            </div>
+                          )}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="truncate font-medium">
