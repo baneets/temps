@@ -441,19 +441,25 @@ export function S3SourceDetail() {
 
         <Card>
           <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-            <div>
+            <div className="min-w-0">
               <CardTitle className="flex items-center gap-2">
-                <CalendarDays className="h-5 w-5" />
+                <CalendarDays className="h-5 w-5 shrink-0" />
                 Backup Schedules
               </CardTitle>
               <CardDescription>
                 Scheduled backups writing to this S3 source
               </CardDescription>
             </div>
-            <Button size="sm" asChild>
+            <Button
+              size="sm"
+              className="shrink-0"
+              asChild
+              aria-label="New schedule"
+              title="New schedule"
+            >
               <Link to={`/backups/s3-sources/${sourceId}/schedules/new`}>
-                <Plus className="mr-2 h-4 w-4" />
-                New Schedule
+                <Plus className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">New Schedule</span>
               </Link>
             </Button>
           </CardHeader>
@@ -479,27 +485,31 @@ export function S3SourceDetail() {
                 }
               />
             ) : (
-              <div className="overflow-x-auto">
-                <Table>
+              <div className="-mx-6 overflow-x-auto">
+                <Table className="min-w-[640px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Name</TableHead>
-                      <TableHead>Type</TableHead>
+                      <TableHead className="hidden sm:table-cell">
+                        Type
+                      </TableHead>
                       <TableHead>Schedule</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="hidden md:table-cell">
                         Retention
                       </TableHead>
-                      <TableHead className="hidden md:table-cell">
+                      <TableHead className="hidden lg:table-cell">
                         Timeout
                       </TableHead>
                       <TableHead className="hidden md:table-cell">
                         Last Run
                       </TableHead>
-                      <TableHead className="hidden md:table-cell">
+                      <TableHead className="hidden lg:table-cell">
                         Next Run
                       </TableHead>
-                      <TableHead className="w-[80px]">Actions</TableHead>
+                      <TableHead className="w-12 text-right">
+                        <span className="sr-only">Actions</span>
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -511,7 +521,7 @@ export function S3SourceDetail() {
                           !schedule.enabled && 'text-muted-foreground',
                         )}
                       >
-                        <TableCell>
+                        <TableCell className="max-w-[200px] sm:max-w-[280px]">
                           {/* Anchor — supports ⌘-click / middle-click /
                               right-click "Open in new tab". The whole-row
                               click fallback got replaced because <a>
@@ -519,40 +529,51 @@ export function S3SourceDetail() {
                               navigation. */}
                           <Link
                             to={`/backups/schedules/${schedule.id}`}
-                            className="flex items-center gap-3 hover:underline"
+                            className="flex min-w-0 items-center gap-3 hover:underline"
                           >
                             <DatabaseBackup
                               className={cn(
-                                'h-4 w-4',
+                                'h-4 w-4 shrink-0',
                                 !schedule.enabled &&
                                   'text-muted-foreground/60',
                               )}
                             />
-                            <div>
-                              <div className="font-medium">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
                                 {schedule.name}
                               </div>
                               {schedule.description && (
                                 <div
                                   className={cn(
-                                    'text-sm',
+                                    'truncate text-base sm:text-sm',
                                     !schedule.enabled
                                       ? 'text-muted-foreground/60'
                                       : 'text-muted-foreground',
                                   )}
+                                  title={schedule.description}
                                 >
                                   {schedule.description}
                                 </div>
                               )}
+                              {/* Mobile-only inline meta so users see Type
+                                  even when the column is hidden. */}
+                              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground sm:hidden">
+                                <Badge
+                                  variant="outline"
+                                  className="font-normal"
+                                >
+                                  {schedule.backup_type}
+                                </Badge>
+                              </div>
                             </div>
                           </Link>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="hidden sm:table-cell">
                           <Badge variant="outline">
                             {schedule.backup_type}
                           </Badge>
                         </TableCell>
-                        <TableCell className="font-mono text-xs">
+                        <TableCell className="whitespace-nowrap font-mono text-xs">
                           {schedule.schedule_expression}
                         </TableCell>
                         <TableCell>
@@ -564,15 +585,15 @@ export function S3SourceDetail() {
                             {schedule.enabled ? 'Enabled' : 'Disabled'}
                           </Badge>
                         </TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden whitespace-nowrap md:table-cell">
                           {schedule.retention_period} days
                         </TableCell>
-                        <TableCell className="hidden md:table-cell text-muted-foreground">
+                        <TableCell className="hidden whitespace-nowrap text-muted-foreground lg:table-cell">
                           {schedule.max_runtime_secs
                             ? formatTimeoutSecs(schedule.max_runtime_secs)
                             : 'engine default'}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden whitespace-nowrap md:table-cell">
                           {schedule.last_run
                             ? format(
                                 new Date(schedule.last_run),
@@ -580,7 +601,7 @@ export function S3SourceDetail() {
                               )
                             : '-'}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden whitespace-nowrap lg:table-cell">
                           {schedule.next_run
                             ? format(
                                 new Date(schedule.next_run),
@@ -589,11 +610,17 @@ export function S3SourceDetail() {
                             : '-'}
                         </TableCell>
                         <TableCell
+                          className="w-12 p-0 pr-2 text-right align-middle"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 shrink-0"
+                                aria-label={`Actions for ${schedule.name}`}
+                              >
                                 <MoreHorizontal className="h-4 w-4" />
                               </Button>
                             </DropdownMenuTrigger>
