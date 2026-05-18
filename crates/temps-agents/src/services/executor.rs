@@ -330,18 +330,28 @@ impl AgentExecutor {
             ephemeral_yaml,
         } = params;
 
-        // Load global sandbox settings for image/runtime/limits/credentials.
-        let global_sandbox = settings::Entity::find_by_id(1)
+        // Load settings row once: used for both sandbox config and external_url.
+        let settings_row = settings::Entity::find_by_id(1)
             .one(self.db.as_ref())
             .await
             .ok()
-            .flatten()
+            .flatten();
+
+        let global_sandbox = settings_row
+            .as_ref()
             .and_then(|s| {
                 s.data.get("agent_sandbox").cloned().and_then(|v| {
                     serde_json::from_value::<temps_core::AgentSandboxSettings>(v).ok()
                 })
             })
             .unwrap_or_default();
+
+        let app_external_url = settings_row
+            .as_ref()
+            .and_then(|s| serde_json::from_value::<temps_core::AppSettings>(s.data.clone()).ok())
+            .and_then(|app| app.external_url)
+            .map(|u| u.trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty());
 
         let resolved_image = if global_sandbox.runtime == "custom" {
             if global_sandbox.custom_image.is_empty() {
@@ -410,7 +420,9 @@ impl AgentExecutor {
         sandbox_env.insert(
             "TEMPS_API_URL".to_string(),
             std::env::var("TEMPS_INTERNAL_API_URL")
-                .unwrap_or_else(|_| "http://host.docker.internal:3000".to_string()),
+                .ok()
+                .or(app_external_url)
+                .unwrap_or_else(|| "http://host.docker.internal:3000".to_string()),
         );
         sandbox_env.insert(
             "PATH".to_string(),

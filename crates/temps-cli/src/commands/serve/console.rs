@@ -26,7 +26,9 @@ use temps_backup::BackupPlugin;
 use temps_blob::BlobPlugin;
 use temps_config::ConfigPlugin;
 use temps_config::ServerConfig;
-use temps_core::plugin::PluginManager;
+use temps_core::plugin::{PluginManager, TempsPlugin};
+// `TempsPlugin` is used both directly (extra_plugins field) and through
+// `dyn TempsPlugin` in `ConsoleApiParams`.
 use temps_core::templates::TemplateService;
 use temps_core::{CookieCrypto, EncryptionService};
 use temps_database::DbConnection;
@@ -631,6 +633,11 @@ pub struct ConsoleApiParams {
     pub ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
     pub additional_templates: Vec<std::path::PathBuf>,
     pub on_demand_waker: Option<Arc<dyn temps_core::OnDemandWaker>>,
+    /// Additional plugins registered by an external entrypoint (e.g. the
+    /// EE binary). Registered immediately before `initialize_plugins`, so
+    /// they observe every OSS service in the registry and can wrap or
+    /// extend them. OSS callers pass an empty Vec.
+    pub extra_plugins: Vec<Box<dyn TempsPlugin>>,
 }
 
 /// Initialize and start the console API server
@@ -645,6 +652,7 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         ready_signal,
         additional_templates,
         on_demand_waker,
+        extra_plugins,
     } = params;
     // PRE-VALIDATE all plugin dependencies BEFORE initializing plugin manager
     // This ensures clear error messages if any critical resources are missing
@@ -1005,6 +1013,22 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         external_plugin_config,
     ));
     plugin_manager.register_plugin(external_plugins_plugin);
+
+    // Extra plugins from the calling binary (EE, etc.). Registered last so
+    // they can resolve every OSS service via `require_service`. See ADR 0001
+    // §"Extension points exposed by OSS" — this is the
+    // single seam between an OSS build and an EE-bundled binary.
+    let extra_count = extra_plugins.len();
+    for plugin in extra_plugins {
+        debug!("Registering extra plugin: {}", plugin.name());
+        plugin_manager.register_plugin(plugin);
+    }
+    if extra_count > 0 {
+        info!(
+            "Registered {} extra plugin(s) from binary entrypoint",
+            extra_count
+        );
+    }
 
     // Initialize all plugins
     debug!("Initializing plugins");

@@ -11,6 +11,13 @@ homepage.workspace = true
 name = "temps"
 path = "src/main.rs"
 
+# Expose a library target so out-of-tree binaries (e.g. the EE-bundled
+# `temps` in temps-ee/apps/temps-cli) can call into the CLI dispatch
+# without duplicating subcommand wiring. See ADR 0001 §"Extension points".
+[lib]
+name = "temps_cli"
+path = "src/lib.rs"
+
 [dependencies]
 # All library crates
 temps-agent = { path = "../temps-agent" }
