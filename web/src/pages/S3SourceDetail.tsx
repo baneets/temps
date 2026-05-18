@@ -329,9 +329,25 @@ export function S3SourceDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" asChild>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="-ml-1 shrink-0 sm:hidden"
+            asChild
+            aria-label="Back"
+          >
+            <Link to="/backups">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="hidden shrink-0 sm:inline-flex"
+            asChild
+          >
             <Link to="/backups">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
@@ -341,54 +357,61 @@ export function S3SourceDetail() {
         <Button
           variant="outline"
           size="sm"
+          className="shrink-0"
           onClick={() => testConnectionMutation.mutate()}
           disabled={testConnectionMutation.isPending || !sourceId}
+          aria-label="Test connection"
+          title="Test connection"
         >
           {testConnectionMutation.isPending ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin sm:mr-2" />
           ) : (
-            <Plug className="mr-2 h-4 w-4" />
+            <Plug className="h-4 w-4 sm:mr-2" />
           )}
-          Test connection
+          <span className="hidden sm:inline">Test connection</span>
         </Button>
       </div>
 
       <div className="grid gap-6">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Database className="h-5 w-5" />
-              {source.name}
+            <CardTitle className="flex min-w-0 items-center gap-2">
+              <Database className="h-5 w-5 shrink-0" />
+              <span className="min-w-0 break-words">{source.name}</span>
             </CardTitle>
             <CardDescription>S3 Storage Configuration</CardDescription>
           </CardHeader>
           <CardContent>
             <dl className="grid gap-4">
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Bucket Name
                 </dt>
-                <dd className="text-sm">{source.bucket_name}</dd>
+                <dd className="break-all text-base sm:text-sm">
+                  {source.bucket_name}
+                </dd>
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Region
                 </dt>
-                <dd className="text-sm">{source.region}</dd>
+                <dd className="text-base sm:text-sm">{source.region}</dd>
               </div>
               {source.endpoint && (
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">
+                <div className="min-w-0">
+                  <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                     Endpoint URL
                   </dt>
-                  <dd className="text-sm">{source.endpoint}</dd>
+                  <dd className="break-all text-base sm:text-sm">
+                    {source.endpoint}
+                  </dd>
                 </div>
               )}
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Force Path Style
                 </dt>
-                <dd className="text-sm">
+                <dd className="text-base sm:text-sm">
                   <Badge
                     variant={source.force_path_style ? 'default' : 'secondary'}
                   >
@@ -396,19 +419,19 @@ export function S3SourceDetail() {
                   </Badge>
                 </dd>
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Access Key ID
                 </dt>
-                <dd className="text-sm font-mono">
+                <dd className="truncate font-mono text-base sm:text-sm">
                   &bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;
                 </dd>
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Secret Key
                 </dt>
-                <dd className="text-sm font-mono">
+                <dd className="truncate font-mono text-base sm:text-sm">
                   &bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;
                 </dd>
               </div>

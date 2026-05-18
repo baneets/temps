@@ -328,14 +328,16 @@ export function ScheduleRunDetail() {
                 size="sm"
                 onClick={() => setShowCancelRunDialog(true)}
                 disabled={cancelRunMutation.isPending}
-                className="flex-1 gap-2 sm:flex-none"
+                className="shrink-0 gap-2"
+                aria-label="Cancel run"
+                title="Cancel run"
               >
                 {cancelRunMutation.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Ban className="h-4 w-4" />
                 )}
-                <span className="sm:inline">Cancel run</span>
+                <span className="hidden sm:inline">Cancel run</span>
               </Button>
             )}
 

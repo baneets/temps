@@ -474,9 +474,10 @@ export function ScheduleDetail() {
             <Button
               variant="default"
               size="sm"
-              className="flex-1 sm:flex-none"
+              className="shrink-0"
               disabled={!schedule.enabled || runNowMutation.isPending}
               onClick={() => runNowMutation.mutate()}
+              aria-label="Run now"
               title={
                 !schedule.enabled
                   ? 'Enable the schedule before running'
@@ -484,11 +485,11 @@ export function ScheduleDetail() {
               }
             >
               {runNowMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin sm:mr-2" />
               ) : (
-                <Play className="mr-2 h-4 w-4" />
+                <Play className="h-4 w-4 sm:mr-2" />
               )}
-              Run now
+              <span className="hidden sm:inline">Run now</span>
             </Button>
 
             <Button
