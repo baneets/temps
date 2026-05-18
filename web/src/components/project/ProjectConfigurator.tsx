@@ -41,15 +41,7 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ServiceLogo } from '@/components/ui/service-logo'
-import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -141,7 +133,7 @@ const formSchema = z.object({
   storageServices: z.array(z.number()),
   dockerfilePath: z.string().optional(),
   composePath: z.string().optional(),
-  port: z.coerce.number().min(1).max(65535).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
 })
 
 export type ProjectFormValues = z.infer<typeof formSchema>
@@ -906,12 +898,18 @@ export function ProjectConfigurator({
               <FormLabel>Application Port</FormLabel>
               <FormControl>
                 <Input
-                  {...field}
                   type="number"
                   min="1"
                   max="65535"
                   placeholder="3000"
-                  value={field.value || 3000}
+                  name={field.name}
+                  ref={field.ref}
+                  onBlur={field.onBlur}
+                  value={field.value ?? 3000}
+                  onChange={(e) => {
+                    const v = e.target.valueAsNumber
+                    field.onChange(Number.isNaN(v) ? undefined : v)
+                  }}
                 />
               </FormControl>
               <p className="text-xs text-muted-foreground">
