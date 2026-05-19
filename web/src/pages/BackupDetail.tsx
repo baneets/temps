@@ -47,7 +47,7 @@ import { listBackupChildrenOptions } from '@/lib/backup-children'
 import { cancelBackup } from '@/lib/schedule-runs'
 import { cn, formatBytes } from '@/lib/utils'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { format, formatDistanceToNow } from 'date-fns'
+import { format } from 'date-fns'
 import {
   AlertCircle,
   ArrowLeft,
@@ -351,9 +351,7 @@ export function BackupDetail() {
     : null
   // Final size is authoritative once the backup completes; while still
   // running we surface `live_size_bytes` (server samples S3 listing) so
-  // the user sees progress instead of an indefinite blank. The backend
-  // also returns a `stalled` flag for `running` rows whose heartbeat is
-  // older than 5 minutes — the worker likely died.
+  // the user sees progress instead of an indefinite blank.
   const finalSize =
     typeof backup.size_bytes === 'number' && backup.size_bytes > 0
       ? backup.size_bytes
@@ -364,7 +362,6 @@ export function BackupDetail() {
       : null
   const displaySize = finalSize ?? liveSize
   const isLiveSize = !finalSize && liveSize !== null
-  const isStalled = backup.stalled === true
 
   const createdByUser = users?.find((u) => u.user.id === backup.created_by)
     ?.user
@@ -425,14 +422,6 @@ export function BackupDetail() {
               </div>
               <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
                 <StatusBadge state={state} />
-                {isStalled ? (
-                  <Badge
-                    variant="outline"
-                    className="border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                  >
-                    Stalled — worker not responding
-                  </Badge>
-                ) : null}
                 <CopyButton value={backup.s3_location} className="gap-2">
                   Copy S3 path
                 </CopyButton>
@@ -617,32 +606,6 @@ export function BackupDetail() {
                       {backup.current_step ?? 'starting…'}
                     </span>
                   </span>
-                </Detail>
-              ) : null}
-              {state === 'running' && backup.last_heartbeat_at ? (
-                <Detail label="Last heartbeat">
-                  {isStalled ? (
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="text-destructive cursor-help">
-                            {formatDistanceToNow(
-                              new Date(backup.last_heartbeat_at),
-                              { addSuffix: true },
-                            )}
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          No heartbeat in over 5 minutes — engine may be
-                          wedged.
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  ) : (
-                    formatDistanceToNow(new Date(backup.last_heartbeat_at), {
-                      addSuffix: true,
-                    })
-                  )}
                 </Detail>
               ) : null}
               {typeof backup.attempts === 'number' &&

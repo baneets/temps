@@ -9,6 +9,17 @@ pub struct GitPushEventJob {
     pub tag: Option<String>,
     pub commit: String,
     pub project_id: i32,
+    /// True when this event came from an explicit user action (the
+    /// "Deploy" button or `trigger_pipeline` API call), false when it
+    /// came from a git provider webhook. Manual triggers bypass the
+    /// `environments.automatic_deploy` gate — the user already opted in
+    /// by clicking; webhook events still honour the opt-out.
+    ///
+    /// `#[serde(default)]` so in-flight jobs queued by older versions
+    /// (no field) deserialize as webhook-driven, which preserves the
+    /// pre-existing gate behaviour for them.
+    #[serde(default)]
+    pub manual_trigger: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

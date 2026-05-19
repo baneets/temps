@@ -12,9 +12,13 @@
 //! so the per-engine code only owns step 3 (its specific Docker command)
 //! and the param-validation in step 1.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use aws_sdk_s3::config::SharedHttpClient;
 use aws_sdk_s3::Client as S3Client;
+use aws_smithy_http_client::tls::{
+    rustls_provider::CryptoMode, Provider as TlsProvider, TlsContext, TrustStore,
+};
 use chrono::Utc;
 use serde_json::{json, Value};
 use tracing::warn;
@@ -22,9 +26,121 @@ use tracing::warn;
 use temps_backup_core::engine_v2::BackupError;
 use temps_core::EncryptionService;
 
+/// Shared HTTPS client backed by the Mozilla CA bundle compiled in via
+/// `webpki-root-certs`. Built once on first use, then reused for every
+/// S3 client this crate constructs.
+///
+/// We bypass the SDK's default-https-client because it asks the OS for
+/// trusted roots via `rustls-native-certs`. On some macOS dev machines
+/// that returns zero parsed certs and `aws-smithy-http-client` then trips
+/// a `debug_assert!`, panicking every test that touches the S3 builder.
+/// Pinning a deterministic trust bundle makes the client constructable
+/// in any environment (dev macOS, CI sandbox, minimal Linux container)
+/// without depending on the OS trust store.
+pub(crate) fn bundled_roots_http_client() -> SharedHttpClient {
+    static CLIENT: OnceLock<SharedHttpClient> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let mut trust_store = TrustStore::empty().with_native_roots(false);
+            for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+                let pem = pem::Pem::new("CERTIFICATE", der.to_vec());
+                trust_store = trust_store.with_pem_certificate(pem::encode(&pem).into_bytes());
+            }
+            let tls_context = TlsContext::builder()
+                .with_trust_store(trust_store)
+                .build()
+                .expect("static TLS context built from bundled roots");
+            aws_smithy_http_client::Builder::new()
+                .tls_provider(TlsProvider::Rustls(CryptoMode::AwsLc))
+                .tls_context(tls_context)
+                .build_https()
+        })
+        .clone()
+}
+
 /// Multipart upload threshold. Files larger than this use multipart
 /// upload instead of a single PUT.
 pub const MULTIPART_THRESHOLD: i64 = 30 * 1024 * 1024;
+
+/// S3 object tags applied to every backup upload. These drive tag-based
+/// `BucketLifecycleConfiguration` rules so S3 (or compatible storage)
+/// expires backups even when temps is offline.
+///
+/// Tag keys are namespaced with `temps-` so user-managed rules on the
+/// same bucket don't collide. Values are kept simple (digits/words) to
+/// avoid URL-encoding surprises across providers.
+#[derive(Debug, Clone, Default)]
+pub struct BackupTags {
+    /// Retention in days. `None` means the backup is kept indefinitely
+    /// from S3's perspective — only app-side deletion removes it.
+    pub retention_days: Option<i32>,
+    /// The schedule that produced this backup, if any.
+    pub schedule_id: Option<i32>,
+    /// The backup row id, for traceability in the S3 console.
+    pub backup_id: Option<i32>,
+}
+
+impl BackupTags {
+    /// Load tag context for `backup_id` from the database. Looks up the
+    /// backup row to find `schedule_id`, then resolves
+    /// `schedule.retention_period`. Ad-hoc backups (no schedule) get
+    /// `retention_days = None` which renders as `temps-retention-days=never`.
+    /// Returns a best-effort tag set even on partial DB failure — tagging
+    /// is observability/lifecycle plumbing, never a reason to fail the
+    /// upload.
+    pub async fn load_for_backup(db: &sea_orm::DatabaseConnection, backup_id: i32) -> Self {
+        use sea_orm::EntityTrait;
+        let mut tags = BackupTags {
+            retention_days: None,
+            schedule_id: None,
+            backup_id: Some(backup_id),
+        };
+        let backup = match temps_entities::backups::Entity::find_by_id(backup_id)
+            .one(db)
+            .await
+        {
+            Ok(Some(b)) => b,
+            _ => return tags,
+        };
+        let Some(sched_id) = backup.schedule_id else {
+            return tags;
+        };
+        tags.schedule_id = Some(sched_id);
+        if let Ok(Some(s)) = temps_entities::backup_schedules::Entity::find_by_id(sched_id)
+            .one(db)
+            .await
+        {
+            if s.retention_period > 0 {
+                tags.retention_days = Some(s.retention_period);
+            }
+        }
+        tags
+    }
+
+    /// Render the tag set as the `Tagging` HTTP header / SDK param
+    /// (`k1=v1&k2=v2`, URL-encoded). Every backup carries
+    /// `temps-managed=true` so lifecycle rules can target only objects
+    /// temps wrote.
+    pub fn to_tagging_string(&self) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(4);
+        parts.push("temps-managed=true".to_string());
+        match self.retention_days {
+            Some(days) if days > 0 => {
+                parts.push(format!("temps-retention-days={}", days));
+            }
+            _ => {
+                parts.push("temps-retention-days=never".to_string());
+            }
+        }
+        if let Some(id) = self.schedule_id {
+            parts.push(format!("temps-schedule-id={}", id));
+        }
+        if let Some(id) = self.backup_id {
+            parts.push(format!("temps-backup-id={}", id));
+        }
+        parts.join("&")
+    }
+}
 
 // ── S3 client construction ───────────────────────────────────────────────────
 
@@ -78,7 +194,8 @@ pub fn build_s3_client(
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .region(aws_sdk_s3::config::Region::new(s3_source.region.clone()))
         .force_path_style(s3_source.force_path_style.unwrap_or(true))
-        .credentials_provider(creds);
+        .credentials_provider(creds)
+        .http_client(bundled_roots_http_client());
 
     if let Some(endpoint) = &s3_source.endpoint {
         let url = if endpoint.starts_with("http") {
@@ -193,6 +310,7 @@ pub async fn upload_single_part(
     key: &str,
     path: &str,
     content_type: &str,
+    tags: Option<&BackupTags>,
 ) -> Result<(), BackupError> {
     let body = aws_sdk_s3::primitives::ByteStream::from_path(std::path::Path::new(path))
         .await
@@ -200,20 +318,21 @@ pub async fn upload_single_part(
             reason: format!("failed to create byte stream from {}: {}", path, e),
         })?;
 
-    client
+    let mut req = client
         .put_object()
         .bucket(bucket)
         .key(key)
         .body(body)
-        .content_type(content_type)
-        .send()
-        .await
-        .map_err(|e| BackupError::Failed {
-            reason: format!(
-                "single-part upload to s3://{}/{} failed: {}",
-                bucket, key, e
-            ),
-        })?;
+        .content_type(content_type);
+    if let Some(tags) = tags {
+        req = req.tagging(tags.to_tagging_string());
+    }
+    req.send().await.map_err(|e| BackupError::Failed {
+        reason: format!(
+            "single-part upload to s3://{}/{} failed: {}",
+            bucket, key, e
+        ),
+    })?;
     Ok(())
 }
 
@@ -226,19 +345,21 @@ pub async fn upload_multipart(
     key: &str,
     path: &str,
     content_type: &str,
+    tags: Option<&BackupTags>,
 ) -> Result<(), BackupError> {
     use tokio_stream::StreamExt as TokioStreamExt;
 
-    let create_resp = client
+    let mut create_req = client
         .create_multipart_upload()
         .bucket(bucket)
         .key(key)
-        .content_type(content_type)
-        .send()
-        .await
-        .map_err(|e| BackupError::Failed {
-            reason: format!("create_multipart_upload failed: {}", e),
-        })?;
+        .content_type(content_type);
+    if let Some(tags) = tags {
+        create_req = create_req.tagging(tags.to_tagging_string());
+    }
+    let create_resp = create_req.send().await.map_err(|e| BackupError::Failed {
+        reason: format!("create_multipart_upload failed: {}", e),
+    })?;
 
     let upload_id = create_resp.upload_id().ok_or_else(|| BackupError::Failed {
         reason: "create_multipart_upload returned no upload_id".into(),
@@ -338,11 +459,12 @@ pub async fn upload_file(
     path: &str,
     content_type: &str,
     file_size: i64,
+    tags: Option<&BackupTags>,
 ) -> Result<(), BackupError> {
     if file_size > MULTIPART_THRESHOLD {
-        upload_multipart(client, bucket, key, path, content_type).await
+        upload_multipart(client, bucket, key, path, content_type, tags).await
     } else {
-        upload_single_part(client, bucket, key, path, content_type).await
+        upload_single_part(client, bucket, key, path, content_type, tags).await
     }
 }
 

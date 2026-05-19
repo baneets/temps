@@ -67,7 +67,21 @@ pub struct ServeCommand {
 }
 
 impl ServeCommand {
+    /// Run `temps serve` with the OSS-only plugin set.
     pub fn execute(self) -> anyhow::Result<()> {
+        self.execute_with_extra_plugins(Vec::new())
+    }
+
+    /// Run `temps serve` with additional plugins registered alongside the
+    /// OSS ones. This is the entrypoint used by EE-bundled binaries (per
+    /// ADR 0001 §"Extension points exposed by OSS"); pass a fresh
+    /// `vec![Box::new(TeamsPlugin::new()), ...]` and the extra plugins are
+    /// registered just before `initialize_plugins`, so they observe the
+    /// full OSS service registry.
+    pub fn execute_with_extra_plugins(
+        self,
+        extra_plugins: Vec<Box<dyn temps_core::plugin::TempsPlugin>>,
+    ) -> anyhow::Result<()> {
         // Install the rustls crypto provider once at startup. Both temps-domains
         // and check-if-email-exists try to install it themselves — calling it here
         // first satisfies the library's internal Once guard and prevents panics.
@@ -275,6 +289,7 @@ impl ServeCommand {
             on_demand_waker: on_demand_manager
                 .clone()
                 .map(|m| m as Arc<dyn temps_core::OnDemandWaker>),
+            extra_plugins,
         };
         rt.spawn(async move {
             match start_console_api(params).await {

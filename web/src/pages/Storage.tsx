@@ -9,6 +9,7 @@ import {
   type HealthStatus,
 } from '@/lib/service-health'
 import { formatBytes } from '@/lib/utils'
+import { formatCpuUsage } from '@/lib/cpu-format'
 import { CreateServiceButton } from '@/components/storage/CreateServiceButton'
 import { DeleteServiceButton } from '@/components/storage/DeleteServiceButton'
 import { EditServiceDialog } from '@/components/storage/EditServiceDialog'
@@ -420,22 +421,14 @@ function ServiceMetricsCell({ serviceId }: { serviceId: number }) {
     return null
   }
 
-  // Rebase each member's CPU% against its cap so the headline number is
-  // "% of allocated", which is the only mental model that makes sense
-  // when caps are heterogeneous across cluster members.
-  const cpuPercent = stats.data.members.reduce((sum, m) => {
-    const hostPct = m.cpu_percent ?? 0
-    const onlineCpus = m.online_cpus ?? null
-    const memberRuntime = runtime.data?.members.find(
-      (r) => r.container_name === m.container_name,
-    )
-    const nano = memberRuntime?.resource_limits?.nano_cpus ?? null
-    const capCores = nano != null && nano > 0 ? nano / 1_000_000_000 : null
-    if (capCores != null && onlineCpus != null && capCores < onlineCpus) {
-      return sum + hostPct * (onlineCpus / capCores)
-    }
-    return sum + hostPct
-  }, 0)
+  // Sum raw Docker CPU% across members (200% per member = 2 cores). We
+  // render as cores used (% / 100), which sums cleanly across heterogeneous
+  // caps — "0.5 + 2.0 = 2.5 cores used" beats trying to reconcile mixed
+  // "% of cap" numbers.
+  const cpuPercentTotal = stats.data.members.reduce(
+    (sum, m) => sum + (m.cpu_percent ?? 0),
+    0,
+  )
 
   const memBytes = stats.data.members.reduce(
     (sum, m) => sum + (m.memory_usage_bytes ?? 0),
@@ -475,12 +468,9 @@ function ServiceMetricsCell({ serviceId }: { serviceId: number }) {
           }
         >
           <Cpu className="size-3.5" />
-          <span>{cpuPercent.toFixed(1)}%</span>
-          {hasCpuCap && (
-            <span className="text-muted-foreground/60">
-              / {cpuLimitCores!.toFixed(cpuLimitCores! % 1 === 0 ? 0 : 2)}c
-            </span>
-          )}
+          <span>
+            {formatCpuUsage(cpuPercentTotal, hasCpuCap ? cpuLimitCores! : null)}
+          </span>
         </span>
       )}
       {hasMem && (

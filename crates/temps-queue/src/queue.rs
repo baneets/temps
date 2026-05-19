@@ -584,6 +584,7 @@ mod tests {
             tag: None,
             commit: "abc123def456".to_string(),
             project_id: 123,
+            manual_trigger: false,
         };
 
         // Publish job
@@ -738,6 +739,7 @@ mod tests {
             tag: None,
             commit: "abc123".to_string(),
             project_id: 123,
+            manual_trigger: false,
         });
 
         let cert_job = Job::ProvisionCertificate(ProvisionCertificateJob {

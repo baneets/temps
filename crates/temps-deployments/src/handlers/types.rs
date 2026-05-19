@@ -752,8 +752,12 @@ pub struct ResourceLimitsResponse {
 pub struct ContainerMetricsResponse {
     pub container_id: String,
     pub container_name: String,
-    /// CPU usage percentage (0-100)
+    /// CPU usage as a multi-core percentage (Docker convention: 200 = 2 cores
+    /// fully pinned). Divide by 100 to get cores used.
     pub cpu_percent: f64,
+    /// CPU limit in whole cores (e.g. 1.0). None = no limit.
+    #[schema(nullable = true)]
+    pub cpu_limit_cores: Option<f64>,
     /// Memory usage in bytes
     pub memory_bytes: u64,
     /// Memory limit in bytes (if set)

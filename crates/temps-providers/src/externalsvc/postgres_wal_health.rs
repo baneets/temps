@@ -420,8 +420,14 @@ fn compute_warnings(snapshot: &PostgresWalHealth) -> Vec<WalWarning> {
         }
     }
 
-    if snapshot.oldest_wal_age_secs >= WAL_NOT_RECYCLED_AGE_SECS
-        && snapshot.pg_wal_bytes > snapshot.max_wal_size_bytes
+    // `pg_wal/` naturally settles at ~max_wal_size — that's the configured
+    // steady state, not a problem. Postgres also recycles segments by
+    // renaming them in place, so mtime alone can be arbitrarily old on a
+    // perfectly healthy database. Only flag "not recycled" when the segment
+    // is old AND pg_wal is meaningfully bloated (same ratio as WalBloat).
+    if snapshot.max_wal_size_bytes > 0
+        && snapshot.oldest_wal_age_secs >= WAL_NOT_RECYCLED_AGE_SECS
+        && (snapshot.pg_wal_bytes as f64 / snapshot.max_wal_size_bytes as f64) >= WAL_BLOAT_RATIO
     {
         warnings.push(WalWarning::WalNotRecycled {
             oldest_age_secs: snapshot.oldest_wal_age_secs,
@@ -545,14 +551,23 @@ mod tests {
     fn wal_not_recycled_requires_both_age_and_bloat() {
         let mut s = base_snapshot();
         s.oldest_wal_age_secs = WAL_NOT_RECYCLED_AGE_SECS + 100;
-        // pg_wal still small — should NOT trigger (recycling could be normal).
+
+        // pg_wal far below max — should NOT trigger.
         s.pg_wal_bytes = 100 * 1024 * 1024;
         assert!(compute_warnings(&s)
             .iter()
             .all(|w| !matches!(w, WalWarning::WalNotRecycled { .. })));
 
-        // Old AND bigger than max — triggers.
-        s.pg_wal_bytes = 2 * 1024 * 1024 * 1024;
+        // pg_wal at the configured ceiling (or just over) is the normal
+        // steady state — old mtimes here come from in-place recycling, not
+        // stalled recycling. Must NOT trigger.
+        s.pg_wal_bytes = s.max_wal_size_bytes + 369; // mirrors the false-positive seen in prod
+        assert!(compute_warnings(&s)
+            .iter()
+            .all(|w| !matches!(w, WalWarning::WalNotRecycled { .. })));
+
+        // Old AND >= WAL_BLOAT_RATIO of max_wal_size — triggers.
+        s.pg_wal_bytes = (WAL_BLOAT_RATIO * s.max_wal_size_bytes as f64) as i64;
         assert!(compute_warnings(&s)
             .iter()
             .any(|w| matches!(w, WalWarning::WalNotRecycled { .. })));

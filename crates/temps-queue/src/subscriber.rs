@@ -24,6 +24,7 @@ mod tests {
             tag: None,
             commit: "abc123".to_string(),
             project_id: 123,
+            manual_trigger: false,
         };
         queue.send(Job::GitPushEvent(git_push_job)).await.unwrap();
 
@@ -77,6 +78,7 @@ mod tests {
             tag: None,
             commit: "def456".to_string(),
             project_id: 999,
+            manual_trigger: false,
         };
         queue.send(Job::GitPushEvent(git_push_job)).await.unwrap();
 
@@ -116,6 +118,7 @@ mod tests {
             tag: None,
             commit: "xyz789".to_string(),
             project_id: 42,
+            manual_trigger: false,
         };
         queue.send(Job::GitPushEvent(git_push_job)).await.unwrap();
 

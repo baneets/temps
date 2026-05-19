@@ -21,7 +21,10 @@ use crate::{
         s3_mirror::{S3MirrorDeps, S3MirrorEngine},
     },
     handlers::{self, create_backup_app_state, BackupAppState},
-    services::{sweep_backup_alerts, BackupNotificationAdapter, BackupService, RestoreService},
+    services::{
+        sweep_backup_alerts, BackupNotificationAdapter, BackupService, RestoreService,
+        S3LifecycleService,
+    },
 };
 use temps_providers::externalsvc::postgres_upgrade::{
     PostgresContainerLifecycle, PreUpgradeBackupProvider,
@@ -209,6 +212,7 @@ impl TempsPlugin for BackupPlugin {
     ) -> Pin<Box<dyn Future<Output = Result<(), PluginError>> + Send + 'a>> {
         Box::pin(async move {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
+            let encryption_service = context.require_service::<temps_core::EncryptionService>();
             let backup_app_state = context.require_service::<BackupAppState>();
             let executor = Arc::clone(&backup_app_state.backup_executor);
 
@@ -272,6 +276,51 @@ impl TempsPlugin for BackupPlugin {
                         ),
                         Err(e) => {
                             error!("Rollback-volume sweep failed (will retry next tick): {}", e)
+                        }
+                    }
+                }
+            });
+
+            // S3 lifecycle drift reconciler. Walks every S3 source hourly
+            // and re-pushes lifecycle rules so manual edits in the AWS
+            // console (or missed event-driven reconciles) eventually
+            // converge to the desired state. App-side `enforce_retention`
+            // is still the primary cleanup path; this only handles drift
+            // on the storage provider side.
+            let lifecycle_db = db.clone();
+            let lifecycle_enc = encryption_service.clone();
+            tokio::spawn(async move {
+                use sea_orm::EntityTrait;
+                // First tick is one interval out — give the rest of the
+                // server time to settle before hammering S3.
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+                tick.tick().await;
+                let svc = S3LifecycleService::new(lifecycle_db.clone(), lifecycle_enc);
+                loop {
+                    tick.tick().await;
+                    let sources = match temps_entities::s3_sources::Entity::find()
+                        .all(lifecycle_db.as_ref())
+                        .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "S3 lifecycle sweep: failed to list S3 sources",
+                            );
+                            continue;
+                        }
+                    };
+                    for source in sources {
+                        match svc.reconcile_bucket(source.id).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!(
+                                    s3_source_id = source.id,
+                                    error = %e,
+                                    "S3 lifecycle reconcile failed during sweep",
+                                );
+                            }
                         }
                     }
                 }

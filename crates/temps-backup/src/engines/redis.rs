@@ -191,6 +191,7 @@ impl BackupEngine for RedisEngine {
             v2_common::best_effort_remove(&host_rdb_gz_path).await;
             return Err(BackupError::Cancelled);
         }
+        let tags = v2_common::BackupTags::load_for_backup(&ctx.db, ctx.backup_id).await;
         v2_common::upload_file(
             &s3_client,
             &s3_source.bucket_name,
@@ -198,6 +199,7 @@ impl BackupEngine for RedisEngine {
             &host_dump_path_str,
             "application/x-gzip",
             file_size,
+            Some(&tags),
         )
         .await?;
         v2_common::best_effort_remove(&host_rdb_gz_path).await;

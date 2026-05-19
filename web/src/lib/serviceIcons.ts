@@ -10,6 +10,7 @@
  * kebab-case plugin slugs) and finally to the Puzzle icon, so nothing
  * ever crashes on a missing entry.
  */
+import type { ServiceTypeRoute } from '@/api/client'
 import {
   Boxes,
   Database,
@@ -82,4 +83,47 @@ export function iconForServiceType(serviceType: string | undefined | null): Luci
   }
 
   return resolvePluginIcon(normalized)
+}
+
+/**
+ * Backup engine / service-type string → `ServiceTypeRoute` for the brand
+ * SVG logos exposed by `<ServiceLogo>`. Returns `null` when the engine
+ * has no brand logo (e.g. `control_plane`, plugin engines) so the caller
+ * can fall back to the generic Lucide icon from `iconForServiceType`.
+ *
+ * Accepts both backup-engine strings (`postgres_walg`, `s3_mirror`) and
+ * service-type strings (`postgres`, `s3`) — the same dual vocabulary
+ * `iconForServiceType` handles.
+ */
+export function serviceTypeRouteForEngine(
+  serviceType: string | undefined | null,
+): ServiceTypeRoute | null {
+  if (!serviceType) return null
+  const normalized = serviceType.toLowerCase()
+
+  if (
+    normalized.startsWith('postgres') ||
+    normalized === 'postgresql'
+  ) {
+    return 'postgres'
+  }
+
+  if (normalized === 'mongodb' || normalized === 'mongo') {
+    return 'mongodb'
+  }
+
+  if (normalized === 'redis') {
+    return 'redis'
+  }
+
+  if (normalized === 's3' || normalized === 's3_mirror') {
+    return 's3'
+  }
+
+  if (normalized === 'minio') return 'minio'
+  if (normalized === 'rustfs') return 'rustfs'
+  if (normalized === 'blob') return 'blob'
+  if (normalized === 'kv') return 'kv'
+
+  return null
 }

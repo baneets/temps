@@ -459,9 +459,61 @@ function NavSection({
 
 function NavUser() {
   const { user } = useAuth()
-  const { isMobile, isMinimal } = useSidebar()
+  const { isMobile, isMinimal, setOpenMobile } = useSidebar()
   const { logout } = useAuth()
   if (!user) return null
+
+  // Mobile renders inside a Radix Sheet (Dialog) with z-[9999] on the
+  // overlay. A nested DropdownMenu portals to body and inherits z-50,
+  // so the menu pops up behind the sheet and is invisible/unclickable.
+  // Skip the dropdown on mobile: tap the row → /account directly,
+  // with Log out as a sibling icon button so it's still one tap.
+  // The desktop dropdown is unchanged.
+  if (isMobile) {
+    return (
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <div className="flex items-center gap-1">
+            <SidebarMenuButton
+              size="lg"
+              asChild
+              className="flex-1"
+              onClick={() => setOpenMobile(false)}
+            >
+              <Link to="/account" aria-label="Open account settings">
+                <Avatar className="h-8 w-8 rounded-lg">
+                  <AvatarImage
+                    src={user.avatar_url || ''}
+                    alt={user.username || ''}
+                  />
+                  <AvatarFallback className="rounded-lg">
+                    {user.username?.slice(0, 2).toUpperCase() || 'U'}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="grid min-w-0 flex-1 text-left text-sm leading-tight">
+                  <span className="truncate font-semibold">
+                    {user.username || 'User'}
+                  </span>
+                  <span className="truncate text-xs">{user.email}</span>
+                </div>
+              </Link>
+            </SidebarMenuButton>
+            <button
+              type="button"
+              onClick={async () => {
+                await logout()
+              }}
+              className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              aria-label="Log out"
+              title="Log out"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          </div>
+        </SidebarMenuItem>
+      </SidebarMenu>
+    )
+  }
 
   return (
     <SidebarMenu>
@@ -481,7 +533,7 @@ function NavUser() {
                   {user.username?.slice(0, 2).toUpperCase() || 'U'}
                 </AvatarFallback>
               </Avatar>
-              {(!isMinimal || isMobile) && (
+              {!isMinimal && (
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-semibold">
                     {user.username || 'User'}
@@ -494,7 +546,7 @@ function NavUser() {
           </DropdownMenuTrigger>
           <DropdownMenuContent
             className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
-            side={isMobile ? 'bottom' : 'right'}
+            side="right"
             align="end"
             sideOffset={4}
           >

@@ -131,15 +131,27 @@ function RunRow({ run }: { run: ScheduleRunSummary }) {
     <TableRow className="hover:bg-muted/50">
       <TableCell className="font-mono text-xs">
         {isLegacy ? (
-          format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')
+          <>
+            <span className="sm:hidden">
+              {format(new Date(run.started_at), 'MMM d HH:mm')}
+            </span>
+            <span className="hidden sm:inline">
+              {format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')}
+            </span>
+          </>
         ) : (
           <Link to={detailUrl} className="flex hover:underline">
-            {format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')}
+            <span className="sm:hidden">
+              {format(new Date(run.started_at), 'MMM d HH:mm')}
+            </span>
+            <span className="hidden sm:inline">
+              {format(new Date(run.started_at), 'MMM d, yyyy HH:mm:ss')}
+            </span>
           </Link>
         )}
       </TableCell>
 
-      <TableCell className="hidden text-sm text-muted-foreground sm:table-cell">
+      <TableCell className="hidden text-base text-muted-foreground sm:table-cell sm:text-sm">
         {durationMs !== null
           ? formatDuration(durationMs)
           : run.aggregate_state === 'running' ||
@@ -154,15 +166,21 @@ function RunRow({ run }: { run: ScheduleRunSummary }) {
         </Badge>
       </TableCell>
 
-      <TableCell className="hidden text-sm text-muted-foreground md:table-cell">
+      <TableCell className="hidden text-base text-muted-foreground md:table-cell md:text-sm">
         {run.triggered_by}
       </TableCell>
 
-      <TableCell className="text-sm">
+      <TableCell className="text-base sm:text-sm">
         {run.failed_jobs > 0 ? (
           <span className="text-destructive">
-            {run.completed_jobs} / {run.total_jobs} (
-            <span className="font-medium">{run.failed_jobs} failed</span>)
+            {run.completed_jobs} / {run.total_jobs}
+            <span className="hidden sm:inline">
+              {' '}
+              (<span className="font-medium">{run.failed_jobs} failed</span>)
+            </span>
+            <span className="ml-1 font-medium sm:hidden">
+              · {run.failed_jobs} failed
+            </span>
           </span>
         ) : (
           <span className="text-muted-foreground">
@@ -297,22 +315,34 @@ export function ScheduleDetail() {
         <CardContent>
           <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Cron expression</dt>
-              <dd className="font-mono text-sm">{s.schedule_expression}</dd>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Cron expression
+              </dt>
+              <dd className="break-all font-mono text-base sm:text-sm">
+                {s.schedule_expression}
+              </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Backup type</dt>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Backup type
+              </dt>
               <dd>
                 <Badge variant="outline">{s.backup_type}</Badge>
               </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Retention</dt>
-              <dd className="text-sm">{s.retention_period} days</dd>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Retention
+              </dt>
+              <dd className="text-base sm:text-sm">
+                {s.retention_period} days
+              </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Max runtime</dt>
-              <dd className="text-sm text-muted-foreground">
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Max runtime
+              </dt>
+              <dd className="text-base text-muted-foreground sm:text-sm">
                 {s.max_runtime_secs
                   ? formatTimeoutSecs(s.max_runtime_secs)
                   : 'engine default'}
@@ -320,21 +350,27 @@ export function ScheduleDetail() {
             </div>
             {s.description && (
               <div className="sm:col-span-2">
-                <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                <dd className="text-sm">{s.description}</dd>
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                  Description
+                </dt>
+                <dd className="text-base sm:text-sm">{s.description}</dd>
               </div>
             )}
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Last run</dt>
-              <dd className="text-sm">
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Last run
+              </dt>
+              <dd className="text-base sm:text-sm">
                 {s.last_run
                   ? format(new Date(s.last_run), 'MMM d, yyyy HH:mm')
                   : '—'}
               </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Next run</dt>
-              <dd className="text-sm">
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Next run
+              </dt>
+              <dd className="text-base sm:text-sm">
                 {s.next_run
                   ? format(new Date(s.next_run), 'MMM d, yyyy HH:mm')
                   : '—'}
@@ -342,11 +378,13 @@ export function ScheduleDetail() {
             </div>
             {s3Source && (
               <div>
-                <dt className="text-sm font-medium text-muted-foreground">S3 source</dt>
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                  S3 source
+                </dt>
                 <dd>
                   <Link
                     to={`/backups/s3-sources/${s.s3_source_id}`}
-                    className="text-sm text-primary hover:underline"
+                    className="text-base text-primary hover:underline sm:text-sm"
                   >
                     {s3Source.name}
                   </Link>
@@ -373,9 +411,9 @@ export function ScheduleDetail() {
 
   if (!schedule) {
     return (
-      <div className="flex flex-col items-center justify-center py-12">
+      <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
         <h2 className="text-lg font-semibold">Schedule Not Found</h2>
-        <p className="text-sm text-muted-foreground mt-1">
+        <p className="mt-1 text-base text-muted-foreground sm:text-sm">
           The requested backup schedule could not be found.
         </p>
         <Button asChild className="mt-4">
@@ -394,18 +432,36 @@ export function ScheduleDetail() {
     <TooltipProvider>
       <div className="space-y-6">
         {/* ── Header ── */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" asChild>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2 sm:items-center sm:gap-3">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="-ml-1 shrink-0 sm:hidden"
+              asChild
+              aria-label="Back"
+            >
+              <Link to={`/backups/s3-sources/${schedule.s3_source_id}`}>
+                <ArrowLeft className="h-4 w-4" />
+              </Link>
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="hidden shrink-0 sm:inline-flex"
+              asChild
+            >
               <Link to={`/backups/s3-sources/${schedule.s3_source_id}`}>
                 <ArrowLeft className="mr-2 h-4 w-4" />
                 Back
               </Link>
             </Button>
-            <div>
-              <div className="flex items-center gap-2">
-                <DatabaseBackup className="h-5 w-5 text-muted-foreground" />
-                <h1 className="text-xl font-semibold">{schedule.name}</h1>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <DatabaseBackup className="h-5 w-5 shrink-0 text-muted-foreground" />
+                <h1 className="break-words text-xl font-semibold">
+                  {schedule.name}
+                </h1>
                 <Badge variant={schedule.enabled ? 'default' : 'secondary'}>
                   {schedule.enabled ? 'Enabled' : 'Disabled'}
                 </Badge>
@@ -414,12 +470,14 @@ export function ScheduleDetail() {
           </div>
 
           {/* ── Action row ── */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 sm:shrink-0">
             <Button
               variant="default"
               size="sm"
+              className="shrink-0"
               disabled={!schedule.enabled || runNowMutation.isPending}
               onClick={() => runNowMutation.mutate()}
+              aria-label="Run now"
               title={
                 !schedule.enabled
                   ? 'Enable the schedule before running'
@@ -427,25 +485,37 @@ export function ScheduleDetail() {
               }
             >
               {runNowMutation.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin sm:mr-2" />
               ) : (
-                <Play className="mr-2 h-4 w-4" />
+                <Play className="h-4 w-4 sm:mr-2" />
               )}
-              Run now
+              <span className="hidden sm:inline">Run now</span>
             </Button>
 
-            <Button variant="outline" size="sm" asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              asChild
+              title="Edit schedule"
+            >
               <Link
                 to={`/backups/s3-sources/${schedule.s3_source_id}/schedules/${schedule.id}/edit`}
+                aria-label="Edit schedule"
               >
-                <Pencil className="mr-2 h-4 w-4" />
-                Edit
+                <Pencil className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Edit</span>
               </Link>
             </Button>
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  aria-label="More actions"
+                >
                   <MoreHorizontal className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
@@ -458,7 +528,9 @@ export function ScheduleDetail() {
                       enableMutation.mutate({ path: { id: schedule.id } })
                     }
                   }}
-                  disabled={disableMutation.isPending || enableMutation.isPending}
+                  disabled={
+                    disableMutation.isPending || enableMutation.isPending
+                  }
                 >
                   {schedule.enabled ? 'Disable' : 'Enable'}
                 </DropdownMenuItem>
@@ -483,8 +555,8 @@ export function ScheduleDetail() {
           <CardHeader>
             <CardTitle>Run History</CardTitle>
             <CardDescription>
-              Backup runs for this schedule, newest first. Click a row to see
-              full details.
+              Backup runs for this schedule, newest first. Tap a row for full
+              details.
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
@@ -495,19 +567,24 @@ export function ScheduleDetail() {
                 ))}
               </div>
             ) : !runsData || runsData.runs.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-12 text-sm text-muted-foreground">
+              <div className="flex flex-col items-center justify-center px-6 py-12 text-center text-base text-muted-foreground sm:text-sm">
                 <DatabaseBackup className="mb-3 h-8 w-8 opacity-40" />
-                No runs yet — click &ldquo;Run now&rdquo; to start the first backup.
+                No runs yet — tap &ldquo;Run now&rdquo; to start the first
+                backup.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <Table>
+                <Table className="min-w-[480px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Started</TableHead>
-                      <TableHead className="hidden sm:table-cell">Duration</TableHead>
+                      <TableHead className="hidden sm:table-cell">
+                        Duration
+                      </TableHead>
                       <TableHead>State</TableHead>
-                      <TableHead className="hidden md:table-cell">Trigger</TableHead>
+                      <TableHead className="hidden md:table-cell">
+                        Trigger
+                      </TableHead>
                       <TableHead>Jobs</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -522,11 +599,11 @@ export function ScheduleDetail() {
 
             {/* ── Pagination ── */}
             {runsData && runsData.total > 0 && (
-              <div className="flex items-center justify-between border-t px-6 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 sm:px-6 sm:py-4">
                 <span className="hidden text-sm text-muted-foreground sm:inline">
                   Showing {rangeStart}–{rangeEnd} of {total}
                 </span>
-                <span className="text-sm text-muted-foreground sm:hidden">
+                <span className="text-base text-muted-foreground sm:hidden sm:text-sm">
                   {page} / {totalPages}
                 </span>
                 <div className="flex items-center gap-2">
@@ -535,11 +612,12 @@ export function ScheduleDetail() {
                     size="sm"
                     disabled={page <= 1}
                     onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    aria-label="Previous page"
                   >
                     <ChevronLeft className="h-4 w-4" />
-                    <span className="hidden sm:inline">Previous</span>
+                    <span className="hidden sm:ml-1 sm:inline">Previous</span>
                   </Button>
-                  <span className="text-sm">
+                  <span className="hidden text-sm sm:inline">
                     {page} / {totalPages}
                   </span>
                   <Button
@@ -547,8 +625,9 @@ export function ScheduleDetail() {
                     size="sm"
                     disabled={page >= totalPages}
                     onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    aria-label="Next page"
                   >
-                    <span className="hidden sm:inline">Next</span>
+                    <span className="hidden sm:mr-1 sm:inline">Next</span>
                     <ChevronRight className="h-4 w-4" />
                   </Button>
                 </div>

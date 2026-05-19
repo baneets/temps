@@ -26,6 +26,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useContainerMetricsStream } from './useContainerMetricsStream'
+import { formatCpuUsage } from '@/lib/cpu-format'
 
 type ContainerStatus = string
 type ContainerTab = 'logs' | 'configuration'
@@ -134,9 +135,11 @@ export function ContainerHeaderBar({
                   <div className="inline-flex items-center gap-1.5 tabular-nums">
                     <Cpu className="size-3.5" aria-hidden="true" />
                     <span>
-                      CPU {metrics.cpu_percent.toFixed(1)}%
-                      {metrics.cpu_limit_cores != null &&
-                        ` / ${formatCores(metrics.cpu_limit_cores)}`}
+                      CPU{' '}
+                      {formatCpuUsage(
+                        metrics.cpu_percent,
+                        metrics.cpu_limit_cores,
+                      )}
                     </span>
                   </div>
                   <div className="inline-flex items-center gap-1.5 tabular-nums">
@@ -476,15 +479,6 @@ function hasRealMemoryLimit(bytes: number | null | undefined): boolean {
   if (bytes == null || bytes <= 0) return false
   const HUNDRED_GIB = 100 * 1024 * 1024 * 1024
   return bytes < HUNDRED_GIB
-}
-
-function formatCores(cores: number): string {
-  if (cores >= 1) {
-    const rounded = Math.round(cores * 100) / 100
-    return `${rounded} ${rounded === 1 ? 'core' : 'cores'}`
-  }
-  // Sub-core: render in millicores so "0.5" doesn't look ambiguous.
-  return `${Math.round(cores * 1000)}m`
 }
 
 function formatBytes(bytes: number): string {

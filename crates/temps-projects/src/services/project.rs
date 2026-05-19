@@ -1763,6 +1763,9 @@ impl ProjectService {
             tag: None, // No tag for initial deployment
             commit: commit_sha.clone(),
             project_id: project.id, // Include project_id
+            // Initial deployment is a user-initiated event (project creation),
+            // not a git webhook — bypass automatic_deploy.
+            manual_trigger: true,
         };
 
         self.queue_service
@@ -1931,6 +1934,9 @@ impl ProjectService {
             tag: tag.clone(),
             commit: commit_to_use.clone(),
             project_id, // Include project_id
+            // `trigger_pipeline` on the projects service is hit by the
+            // "Deploy" button and the CLI — both are user-initiated.
+            manual_trigger: true,
         };
 
         // Send the job to the queue

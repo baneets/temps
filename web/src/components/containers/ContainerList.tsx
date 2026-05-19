@@ -3,6 +3,7 @@ import {
   getContainerMetricsOptions,
   listContainersOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import { formatCpuUsage } from '@/lib/cpu-format'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -187,7 +188,7 @@ function ContainerRow({
             <>
               <span className="inline-flex items-center gap-1 tabular-nums">
                 <Cpu className="size-3" aria-hidden="true" />
-                {metrics.cpu_percent.toFixed(1)}%
+                {formatCpuUsage(metrics.cpu_percent, metrics.cpu_limit_cores)}
               </span>
               <span className="inline-flex items-center gap-1 tabular-nums">
                 <HardDrive className="size-3" aria-hidden="true" />

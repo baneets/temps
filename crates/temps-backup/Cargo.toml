@@ -22,6 +22,15 @@ tokio = { workspace = true }
 flate2 = { workspace = true }
 tempfile = { workspace = true }
 aws-sdk-s3 = { workspace = true }
+# S3 clients must use a deterministic root-cert bundle. Without it, the
+# default-https-client falls back to `rustls-native-certs`, which is broken
+# on some macOS configurations (returns zero parsed roots) and triggers a
+# `debug_assert!` panic in `aws-smithy-http-client`. Bundling Mozilla's CA
+# list at compile time also makes prod hosts immune to a missing/broken
+# /etc/ssl/certs, and keeps test runs hermetic.
+aws-smithy-http-client = { version = "1.1", default-features = false, features = ["rustls-aws-lc"] }
+webpki-root-certs = "0.26"
+pem = "3"
 sea-orm = { workspace = true }
 serde_json = { workspace = true }
 serde_derive = { workspace = true }

@@ -5312,7 +5312,6 @@ mod tests {
             created_by: 1,
             expires_at: None,
             tags: "".into(),
-            last_heartbeat_at: None,
         };
         let source_service = temps_entities::external_services::Model {
             id: 1,

@@ -643,19 +643,25 @@ async fn process_git_push_event(
     // Respect the user's "deploy on push" setting before doing any work.
     // The effective value is computed by merging project + environment
     // deployment configs (env overrides project). When both sides have
-    // automatic_deploy=false, push events must NOT trigger a deployment —
-    // the user has explicitly opted out.
+    // automatic_deploy=false, webhook push events must NOT trigger a
+    // deployment — the user has explicitly opted out of auto-deploy.
     //
-    // Exception: the FIRST deployment for an environment always runs even
-    // when automatic_deploy=false. Without this, an opted-out project would
-    // never get a baseline deployment, and project creation would silently
-    // produce zero deployments.
+    // Manual triggers (the "Deploy" button, `trigger_pipeline` API,
+    // initial deployment on project creation) bypass this gate entirely:
+    // the user just clicked deploy, so they unambiguously want a deploy
+    // regardless of the auto-deploy setting. The flag exists for
+    // webhook-driven flows, not user-driven ones.
+    //
+    // Exception for the webhook path: the FIRST deployment for an
+    // environment always runs even when automatic_deploy=false. Without
+    // this, a freshly-created opt-out project would never get a baseline
+    // deployment from the first push.
     use sea_orm::{EntityTrait, PaginatorTrait, QueryOrder};
     let auto_deploy_enabled = is_automatic_deploy_enabled(
         project.deployment_config.as_ref(),
         environment.deployment_config.as_ref(),
     );
-    if !auto_deploy_enabled {
+    if !auto_deploy_enabled && !job.manual_trigger {
         let existing_count = match deployments::Entity::find()
             .filter(deployments::Column::EnvironmentId.eq(environment.id))
             .count(db.as_ref())
@@ -681,6 +687,11 @@ async fn process_git_push_event(
 
         info!(
             "Allowing initial deployment for project {} environment {} ({}) despite automatic_deploy=false (no prior deployments)",
+            project.id, environment.id, environment.name
+        );
+    } else if job.manual_trigger && !auto_deploy_enabled {
+        info!(
+            "Manual trigger for project {} environment {} ({}) — bypassing automatic_deploy=false",
             project.id, environment.id, environment.name
         );
     }
@@ -1219,6 +1230,7 @@ mod tests {
             tag: None,
             commit: "abc123".to_string(),
             project_id: 0,
+            manual_trigger: false,
         };
 
         // Try to find the project (should return None)

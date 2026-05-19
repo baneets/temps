@@ -527,12 +527,6 @@ pub struct BackupResponse {
     pub created_by: i32,
     pub expires_at: Option<i64>,
     pub tags: Vec<String>,
-    /// Last time the worker reported progress. Older than ~5 minutes while
-    /// `state == "running"` indicates a stalled backup the UI should flag.
-    pub last_heartbeat_at: Option<i64>,
-    /// True when `state == "running"` but the heartbeat is stale, suggesting
-    /// the worker process died mid-backup.
-    pub stalled: bool,
     /// External service that owns this backup (Redis, Postgres, etc.).
     /// `null` for control-plane backups (the Temps server's own database).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -661,21 +655,8 @@ impl From<temps_entities::backup_schedules::Model> for BackupScheduleResponse {
     }
 }
 
-/// Heartbeat older than this while state=running marks the row as stalled.
-pub const BACKUP_STALL_THRESHOLD_SECS: i64 = 300;
-
 impl From<temps_entities::backups::Model> for BackupResponse {
     fn from(backup: temps_entities::backups::Model) -> Self {
-        let stalled = backup.state == "running"
-            && backup
-                .last_heartbeat_at
-                .map(|hb| (chrono::Utc::now() - hb).num_seconds() > BACKUP_STALL_THRESHOLD_SECS)
-                .unwrap_or_else(|| {
-                    // No heartbeat yet AND started long enough ago.
-                    (chrono::Utc::now() - backup.started_at).num_seconds()
-                        > BACKUP_STALL_THRESHOLD_SECS
-                });
-
         Self {
             id: backup.id,
             name: backup.name,
@@ -697,8 +678,6 @@ impl From<temps_entities::backups::Model> for BackupResponse {
             created_by: backup.created_by,
             expires_at: backup.expires_at.map(|dt| dt.timestamp_millis()),
             tags: serde_json::from_str(&backup.tags).unwrap_or_default(),
-            last_heartbeat_at: backup.last_heartbeat_at.map(|dt| dt.timestamp_millis()),
-            stalled,
             // Populated by the handler when the linked external service is available.
             external_service: None,
             // Populated by the handler via get_latest_job_for_backup.

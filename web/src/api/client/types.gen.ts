@@ -911,11 +911,6 @@ export type BackupResponse = {
     file_count?: number | null;
     id: number;
     /**
-     * Last time the worker reported progress. Older than ~5 minutes while
-     * `state == "running"` indicates a stalled backup the UI should flag.
-     */
-    last_heartbeat_at?: number | null;
-    /**
      * Best-effort partial size while a backup is still running, computed
      * by listing the S3 prefix. Null when the backup is finished
      * (`size_bytes` is authoritative in that case).
@@ -941,11 +936,6 @@ export type BackupResponse = {
      * Final size of the backup once completed. Null while running.
      */
     size_bytes?: number | null;
-    /**
-     * True when `state == "running"` but the heartbeat is stale, suggesting
-     * the worker process died mid-backup.
-     */
-    stalled: boolean;
     started_at: number;
     state: string;
     tags: Array<string>;
@@ -1826,7 +1816,12 @@ export type ContainerMetricsResponse = {
     container_id: string;
     container_name: string;
     /**
-     * CPU usage percentage (0-100)
+     * CPU limit in whole cores (e.g. 1.0). None = no limit.
+     */
+    cpu_limit_cores?: number | null;
+    /**
+     * CPU usage as a multi-core percentage (Docker convention: 200 = 2 cores
+     * fully pinned). Divide by 100 to get cores used.
      */
     cpu_percent: number;
     /**

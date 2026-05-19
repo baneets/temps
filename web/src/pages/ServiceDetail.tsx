@@ -1345,14 +1345,20 @@ export function ServiceDetail() {
                               ) : null}
                             </div>
                             {/* Error preview — only when the backup actually
-                                failed. Truncates to a single line; full
-                                message is on the BackupDetail page. */}
+                                failed. Hard-caps the rendered string at ~160
+                                chars and clips with CSS `truncate` so a long
+                                stack trace can't blow out the card width even
+                                if a parent flex container forgets `min-w-0`.
+                                Full message is on the BackupDetail page (and
+                                surfaced via `title` on hover). */}
                             {isFailed && backup.error_message ? (
                               <p
                                 className="mt-1 truncate text-xs text-destructive"
                                 title={backup.error_message}
                               >
-                                {backup.error_message}
+                                {backup.error_message.length > 160
+                                  ? `${backup.error_message.slice(0, 160)}…`
+                                  : backup.error_message}
                               </p>
                             ) : null}
                           </div>

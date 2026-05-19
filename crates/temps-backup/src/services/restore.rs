@@ -979,7 +979,6 @@ async fn run_restore_inner(
             created_by: run.created_by,
             expires_at: None,
             tags: "[]".to_string(),
-            last_heartbeat_at: None,
         }
     };
 
@@ -1473,7 +1472,8 @@ fn build_s3_client(creds: &S3Credentials) -> S3Client {
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .region(aws_sdk_s3::config::Region::new(creds.region.clone()))
         .force_path_style(creds.force_path_style)
-        .credentials_provider(aws_creds);
+        .credentials_provider(aws_creds)
+        .http_client(crate::engines::v2_common::bundled_roots_http_client());
 
     if let Some(endpoint) = &creds.endpoint {
         let url = if endpoint.starts_with("http") {

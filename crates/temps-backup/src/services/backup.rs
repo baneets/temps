@@ -808,6 +808,34 @@ impl BackupService {
         let _ = self.queue.set(queue);
     }
 
+    /// Fire-and-forget S3 bucket lifecycle reconcile for the given source.
+    /// Spawns a background task so the caller (schedule create/update/delete)
+    /// is never blocked on S3, and lifecycle failures never bubble up as
+    /// schedule operation failures — they only show up in logs.
+    ///
+    /// The reconcile rebuilds the bucket's lifecycle rules from current
+    /// schedule state, so even concurrent schedule changes converge to a
+    /// consistent rule set eventually.
+    fn fire_lifecycle_reconcile(&self, s3_source_id: i32) {
+        let db = self.db.clone();
+        let enc = self.encryption_service.clone();
+        tokio::spawn(async move {
+            let svc = super::S3LifecycleService::new(db, enc);
+            match svc.reconcile_bucket(s3_source_id).await {
+                Ok(outcome) => {
+                    info!(s3_source_id, ?outcome, "S3 lifecycle reconcile completed");
+                }
+                Err(e) => {
+                    warn!(
+                        s3_source_id,
+                        error = %e,
+                        "S3 lifecycle reconcile failed (app-side retention still active)"
+                    );
+                }
+            }
+        });
+    }
+
     /// Internal accessor — panics if `set_queue` was never called.
     fn queue(&self) -> &Arc<dyn temps_core::JobQueue> {
         self.queue
@@ -971,7 +999,6 @@ impl BackupService {
             error_message: sea_orm::Set(None),
             expires_at: sea_orm::Set(None),
             checksum: sea_orm::Set(None),
-            last_heartbeat_at: sea_orm::Set(None),
             metadata: sea_orm::Set(
                 serde_json::json!({
                     "size_bytes": size_bytes,
@@ -1971,7 +1998,8 @@ impl BackupService {
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(s3_source.region.clone()))
             .force_path_style(s3_source.force_path_style.unwrap_or(true)) // Default to true for Minio
-            .credentials_provider(creds);
+            .credentials_provider(creds)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client());
 
         // Only set endpoint URL if endpoint is specified (for Minio)
         if let Some(endpoint) = &s3_source.endpoint {
@@ -2005,7 +2033,8 @@ impl BackupService {
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .region(aws_sdk_s3::config::Region::new(request.region.clone()))
             .force_path_style(request.force_path_style.unwrap_or(true))
-            .credentials_provider(creds);
+            .credentials_provider(creds)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client());
 
         // Only set endpoint URL if endpoint is specified (for MinIO)
         if let Some(endpoint) = &request.endpoint {
@@ -3937,6 +3966,7 @@ impl BackupService {
 
         let schedule_model = new_schedule.insert(self.db.as_ref()).await?;
         info!("Created new backup schedule: {}", schedule_model.name);
+        self.fire_lifecycle_reconcile(schedule_model.s3_source_id);
         Ok(schedule_model)
     }
 
@@ -3984,6 +4014,7 @@ impl BackupService {
             .exec(self.db.as_ref())
             .await?;
         info!("Deleted backup schedule: {}", schedule.name);
+        self.fire_lifecycle_reconcile(schedule.s3_source_id);
         Ok(result.rows_affected > 0)
     }
 
@@ -4691,7 +4722,6 @@ RETURNING id
             error_message: Set(None),
             expires_at: Set(None),
             checksum: Set(None),
-            last_heartbeat_at: Set(None),
             metadata: Set(serde_json::json!({
                 "engine": "control_plane",
                 "async_runner": true,
@@ -4867,7 +4897,6 @@ RETURNING id
             error_message: Set(None),
             expires_at: Set(None),
             checksum: Set(None),
-            last_heartbeat_at: Set(None),
             metadata: Set(serde_json::json!({
                 "engine": trigger.engine,
                 "async_runner": true,
@@ -5017,7 +5046,6 @@ RETURNING id
             error_message: Set(None),
             expires_at: Set(None),
             checksum: Set(None),
-            last_heartbeat_at: Set(None),
             metadata: Set(serde_json::Value::Object(backups_metadata).to_string()),
         }
         .insert(txn)
@@ -5964,17 +5992,9 @@ ORDER BY esb.id ASC
             ),
             checksum: sea_orm::Set(None),
             expires_at: sea_orm::Set(None),
-            last_heartbeat_at: sea_orm::Set(Some(now)),
         };
 
         let backup = backup.insert(self.db.as_ref()).await?;
-
-        // Spawn a heartbeat task. Dropped at function end (or any early
-        // return), which aborts the task. While alive it keeps
-        // `last_heartbeat_at` fresh; the UI uses staleness > 5min as a
-        // "stalled" signal, and startup reconciliation covers the case
-        // where the worker dies before drop runs.
-        let _heartbeat = crate::services::HeartbeatGuard::spawn(self.db.clone(), backup.id);
 
         // Generate backup path
         let subpath = format!(
@@ -6433,6 +6453,14 @@ ORDER BY esb.id ASC
             fields = ?changed_fields,
             "Updated backup schedule fields",
         );
+
+        // If retention or enabled flipped, the desired S3 lifecycle config
+        // changed. Reconcile in the background. (Schedule can't be moved to
+        // a different s3_source via UpdateBackupScheduleRequest today, so
+        // we only reconcile one bucket.)
+        if changed_fields.contains(&"retention_period") || changed_fields.contains(&"enabled") {
+            self.fire_lifecycle_reconcile(updated.s3_source_id);
+        }
 
         Ok(updated)
     }
@@ -7124,6 +7152,7 @@ mod tests {
             ))
             .endpoint_url(&minio_endpoint)
             .force_path_style(true)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client())
             .build();
 
         let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
@@ -7391,6 +7420,7 @@ mod tests {
             ))
             .endpoint_url(&minio_endpoint)
             .force_path_style(true)
+            .http_client(crate::engines::v2_common::bundled_roots_http_client())
             .build();
 
         let s3_client = aws_sdk_s3::Client::from_conf(s3_config);
@@ -7618,7 +7648,6 @@ mod tests {
             expires_at: Set(backup_result.expires_at),
             checksum: Set(backup_result.checksum.clone()),
             metadata: Set(backup_result.metadata.clone()),
-            last_heartbeat_at: Set(None),
         };
 
         target_backup
@@ -7935,7 +7964,6 @@ mod tests {
             created_by: 1,
             expires_at: None,
             tags: "[]".to_string(),
-            last_heartbeat_at: None,
         };
 
         // MockDatabase query sequence for `list_source_backups`:
@@ -8472,7 +8500,6 @@ mod tests {
             size_bytes: Some(1024),
             file_count: None,
             tags: "[]".to_string(),
-            last_heartbeat_at: None,
         }
     }
 

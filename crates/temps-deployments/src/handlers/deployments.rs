@@ -1749,6 +1749,7 @@ pub async fn get_container_metrics(
         container_id: stats.container_id,
         container_name: stats.container_name,
         cpu_percent: stats.cpu_percent,
+        cpu_limit_cores: stats.cpu_limit_cores,
         memory_bytes: stats.memory_bytes,
         memory_limit_bytes: stats.memory_limit_bytes,
         memory_percent: stats.memory_percent,

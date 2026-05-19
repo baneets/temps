@@ -13,6 +13,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import { formatBytes, cn } from '@/lib/utils'
+import { formatCpuUsage } from '@/lib/cpu-format'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, Cpu, MemoryStick, Settings2 } from 'lucide-react'
 import { useState } from 'react'
@@ -250,9 +251,10 @@ function EditLimitsButton({ onClick }: { onClick: () => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// CPU meter: inline value + thin bar. Bar capacity is rebased to the user's
-// CPU cap when set, so a 4-of-16-core cap reads "100%" at saturation rather
-// than "25%" (which feels like the bar is broken).
+// CPU meter: inline value + thin bar. Value reads as cores used (and "/ cap"
+// when a CPU cap is configured) so a 2-core-pinned container says "2.00 / 2
+// cores" rather than the raw "200%" Docker reports. The bar fills against
+// the cap when set, otherwise against host cores.
 // ---------------------------------------------------------------------------
 function CpuMeter({
   sample,
@@ -268,28 +270,26 @@ function CpuMeter({
       ? limits.nano_cpus / 1_000_000_000
       : null
 
-  let displayedPercent = hostCpuPercent
-  if (
-    displayedPercent != null &&
-    capCores != null &&
-    onlineCpus != null &&
-    capCores < onlineCpus
-  ) {
-    displayedPercent = displayedPercent * (onlineCpus / capCores)
+  // Bar fills against the cap when set; otherwise against host cores so
+  // pinning a single core on an 8-core host doesn't look like 100% load.
+  let barValue = 0
+  if (hostCpuPercent != null) {
+    const denomCores = capCores ?? onlineCpus
+    if (denomCores != null && denomCores > 0) {
+      const pctOfDenom = (hostCpuPercent / 100 / denomCores) * 100
+      barValue = Math.min(100, Math.max(0, pctOfDenom))
+    } else {
+      barValue = Math.min(100, Math.max(0, hostCpuPercent))
+    }
   }
-
-  const barValue =
-    displayedPercent != null
-      ? Math.min(100, Math.max(0, displayedPercent))
-      : 0
 
   return (
     <Meter
       icon={<Cpu className="size-3.5" />}
       label="CPU"
       value={
-        displayedPercent != null
-          ? `${displayedPercent.toFixed(1)}%`
+        hostCpuPercent != null
+          ? formatCpuUsage(hostCpuPercent, capCores)
           : '—'
       }
       barPercent={barValue}

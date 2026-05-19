@@ -49,7 +49,8 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { listSourceBackupsWithScan, testS3SourceConnection } from '@/lib/s3-sources'
 import { runScheduleNow } from '@/lib/schedule-runs'
 import { cn, formatBytes } from '@/lib/utils'
-import { iconForServiceType } from '@/lib/serviceIcons'
+import { iconForServiceType, serviceTypeRouteForEngine } from '@/lib/serviceIcons'
+import { ServiceLogo } from '@/components/ui/service-logo'
 import { Input } from '@/components/ui/input'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
@@ -328,9 +329,25 @@ export function S3SourceDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" asChild>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="-ml-1 shrink-0 sm:hidden"
+            asChild
+            aria-label="Back"
+          >
+            <Link to="/backups">
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="hidden shrink-0 sm:inline-flex"
+            asChild
+          >
             <Link to="/backups">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
@@ -340,54 +357,61 @@ export function S3SourceDetail() {
         <Button
           variant="outline"
           size="sm"
+          className="shrink-0"
           onClick={() => testConnectionMutation.mutate()}
           disabled={testConnectionMutation.isPending || !sourceId}
+          aria-label="Test connection"
+          title="Test connection"
         >
           {testConnectionMutation.isPending ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin sm:mr-2" />
           ) : (
-            <Plug className="mr-2 h-4 w-4" />
+            <Plug className="h-4 w-4 sm:mr-2" />
           )}
-          Test connection
+          <span className="hidden sm:inline">Test connection</span>
         </Button>
       </div>
 
       <div className="grid gap-6">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Database className="h-5 w-5" />
-              {source.name}
+            <CardTitle className="flex min-w-0 items-center gap-2">
+              <Database className="h-5 w-5 shrink-0" />
+              <span className="min-w-0 break-words">{source.name}</span>
             </CardTitle>
             <CardDescription>S3 Storage Configuration</CardDescription>
           </CardHeader>
           <CardContent>
             <dl className="grid gap-4">
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Bucket Name
                 </dt>
-                <dd className="text-sm">{source.bucket_name}</dd>
+                <dd className="break-all text-base sm:text-sm">
+                  {source.bucket_name}
+                </dd>
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Region
                 </dt>
-                <dd className="text-sm">{source.region}</dd>
+                <dd className="text-base sm:text-sm">{source.region}</dd>
               </div>
               {source.endpoint && (
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">
+                <div className="min-w-0">
+                  <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                     Endpoint URL
                   </dt>
-                  <dd className="text-sm">{source.endpoint}</dd>
+                  <dd className="break-all text-base sm:text-sm">
+                    {source.endpoint}
+                  </dd>
                 </div>
               )}
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Force Path Style
                 </dt>
-                <dd className="text-sm">
+                <dd className="text-base sm:text-sm">
                   <Badge
                     variant={source.force_path_style ? 'default' : 'secondary'}
                   >
@@ -395,19 +419,19 @@ export function S3SourceDetail() {
                   </Badge>
                 </dd>
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Access Key ID
                 </dt>
-                <dd className="text-sm font-mono">
+                <dd className="truncate font-mono text-base sm:text-sm">
                   &bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;
                 </dd>
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">
+              <div className="min-w-0">
+                <dt className="text-base font-medium text-muted-foreground sm:text-sm">
                   Secret Key
                 </dt>
-                <dd className="text-sm font-mono">
+                <dd className="truncate font-mono text-base sm:text-sm">
                   &bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;
                 </dd>
               </div>
@@ -417,19 +441,25 @@ export function S3SourceDetail() {
 
         <Card>
           <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
-            <div>
+            <div className="min-w-0">
               <CardTitle className="flex items-center gap-2">
-                <CalendarDays className="h-5 w-5" />
+                <CalendarDays className="h-5 w-5 shrink-0" />
                 Backup Schedules
               </CardTitle>
               <CardDescription>
                 Scheduled backups writing to this S3 source
               </CardDescription>
             </div>
-            <Button size="sm" asChild>
+            <Button
+              size="sm"
+              className="shrink-0"
+              asChild
+              aria-label="New schedule"
+              title="New schedule"
+            >
               <Link to={`/backups/s3-sources/${sourceId}/schedules/new`}>
-                <Plus className="mr-2 h-4 w-4" />
-                New Schedule
+                <Plus className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">New Schedule</span>
               </Link>
             </Button>
           </CardHeader>
@@ -455,27 +485,31 @@ export function S3SourceDetail() {
                 }
               />
             ) : (
-              <div className="overflow-x-auto">
-                <Table>
+              <div className="-mx-6 overflow-x-auto">
+                <Table className="min-w-[640px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Name</TableHead>
-                      <TableHead>Type</TableHead>
+                      <TableHead className="hidden sm:table-cell">
+                        Type
+                      </TableHead>
                       <TableHead>Schedule</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead className="hidden md:table-cell">
                         Retention
                       </TableHead>
-                      <TableHead className="hidden md:table-cell">
+                      <TableHead className="hidden lg:table-cell">
                         Timeout
                       </TableHead>
                       <TableHead className="hidden md:table-cell">
                         Last Run
                       </TableHead>
-                      <TableHead className="hidden md:table-cell">
+                      <TableHead className="hidden lg:table-cell">
                         Next Run
                       </TableHead>
-                      <TableHead className="w-[80px]">Actions</TableHead>
+                      <TableHead className="w-12 text-right">
+                        <span className="sr-only">Actions</span>
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -487,7 +521,7 @@ export function S3SourceDetail() {
                           !schedule.enabled && 'text-muted-foreground',
                         )}
                       >
-                        <TableCell>
+                        <TableCell className="max-w-[200px] sm:max-w-[280px]">
                           {/* Anchor — supports ⌘-click / middle-click /
                               right-click "Open in new tab". The whole-row
                               click fallback got replaced because <a>
@@ -495,40 +529,51 @@ export function S3SourceDetail() {
                               navigation. */}
                           <Link
                             to={`/backups/schedules/${schedule.id}`}
-                            className="flex items-center gap-3 hover:underline"
+                            className="flex min-w-0 items-center gap-3 hover:underline"
                           >
                             <DatabaseBackup
                               className={cn(
-                                'h-4 w-4',
+                                'h-4 w-4 shrink-0',
                                 !schedule.enabled &&
                                   'text-muted-foreground/60',
                               )}
                             />
-                            <div>
-                              <div className="font-medium">
+                            <div className="min-w-0">
+                              <div className="truncate font-medium">
                                 {schedule.name}
                               </div>
                               {schedule.description && (
                                 <div
                                   className={cn(
-                                    'text-sm',
+                                    'truncate text-base sm:text-sm',
                                     !schedule.enabled
                                       ? 'text-muted-foreground/60'
                                       : 'text-muted-foreground',
                                   )}
+                                  title={schedule.description}
                                 >
                                   {schedule.description}
                                 </div>
                               )}
+                              {/* Mobile-only inline meta so users see Type
+                                  even when the column is hidden. */}
+                              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground sm:hidden">
+                                <Badge
+                                  variant="outline"
+                                  className="font-normal"
+                                >
+                                  {schedule.backup_type}
+                                </Badge>
+                              </div>
                             </div>
                           </Link>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="hidden sm:table-cell">
                           <Badge variant="outline">
                             {schedule.backup_type}
                           </Badge>
                         </TableCell>
-                        <TableCell className="font-mono text-xs">
+                        <TableCell className="whitespace-nowrap font-mono text-xs">
                           {schedule.schedule_expression}
                         </TableCell>
                         <TableCell>
@@ -540,15 +585,15 @@ export function S3SourceDetail() {
                             {schedule.enabled ? 'Enabled' : 'Disabled'}
                           </Badge>
                         </TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden whitespace-nowrap md:table-cell">
                           {schedule.retention_period} days
                         </TableCell>
-                        <TableCell className="hidden md:table-cell text-muted-foreground">
+                        <TableCell className="hidden whitespace-nowrap text-muted-foreground lg:table-cell">
                           {schedule.max_runtime_secs
                             ? formatTimeoutSecs(schedule.max_runtime_secs)
                             : 'engine default'}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden whitespace-nowrap md:table-cell">
                           {schedule.last_run
                             ? format(
                                 new Date(schedule.last_run),
@@ -556,7 +601,7 @@ export function S3SourceDetail() {
                               )
                             : '-'}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell">
+                        <TableCell className="hidden whitespace-nowrap lg:table-cell">
                           {schedule.next_run
                             ? format(
                                 new Date(schedule.next_run),
@@ -565,11 +610,17 @@ export function S3SourceDetail() {
                             : '-'}
                         </TableCell>
                         <TableCell
+                          className="w-12 p-0 pr-2 text-right align-middle"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 shrink-0"
+                                aria-label={`Actions for ${schedule.name}`}
+                              >
                                 <MoreHorizontal className="h-4 w-4" />
                               </Button>
                             </DropdownMenuTrigger>
@@ -705,12 +756,15 @@ export function S3SourceDetail() {
                     backup.name ||
                     'Backup'
 
-                  // Per-row icon based on the engine that produced the
-                  // backup. `iconForServiceType` understands the engine
-                  // vocabulary (`postgres_walg`, `s3_mirror`, …) and the
-                  // service-type vocabulary (`postgres`, `s3`, …); falls
-                  // back to a generic Database icon for unknown values.
-                  const ServiceIcon = iconForServiceType(backup.engine)
+                  // Per-row icon. Prefer the real brand logo
+                  // (`<ServiceLogo>`) when the engine maps to a known
+                  // service type — Postgres elephant, Redis cube, etc. —
+                  // so backups visually match the storage-list rows. Fall
+                  // back to the generic Lucide icon (`ServerCog` for the
+                  // control plane, `Database` for unknown engines) in a
+                  // muted square so something is always shown.
+                  const brandService = serviceTypeRouteForEngine(backup.engine)
+                  const FallbackIcon = iconForServiceType(backup.engine)
 
                   return (
                     <Link
@@ -721,12 +775,19 @@ export function S3SourceDetail() {
                       <div className="flex flex-col gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50 sm:flex-row sm:items-center sm:justify-between sm:p-4">
                         {/* Left: name + meta */}
                         <div className="flex min-w-0 items-center gap-3">
-                          <div
-                            className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground"
-                            aria-hidden
-                          >
-                            <ServiceIcon className="h-4 w-4" />
-                          </div>
+                          {brandService ? (
+                            <ServiceLogo
+                              service={brandService}
+                              className="size-8 shrink-0"
+                            />
+                          ) : (
+                            <div
+                              className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground"
+                              aria-hidden
+                            >
+                              <FallbackIcon className="h-4 w-4" />
+                            </div>
+                          )}
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="truncate font-medium">

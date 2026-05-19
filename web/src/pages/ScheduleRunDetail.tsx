@@ -272,7 +272,7 @@ export function ScheduleRunDetail() {
 
   if (scheduleIdNum === undefined || runIdNum === undefined) {
     return (
-      <div className="p-6 text-sm text-destructive">
+      <div className="px-4 py-6 text-base text-destructive sm:px-6 sm:text-sm">
         Invalid run URL — missing schedule or run id.
       </div>
     )
@@ -280,21 +280,22 @@ export function ScheduleRunDetail() {
 
   return (
     <TooltipProvider>
-      <div className="space-y-4 p-4 sm:p-6">
+      <div className="space-y-6">
         {/* ── Header ─────────────────────────────────────────────────── */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-start gap-2 sm:items-center sm:gap-3">
             <Button
               variant="ghost"
               size="icon"
+              className="-ml-1 shrink-0"
               onClick={() => navigate(`/backups/schedules/${scheduleIdNum}`)}
               aria-label="Back to schedule"
             >
               <ArrowLeft className="h-4 w-4" />
             </Button>
-            <div>
-              <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-                Run #{runIdNum}
+            <div className="min-w-0">
+              <h1 className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xl font-semibold tracking-tight sm:text-2xl">
+                <span>Run #{runIdNum}</span>
                 {jobs && (
                   <Badge variant={stateBadgeVariant(aggregateState)}>
                     {aggregateState}
@@ -304,11 +305,11 @@ export function ScheduleRunDetail() {
               {isSchedulePending ? (
                 <Skeleton className="mt-1 h-4 w-48" />
               ) : schedule ? (
-                <p className="text-sm text-muted-foreground">
+                <p className="mt-0.5 text-base text-muted-foreground sm:text-sm">
                   Scheduler tick for{' '}
                   <Link
                     to={`/backups/schedules/${schedule.id}`}
-                    className="hover:underline"
+                    className="break-words hover:underline"
                   >
                     {schedule.name}
                   </Link>
@@ -317,7 +318,7 @@ export function ScheduleRunDetail() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 sm:shrink-0">
             {/* Cancel run — only when at least one child is still live.
                 Refreshing while cancelling is fine, the mutation invalidates
                 the jobs query on success. */}
@@ -327,14 +328,16 @@ export function ScheduleRunDetail() {
                 size="sm"
                 onClick={() => setShowCancelRunDialog(true)}
                 disabled={cancelRunMutation.isPending}
-                className="gap-2"
+                className="shrink-0 gap-2"
+                aria-label="Cancel run"
+                title="Cancel run"
               >
                 {cancelRunMutation.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Ban className="h-4 w-4" />
                 )}
-                Cancel run
+                <span className="hidden sm:inline">Cancel run</span>
               </Button>
             )}
 
@@ -343,6 +346,7 @@ export function ScheduleRunDetail() {
                 <Button
                   variant="outline"
                   size="icon"
+                  className="shrink-0"
                   onClick={() => {
                     void queryClient.invalidateQueries({
                       queryKey: jobsQueryOptions.queryKey,
@@ -419,24 +423,26 @@ export function ScheduleRunDetail() {
           </CardHeader>
           <CardContent className="px-0">
             {isJobsPending ? (
-              <div className="space-y-2 px-6 pb-6">
+              <div className="space-y-2 px-4 pb-6 sm:px-6">
                 {[...Array(4)].map((_, i) => (
                   <Skeleton key={i} className="h-10 w-full" />
                 ))}
               </div>
             ) : isJobsError ? (
-              <div className="px-6 pb-6 text-sm text-destructive">
+              <div className="px-4 pb-6 text-base text-destructive sm:px-6 sm:text-sm">
                 Failed to load jobs:{' '}
-                {jobsError instanceof Error ? jobsError.message : 'Unknown error'}
+                {jobsError instanceof Error
+                  ? jobsError.message
+                  : 'Unknown error'}
               </div>
             ) : !jobs || jobs.length === 0 ? (
-              <div className="flex flex-col items-center justify-center px-6 py-12 text-sm text-muted-foreground">
+              <div className="flex flex-col items-center justify-center px-4 py-12 text-center text-base text-muted-foreground sm:px-6 sm:text-sm">
                 <DatabaseBackup className="mb-3 h-8 w-8 opacity-40" />
                 No child jobs recorded for this run.
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <Table>
+                <Table className="min-w-[560px]">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Service</TableHead>
@@ -450,7 +456,7 @@ export function ScheduleRunDetail() {
                       <TableHead className="hidden lg:table-cell">
                         Duration
                       </TableHead>
-                      <TableHead className="hidden md:table-cell">
+                      <TableHead className="hidden sm:table-cell">
                         Size
                       </TableHead>
                       <TableHead className="hidden xl:table-cell">
@@ -477,10 +483,23 @@ export function ScheduleRunDetail() {
                           <TableCell className="font-medium">
                             <Link
                               to={detailUrl}
-                              className="flex hover:underline"
+                              className="block min-w-0 max-w-[200px] truncate hover:underline sm:max-w-none"
+                              title={job.service_name}
                             >
                               {job.service_name}
                             </Link>
+                            {/* Mobile-only inline meta so users see something
+                                useful below the service name when the columns
+                                are hidden. */}
+                            <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-muted-foreground sm:hidden">
+                              <span className="font-mono">{job.engine}</span>
+                              {job.size_bytes != null && (
+                                <>
+                                  <span>·</span>
+                                  <span>{formatBytes(job.size_bytes)}</span>
+                                </>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="hidden font-mono text-xs text-muted-foreground sm:table-cell">
                             {job.engine}
@@ -512,7 +531,7 @@ export function ScheduleRunDetail() {
                                 ? '…'
                                 : '—'}
                           </TableCell>
-                          <TableCell className="hidden text-sm md:table-cell">
+                          <TableCell className="hidden text-sm sm:table-cell">
                             {job.size_bytes != null
                               ? formatBytes(job.size_bytes)
                               : '—'}
@@ -694,10 +713,11 @@ function SummaryStat({
   mono?: boolean
 }) {
   return (
-    <div className="rounded-lg border bg-card px-3 py-2.5">
-      <div className="text-xs text-muted-foreground">{label}</div>
+    <div className="min-w-0 rounded-lg border bg-card px-3 py-2.5">
+      <div className="text-sm text-muted-foreground sm:text-xs">{label}</div>
       <div
-        className={`mt-0.5 text-sm ${mono ? 'font-mono' : 'font-medium'}`}
+        className={`mt-0.5 truncate text-base sm:text-sm ${mono ? 'font-mono' : 'font-medium'}`}
+        title={typeof value === 'string' ? value : undefined}
       >
         {value}
       </div>

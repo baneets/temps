@@ -25,7 +25,6 @@ pub struct Model {
     pub created_by: i32,
     pub expires_at: Option<DBDateTime>,
     pub tags: String,
-    pub last_heartbeat_at: Option<DBDateTime>,
     /// FK to `schedule_runs.id`. Set for all `backups` rows created by the
     /// fan-out path (`enqueue_scheduled_run`). `NULL` for legacy one-shot rows
     /// that pre-date the `schedule_runs` table (migration

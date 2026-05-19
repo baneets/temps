@@ -2359,8 +2359,27 @@ mod tests {
 
         if let Some(config) = &build_job.job_config {
             let config_obj: serde_json::Value = config.clone();
-            assert!(config_obj.get("dockerfile_path").is_some());
-            assert!(config_obj.get("build_args").is_some());
+            assert!(
+                config_obj.get("dockerfile_path").is_some(),
+                "build_image config must expose dockerfile_path",
+            );
+            // Env-var-derived build args are sealed into `build_args_encrypted`
+            // + a plaintext `build_args_keys` index (see `sensitive_envelope::write_sealed`).
+            // The planner always injects a default `HOST=0.0.0.0` env var, so
+            // the sealed fields are always written for projects without custom env vars too.
+            assert!(
+                config_obj.get("build_args_encrypted").is_some(),
+                "build_image config must include sealed build_args_encrypted",
+            );
+            assert!(
+                config_obj.get("build_args_keys").is_some(),
+                "build_image config must include build_args_keys index",
+            );
+            // Plaintext `build_args` must NOT appear — that would leak env-var values.
+            assert!(
+                config_obj.get("build_args").is_none(),
+                "plaintext build_args must not be present (envelope leak)",
+            );
         }
 
         let deploy_job = jobs
