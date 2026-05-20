@@ -10,7 +10,9 @@ use sea_orm::{
     QuerySelect,
 };
 use std::sync::Arc;
-use temps_entities::{deployments, events, projects};
+use temps_entities::{
+    deployments, error_events, error_groups, events, funnel_steps, funnels, projects,
+};
 use tracing::{error, info};
 
 pub struct DigestService {
@@ -157,19 +159,232 @@ impl DigestService {
             0.0
         };
 
-        // TODO: Implement more detailed analytics queries
-        // For now, return basic data
+        let average_session_duration = self
+            .query_average_session_duration(week_start, week_end)
+            .await
+            .unwrap_or(0.0);
+        let bounce_rate = self
+            .query_bounce_rate(week_start, week_end)
+            .await
+            .unwrap_or(0.0);
+        let top_pages = self
+            .query_top_pages(week_start, week_end)
+            .await
+            .unwrap_or_default();
+        let geographic_distribution = self
+            .query_geographic_distribution(week_start, week_end, total_visitors)
+            .await
+            .unwrap_or_default();
+        let visitor_trend = self
+            .query_visitor_trend(week_start, week_end)
+            .await
+            .unwrap_or_default();
+
         Ok(PerformanceData {
             total_visitors,
             unique_sessions: total_visitors,
             page_views,
-            average_session_duration: 0.0,
-            bounce_rate: 0.0,
-            top_pages: vec![],
-            geographic_distribution: vec![],
-            visitor_trend: vec![],
+            average_session_duration,
+            bounce_rate,
+            top_pages,
+            geographic_distribution,
+            visitor_trend,
             week_over_week_change,
         })
+    }
+
+    /// Average session duration in minutes. A session's duration is the span
+    /// from its first to its last event; sessions are then averaged.
+    async fn query_average_session_duration(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+    ) -> Result<f64> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT COALESCE(AVG(session_seconds), 0)::float8 AS avg_seconds
+            FROM (
+                SELECT EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) AS session_seconds
+                FROM events
+                WHERE timestamp BETWEEN $1 AND $2
+                  AND session_id IS NOT NULL
+                  AND is_crawler = false
+                GROUP BY session_id
+            ) s
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        let avg_seconds: f64 = self
+            .db
+            .query_one(stmt)
+            .await?
+            .and_then(|row| row.try_get::<f64>("", "avg_seconds").ok())
+            .unwrap_or(0.0);
+
+        Ok(avg_seconds / 60.0)
+    }
+
+    /// Bounce rate: percentage of sessions whose entry event is flagged as a
+    /// bounce (single-interaction session).
+    async fn query_bounce_rate(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+    ) -> Result<f64> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE bounced)::float8 AS bounced,
+                COUNT(*)::float8 AS total
+            FROM (
+                SELECT bool_or(is_bounce) AS bounced
+                FROM events
+                WHERE timestamp BETWEEN $1 AND $2
+                  AND session_id IS NOT NULL
+                  AND is_crawler = false
+                GROUP BY session_id
+            ) s
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        if let Some(row) = self.db.query_one(stmt).await? {
+            let bounced: f64 = row.try_get("", "bounced").unwrap_or(0.0);
+            let total: f64 = row.try_get("", "total").unwrap_or(0.0);
+            if total > 0.0 {
+                return Ok((bounced / total) * 100.0);
+            }
+        }
+        Ok(0.0)
+    }
+
+    /// Top pages by view count for the week (max 5).
+    async fn query_top_pages(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+    ) -> Result<Vec<TopPage>> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT
+                page_path,
+                COUNT(*)::bigint AS views,
+                COUNT(DISTINCT session_id)::bigint AS unique_visitors
+            FROM events
+            WHERE timestamp BETWEEN $1 AND $2
+              AND is_crawler = false
+            GROUP BY page_path
+            ORDER BY views DESC
+            LIMIT 5
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(TopPage {
+                    path: row.try_get("", "page_path").ok()?,
+                    views: row.try_get("", "views").ok()?,
+                    unique_visitors: row.try_get("", "unique_visitors").ok()?,
+                })
+            })
+            .collect())
+    }
+
+    /// Top countries by visitor count for the week (max 5), with each
+    /// country's share of `total_visitors`.
+    async fn query_geographic_distribution(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+        total_visitors: i64,
+    ) -> Result<Vec<GeographicData>> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT
+                g.country AS country,
+                COUNT(DISTINCT e.session_id)::bigint AS visitors
+            FROM events e
+            JOIN ip_geolocations g ON g.id = e.ip_geolocation_id
+            WHERE e.timestamp BETWEEN $1 AND $2
+              AND e.session_id IS NOT NULL
+              AND e.is_crawler = false
+            GROUP BY g.country
+            ORDER BY visitors DESC
+            LIMIT 5
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let visitors: i64 = row.try_get("", "visitors").ok()?;
+                let percentage = if total_visitors > 0 {
+                    (visitors as f64 / total_visitors as f64) * 100.0
+                } else {
+                    0.0
+                };
+                Some(GeographicData {
+                    country: row.try_get("", "country").ok()?,
+                    visitors,
+                    percentage,
+                })
+            })
+            .collect())
+    }
+
+    /// Daily unique-session counts across the digest window, for the trend
+    /// sparkline.
+    async fn query_visitor_trend(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+    ) -> Result<Vec<TrendPoint>> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT
+                date_trunc('day', timestamp) AS day,
+                COUNT(DISTINCT session_id)::bigint AS visitors
+            FROM events
+            WHERE timestamp BETWEEN $1 AND $2
+              AND session_id IS NOT NULL
+              AND is_crawler = false
+            GROUP BY day
+            ORDER BY day ASC
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(TrendPoint {
+                    date: row.try_get("", "day").ok()?,
+                    value: row.try_get("", "visitors").ok()?,
+                })
+            })
+            .collect())
     }
 
     /// Aggregate deployment and infrastructure data
@@ -216,37 +431,327 @@ impl DigestService {
         })
     }
 
-    /// Aggregate error and reliability data
+    /// Aggregate error and reliability data from `error_events`,
+    /// `error_groups`, and `external_service_health_checks`.
     async fn aggregate_error_data(
         &self,
-        _week_start: DateTime<Utc>,
-        _week_end: DateTime<Utc>,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
     ) -> Result<ErrorData> {
-        // TODO: Implement error aggregation from temps-logs or temps-analytics
-        // For now, return basic data
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        // Total error events captured in the window.
+        let total_errors = error_events::Entity::find()
+            .filter(error_events::Column::Timestamp.between(week_start, week_end))
+            .count(self.db.as_ref())
+            .await? as i64;
+
+        // Error groups first seen this week — "new error types".
+        let new_error_types = error_groups::Entity::find()
+            .filter(error_groups::Column::FirstSeen.between(week_start, week_end))
+            .count(self.db.as_ref())
+            .await? as i64;
+
+        // Distinct visitors affected by errors this week.
+        let affected_users = error_events::Entity::find()
+            .filter(error_events::Column::Timestamp.between(week_start, week_end))
+            .filter(error_events::Column::VisitorId.is_not_null())
+            .select_only()
+            .column(error_events::Column::VisitorId)
+            .distinct()
+            .count(self.db.as_ref())
+            .await? as i64;
+
+        // Most common errors this week, grouped by error group.
+        let most_common_errors = self
+            .query_most_common_errors(week_start, week_end)
+            .await
+            .unwrap_or_default();
+
+        // Daily error counts for the trend sparkline.
+        let error_trend = self
+            .query_error_trend(week_start, week_end)
+            .await
+            .unwrap_or_default();
+
+        // Health-check based uptime. `external_service_health_checks.status`
+        // is "operational" | "degraded" | "down". Uptime = share of checks
+        // that were operational; failed = degraded + down.
+        let (uptime_percentage, failed_health_checks) = {
+            let stmt = Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'operational')::float8 AS operational,
+                    COUNT(*) FILTER (WHERE status <> 'operational')::bigint AS failed,
+                    COUNT(*)::float8 AS total
+                FROM external_service_health_checks
+                WHERE checked_at BETWEEN $1 AND $2
+                "#,
+                [week_start.into(), week_end.into()],
+            );
+            match self.db.query_one(stmt).await? {
+                Some(row) => {
+                    let operational: f64 = row.try_get("", "operational").unwrap_or(0.0);
+                    let failed: i64 = row.try_get("", "failed").unwrap_or(0);
+                    let total: f64 = row.try_get("", "total").unwrap_or(0.0);
+                    if total > 0.0 {
+                        ((operational / total) * 100.0, failed)
+                    } else {
+                        // No health checks recorded — report 100% rather than
+                        // a fabricated 99.9, and zero failures.
+                        (100.0, 0)
+                    }
+                }
+                None => (100.0, 0),
+            }
+        };
+
+        // Error rate: errors per 1,000 page views this week. Gives the number
+        // meaning relative to traffic instead of a raw count.
+        let page_views = events::Entity::find()
+            .filter(events::Column::Timestamp.between(week_start, week_end))
+            .count(self.db.as_ref())
+            .await? as i64;
+        let error_rate = if page_views > 0 {
+            (total_errors as f64 / page_views as f64) * 1000.0
+        } else {
+            0.0
+        };
+
         Ok(ErrorData {
-            total_errors: 0,
-            error_rate: 0.0,
-            new_error_types: 0,
-            most_common_errors: vec![],
-            affected_users: 0,
-            error_trend: vec![],
-            uptime_percentage: 99.9,
-            failed_health_checks: 0,
+            total_errors,
+            error_rate,
+            new_error_types,
+            most_common_errors,
+            affected_users,
+            error_trend,
+            uptime_percentage,
+            failed_health_checks,
         })
     }
 
-    /// Aggregate funnel and conversion data
+    /// Top error groups by event count this week (max 5).
+    async fn query_most_common_errors(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+    ) -> Result<Vec<CommonError>> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT
+                g.title AS error_type,
+                COUNT(e.id)::bigint AS count,
+                MIN(e.timestamp) AS first_occurrence,
+                MAX(e.timestamp) AS last_occurrence,
+                COUNT(DISTINCT e.visitor_id)::bigint AS affected_sessions
+            FROM error_events e
+            JOIN error_groups g ON g.id = e.error_group_id
+            WHERE e.timestamp BETWEEN $1 AND $2
+            GROUP BY g.id, g.title
+            ORDER BY count DESC
+            LIMIT 5
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(CommonError {
+                    error_type: row.try_get("", "error_type").ok()?,
+                    count: row.try_get("", "count").ok()?,
+                    first_occurrence: row.try_get("", "first_occurrence").ok()?,
+                    last_occurrence: row.try_get("", "last_occurrence").ok()?,
+                    affected_sessions: row.try_get("", "affected_sessions").ok()?,
+                })
+            })
+            .collect())
+    }
+
+    /// Daily error-event counts across the digest window.
+    async fn query_error_trend(
+        &self,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
+    ) -> Result<Vec<TrendPoint>> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            SELECT
+                date_trunc('day', timestamp) AS day,
+                COUNT(*)::bigint AS errors
+            FROM error_events
+            WHERE timestamp BETWEEN $1 AND $2
+            GROUP BY day
+            ORDER BY day ASC
+            "#,
+            [week_start.into(), week_end.into()],
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(TrendPoint {
+                    date: row.try_get("", "day").ok()?,
+                    value: row.try_get("", "errors").ok()?,
+                })
+            })
+            .collect())
+    }
+
+    /// Aggregate funnel and conversion data from `funnels` / `funnel_steps`.
+    ///
+    /// For each active funnel, a session "enters" if it fired the first step's
+    /// event and "completes" if it also fired the last step's event within the
+    /// window. Conversion is completions / entries, compared against the prior
+    /// week for the trend.
     async fn aggregate_funnel_data(
         &self,
-        __week_start: DateTime<Utc>,
-        __week_end: DateTime<Utc>,
+        week_start: DateTime<Utc>,
+        week_end: DateTime<Utc>,
     ) -> Result<FunnelData> {
-        // TODO: Implement funnel aggregation from temps-analytics-funnels
+        let funnels = funnels::Entity::find()
+            .filter(funnels::Column::IsActive.eq(true))
+            .all(self.db.as_ref())
+            .await?;
+
+        let total_funnels = funnels.len() as i64;
+        let prev_week_start = week_start - Duration::days(7);
+
+        let mut funnel_stats = Vec::new();
+        for funnel in funnels {
+            let steps = funnel_steps::Entity::find()
+                .filter(funnel_steps::Column::FunnelId.eq(funnel.id))
+                .order_by_asc(funnel_steps::Column::StepOrder)
+                .all(self.db.as_ref())
+                .await?;
+
+            // A funnel needs at least one step to be measurable.
+            let Some(first_step) = steps.first() else {
+                continue;
+            };
+            let last_step = steps.last().unwrap_or(first_step);
+
+            let (entries, completions) = self
+                .funnel_entries_completions(
+                    funnel.id,
+                    &first_step.event_name,
+                    &last_step.event_name,
+                    week_start,
+                    week_end,
+                )
+                .await
+                .unwrap_or((0, 0));
+
+            let (prev_entries, prev_completions) = self
+                .funnel_entries_completions(
+                    funnel.id,
+                    &first_step.event_name,
+                    &last_step.event_name,
+                    prev_week_start,
+                    week_start,
+                )
+                .await
+                .unwrap_or((0, 0));
+
+            let completion_rate = if entries > 0 {
+                (completions as f64 / entries as f64) * 100.0
+            } else {
+                0.0
+            };
+            let prev_rate = if prev_entries > 0 {
+                (prev_completions as f64 / prev_entries as f64) * 100.0
+            } else {
+                0.0
+            };
+            let week_over_week_change = completion_rate - prev_rate;
+
+            funnel_stats.push(FunnelStat {
+                funnel_name: funnel.name,
+                completion_rate,
+                drop_off_rate: 100.0 - completion_rate,
+                week_over_week_change,
+                total_entries: entries,
+                total_completions: completions,
+            });
+        }
+
+        // Most-trafficked funnels first.
+        funnel_stats.sort_by_key(|f| std::cmp::Reverse(f.total_entries));
+
         Ok(FunnelData {
-            total_funnels: 0,
-            funnel_stats: vec![],
+            total_funnels,
+            funnel_stats,
         })
+    }
+
+    /// Count sessions that entered (fired `first_event`) and completed (also
+    /// fired `last_event`) a funnel within `[start, end)`.
+    async fn funnel_entries_completions(
+        &self,
+        funnel_id: i32,
+        first_event: &str,
+        last_event: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<(i64, i64)> {
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+        // Single funnel-step funnels: entry == completion.
+        let same_step = first_event == last_event;
+
+        let stmt = Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"
+            WITH entered AS (
+                SELECT DISTINCT session_id
+                FROM events
+                WHERE timestamp >= $1 AND timestamp < $2
+                  AND session_id IS NOT NULL
+                  AND is_crawler = false
+                  AND COALESCE(event_name, event_type) = $3
+            ),
+            completed AS (
+                SELECT DISTINCT session_id
+                FROM events
+                WHERE timestamp >= $1 AND timestamp < $2
+                  AND session_id IS NOT NULL
+                  AND is_crawler = false
+                  AND COALESCE(event_name, event_type) = $4
+            )
+            SELECT
+                (SELECT COUNT(*) FROM entered)::bigint AS entries,
+                (SELECT COUNT(*) FROM entered e
+                    WHERE $5 OR e.session_id IN (SELECT session_id FROM completed))::bigint
+                    AS completions
+            "#,
+            [
+                start.into(),
+                end.into(),
+                first_event.into(),
+                last_event.into(),
+                same_step.into(),
+            ],
+        );
+
+        // `funnel_id` is accepted for future per-funnel event filtering; the
+        // current model identifies funnel membership purely by event name.
+        let _ = funnel_id;
+
+        if let Some(row) = self.db.query_one(stmt).await? {
+            let entries: i64 = row.try_get("", "entries").unwrap_or(0);
+            let completions: i64 = row.try_get("", "completions").unwrap_or(0);
+            return Ok((entries, completions));
+        }
+        Ok((0, 0))
     }
 
     /// Aggregate individual project statistics
@@ -993,6 +1498,416 @@ mod tests {
         assert_eq!(digest.executive_summary.total_visitors, 10);
         assert_eq!(digest.executive_summary.total_deployments, 6);
         assert_eq!(digest.executive_summary.failed_deployments, 1);
+
+        test_db.cleanup_all_tables().await.expect("Cleanup failed");
+    }
+
+    // ── Error aggregation ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_aggregate_error_data_empty() {
+        let (service, test_db) = setup_test_service().await;
+
+        let now = Utc::now();
+        let week_start = now - Duration::days(7);
+
+        let errors = service
+            .aggregate_error_data(week_start, now)
+            .await
+            .expect("Failed to aggregate error data");
+
+        // With no error events and no health checks, the digest must report
+        // zeros and 100% uptime — never the old fabricated 99.9%.
+        assert_eq!(errors.total_errors, 0);
+        assert_eq!(errors.new_error_types, 0);
+        assert_eq!(errors.affected_users, 0);
+        assert_eq!(errors.failed_health_checks, 0);
+        assert_eq!(errors.uptime_percentage, 100.0);
+        assert!(errors.most_common_errors.is_empty());
+
+        test_db.cleanup_all_tables().await.expect("Cleanup failed");
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_error_data_with_real_errors() {
+        use temps_entities::{error_events, error_groups, visitor};
+
+        let (service, test_db) = setup_test_service().await;
+
+        let now = Utc::now();
+        let week_start = now - Duration::days(7);
+
+        let project = projects::ActiveModel {
+            name: Set("err-project".to_string()),
+            slug: Set("err-project".to_string()),
+            repo_name: Set("err-repo".to_string()),
+            repo_owner: Set("err-owner".to_string()),
+            directory: Set("/".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::Astro),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let project = project.insert(test_db.connection()).await.unwrap();
+
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("production".to_string()),
+            slug: Set("production".to_string()),
+            subdomain: Set("production".to_string()),
+            host: Set("production.example.com".to_string()),
+            upstreams: Set(temps_entities::upstream_config::UpstreamList::default()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let environment = environment.insert(test_db.connection()).await.unwrap();
+
+        // error_events.visitor_id has an FK to `visitor` — create two.
+        let mut visitor_ids = Vec::new();
+        for i in 0..2 {
+            let v = visitor::ActiveModel {
+                visitor_id: Set(format!("visitor-{}", i)),
+                project_id: Set(project.id),
+                environment_id: Set(environment.id),
+                first_seen: Set(now - Duration::days(1)),
+                last_seen: Set(now),
+                is_crawler: Set(false),
+                has_activity: Set(true),
+                ..Default::default()
+            };
+            visitor_ids.push(v.insert(test_db.connection()).await.unwrap().id);
+        }
+
+        // An error group first seen this week → counts as a new error type.
+        let group = error_groups::ActiveModel {
+            title: Set("TypeError: undefined is not a function".to_string()),
+            error_type: Set("TypeError".to_string()),
+            first_seen: Set(now - Duration::days(2)),
+            last_seen: Set(now),
+            total_count: Set(3),
+            status: Set("unresolved".to_string()),
+            project_id: Set(project.id),
+            created_at: Set(now - Duration::days(2)),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let group = group.insert(test_db.connection()).await.unwrap();
+
+        // Three error events this week, two distinct visitors.
+        for i in 0..3 {
+            let event = error_events::ActiveModel {
+                error_group_id: Set(group.id),
+                project_id: Set(project.id),
+                fingerprint_hash: Set(format!("fp-{}", i)),
+                timestamp: Set(now - Duration::hours((i + 1) as i64)),
+                exception_type: Set("TypeError".to_string()),
+                exception_value: Set(Some("undefined is not a function".to_string())),
+                source: Set(Some("custom".to_string())),
+                visitor_id: Set(Some(if i < 2 {
+                    visitor_ids[0]
+                } else {
+                    visitor_ids[1]
+                })),
+                created_at: Set(now - Duration::hours((i + 1) as i64)),
+                ..Default::default()
+            };
+            event.insert(test_db.connection()).await.unwrap();
+        }
+
+        let errors = service
+            .aggregate_error_data(week_start, now)
+            .await
+            .expect("Failed to aggregate error data");
+
+        assert_eq!(errors.total_errors, 3);
+        assert_eq!(errors.new_error_types, 1);
+        assert_eq!(errors.affected_users, 2);
+        assert_eq!(errors.most_common_errors.len(), 1);
+        assert_eq!(errors.most_common_errors[0].count, 3);
+        // No health checks recorded → 100% uptime, not a fabricated value.
+        assert_eq!(errors.uptime_percentage, 100.0);
+
+        test_db.cleanup_all_tables().await.expect("Cleanup failed");
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_error_data_uptime_from_health_checks() {
+        use temps_entities::{external_service_health_checks as hc, external_services};
+
+        let (service, test_db) = setup_test_service().await;
+
+        let now = Utc::now();
+        let week_start = now - Duration::days(7);
+
+        // Health checks have an FK to external_services — create one first.
+        let svc = external_services::ActiveModel {
+            name: Set("test-postgres".to_string()),
+            service_type: Set("postgres".to_string()),
+            status: Set("running".to_string()),
+            topology: Set("standalone".to_string()),
+            consecutive_health_failures: Set(0),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let svc = svc.insert(test_db.connection()).await.unwrap();
+
+        // 8 operational + 2 down = 80% uptime, 2 failed checks.
+        for i in 0..10 {
+            let status = if i < 8 { "operational" } else { "down" };
+            let check = hc::ActiveModel {
+                service_id: Set(svc.id),
+                checked_at: Set(now - Duration::hours((i + 1) as i64)),
+                status: Set(status.to_string()),
+                response_time_ms: Set(Some(100)),
+                error_message: Set(None),
+                ..Default::default()
+            };
+            check.insert(test_db.connection()).await.unwrap();
+        }
+
+        let errors = service
+            .aggregate_error_data(week_start, now)
+            .await
+            .expect("Failed to aggregate error data");
+
+        assert!((errors.uptime_percentage - 80.0).abs() < 0.01);
+        assert_eq!(errors.failed_health_checks, 2);
+
+        test_db.cleanup_all_tables().await.expect("Cleanup failed");
+    }
+
+    // ── Funnel aggregation ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_aggregate_funnel_data_empty() {
+        let (service, test_db) = setup_test_service().await;
+
+        let now = Utc::now();
+        let week_start = now - Duration::days(7);
+
+        let funnels = service
+            .aggregate_funnel_data(week_start, now)
+            .await
+            .expect("Failed to aggregate funnel data");
+
+        assert_eq!(funnels.total_funnels, 0);
+        assert!(funnels.funnel_stats.is_empty());
+
+        test_db.cleanup_all_tables().await.expect("Cleanup failed");
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_funnel_data_with_conversions() {
+        use temps_entities::{funnel_steps, funnels};
+
+        let (service, test_db) = setup_test_service().await;
+
+        let now = Utc::now();
+        let week_start = now - Duration::days(7);
+
+        let project = projects::ActiveModel {
+            name: Set("funnel-project".to_string()),
+            slug: Set("funnel-project".to_string()),
+            repo_name: Set("funnel-repo".to_string()),
+            repo_owner: Set("funnel-owner".to_string()),
+            directory: Set("/".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::Astro),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let project = project.insert(test_db.connection()).await.unwrap();
+
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("production".to_string()),
+            slug: Set("production".to_string()),
+            subdomain: Set("production".to_string()),
+            host: Set("production.example.com".to_string()),
+            upstreams: Set(temps_entities::upstream_config::UpstreamList::default()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let environment = environment.insert(test_db.connection()).await.unwrap();
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set("deploy-funnel".to_string()),
+            state: Set("completed".to_string()),
+            metadata: Set(Some(Default::default())),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let deployment = deployment.insert(test_db.connection()).await.unwrap();
+
+        // Funnel: signup_started → signup_completed.
+        let funnel = funnels::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("Signup".to_string()),
+            description: Set(None),
+            is_active: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let funnel = funnel.insert(test_db.connection()).await.unwrap();
+
+        for (order, event_name) in [(1, "signup_started"), (2, "signup_completed")] {
+            let step = funnel_steps::ActiveModel {
+                funnel_id: Set(funnel.id),
+                step_order: Set(order),
+                event_name: Set(event_name.to_string()),
+                event_filter: Set(None),
+                created_at: Set(now),
+                ..Default::default()
+            };
+            step.insert(test_db.connection()).await.unwrap();
+        }
+
+        // Helper to insert a custom event for a session.
+        let insert_event =
+            |session: &str, event_name: &str, ts: DateTime<Utc>| events::ActiveModel {
+                timestamp: Set(ts),
+                project_id: Set(project.id),
+                environment_id: Set(Some(environment.id)),
+                deployment_id: Set(Some(deployment.id)),
+                session_id: Set(Some(session.to_string())),
+                hostname: Set("example.com".to_string()),
+                pathname: Set("/".to_string()),
+                page_path: Set("/".to_string()),
+                href: Set("https://example.com/".to_string()),
+                event_type: Set("custom".to_string()),
+                event_name: Set(Some(event_name.to_string())),
+                is_crawler: Set(false),
+                ..Default::default()
+            };
+
+        // 4 sessions enter, 3 of them complete this week. Events are placed
+        // strictly inside the window — funnel aggregation uses `< week_end`.
+        for i in 0..4 {
+            let sid = format!("s{}", i);
+            let ts = now - Duration::hours((i + 1) as i64);
+            insert_event(&sid, "signup_started", ts)
+                .insert(test_db.connection())
+                .await
+                .unwrap();
+            if i < 3 {
+                insert_event(&sid, "signup_completed", ts)
+                    .insert(test_db.connection())
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let funnel_data = service
+            .aggregate_funnel_data(week_start, now)
+            .await
+            .expect("Failed to aggregate funnel data");
+
+        assert_eq!(funnel_data.total_funnels, 1);
+        assert_eq!(funnel_data.funnel_stats.len(), 1);
+        let stat = &funnel_data.funnel_stats[0];
+        assert_eq!(stat.funnel_name, "Signup");
+        assert_eq!(stat.total_entries, 4);
+        assert_eq!(stat.total_completions, 3);
+        assert!((stat.completion_rate - 75.0).abs() < 0.01);
+        assert!((stat.drop_off_rate - 25.0).abs() < 0.01);
+
+        test_db.cleanup_all_tables().await.expect("Cleanup failed");
+    }
+
+    // ── Performance detail aggregation ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_aggregate_performance_top_pages_and_bounce() {
+        let (service, test_db) = setup_test_service().await;
+
+        let now = Utc::now();
+        let week_start = now - Duration::days(7);
+
+        let project = projects::ActiveModel {
+            name: Set("perf-project".to_string()),
+            slug: Set("perf-project".to_string()),
+            repo_name: Set("perf-repo".to_string()),
+            repo_owner: Set("perf-owner".to_string()),
+            directory: Set("/".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::Astro),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let project = project.insert(test_db.connection()).await.unwrap();
+
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("production".to_string()),
+            slug: Set("production".to_string()),
+            subdomain: Set("production".to_string()),
+            host: Set("production.example.com".to_string()),
+            upstreams: Set(temps_entities::upstream_config::UpstreamList::default()),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let environment = environment.insert(test_db.connection()).await.unwrap();
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set("deploy-perf".to_string()),
+            state: Set("completed".to_string()),
+            metadata: Set(Some(Default::default())),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let deployment = deployment.insert(test_db.connection()).await.unwrap();
+
+        // 3 sessions: 2 land on /pricing (one bounces), 1 on /docs.
+        let pages = [
+            ("sess-a", "/pricing", true),
+            ("sess-b", "/pricing", false),
+            ("sess-c", "/docs", false),
+        ];
+        for (sid, path, bounce) in pages {
+            let event = events::ActiveModel {
+                timestamp: Set(now - Duration::hours(1)),
+                project_id: Set(project.id),
+                environment_id: Set(Some(environment.id)),
+                deployment_id: Set(Some(deployment.id)),
+                session_id: Set(Some(sid.to_string())),
+                hostname: Set("example.com".to_string()),
+                pathname: Set(path.to_string()),
+                page_path: Set(path.to_string()),
+                href: Set(format!("https://example.com{}", path)),
+                is_entry: Set(true),
+                is_bounce: Set(bounce),
+                event_type: Set("pageview".to_string()),
+                is_crawler: Set(false),
+                ..Default::default()
+            };
+            event.insert(test_db.connection()).await.unwrap();
+        }
+
+        let perf = service
+            .aggregate_performance_data(week_start, now)
+            .await
+            .expect("Failed to aggregate performance data");
+
+        // Top pages: /pricing has 2 views, /docs has 1.
+        assert_eq!(perf.top_pages.len(), 2);
+        assert_eq!(perf.top_pages[0].path, "/pricing");
+        assert_eq!(perf.top_pages[0].views, 2);
+        // Bounce rate: 1 of 3 sessions bounced.
+        assert!((perf.bounce_rate - 33.33).abs() < 0.1);
 
         test_db.cleanup_all_tables().await.expect("Cleanup failed");
     }
