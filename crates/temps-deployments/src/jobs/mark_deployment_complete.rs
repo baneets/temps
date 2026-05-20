@@ -506,15 +506,12 @@ impl MarkDeploymentCompleteJob {
                 routing_inputs.static_dir_location = Set(static_dir.clone());
             }
             if routing_inputs.is_changed() {
-                routing_inputs
-                    .update(self.db.as_ref())
-                    .await
-                    .map_err(|e| {
-                        WorkflowError::JobExecutionFailed(format!(
-                            "Failed to persist deployment routing inputs: {}",
-                            e
-                        ))
-                    })?;
+                routing_inputs.update(self.db.as_ref()).await.map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Failed to persist deployment routing inputs: {}",
+                        e
+                    ))
+                })?;
             }
         }
 
