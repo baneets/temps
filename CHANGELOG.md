@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -
 
 
+## [0.1.0-beta.19] - 2026-05-20
+
+### Added
+- **Manual (non-git) project creation from the CLI**: `bunx @temps-sdk/cli projects create` gains `--manual`, `--source-type` (`manual`, `docker_image`, or `static_files`), `--image`, and `--port` flags so you can create Docker-image and static-files projects without linking a git repository. The git-based flow is unchanged when `--repo` is supplied.
+
+### Fixed
+- **AI Gateway returned 401 for valid API keys**: the OpenAI-compatible endpoints (`/ai/v1/chat/completions`, `/ai/v1/models`, `/ai/v1/embeddings`) were registered via `configure_public_routes`, which mounts on the no-auth router — but the handlers use the `RequireAuth` extractor, which reads the `AuthContext` injected by `auth_middleware`. Since that middleware only runs on the authenticated router, every request 401'd with "Authentication Required" *before* the `tk_` API key was ever validated, so no diagnostic was logged. The gateway routes now register via `configure_routes` alongside the admin/usage/pricing routes, so they sit on the authenticated surface: valid API keys authenticate and the `AiGatewayExecute` permission check runs as intended.
+- **Static deployments were not served until an unrelated route reload**: `mark_deployment_complete` flipped `current_deployment_id` and fired the route-table `NOTIFY` before writing `static_dir_location`/`image_name`, which `load_routes()` reads to build an environment's backend. For static deployments the `NOTIFY` fired while `static_dir_location` was still NULL, so the proxy built a route with no static directory. A new Phase 0 step persists the routing-relevant deployment fields first, so the route table sees a consistent record the moment the `NOTIFY` fires.
+- **Inflated session-engagement and bot traffic in analytics**: auto-fired view events (`page_view`, `page_leave`, `*_viewed`) — which intersection observers trigger for bots too — could mark a session "engaged" on their own. A session now counts as engaged only with ≥10s of measured wall-clock time or a genuine interaction event. Zero-duration session replays (never-finalized single-burst sessions, typically bots) are excluded from replay listings, and user-agent bot detection in the events pipeline is broadened.
+
+
 ## [0.1.0-beta.18] - 2026-05-19
 
 ### Added
