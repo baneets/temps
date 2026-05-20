@@ -61,6 +61,13 @@ impl RateLimiter {
         true
     }
 
+    /// Maximum requests allowed per window per project. This is the value the
+    /// limiter was constructed with (from `TEMPS_OTEL_RATE_LIMIT`), and is the
+    /// single source of truth for the configured limit.
+    pub fn max_requests(&self) -> u32 {
+        self.max_requests
+    }
+
     /// Get current count for a project (for observability).
     pub fn current_count(&self, project_id: i32) -> u32 {
         let counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());

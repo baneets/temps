@@ -84,9 +84,11 @@ impl OtelService {
     /// Check rate limit for a project.
     pub fn check_rate_limit(&self, project_id: i32) -> Result<(), OtelError> {
         if !self.rate_limiter.check_and_increment(project_id) {
+            // Report the limiter's actual configured limit (set via
+            // `TEMPS_OTEL_RATE_LIMIT`) so the error matches reality.
             return Err(OtelError::RateLimitExceeded {
                 project_id,
-                limit: 1000, // TODO: make configurable
+                limit: self.rate_limiter.max_requests(),
             });
         }
         Ok(())
@@ -616,7 +618,12 @@ mod tests {
         assert!(svc.check_rate_limit(1).is_ok());
         assert!(svc.check_rate_limit(1).is_ok());
         let result = svc.check_rate_limit(1);
-        assert!(matches!(result, Err(OtelError::RateLimitExceeded { .. })));
+        // The error must report the limiter's actual configured limit (2),
+        // not a hardcoded value.
+        assert!(matches!(
+            result,
+            Err(OtelError::RateLimitExceeded { limit: 2, .. })
+        ));
     }
 
     #[tokio::test]
