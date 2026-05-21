@@ -23,17 +23,16 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use hickory_proto::op::{Header, ResponseCode};
+use hickory_proto::op::{Header, HeaderCounts, Metadata, ResponseCode};
 use hickory_proto::rr::{Name, Record};
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::Resolver;
-use hickory_server::authority::MessageResponseBuilder;
 use hickory_server::server::{Request, ResponseHandler, ResponseInfo};
+use hickory_server::zone_handler::MessageResponseBuilder;
 use tracing::{trace, warn};
 
-type TokioResolver = Resolver<TokioConnectionProvider>;
+type TokioResolver = Resolver<TokioRuntimeProvider>;
 
 /// Forwards queries that fall outside the internal `temps.local` zone
 /// to the upstream pool. Construct once per agent process and share via
@@ -52,12 +51,13 @@ impl UpstreamResolver {
             return None;
         }
 
-        let mut config = ResolverConfig::new();
+        let mut config = ResolverConfig::default();
         for addr in upstreams {
-            config.add_name_server(NameServerConfig::new(*addr, Protocol::Udp));
-            // TCP fallback for responses too large for UDP (e.g. some
-            // TXT and DNSSEC answers). Same socket address.
-            config.add_name_server(NameServerConfig::new(*addr, Protocol::Tcp));
+            // `NameServerConfig::udp_and_tcp` bundles both a UDP and a TCP
+            // connection for one server — TCP is the fallback for responses
+            // too large for UDP (some TXT / DNSSEC answers). The standard
+            // DNS port (53) is used.
+            config.add_name_server(NameServerConfig::udp_and_tcp(addr.ip()));
         }
 
         let mut opts = ResolverOpts::default();
@@ -69,9 +69,10 @@ impl UpstreamResolver {
         opts.edns0 = true;
         opts.try_tcp_on_error = true;
 
-        let resolver = Resolver::builder_with_config(config, TokioConnectionProvider::default())
+        let resolver = Resolver::builder_with_config(config, TokioRuntimeProvider::default())
             .with_options(opts)
-            .build();
+            .build()
+            .ok()?;
 
         Some(Self { resolver })
     }
@@ -101,7 +102,7 @@ impl UpstreamResolver {
 
         let (records, response_code) = match lookup_result {
             Ok(lookup) => {
-                let recs: Vec<Record> = lookup.record_iter().cloned().collect();
+                let recs: Vec<Record> = lookup.answers().to_vec();
                 trace!(qname = %qname, qtype = ?qtype, answers = recs.len(), "upstream answer");
                 (recs, ResponseCode::NoError)
             }
@@ -134,15 +135,15 @@ impl UpstreamResolver {
         // haven't enumerated yet (HTTPS/SVCB/CAA/…).
         let answers: Vec<&Record> = records.iter().collect();
 
-        let mut header = Header::response_from_request(info.header);
-        header.set_response_code(response_code);
+        let mut metadata = Metadata::response_from_request(info.metadata);
+        metadata.response_code = response_code;
         // We are *not* authoritative for the forwarded zone.
-        header.set_authoritative(false);
-        header.set_recursion_available(true);
+        metadata.authoritative = false;
+        metadata.recursion_available = true;
 
         let builder = MessageResponseBuilder::from_message_request(request);
         let resp = builder.build(
-            header,
+            metadata,
             answers.iter().copied(),
             std::iter::empty::<&Record>(),
             std::iter::empty::<&Record>(),
@@ -160,9 +161,14 @@ impl UpstreamResolver {
 }
 
 fn error_info(request: &Request, code: ResponseCode) -> ResponseInfo {
-    let mut header = Header::response_from_request(request.header());
-    header.set_response_code(code);
-    header.into()
+    // `Request` derefs to `Metadata`; `ResponseInfo` is built from a `Header`.
+    let mut metadata = Metadata::response_from_request(&request.metadata);
+    metadata.response_code = code;
+    Header {
+        metadata,
+        counts: HeaderCounts::default(),
+    }
+    .into()
 }
 
 #[cfg(test)]

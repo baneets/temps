@@ -1,14 +1,16 @@
 //! DNS verification utilities for email records
 
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ResolveHosts, ResolverConfig, ResolverOpts, CLOUDFLARE};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::{RData, RecordType};
+use hickory_resolver::Resolver;
 use tracing::debug;
 
 use crate::providers::DnsRecordStatus;
 
 /// DNS verification service for checking email-related DNS records
 pub struct DnsVerifier {
-    resolver: TokioAsyncResolver,
+    resolver: Resolver<TokioRuntimeProvider>,
 }
 
 impl Default for DnsVerifier {
@@ -22,9 +24,17 @@ impl DnsVerifier {
     pub fn new() -> Self {
         let mut options = ResolverOpts::default();
         options.try_tcp_on_error = true;
-        options.use_hosts_file = false;
+        options.use_hosts_file = ResolveHosts::Never;
 
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::cloudflare(), options);
+        // Building from a static, known-valid config cannot fail in practice;
+        // a failure here means the process environment is fundamentally broken.
+        let resolver = Resolver::builder_with_config(
+            ResolverConfig::udp_and_tcp(&CLOUDFLARE),
+            TokioRuntimeProvider::default(),
+        )
+        .with_options(options)
+        .build()
+        .expect("failed to build DNS resolver from static Cloudflare config");
 
         Self { resolver }
     }
@@ -35,9 +45,12 @@ impl DnsVerifier {
 
         match self.resolver.txt_lookup(name).await {
             Ok(lookup) => {
-                for record in lookup.iter() {
-                    let txt_data: String = record
-                        .txt_data()
+                for record in lookup.answers() {
+                    let RData::TXT(txt) = &record.data else {
+                        continue;
+                    };
+                    let txt_data: String = txt
+                        .txt_data
                         .iter()
                         .map(|data| String::from_utf8_lossy(data).to_string())
                         .collect();
@@ -76,14 +89,10 @@ impl DnsVerifier {
     pub async fn verify_cname_record(&self, name: &str, expected_value: &str) -> DnsRecordStatus {
         debug!("Verifying CNAME record: {} -> {}", name, expected_value);
 
-        match self
-            .resolver
-            .lookup(name, hickory_resolver::proto::rr::RecordType::CNAME)
-            .await
-        {
+        match self.resolver.lookup(name, RecordType::CNAME).await {
             Ok(lookup) => {
-                for record in lookup.iter() {
-                    if let Some(cname) = record.as_cname() {
+                for record in lookup.answers() {
+                    if let RData::CNAME(cname) = &record.data {
                         let cname_str = cname.to_string();
                         debug!("Found CNAME record: {}", cname_str);
 
@@ -124,9 +133,12 @@ impl DnsVerifier {
 
         match self.resolver.mx_lookup(name).await {
             Ok(lookup) => {
-                for record in lookup.iter() {
-                    let exchange = record.exchange().to_string();
-                    let priority = record.preference();
+                for record in lookup.answers() {
+                    let RData::MX(mx) = &record.data else {
+                        continue;
+                    };
+                    let exchange = mx.exchange.to_string();
+                    let priority = mx.preference;
 
                     debug!("Found MX record: {} (priority: {})", exchange, priority);
 
@@ -168,9 +180,12 @@ impl DnsVerifier {
 
         match self.resolver.txt_lookup(domain).await {
             Ok(lookup) => {
-                for record in lookup.iter() {
-                    let txt_data: String = record
-                        .txt_data()
+                for record in lookup.answers() {
+                    let RData::TXT(txt) = &record.data else {
+                        continue;
+                    };
+                    let txt_data: String = txt
+                        .txt_data
                         .iter()
                         .map(|data| String::from_utf8_lossy(data).to_string())
                         .collect();

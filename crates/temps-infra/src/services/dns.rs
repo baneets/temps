@@ -1,6 +1,7 @@
 use anyhow::Result;
 use hickory_resolver::config::*;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::Resolver;
 
 /// Result of a DNS A record lookup
 #[derive(Debug, Clone)]
@@ -28,21 +29,25 @@ impl DnsService {
     }
 
     /// Create a fresh resolver with no caching
-    async fn create_resolver(&self) -> Result<(TokioAsyncResolver, Vec<String>)> {
+    async fn create_resolver(&self) -> Result<(Resolver<TokioRuntimeProvider>, Vec<String>)> {
         let config = ResolverConfig::default();
         let mut opts = ResolverOpts::default();
 
         // Disable caching to get fresh data
         opts.cache_size = 0;
-        opts.use_hosts_file = false;
+        opts.use_hosts_file = ResolveHosts::Never;
 
-        let resolver = TokioAsyncResolver::tokio(config.clone(), opts);
+        let resolver =
+            Resolver::builder_with_config(config.clone(), TokioRuntimeProvider::default())
+                .with_options(opts)
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build DNS resolver: {}", e))?;
 
-        // Extract DNS server addresses
+        // Extract DNS server addresses (hickory 0.26: NameServerConfig.ip).
         let dns_servers: Vec<String> = config
             .name_servers()
             .iter()
-            .map(|ns| ns.socket_addr.ip().to_string())
+            .map(|ns| ns.ip.to_string())
             .collect();
 
         Ok((resolver, dns_servers))
@@ -50,15 +55,26 @@ impl DnsService {
 
     /// Lookup A records for a domain name with fresh data
     pub async fn lookup_a_records(&self, domain: &str) -> Result<DnsLookupResult> {
+        use hickory_resolver::proto::rr::{RData, RecordType};
+
         // Create a fresh resolver for each lookup (no caching)
         let (resolver, dns_servers) = self.create_resolver().await?;
 
+        // Generic `lookup` returns a `Lookup`; pull the A rdata out of each
+        // answer record (hickory 0.26 — record.data is the typed RData).
         let response = resolver
-            .ipv4_lookup(domain)
+            .lookup(domain, RecordType::A)
             .await
             .map_err(|e| anyhow::anyhow!("DNS lookup failed: {}", e))?;
 
-        let records: Vec<String> = response.iter().map(|ip| ip.to_string()).collect();
+        let records: Vec<String> = response
+            .answers()
+            .iter()
+            .filter_map(|record| match &record.data {
+                RData::A(a) => Some(a.0.to_string()),
+                _ => None,
+            })
+            .collect();
 
         Ok(DnsLookupResult {
             records,

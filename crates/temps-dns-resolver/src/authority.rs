@@ -18,11 +18,12 @@
 
 use std::sync::Arc;
 
-use hickory_proto::op::{Header, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Header, HeaderCounts, Metadata, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A as RDataA, AAAA as RDataAAAA, CNAME as RDataCNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
-use hickory_server::authority::MessageResponseBuilder;
+use hickory_server::net::runtime::Time;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use hickory_server::zone_handler::MessageResponseBuilder;
 use std::net::IpAddr;
 use std::str::FromStr;
 use tracing::{debug, trace, warn};
@@ -62,7 +63,7 @@ fn is_internal_zone(qname: &str) -> bool {
 
 #[async_trait::async_trait]
 impl RequestHandler for ZoneAuthority {
-    async fn handle_request<R: ResponseHandler>(
+    async fn handle_request<R: ResponseHandler, T: Time>(
         &self,
         request: &Request,
         mut response_handle: R,
@@ -76,12 +77,12 @@ impl RequestHandler for ZoneAuthority {
         };
 
         // Only standard queries are supported.
-        if info.header.op_code() != OpCode::Query
-            || info.header.message_type() != MessageType::Query
+        if info.metadata.op_code != OpCode::Query
+            || info.metadata.message_type != MessageType::Query
         {
             trace!(
-                op = ?info.header.op_code(),
-                ty = ?info.header.message_type(),
+                op = ?info.metadata.op_code,
+                ty = ?info.metadata.message_type,
                 "rejecting non-Query DNS message"
             );
             return reply_error(request, &mut response_handle, ResponseCode::NotImp).await;
@@ -139,7 +140,7 @@ impl RequestHandler for ZoneAuthority {
             if any_match {
                 // NODATA: name exists, just not for this qtype. Reply
                 // NoError with no answer rrs and the AA bit set.
-                return reply_nodata(request, &mut response_handle, info.header).await;
+                return reply_nodata(request, &mut response_handle, info.metadata).await;
             }
             // Genuine NXDOMAIN.
             return reply_error(request, &mut response_handle, ResponseCode::NXDomain).await;
@@ -158,13 +159,13 @@ impl RequestHandler for ZoneAuthority {
             return reply_error(request, &mut response_handle, ResponseCode::ServFail).await;
         }
 
-        let mut header = Header::response_from_request(info.header);
-        header.set_authoritative(true);
-        header.set_response_code(ResponseCode::NoError);
+        let mut metadata = Metadata::response_from_request(info.metadata);
+        metadata.authoritative = true;
+        metadata.response_code = ResponseCode::NoError;
 
         let builder = MessageResponseBuilder::from_message_request(request);
         let resp = builder.build(
-            header,
+            metadata,
             answers.iter(),
             std::iter::empty::<&Record>(),
             std::iter::empty::<&Record>(),
@@ -235,7 +236,8 @@ async fn reply_error<R: ResponseHandler>(
     code: ResponseCode,
 ) -> ResponseInfo {
     let builder = MessageResponseBuilder::from_message_request(request);
-    let resp = builder.error_msg(request.header(), code);
+    // `Request` derefs to `Metadata`; `error_msg` wants `&Metadata`.
+    let resp = builder.error_msg(&request.metadata, code);
     match response_handle.send_response(resp).await {
         Ok(info) => info,
         Err(e) => {
@@ -253,15 +255,15 @@ async fn reply_error<R: ResponseHandler>(
 async fn reply_nodata<R: ResponseHandler>(
     request: &Request,
     response_handle: &mut R,
-    request_header: &Header,
+    request_metadata: &Metadata,
 ) -> ResponseInfo {
-    let mut header = Header::response_from_request(request_header);
-    header.set_authoritative(true);
-    header.set_response_code(ResponseCode::NoError);
+    let mut metadata = Metadata::response_from_request(request_metadata);
+    metadata.authoritative = true;
+    metadata.response_code = ResponseCode::NoError;
 
     let builder = MessageResponseBuilder::from_message_request(request);
     let resp = builder.build(
-        header,
+        metadata,
         std::iter::empty::<&Record>(),
         std::iter::empty::<&Record>(),
         std::iter::empty::<&Record>(),
@@ -277,9 +279,15 @@ async fn reply_nodata<R: ResponseHandler>(
 }
 
 fn error_info(request: &Request, code: ResponseCode) -> ResponseInfo {
-    let mut header = Header::response_from_request(request.header());
-    header.set_response_code(code);
-    header.into()
+    // `Request` derefs to `Metadata`; build a fresh response Header from it.
+    // `ResponseInfo` is constructed from a `Header` (Metadata + record counts).
+    let mut metadata = Metadata::response_from_request(&request.metadata);
+    metadata.response_code = code;
+    Header {
+        metadata,
+        counts: HeaderCounts::default(),
+    }
+    .into()
 }
 
 #[cfg(test)]

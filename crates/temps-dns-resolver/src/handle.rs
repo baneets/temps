@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_server::ServerFuture;
+use hickory_server::server::Server;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -71,7 +71,7 @@ impl ResolverHandle {
         if let Some(upstream) = upstream {
             authority = authority.with_upstream(upstream);
         }
-        let mut server = ServerFuture::new(authority);
+        let mut server = Server::new(authority);
 
         for addr in &config.listen_addrs {
             let udp =
@@ -90,7 +90,9 @@ impl ResolverHandle {
                         addr: *addr,
                         source,
                     })?;
-            server.register_listener(tcp, TCP_IDLE_TIMEOUT);
+            // 65535 = the maximum DNS-over-TCP message size (2-byte length
+            // prefix), so a single response never has to be split.
+            server.register_listener(tcp, TCP_IDLE_TIMEOUT, u16::MAX as usize);
             info!(%addr, "DNS resolver listening (UDP + TCP)");
         }
 
