@@ -2,8 +2,9 @@
 
 use async_trait::async_trait;
 use bollard::{
-    models::ContainerInspectResponse, query_parameters::ListContainersOptions,
-    secret::RestartPolicyNameEnum, Docker,
+    models::{ContainerInspectResponse, RestartPolicyNameEnum},
+    query_parameters::ListContainersOptions,
+    Docker,
 };
 use std::{collections::HashMap, sync::Arc};
 use temps_import_types::{
