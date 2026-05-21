@@ -387,6 +387,9 @@ pub mod proxy_tests {
 
     #[tokio::test]
     async fn test_proxy_visitor_management() -> Result<()> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+        use temps_entities::{deployments, environments, projects};
+
         let test_db_mock = TestDatabase::with_migrations().await.unwrap();
         let test_db = TestDBMockOperations::new(test_db_mock.connection_arc().clone())
             .await
@@ -399,18 +402,64 @@ pub mod proxy_tests {
         let visitor_manager =
             VisitorManagerImpl::new(test_db.db.clone(), crypto.clone(), ip_service);
 
+        // A visitor row has non-nullable project_id / environment_id, so
+        // get_or_create_visitor requires a real ProjectContext — create one.
+        let project = projects::ActiveModel {
+            slug: Set("visitor-mgmt-test".to_string()),
+            name: Set("Visitor Mgmt Test".to_string()),
+            repo_name: Set("visitor-app".to_string()),
+            repo_owner: Set("test-org".to_string()),
+            directory: Set("".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::Vite),
+            ..Default::default()
+        }
+        .insert(test_db.db.as_ref())
+        .await?;
+
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            slug: Set("production".to_string()),
+            name: Set("Production".to_string()),
+            subdomain: Set("visitor-app".to_string()),
+            host: Set("visitor-app.example.com".to_string()),
+            upstreams: Set(temps_entities::upstream_config::UpstreamList::default()),
+            ..Default::default()
+        }
+        .insert(test_db.db.as_ref())
+        .await?;
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set("deploy-visitor-test".to_string()),
+            state: Set("deployed".to_string()),
+            metadata: Set(Some(Default::default())),
+            ..Default::default()
+        }
+        .insert(test_db.db.as_ref())
+        .await?;
+
+        let context = ProjectContext {
+            project: Arc::new(project),
+            environment: Arc::new(environment),
+            deployment: Arc::new(deployment),
+        };
+
         // Test visitor creation
         let attribution = crate::traits::FirstVisitAttribution::default();
         let visitor = visitor_manager
             .get_or_create_visitor(
                 None, // No existing cookie
-                None, // No project context
+                Some(&context),
                 "Mozilla/5.0 (test)",
                 Some("127.0.0.1"),
                 &attribution,
             )
             .await
-            .map_err(|_| anyhow::anyhow!("Failed to get or create visitor"))?;
+            // Surface the real error instead of swallowing it, so a future
+            // failure here is diagnosable.
+            .map_err(|e| anyhow::anyhow!("Failed to get or create visitor: {e}"))?;
 
         assert!(!visitor.visitor_id.is_empty());
         assert!(!visitor.is_crawler);
@@ -427,48 +476,111 @@ pub mod proxy_tests {
         assert!(cookie.contains("HttpOnly"));
 
         // Test bot detection
-        let bot_visitor = convert_send_sync_error(
-            visitor_manager
-                .get_or_create_visitor(None, None, "Googlebot/2.1", Some("127.0.0.1"), &attribution)
-                .await,
-        )?;
+        let bot_visitor = visitor_manager
+            .get_or_create_visitor(
+                None,
+                Some(&context),
+                "Googlebot/2.1",
+                Some("127.0.0.1"),
+                &attribution,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get or create bot visitor: {e}"))?;
 
         assert!(bot_visitor.is_crawler);
         assert!(bot_visitor.crawler_name.is_some());
+
+        // A request with no project context must be rejected, not silently
+        // create an orphan visitor.
+        let no_context = visitor_manager
+            .get_or_create_visitor(
+                None,
+                None,
+                "Mozilla/5.0 (test)",
+                Some("127.0.0.1"),
+                &attribution,
+            )
+            .await;
+        assert!(
+            no_context.is_err(),
+            "visitor creation without project context must fail"
+        );
 
         // Note: Using shared database, so we don't cleanup individual test data
         Ok(())
     }
 
     #[tokio::test]
-    #[ignore] // TODO: Fix foreign key constraint - needs visitor record creation before session
     async fn test_proxy_session_management() -> Result<()> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+        use temps_entities::{environments, projects, visitor as visitor_entity};
+
         let _server_config = ProxyConfig::default();
         let crypto = create_crypto_cookie_crypto();
         let test_db_mock = TestDatabase::with_migrations().await.unwrap();
-        let session_manager =
-            SessionManagerImpl::new(test_db_mock.connection_arc().clone(), crypto.clone());
+        let db = test_db_mock.connection_arc().clone();
+        let session_manager = SessionManagerImpl::new(db.clone(), crypto.clone());
+
+        // request_sessions.visitor_id has an FK to `visitor`, which in turn
+        // requires a project + environment — create the full chain so the
+        // session insert has a real visitor row to reference.
+        let project = projects::ActiveModel {
+            slug: Set("session-mgmt-test".to_string()),
+            name: Set("Session Mgmt Test".to_string()),
+            repo_name: Set("session-app".to_string()),
+            repo_owner: Set("test-org".to_string()),
+            directory: Set("".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::Vite),
+            ..Default::default()
+        }
+        .insert(db.as_ref())
+        .await?;
+
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            slug: Set("production".to_string()),
+            name: Set("Production".to_string()),
+            subdomain: Set("session-app".to_string()),
+            host: Set("session-app.example.com".to_string()),
+            upstreams: Set(temps_entities::upstream_config::UpstreamList::default()),
+            ..Default::default()
+        }
+        .insert(db.as_ref())
+        .await?;
+
+        let visitor_row = visitor_entity::ActiveModel {
+            visitor_id: Set("test-visitor-123".to_string()),
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            first_seen: Set(chrono::Utc::now()),
+            last_seen: Set(chrono::Utc::now()),
+            is_crawler: Set(false),
+            has_activity: Set(true),
+            ..Default::default()
+        }
+        .insert(db.as_ref())
+        .await?;
 
         let visitor = Visitor {
-            visitor_id: "test-visitor-123".to_string(),
-            visitor_id_i32: 123,
+            visitor_id: visitor_row.visitor_id.clone(),
+            visitor_id_i32: visitor_row.id,
             is_crawler: false,
             crawler_name: None,
         };
 
         // Test session creation
-        let session = convert_send_sync_error(
-            session_manager
-                .get_or_create_session(
-                    None, // No existing cookie
-                    &visitor,
-                    None, // No project context
-                    Some("https://example.com"),
-                    None, // No query string
-                    None, // No current hostname
-                )
-                .await,
-        )?;
+        let session = session_manager
+            .get_or_create_session(
+                None, // No existing cookie
+                &visitor,
+                None, // No project context
+                Some("https://example.com"),
+                None, // No query string
+                None, // No current hostname
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get or create session: {e}"))?;
 
         assert!(!session.session_id.is_empty());
         assert_eq!(session.visitor_id_i32, visitor.visitor_id_i32);
