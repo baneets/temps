@@ -247,6 +247,75 @@ impl AuditOperation for ExternalServiceBackupRunAudit {
     }
 }
 
+/// Audit record emitted when external services are attached to a backup
+/// schedule via `POST /api/backups/schedules/{id}/services`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleServicesAttachedAudit {
+    pub context: AuditContext,
+    pub schedule_id: i32,
+    /// IDs that the caller requested be attached (after dedup).
+    pub requested_service_ids: Vec<i32>,
+    /// Number of rows actually inserted (post `ON CONFLICT DO NOTHING`).
+    pub inserted_count: u64,
+}
+
+impl AuditOperation for ScheduleServicesAttachedAudit {
+    fn operation_type(&self) -> String {
+        "BACKUP_SCHEDULE_SERVICES_ATTACHED".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
+/// Audit record emitted when an external service is detached from a backup
+/// schedule via `DELETE /api/backups/schedules/{id}/services/{service_id}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScheduleServiceDetachedAudit {
+    pub context: AuditContext,
+    pub schedule_id: i32,
+    pub service_id: i32,
+    /// Whether a row was actually removed (false ⇒ idempotent no-op).
+    pub removed: bool,
+}
+
+impl AuditOperation for ScheduleServiceDetachedAudit {
+    fn operation_type(&self) -> String {
+        "BACKUP_SCHEDULE_SERVICE_DETACHED".to_string()
+    }
+
+    fn user_id(&self) -> i32 {
+        self.context.user_id
+    }
+
+    fn ip_address(&self) -> Option<String> {
+        self.context.ip_address.clone()
+    }
+
+    fn user_agent(&self) -> &str {
+        &self.context.user_agent
+    }
+
+    fn serialize(&self) -> Result<String> {
+        serde_json::to_string(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize audit operation {}", e))
+    }
+}
+
 /// Audit record emitted when an operator triggers an immediate (manual) run of
 /// a backup schedule via `POST /api/backups/schedules/{id}/run`.
 #[derive(Debug, Clone, Serialize)]

@@ -1408,6 +1408,15 @@ WHERE project_id = $1
         let utm_campaign = utm_params.utm_campaign;
         let utm_term = utm_params.utm_term;
         let utm_content = utm_params.utm_content;
+
+        // Parse user agent up front: the bot flag is needed both for the
+        // visitor record (so live-visitor lists can exclude crawlers) and the
+        // event row (so analytics read filters on `is_crawler` work).
+        let parsed_ua =
+            crate::services::user_agent::ParsedUserAgent::from_user_agent(user_agent.as_deref());
+        let is_crawler = parsed_ua.is_bot();
+        let crawler_name = parsed_ua.crawler_name();
+
         // Get visitor from visitor_id from visitors table
         // Convert visitor_id (String) to Option<i32> by looking up the visitor in the database
         let visitor_id_i32 = if let Some(ref visitor_id) = visitor_id {
@@ -1433,6 +1442,11 @@ WHERE project_id = $1
                 if !v.has_activity {
                     active_visitor.has_activity = sea_orm::ActiveValue::Set(true);
                 }
+                // Flag the visitor as a crawler once any bot-UA event is seen.
+                // Only escalate (false -> true), never clear it.
+                if is_crawler && !v.is_crawler {
+                    active_visitor.is_crawler = sea_orm::ActiveValue::Set(true);
+                }
                 let _ = active_visitor.update(self.db.as_ref()).await;
             }
 
@@ -1441,9 +1455,7 @@ WHERE project_id = $1
             None
         };
 
-        // Parse user agent for browser/OS info
-        let parsed_ua =
-            crate::services::user_agent::ParsedUserAgent::from_user_agent(user_agent.as_deref());
+        // Browser/OS fields from the user agent parsed above.
         let browser = parsed_ua.browser;
         let browser_version = parsed_ua.browser_version;
         let operating_system = parsed_ua.operating_system;
@@ -1496,7 +1508,8 @@ WHERE project_id = $1
             is_entry: Set(false),
             is_exit: Set(false),
             is_bounce: Set(false),
-            is_crawler: Set(false),
+            is_crawler: Set(is_crawler),
+            crawler_name: Set(crawler_name),
             ..Default::default()
         };
 
@@ -2542,5 +2555,190 @@ mod tests {
         println!("   - All hourly buckets present (including gaps)");
         println!("   - Counts accurate for existing data");
         println!("   - Zero counts for missing hours");
+    }
+
+    /// Verifies that `record_event` persists the bot/crawler classification
+    /// derived from the User-Agent: a bot UA sets `is_crawler = true` with a
+    /// `crawler_name`, while a real browser UA leaves `is_crawler = false`.
+    #[tokio::test]
+    async fn test_record_event_persists_crawler_flag() {
+        use sea_orm::{ActiveModelTrait, Set};
+        use temps_database::test_utils::TestDatabase;
+        use temps_entities::{
+            deployments, environments, projects, source_type::SourceType,
+            upstream_config::UpstreamList,
+        };
+
+        let test_db: TestDatabase = match TestDatabase::with_migrations().await {
+            Ok(db) => db,
+            Err(e) => {
+                println!("Database not available, skipping test: {}", e);
+                return;
+            }
+        };
+        let db = test_db.connection_arc();
+
+        let project = projects::ActiveModel {
+            name: Set("crawler-test".to_string()),
+            repo_name: Set("test-repo".to_string()),
+            repo_owner: Set("test-owner".to_string()),
+            directory: Set("/".to_string()),
+            main_branch: Set("main".to_string()),
+            preset: Set(temps_entities::preset::Preset::NextJs),
+            preset_config: Set(None),
+            deployment_config: Set(None),
+            slug: Set("crawler-test".to_string()),
+            is_deleted: Set(false),
+            deleted_at: Set(None),
+            last_deployment: Set(None),
+            is_public_repo: Set(false),
+            git_url: Set(None),
+            git_provider_connection_id: Set(None),
+            attack_mode: Set(false),
+            enable_preview_environments: Set(false),
+            source_type: Set(SourceType::Git),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db.as_ref())
+        .await
+        .expect("Failed to insert test project");
+
+        let environment = environments::ActiveModel {
+            project_id: Set(project.id),
+            name: Set("production".to_string()),
+            branch: Set(Some("main".to_string())),
+            slug: Set("production".to_string()),
+            subdomain: Set("prod".to_string()),
+            host: Set(String::new()),
+            upstreams: Set(UpstreamList::new()),
+            is_preview: Set(false),
+            current_deployment_id: Set(None),
+            deleted_at: Set(None),
+            deployment_config: Set(None),
+            last_deployment: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db.as_ref())
+        .await
+        .expect("Failed to insert test environment");
+
+        let deployment = deployments::ActiveModel {
+            project_id: Set(project.id),
+            environment_id: Set(environment.id),
+            slug: Set(format!("test-deploy-{}", uuid::Uuid::new_v4())),
+            state: Set("ready".to_string()),
+            metadata: Set(Some(deployments::DeploymentMetadata::default())),
+            deploying_at: Set(None),
+            ready_at: Set(Some(chrono::Utc::now())),
+            started_at: Set(Some(chrono::Utc::now())),
+            finished_at: Set(Some(chrono::Utc::now())),
+            context_vars: Set(None),
+            branch_ref: Set(Some("main".to_string())),
+            tag_ref: Set(None),
+            commit_sha: Set(None),
+            commit_message: Set(None),
+            commit_author: Set(None),
+            commit_json: Set(None),
+            cancelled_reason: Set(None),
+            static_dir_location: Set(None),
+            screenshot_location: Set(None),
+            image_name: Set(None),
+            deployment_config: Set(None),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(db.as_ref())
+        .await
+        .expect("Failed to insert test deployment");
+
+        let service = AnalyticsEventsService::new(db.clone());
+
+        // A bot UA must be flagged as a crawler with a matched name.
+        let bot_ua = "Mozilla/5.0 (compatible; ClaudeBot/1.0; +claudebot@anthropic.com)";
+        let bot_event = service
+            .record_event(
+                project.id,
+                Some(environment.id),
+                Some(deployment.id),
+                Some("bot-session".to_string()),
+                None,
+                "page_view",
+                serde_json::json!({}),
+                "/blog/bot-test",
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(bot_ua.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to record bot event");
+
+        assert!(bot_event.is_crawler, "bot UA should set is_crawler = true");
+        assert_eq!(
+            bot_event.crawler_name,
+            Some("claudebot".to_string()),
+            "bot UA should record the matched crawler name"
+        );
+
+        // A real browser UA must not be flagged.
+        let human_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                         AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+        let human_event = service
+            .record_event(
+                project.id,
+                Some(environment.id),
+                Some(deployment.id),
+                Some("human-session".to_string()),
+                None,
+                "page_view",
+                serde_json::json!({}),
+                "/blog/human-test",
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(human_ua.to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("Failed to record human event");
+
+        assert!(
+            !human_event.is_crawler,
+            "real browser UA should leave is_crawler = false"
+        );
+        assert_eq!(
+            human_event.crawler_name, None,
+            "real browser UA should have no crawler name"
+        );
+
+        println!("✅ record_event crawler-flag persistence test passed!");
     }
 }

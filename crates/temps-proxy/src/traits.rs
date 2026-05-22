@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use pingora_core::{upstreams::peer::HttpPeer, Result as PingoraResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use temps_core::UtcDateTime;
 use temps_entities::{deployments, environments, projects};
 
 /// Context information about a request's project, environment, and deployment
@@ -29,31 +28,6 @@ pub struct Session {
     pub session_id_i32: i32,
     pub visitor_id_i32: i32,
     pub is_new_session: bool,
-}
-
-/// Request metadata for logging
-#[derive(Debug, Clone, Serialize)]
-pub struct RequestLogData {
-    pub request_id: String,
-    pub host: String,
-    pub method: String,
-    pub path: String,
-    pub status_code: i32,
-    pub user_agent: String,
-    pub referrer: Option<String>,
-    pub ip_address: Option<String>,
-    pub started_at: UtcDateTime,
-    pub finished_at: UtcDateTime,
-    pub request_headers: serde_json::Value,
-    pub response_headers: serde_json::Value,
-    pub visitor: Option<Visitor>,
-    pub session: Option<Session>,
-    pub project_context: Option<ProjectContext>,
-    /// W3C `traceparent` trace_id (32 hex chars) extracted from the inbound
-    /// request headers when present. Stamped onto `proxy_logs.trace_id` so
-    /// the unified Observe view can correlate this request with its child
-    /// spans, runtime logs, and any captured exceptions.
-    pub trace_id: Option<String>,
 }
 
 /// Cookie configuration for visitor/session tracking
@@ -110,29 +84,6 @@ pub trait UpstreamResolver: Send + Sync {
 
     /// Get load balancing strategy for a host (for future use)
     async fn get_lb_strategy(&self, host: &str) -> Option<String>;
-}
-
-/// Trait for logging request/response data
-#[async_trait]
-pub trait RequestLogger: Send + Sync {
-    /// Log a completed request with all metadata
-    async fn log_request(
-        &self,
-        data: RequestLogData,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    /// Log an error that occurred during request processing
-    async fn log_error(
-        &self,
-        request_id: &str,
-        host: &str,
-        path: &str,
-        error: &str,
-        context: Option<&ProjectContext>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-    /// Check if logging is enabled for a specific project/environment
-    async fn should_log_request(&self, context: Option<&ProjectContext>) -> bool;
 }
 
 /// Trait for resolving project context from request information

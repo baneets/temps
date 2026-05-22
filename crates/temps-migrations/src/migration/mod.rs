@@ -95,6 +95,9 @@ mod m20260516_000001_create_schedule_runs;
 mod m20260517_000001_add_health_metadata_to_external_services;
 mod m20260517_000002_drop_backup_jobs;
 mod m20260518_000001_drop_backups_last_heartbeat_at;
+mod m20260519_000001_create_backup_schedule_services;
+mod m20260519_000002_add_target_all_services;
+mod m20260519_000003_add_include_control_plane;
 
 pub struct Migrator;
 
@@ -193,6 +196,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260517_000001_add_health_metadata_to_external_services::Migration),
             Box::new(m20260517_000002_drop_backup_jobs::Migration),
             Box::new(m20260518_000001_drop_backups_last_heartbeat_at::Migration),
+            Box::new(m20260519_000001_create_backup_schedule_services::Migration),
+            Box::new(m20260519_000002_add_target_all_services::Migration),
+            Box::new(m20260519_000003_add_include_control_plane::Migration),
         ]
     }
 }

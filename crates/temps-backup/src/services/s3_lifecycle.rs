@@ -272,7 +272,12 @@ async fn clear_temps_rules(
 /// these as generic service errors; the response body text is the only
 /// signal. The strings here cover AWS, MinIO, OVH, R2, and B2 rejections
 /// observed in practice.
-fn is_unsupported_error(msg: &str) -> bool {
+///
+/// Re-exported as `pub` so the upload path (`apply_object_tags`) can use
+/// the same matching to decide whether a tag-write failure is "this
+/// provider can't" (warn + continue) vs "the upload is genuinely broken"
+/// (fail the backup).
+pub fn is_unsupported_error(msg: &str) -> bool {
     let m = msg.to_lowercase();
     m.contains("notimplemented")
         || m.contains("not implemented")
@@ -309,6 +314,8 @@ mod tests {
             description: None,
             tags: "{}".to_string(),
             max_runtime_secs: None,
+            target_all_services: true,
+            include_control_plane: true,
         }
     }
 
@@ -354,6 +361,36 @@ mod tests {
         ));
         assert!(!is_unsupported_error("InternalError: 500"));
         assert!(!is_unsupported_error("NoSuchBucket"));
+    }
+
+    /// Regression: R2 returns this exact shape when `PutObjectTagging`
+    /// is called. The upload-path uses `is_unsupported_error` on the
+    /// rendered `describe_sdk_error` string to decide whether to fail
+    /// the backup or warn + continue.
+    #[test]
+    fn is_unsupported_error_matches_r2_put_object_tagging() {
+        let r2_describe = "put_object_tagging on s3://bucket/key failed | HTTP 501 \
+             | code=NotImplemented | message=PutObjectTagging not implemented \
+             | body=<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error>\
+             <Code>NotImplemented</Code><Message>PutObjectTagging not implemented\
+             </Message></Error>";
+        assert!(
+            is_unsupported_error(r2_describe),
+            "must recognise the R2 PutObjectTagging 501 shape"
+        );
+    }
+
+    /// Regression: R2 also returns the same `NotImplemented` family when
+    /// the `x-amz-tagging` header is passed on a put/create-multipart
+    /// upload. The upload path no longer sends that header, but if a
+    /// future change re-introduces it the `is_unsupported_error` matcher
+    /// must still classify it correctly.
+    #[test]
+    fn is_unsupported_error_matches_r2_x_amz_tagging() {
+        let r2_describe = "create_multipart_upload failed | HTTP 501 \
+             | code=NotImplemented | message=Header 'x-amz-tagging' with value \
+             'temps-managed=true&temps-retention-days=7' not implemented";
+        assert!(is_unsupported_error(r2_describe));
     }
 
     /// Build an S3 client pointed at an arbitrary endpoint with hardcoded

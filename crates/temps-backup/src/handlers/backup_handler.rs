@@ -2,7 +2,8 @@ use crate::engines::dispatch::{resolve_engine_key, ResolveEngineError};
 use crate::handlers::audit::{
     AuditContext, BackupRunAudit, BackupScheduleStatusChangedAudit, BackupScheduleUpdatedAudit,
     ExternalServiceBackupRunAudit, S3SourceCreatedAudit, S3SourceDeletedAudit,
-    S3SourceUpdatedAudit, ScheduleRunNowAudit,
+    S3SourceUpdatedAudit, ScheduleRunNowAudit, ScheduleServiceDetachedAudit,
+    ScheduleServicesAttachedAudit,
 };
 use crate::handlers::types::BackupAppState;
 use crate::services::BackupTriggerParams;
@@ -122,7 +123,11 @@ impl From<BackupError> for Problem {
         enable_backup_schedule,
         update_backup_schedule,
         run_external_service_backup,
-        list_backup_alerts
+        list_backup_alerts,
+        list_schedule_services,
+        attach_schedule_services,
+        detach_schedule_service,
+        list_service_schedules
     ),
     components(
         schemas(
@@ -154,6 +159,8 @@ impl From<BackupError> for Problem {
             CancelBackupResponse,
             ChildBackupEntryResponse,
             ChildBackupListResponse,
+            AttachScheduleServicesRequest,
+            AttachScheduleServicesResponse,
         )
     ),
     info(
@@ -227,6 +234,18 @@ pub struct CreateBackupScheduleRequest {
     /// "use engine default." The per-job `max_runtime_secs` in
     /// `EnqueueJobParams` can still override this for ad-hoc triggers.
     pub max_runtime_secs: Option<i64>,
+    /// When `true` (default), the schedule backs up every external service
+    /// on the host — including databases created in the future. When
+    /// `false`, the schedule backs up only the services explicitly attached
+    /// via `POST /backups/schedules/{id}/services`. Omit to use the default.
+    #[serde(default)]
+    pub target_all_services: Option<bool>,
+    /// When `true` (default), every run also produces a `control_plane`
+    /// backup of Temps's own database. Operators who use Temps purely as
+    /// a backup orchestrator for external DBs can set this to `false` to
+    /// keep the run history focused on those services.
+    #[serde(default)]
+    pub include_control_plane: Option<bool>,
 }
 
 /// Deserializer for `Option<Option<i64>>` that maps:
@@ -278,6 +297,12 @@ pub struct UpdateBackupScheduleRequest {
     pub enabled: Option<bool>,
     /// Replace the full tag list. Skipped when `None`.
     pub tags: Option<Vec<String>>,
+    /// Toggle between "back up every database" (`true`) and "back up only
+    /// the explicit list" (`false`). When set to `true`, the server clears
+    /// the explicit membership rows for this schedule.
+    pub target_all_services: Option<bool>,
+    /// Toggle whether the control-plane backup is produced on every run.
+    pub include_control_plane: Option<bool>,
 }
 
 /// Returns the names of fields that are present (i.e., `Some`) in the patch
@@ -304,6 +329,12 @@ fn changed_fields_for_audit(request: &UpdateBackupScheduleRequest) -> Vec<String
     }
     if request.tags.is_some() {
         fields.push("tags".to_string());
+    }
+    if request.target_all_services.is_some() {
+        fields.push("target_all_services".to_string());
+    }
+    if request.include_control_plane.is_some() {
+        fields.push("include_control_plane".to_string());
     }
     fields
 }
@@ -484,6 +515,32 @@ pub struct BackupScheduleResponse {
     /// `null` means the engine-family default is used. See
     /// `temps_backup_core::timeouts::default_max_runtime_secs`.
     pub max_runtime_secs: Option<i64>,
+    /// When `true`, the schedule auto-includes every external service on
+    /// the host (and any future ones). When `false`, the schedule only
+    /// targets services attached via `backup_schedule_services`.
+    pub target_all_services: bool,
+    /// When `true`, every run also produces a `control_plane` backup
+    /// (Temps's own Postgres). When `false`, only the external service
+    /// fan-out happens.
+    pub include_control_plane: bool,
+}
+
+/// Body for `POST /api/backups/schedules/{id}/services` — attach external
+/// services to a backup schedule. Idempotent.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AttachScheduleServicesRequest {
+    /// External service ids to attach. Duplicates are de-duplicated server-side.
+    pub service_ids: Vec<i32>,
+}
+
+/// Response for `POST /api/backups/schedules/{id}/services`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AttachScheduleServicesResponse {
+    /// Number of rows actually inserted (excludes rows skipped by
+    /// `ON CONFLICT DO NOTHING`).
+    pub inserted: u64,
+    /// Total number of services now attached to the schedule.
+    pub total_attached: usize,
 }
 
 /// Summary of the external service that owns a backup. Only populated for
@@ -651,6 +708,18 @@ impl From<temps_entities::backup_schedules::Model> for BackupScheduleResponse {
             next_run: schedule.next_run.map(|dt| dt.timestamp_millis()),
             last_run: schedule.last_run.map(|dt| dt.timestamp_millis()),
             max_runtime_secs: schedule.max_runtime_secs,
+            target_all_services: schedule.target_all_services,
+            include_control_plane: schedule.include_control_plane,
+        }
+    }
+}
+
+impl From<temps_entities::external_services::Model> for ExternalServiceSummary {
+    fn from(svc: temps_entities::external_services::Model) -> Self {
+        Self {
+            id: svc.id,
+            name: svc.name,
+            service_type: svc.service_type,
         }
     }
 }
@@ -935,6 +1004,186 @@ async fn list_external_service_backups(
     Ok(Json(response))
 }
 
+/// List the external services attached to a backup schedule.
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/schedules/{id}/services",
+    params(("id" = i32, Path, description = "Schedule ID")),
+    responses(
+        (status = 200, description = "Services attached to this schedule", body = Vec<ExternalServiceSummary>),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Schedule not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_schedule_services(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+    let services = app_state
+        .backup_service
+        .list_services_for_schedule(id)
+        .await
+        .map_err(Problem::from)?;
+    let body: Vec<ExternalServiceSummary> = services.into_iter().map(Into::into).collect();
+    Ok(Json(body))
+}
+
+/// Attach one or more external services to a backup schedule. Idempotent —
+/// services that are already attached are silently skipped (`ON CONFLICT
+/// DO NOTHING`). Returns the count of newly inserted rows + the total
+/// membership after the operation.
+#[utoipa::path(
+    tag = "Backups",
+    post,
+    path = "/backups/schedules/{id}/services",
+    params(("id" = i32, Path, description = "Schedule ID")),
+    request_body = AttachScheduleServicesRequest,
+    responses(
+        (status = 200, description = "Services attached", body = AttachScheduleServicesResponse),
+        (status = 400, description = "Validation error", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Schedule not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn attach_schedule_services(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path(id): Path<i32>,
+    Json(request): Json<AttachScheduleServicesRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsCreate);
+
+    let inserted = app_state
+        .backup_service
+        .attach_services_to_schedule(id, &request.service_ids)
+        .await
+        .map_err(Problem::from)?;
+
+    // Fetch the post-attach membership for the response so the UI doesn't
+    // have to issue a follow-up GET.
+    let total_attached = app_state
+        .backup_service
+        .list_services_for_schedule(id)
+        .await
+        .map_err(Problem::from)?
+        .len();
+
+    let audit = ScheduleServicesAttachedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        schedule_id: id,
+        requested_service_ids: request.service_ids.clone(),
+        inserted_count: inserted,
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!(
+            "Failed to create audit log for attach_schedule_services: {}",
+            e
+        );
+    }
+
+    Ok(Json(AttachScheduleServicesResponse {
+        inserted,
+        total_attached,
+    }))
+}
+
+/// Detach a single external service from a backup schedule. Idempotent —
+/// returns `204` whether or not a row was actually removed.
+#[utoipa::path(
+    tag = "Backups",
+    delete,
+    path = "/backups/schedules/{id}/services/{service_id}",
+    params(
+        ("id" = i32, Path, description = "Schedule ID"),
+        ("service_id" = i32, Path, description = "External service ID"),
+    ),
+    responses(
+        (status = 204, description = "Service detached (or was not attached)"),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn detach_schedule_service(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((id, service_id)): Path<(i32, i32)>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsDelete);
+
+    let removed = app_state
+        .backup_service
+        .detach_service_from_schedule(id, service_id)
+        .await
+        .map_err(Problem::from)?;
+
+    let audit = ScheduleServiceDetachedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        schedule_id: id,
+        service_id,
+        removed,
+    };
+    if let Err(e) = app_state.audit_service.create_audit_log(&audit).await {
+        error!(
+            "Failed to create audit log for detach_schedule_service: {}",
+            e
+        );
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// List the schedules that target a specific external service. Useful for
+/// the service detail page ("which schedules back this DB up?").
+#[utoipa::path(
+    tag = "Backups",
+    get,
+    path = "/backups/external-services/{service_id}/schedules",
+    params(("service_id" = i32, Path, description = "External service ID")),
+    responses(
+        (status = 200, description = "Schedules backing up this service", body = Vec<BackupScheduleResponse>),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 404, description = "Service not found", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+async fn list_service_schedules(
+    RequireAuth(auth): RequireAuth,
+    State(app_state): State<Arc<BackupAppState>>,
+    Path(service_id): Path<i32>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, BackupsRead);
+    let schedules = app_state
+        .backup_service
+        .list_schedules_for_service(service_id)
+        .await
+        .map_err(Problem::from)?;
+    let body: Vec<BackupScheduleResponse> = schedules.into_iter().map(Into::into).collect();
+    Ok(Json(body))
+}
+
 pub fn configure_routes() -> Router<Arc<BackupAppState>> {
     Router::new()
         .route(
@@ -973,6 +1222,18 @@ pub fn configure_routes() -> Router<Arc<BackupAppState>> {
         )
         .route("/backups/schedules/{id}/runs", get(list_schedule_runs))
         .route("/backups/schedules/{id}/run", post(run_schedule_now))
+        .route(
+            "/backups/schedules/{id}/services",
+            get(list_schedule_services).post(attach_schedule_services),
+        )
+        .route(
+            "/backups/schedules/{id}/services/{service_id}",
+            axum::routing::delete(detach_schedule_service),
+        )
+        .route(
+            "/backups/external-services/{service_id}/schedules",
+            get(list_service_schedules),
+        )
         .route(
             "/backups/schedule-runs/{id}/jobs",
             get(list_schedule_run_jobs),

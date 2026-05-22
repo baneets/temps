@@ -482,6 +482,39 @@ impl MarkDeploymentCompleteJob {
             )));
         }
 
+        // ── Phase 0: Persist routing inputs before flipping the route table ──
+        //
+        // load_routes() reads `deployments.static_dir_location` (and
+        // `image_name`) to build the backend for an environment. Those fields
+        // are otherwise only written in Phase 3's `active_deployment.update()`,
+        // which runs AFTER current_deployment_id is flipped. For static
+        // deployments that means the PG NOTIFY fires while static_dir_location
+        // is still NULL, so the proxy builds a route with no static directory
+        // and the folder isn't served until a later, unrelated route reload.
+        //
+        // Write the routing-relevant fields to the deployment row FIRST so the
+        // route table sees a consistent record the moment the NOTIFY fires.
+        {
+            let mut routing_inputs = deployments::ActiveModel {
+                id: sea_orm::ActiveValue::Unchanged(self.deployment_id),
+                ..Default::default()
+            };
+            if let sea_orm::ActiveValue::Set(image) = &active_deployment.image_name {
+                routing_inputs.image_name = Set(image.clone());
+            }
+            if let sea_orm::ActiveValue::Set(static_dir) = &active_deployment.static_dir_location {
+                routing_inputs.static_dir_location = Set(static_dir.clone());
+            }
+            if routing_inputs.is_changed() {
+                routing_inputs.update(self.db.as_ref()).await.map_err(|e| {
+                    WorkflowError::JobExecutionFailed(format!(
+                        "Failed to persist deployment routing inputs: {}",
+                        e
+                    ))
+                })?;
+            }
+        }
+
         // ── Phase 1: Switch route table to the new deployment ────────────
         //
         // Subscribe to the queue BEFORE updating current_deployment_id so we

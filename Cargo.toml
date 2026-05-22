@@ -29,7 +29,6 @@ members = [
     "crates/temps-notifications",
     "crates/temps-monitoring",
     "crates/temps-network",
-    "crates/temps-mcp",
     "crates/temps-analytics",
     "crates/temps-audit",
     "crates/temps-config",
@@ -84,7 +83,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-beta.15"
+version = "0.1.0-beta.19"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Temps Contributors"]

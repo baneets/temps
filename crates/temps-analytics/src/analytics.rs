@@ -1129,7 +1129,18 @@ impl Analytics for AnalyticsService {
                     (ARRAY_AGG(e.page_path ORDER BY e.timestamp DESC))[1]                       as exit_path,
                     MIN(e.referrer) as referrer,
                     BOOL_OR(e.is_bounce) as is_bounced,
-                    COUNT(*) FILTER (WHERE e.event_type NOT IN ('page_view', 'page_leave')) > 0 as is_engaged
+                    -- A session is engaged if the visitor spent real attention:
+                    -- at least 10s of measured wall-clock time, OR fired a
+                    -- genuine interaction event. Auto-fired view events
+                    -- (page_view, page_leave, *_viewed) do not count — they
+                    -- trigger from intersection observers for bots too.
+                    (
+                        EXTRACT(EPOCH FROM (MAX(e.timestamp) - MIN(e.timestamp))) >= 10
+                        OR COUNT(*) FILTER (
+                            WHERE e.event_type NOT IN ('page_view', 'page_leave')
+                              AND e.event_type NOT LIKE '%\_viewed' ESCAPE '\'
+                        ) > 0
+                    ) as is_engaged
                 FROM events e
                 LEFT JOIN request_logs rl ON rl.session_id = e.id AND rl.project_id = e.project_id
                 LEFT JOIN request_sessions rs ON rs.session_Id = e.session_id
@@ -1570,8 +1581,16 @@ impl Analytics for AnalyticsService {
                 -- Calculate bounce (1 or fewer page views)
                 (SELECT COUNT(*) FROM events e WHERE e.session_id = rs.session_id AND COALESCE(e.event_name, e.event_type, 'page_view') = 'page_view') <= 1 as is_bounced,
 
-                -- Calculate engagement (any non-page_view/page_leave events)
-                (SELECT COUNT(*) > 0 FROM events e WHERE e.session_id = rs.session_id AND COALESCE(e.event_name, e.event_type, '') NOT IN ('page_view', 'page_leave', '')) as is_engaged
+                -- Engaged if the visitor spent >= 10s of measured time, OR
+                -- fired a genuine interaction event. Auto-fired view events
+                -- (page_view, page_leave, *_viewed) are excluded — they fire
+                -- from intersection observers for bots too.
+                (
+                    EXTRACT(EPOCH FROM (rs.last_accessed_at - rs.started_at)) >= 10
+                    OR (SELECT COUNT(*) > 0 FROM events e WHERE e.session_id = rs.session_id
+                        AND COALESCE(e.event_name, e.event_type, '') NOT IN ('page_view', 'page_leave', '')
+                        AND COALESCE(e.event_name, e.event_type, '') NOT LIKE '%\_viewed' ESCAPE '\')
+                ) as is_engaged
 
             FROM request_sessions rs
             WHERE rs.id = $1

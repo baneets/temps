@@ -25,6 +25,18 @@ pub struct Model {
     ///
     /// `None` means "use the engine default."
     pub max_runtime_secs: Option<i64>,
+    /// When `true`, fan-out targets every external service on the host
+    /// (auto-including future databases). When `false`, fan-out targets
+    /// only the services attached via `backup_schedule_services`. Default
+    /// is `true` so a fresh schedule "just backs up everything."
+    #[sea_orm(default_value = true)]
+    pub target_all_services: bool,
+    /// When `true`, every run also produces a `control_plane` backup
+    /// (Temps's own Postgres). When `false`, only the external service
+    /// fan-out happens — useful when the operator scopes a schedule to a
+    /// single DB and doesn't want the control plane lumped in.
+    #[sea_orm(default_value = true)]
+    pub include_control_plane: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -35,11 +47,19 @@ pub enum Relation {
         to = "super::s3_sources::Column::Id"
     )]
     S3Source,
+    #[sea_orm(has_many = "super::backup_schedule_services::Entity")]
+    Services,
 }
 
 impl Related<super::s3_sources::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::S3Source.def()
+    }
+}
+
+impl Related<super::backup_schedule_services::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Services.def()
     }
 }
 

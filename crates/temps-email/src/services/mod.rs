@@ -6,7 +6,7 @@ mod provider_service;
 mod tracking_service;
 #[cfg(test)]
 mod tracking_service_integration_tests;
-mod validation_service;
+mod validation;
 
 pub use domain_service::{CreateDomainRequest, DomainService, DomainWithDnsRecords};
 pub use email_service::{
@@ -17,7 +17,7 @@ pub use provider_service::{
     CreateProviderRequest, ProviderCredentials, ProviderService, TestEmailResult,
 };
 pub use tracking_service::{ExtractedLink, TrackingEvent, TrackingService, TransformResult};
-pub use validation_service::{
+pub use validation::{
     MiscResult, MxResult, ProxyConfig, ReachabilityStatus, SmtpResult, SyntaxResult,
     ValidateEmailRequest, ValidateEmailResponse, ValidationConfig, ValidationService,
 };

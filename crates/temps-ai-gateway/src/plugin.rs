@@ -70,21 +70,15 @@ impl TempsPlugin for AiGatewayPlugin {
     fn configure_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
         let app_state = context.require_service::<AiGatewayAppState>();
 
-        // Admin: provider key management, usage analytics, pricing dashboard.
+        // All AI Gateway routes live on the authenticated surface. The
+        // OpenAI-compatible gateway endpoints use `RequireAuth`, which depends
+        // on the `AuthContext` injected by `auth_middleware` — that middleware
+        // only runs on this router, not the public one.
         let routes = handlers::configure_admin_routes()
             .merge(handlers::configure_usage_routes())
             .merge(handlers::configure_pricing_routes())
+            .merge(handlers::configure_gateway_routes())
             .with_state(app_state);
-
-        Some(PluginRoutes { router: routes })
-    }
-
-    fn configure_public_routes(&self, context: &PluginContext) -> Option<PluginRoutes> {
-        let app_state = context.require_service::<AiGatewayAppState>();
-
-        // Public: the OpenAI-compatible gateway endpoints. Auth is via API key
-        // tokens issued to deployed apps (handled inside the handlers).
-        let routes = handlers::configure_gateway_routes().with_state(app_state);
 
         Some(PluginRoutes { router: routes })
     }

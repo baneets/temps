@@ -58,6 +58,97 @@ pub(crate) fn bundled_roots_http_client() -> SharedHttpClient {
         .clone()
 }
 
+/// Format an AWS SDK error into something a human can act on.
+///
+/// `Display` on `SdkError` collapses to a useless one-liner like
+/// `service error` for any 4xx/5xx — it doesn't include the status code,
+/// the request id (which Cloudflare R2/AWS support needs), the
+/// service-specific error code (`AccessDenied`, `NoSuchBucket`, …), or
+/// the response body. Operators staring at a failed backup deserve all
+/// of those; this helper pulls them out via the typed
+/// `ProvideErrorMetadata` trait and falls back to `Debug` for
+/// transport-layer errors that don't carry SDK metadata.
+///
+/// Returned string is the operator-facing description; goes verbatim into
+/// `backups.error_message` and bubbles up through the UI.
+pub fn describe_sdk_error<E>(op: &str, err: &aws_sdk_s3::error::SdkError<E>) -> String
+where
+    E: std::fmt::Debug + aws_sdk_s3::error::ProvideErrorMetadata,
+{
+    use aws_sdk_s3::error::SdkError;
+    use aws_sdk_s3::operation::RequestId;
+
+    // Pieces we'll join with " | " so a single-line DB column stays
+    // readable. Only push parts that actually carry information.
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(format!("{} failed", op));
+
+    match err {
+        SdkError::ConstructionFailure(_) => {
+            parts.push("request construction failure".into());
+        }
+        SdkError::TimeoutError(_) => {
+            parts.push("request timed out (operation-level)".into());
+        }
+        SdkError::DispatchFailure(d) => {
+            // Network / TLS / DNS. Display gives "dispatch failure"; the
+            // wrapped error has the actual cause.
+            parts.push(format!("dispatch failure: {:?}", d));
+        }
+        SdkError::ResponseError(r) => {
+            // Could not even parse the HTTP response. Surface what we have.
+            parts.push(format!("invalid response: {:?}", r));
+        }
+        SdkError::ServiceError(s) => {
+            // Typed service error: 4xx/5xx with a parsed XML body.
+            let raw = s.err();
+            let resp = s.raw();
+            parts.push(format!("HTTP {}", resp.status().as_u16()));
+            if let Some(code) = raw.code() {
+                parts.push(format!("code={}", code));
+            }
+            if let Some(msg) = raw.message() {
+                parts.push(format!("message={}", msg));
+            }
+            if let Some(rid) = raw.meta().request_id() {
+                parts.push(format!("request_id={}", rid));
+            }
+            // Extended request id (`x-amz-id-2`) — AWS support asks for
+            // this. Cloudflare R2 doesn't emit one, so it's optional.
+            if let Some(eid) = resp.headers().get("x-amz-id-2") {
+                parts.push(format!("extended_request_id={}", eid));
+            }
+            // Last resort: include the (truncated) response body so the
+            // raw XML/JSON is visible. Storage providers sometimes put
+            // diagnostic detail there that the SDK doesn't surface as
+            // typed fields.
+            if let Some(body_bytes) = resp.body().bytes() {
+                if !body_bytes.is_empty() {
+                    let body_str = String::from_utf8_lossy(body_bytes);
+                    let trimmed = body_str.trim();
+                    if !trimmed.is_empty() {
+                        const MAX_BODY: usize = 512;
+                        let body_excerpt: String = if trimmed.chars().count() > MAX_BODY {
+                            let mut s: String = trimmed.chars().take(MAX_BODY).collect();
+                            s.push('…');
+                            s
+                        } else {
+                            trimmed.to_string()
+                        };
+                        parts.push(format!("body={}", body_excerpt));
+                    }
+                }
+            }
+        }
+        _ => {
+            // Future-proof: SdkError is #[non_exhaustive].
+            parts.push(format!("{:?}", err));
+        }
+    }
+
+    parts.join(" | ")
+}
+
 /// Multipart upload threshold. Files larger than this use multipart
 /// upload instead of a single PUT.
 pub const MULTIPART_THRESHOLD: i64 = 30 * 1024 * 1024;
@@ -117,28 +208,109 @@ impl BackupTags {
         tags
     }
 
-    /// Render the tag set as the `Tagging` HTTP header / SDK param
-    /// (`k1=v1&k2=v2`, URL-encoded). Every backup carries
-    /// `temps-managed=true` so lifecycle rules can target only objects
-    /// temps wrote.
-    pub fn to_tagging_string(&self) -> String {
-        let mut parts: Vec<String> = Vec::with_capacity(4);
-        parts.push("temps-managed=true".to_string());
+    /// Structured form of the tag set. Used by the post-upload
+    /// `PutObjectTagging` path (see `apply_object_tags`) because some
+    /// S3-compatible stores — notably Cloudflare R2 — reject the
+    /// `x-amz-tagging` request header on PutObject / CreateMultipartUpload
+    /// with `501 NotImplemented`. Applying tags as a separate call works
+    /// everywhere, which is why this is the only tag-rendering path: do
+    /// not re-introduce a `to_tagging_string` helper for the upload header.
+    pub fn to_tag_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::with_capacity(4);
+        pairs.push(("temps-managed".to_string(), "true".to_string()));
         match self.retention_days {
             Some(days) if days > 0 => {
-                parts.push(format!("temps-retention-days={}", days));
+                pairs.push(("temps-retention-days".to_string(), days.to_string()));
             }
             _ => {
-                parts.push("temps-retention-days=never".to_string());
+                pairs.push(("temps-retention-days".to_string(), "never".to_string()));
             }
         }
         if let Some(id) = self.schedule_id {
-            parts.push(format!("temps-schedule-id={}", id));
+            pairs.push(("temps-schedule-id".to_string(), id.to_string()));
         }
         if let Some(id) = self.backup_id {
-            parts.push(format!("temps-backup-id={}", id));
+            pairs.push(("temps-backup-id".to_string(), id.to_string()));
         }
-        parts.join("&")
+        pairs
+    }
+}
+
+/// Apply tags to an S3 object **after** upload via `PutObjectTagging`.
+///
+/// History: we originally passed the tag set as the `Tagging` header on
+/// the upload call itself. Cloudflare R2 returns `501 NotImplemented` on
+/// that header for both `PutObject` and `CreateMultipartUpload`. Moving
+/// to a follow-up `PutObjectTagging` call didn't help either — R2
+/// returns the same `501 NotImplemented` on `PutObjectTagging`. Object
+/// tagging is simply not implemented on R2.
+///
+/// So this call is **best-effort**: if the provider rejects it with a
+/// "not implemented / not supported" style error, we log a warning and
+/// continue. The backup data is already uploaded and tracked in our DB,
+/// and app-side `enforce_retention` handles cleanup regardless. The only
+/// thing that gets disabled on tag-less providers is the bucket-side
+/// `BucketLifecycleConfiguration` reconciler that depends on tag filters
+/// — which is also already best-effort (see `s3_lifecycle.rs`).
+///
+/// On AWS S3 / MinIO / any compliant store this still applies tags
+/// normally and fails the backup if tagging is genuinely broken (auth,
+/// network, etc.) so we don't silently drop diagnostic plumbing.
+pub async fn apply_object_tags(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    tags: &BackupTags,
+) -> Result<(), BackupError> {
+    let mut tag_set_builder = aws_sdk_s3::types::Tagging::builder();
+    for (k, v) in tags.to_tag_pairs() {
+        let tag = aws_sdk_s3::types::Tag::builder()
+            .key(k)
+            .value(v)
+            .build()
+            .map_err(|e| BackupError::Failed {
+                reason: format!("failed to build tag for s3://{}/{}: {}", bucket, key, e),
+            })?;
+        tag_set_builder = tag_set_builder.tag_set(tag);
+    }
+    let tagging = tag_set_builder.build().map_err(|e| BackupError::Failed {
+        reason: format!(
+            "failed to build Tagging payload for s3://{}/{}: {}",
+            bucket, key, e
+        ),
+    })?;
+
+    match client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key(key)
+        .tagging(tagging)
+        .send()
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let detail = describe_sdk_error(
+                &format!("put_object_tagging on s3://{}/{}", bucket, key),
+                &e,
+            );
+            if crate::services::s3_lifecycle::is_unsupported_error(&detail) {
+                // Cloudflare R2 (and any other store without
+                // PutObjectTagging) lands here. Don't fail the backup;
+                // app-side retention (see `BackupService::enforce_retention`)
+                // is the source of truth on these providers.
+                warn!(
+                    target: "temps_backup::tagging",
+                    bucket = bucket,
+                    key = key,
+                    detail = %detail,
+                    "S3 provider does not support PutObjectTagging — object stored, tags skipped; relying on app-side retention",
+                );
+                Ok(())
+            } else {
+                Err(BackupError::Failed { reason: detail })
+            }
+        }
     }
 }
 
@@ -233,7 +405,7 @@ pub async fn assert_bucket_reachable(client: &S3Client, bucket: &str) -> Result<
         .send()
         .await
         .map_err(|e| BackupError::Failed {
-            reason: format!("S3 bucket '{}' is not reachable: {}", bucket, e),
+            reason: describe_sdk_error(&format!("head_bucket on '{}'", bucket), &e),
         })?;
     Ok(())
 }
@@ -318,21 +490,27 @@ pub async fn upload_single_part(
             reason: format!("failed to create byte stream from {}: {}", path, e),
         })?;
 
-    let mut req = client
+    // Tags are applied via PutObjectTagging *after* the upload — see
+    // `apply_object_tags` for the R2-compatibility rationale. We
+    // deliberately do not pass `.tagging(...)` here.
+    client
         .put_object()
         .bucket(bucket)
         .key(key)
         .body(body)
-        .content_type(content_type);
+        .content_type(content_type)
+        .send()
+        .await
+        .map_err(|e| BackupError::Failed {
+            reason: describe_sdk_error(
+                &format!("single-part upload to s3://{}/{}", bucket, key),
+                &e,
+            ),
+        })?;
+
     if let Some(tags) = tags {
-        req = req.tagging(tags.to_tagging_string());
+        apply_object_tags(client, bucket, key, tags).await?;
     }
-    req.send().await.map_err(|e| BackupError::Failed {
-        reason: format!(
-            "single-part upload to s3://{}/{} failed: {}",
-            bucket, key, e
-        ),
-    })?;
     Ok(())
 }
 
@@ -349,17 +527,23 @@ pub async fn upload_multipart(
 ) -> Result<(), BackupError> {
     use tokio_stream::StreamExt as TokioStreamExt;
 
-    let mut create_req = client
+    // Tags are applied via PutObjectTagging *after* the upload completes
+    // — see `apply_object_tags` for the R2-compatibility rationale. We
+    // deliberately do not pass `.tagging(...)` on the create call here;
+    // doing so makes Cloudflare R2 fail the upload with 501 NotImplemented.
+    let create_resp = client
         .create_multipart_upload()
         .bucket(bucket)
         .key(key)
-        .content_type(content_type);
-    if let Some(tags) = tags {
-        create_req = create_req.tagging(tags.to_tagging_string());
-    }
-    let create_resp = create_req.send().await.map_err(|e| BackupError::Failed {
-        reason: format!("create_multipart_upload failed: {}", e),
-    })?;
+        .content_type(content_type)
+        .send()
+        .await
+        .map_err(|e| BackupError::Failed {
+            reason: describe_sdk_error(
+                &format!("create_multipart_upload for s3://{}/{}", bucket, key),
+                &e,
+            ),
+        })?;
 
     let upload_id = create_resp.upload_id().ok_or_else(|| BackupError::Failed {
         reason: "create_multipart_upload returned no upload_id".into(),
@@ -400,7 +584,10 @@ pub async fn upload_multipart(
                 .map_err(|e| {
                     abort_multipart_detached(client.clone(), bucket, key, upload_id);
                     BackupError::Failed {
-                        reason: format!("upload_part {} failed: {}", part_number, e),
+                        reason: describe_sdk_error(
+                            &format!("upload_part {} for s3://{}/{}", part_number, bucket, key),
+                            &e,
+                        ),
                     }
                 })?;
 
@@ -426,7 +613,13 @@ pub async fn upload_multipart(
             .map_err(|e| {
                 abort_multipart_detached(client.clone(), bucket, key, upload_id);
                 BackupError::Failed {
-                    reason: format!("upload_part {} (final) failed: {}", part_number, e),
+                    reason: describe_sdk_error(
+                        &format!(
+                            "upload_part {} (final) for s3://{}/{}",
+                            part_number, bucket, key
+                        ),
+                        &e,
+                    ),
                 }
             })?;
         let completed_part = aws_sdk_s3::types::CompletedPart::builder()
@@ -445,9 +638,15 @@ pub async fn upload_multipart(
         .send()
         .await
         .map_err(|e| BackupError::Failed {
-            reason: format!("complete_multipart_upload failed: {}", e),
+            reason: describe_sdk_error(
+                &format!("complete_multipart_upload for s3://{}/{}", bucket, key),
+                &e,
+            ),
         })?;
 
+    if let Some(tags) = tags {
+        apply_object_tags(client, bucket, key, tags).await?;
+    }
     Ok(())
 }
 
@@ -532,9 +731,9 @@ pub async fn write_metadata_companion(
         .send()
         .await
         .map_err(|e| BackupError::Failed {
-            reason: format!(
-                "failed to upload metadata.json to s3://{}/{}: {}",
-                bucket, metadata_key, e
+            reason: describe_sdk_error(
+                &format!("metadata.json upload to s3://{}/{}", bucket, metadata_key),
+                &e,
             ),
         })?;
     Ok(())

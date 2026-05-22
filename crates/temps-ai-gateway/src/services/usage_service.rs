@@ -79,6 +79,15 @@ pub struct UsageLogEntry {
     pub trace_id: Option<String>,
 }
 
+/// A page of recent usage log entries plus the total count for pagination.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UsageLogPage {
+    /// The usage log entries for the requested page.
+    pub entries: Vec<UsageLogEntry>,
+    /// Total number of entries matching the filter (across all pages).
+    pub total: i64,
+}
+
 /// A conversation summary grouping related AI invocations.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationSummary {
@@ -104,6 +113,11 @@ pub struct AiRequestContext {
 }
 
 /// Filters for querying AI usage data.
+///
+/// Cost bounds are expressed in microcents (the unit stored in
+/// `estimated_cost_microcents`). At most one of `gte`/`gt` and one of
+/// `lte`/`lt` is meaningful per query; if both are set the stricter wins
+/// naturally because they are ANDead together.
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct UsageFilter {
     pub user_id: Option<i32>,
@@ -112,6 +126,24 @@ pub struct UsageFilter {
     pub tags: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Filter by HTTP status code (exact match).
+    pub status: Option<i16>,
+    /// Cost greater-than-or-equal, in microcents.
+    pub cost_gte: Option<i64>,
+    /// Cost strictly greater-than, in microcents.
+    pub cost_gt: Option<i64>,
+    /// Cost less-than-or-equal, in microcents.
+    pub cost_lte: Option<i64>,
+    /// Cost strictly less-than, in microcents.
+    pub cost_lt: Option<i64>,
+    /// Total tokens (input + output) greater-than-or-equal.
+    pub tokens_gte: Option<i64>,
+    /// Total tokens (input + output) strictly greater-than.
+    pub tokens_gt: Option<i64>,
+    /// Total tokens (input + output) less-than-or-equal.
+    pub tokens_lte: Option<i64>,
+    /// Total tokens (input + output) strictly less-than.
+    pub tokens_lt: Option<i64>,
 }
 
 // ============================================================================
@@ -178,6 +210,11 @@ struct UsageLogRow {
     tags: Option<String>,
     request_id: Option<String>,
     trace_id: Option<String>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct CountRow {
+    count: Option<i64>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -539,22 +576,46 @@ impl UsageService {
 
     /// Get recent usage log entries.
     pub async fn get_recent(&self, limit: u64) -> Result<Vec<UsageLogEntry>, AiGatewayError> {
-        self.get_recent_filtered(limit, &UsageFilter::default())
-            .await
+        Ok(self
+            .get_recent_filtered(limit, 0, &UsageFilter::default())
+            .await?
+            .entries)
     }
 
-    /// Get recent usage log entries with filters.
+    /// Get a page of recent usage log entries with filters, plus the total count.
     pub async fn get_recent_filtered(
         &self,
         limit: u64,
+        offset: u64,
         filter: &UsageFilter,
-    ) -> Result<Vec<UsageLogEntry>, AiGatewayError> {
+    ) -> Result<UsageLogPage, AiGatewayError> {
         // Use a wide time range for "recent" queries
         let to = Utc::now();
         let from = to - chrono::Duration::days(365);
-        let (where_clause, mut values) = self.build_filter_clause(from, to, filter);
-        let next_param = values.len() + 1;
+
+        // Total count for pagination -- the filter clause and its bound values are
+        // identical to the page query, so build them once and reuse for both.
+        let (where_clause, base_values) = self.build_filter_clause(from, to, filter);
+
+        let count_sql = format!(
+            "SELECT COUNT(*) as count FROM ai_usage_logs WHERE {}",
+            where_clause
+        );
+        let total = CountRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &count_sql,
+            base_values.clone(),
+        ))
+        .one(self.db.as_ref())
+        .await?
+        .and_then(|r| r.count)
+        .unwrap_or(0);
+
+        let mut values = base_values;
+        let limit_param = values.len() + 1;
         values.push((limit as i64).into());
+        let offset_param = values.len() + 1;
+        values.push((offset as i64).into());
 
         let sql = format!(
             r#"SELECT
@@ -576,8 +637,8 @@ impl UsageService {
             FROM ai_usage_logs
             WHERE {}
             ORDER BY timestamp DESC
-            LIMIT ${}"#,
-            where_clause, next_param
+            LIMIT ${} OFFSET ${}"#,
+            where_clause, limit_param, offset_param
         );
 
         let rows = UsageLogRow::find_by_statement(Statement::from_sql_and_values(
@@ -588,7 +649,10 @@ impl UsageService {
         .all(self.db.as_ref())
         .await?;
 
-        Ok(rows.into_iter().map(usage_log_from_row).collect())
+        Ok(UsageLogPage {
+            entries: rows.into_iter().map(usage_log_from_row).collect(),
+            total,
+        })
     }
 
     /// List conversations with aggregated stats.
@@ -736,9 +800,64 @@ impl UsageService {
         if let Some(ref provider) = filter.provider {
             conditions.push(format!("provider = ${}", param_idx));
             values.push(provider.clone().into());
-            let _ = param_idx; // suppress unused warning
+            param_idx += 1;
         }
 
+        if let Some(status) = filter.status {
+            conditions.push(format!("status = ${}", param_idx));
+            values.push(status.into());
+            param_idx += 1;
+        }
+
+        if let Some(cost) = filter.cost_gte {
+            conditions.push(format!("estimated_cost_microcents >= ${}", param_idx));
+            values.push(cost.into());
+            param_idx += 1;
+        }
+
+        if let Some(cost) = filter.cost_gt {
+            conditions.push(format!("estimated_cost_microcents > ${}", param_idx));
+            values.push(cost.into());
+            param_idx += 1;
+        }
+
+        if let Some(cost) = filter.cost_lte {
+            conditions.push(format!("estimated_cost_microcents <= ${}", param_idx));
+            values.push(cost.into());
+            param_idx += 1;
+        }
+
+        if let Some(cost) = filter.cost_lt {
+            conditions.push(format!("estimated_cost_microcents < ${}", param_idx));
+            values.push(cost.into());
+            param_idx += 1;
+        }
+
+        if let Some(tokens) = filter.tokens_gte {
+            conditions.push(format!("(input_tokens + output_tokens) >= ${}", param_idx));
+            values.push(tokens.into());
+            param_idx += 1;
+        }
+
+        if let Some(tokens) = filter.tokens_gt {
+            conditions.push(format!("(input_tokens + output_tokens) > ${}", param_idx));
+            values.push(tokens.into());
+            param_idx += 1;
+        }
+
+        if let Some(tokens) = filter.tokens_lte {
+            conditions.push(format!("(input_tokens + output_tokens) <= ${}", param_idx));
+            values.push(tokens.into());
+            param_idx += 1;
+        }
+
+        if let Some(tokens) = filter.tokens_lt {
+            conditions.push(format!("(input_tokens + output_tokens) < ${}", param_idx));
+            values.push(tokens.into());
+            param_idx += 1;
+        }
+
+        let _ = param_idx; // param_idx is reserved for any future conditions
         (conditions.join(" AND "), values)
     }
 }
@@ -883,6 +1002,7 @@ mod tests {
             tags: Some("agent:support".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             provider: Some("anthropic".to_string()),
+            ..Default::default()
         };
 
         let (clause, values) = service.build_filter_clause(from, to, &filter);
@@ -892,6 +1012,47 @@ mod tests {
         assert!(clause.contains("model = $6"));
         assert!(clause.contains("provider = $7"));
         assert_eq!(values.len(), 7);
+    }
+
+    #[test]
+    fn test_build_filter_clause_with_status_and_cost_bounds() {
+        let db = sea_orm::DatabaseConnection::Disconnected;
+        let service = UsageService::new(Arc::new(db));
+        let from = Utc::now() - chrono::Duration::hours(1);
+        let to = Utc::now();
+        let filter = UsageFilter {
+            provider: Some("openai".to_string()),
+            status: Some(429),
+            cost_gte: Some(100),
+            cost_lt: Some(50_000),
+            ..Default::default()
+        };
+
+        let (clause, values) = service.build_filter_clause(from, to, &filter);
+        // $1/$2 are the time range; provider, status, cost_gte, cost_lt follow.
+        assert!(clause.contains("provider = $3"));
+        assert!(clause.contains("status = $4"));
+        assert!(clause.contains("estimated_cost_microcents >= $5"));
+        assert!(clause.contains("estimated_cost_microcents < $6"));
+        assert_eq!(values.len(), 6);
+    }
+
+    #[test]
+    fn test_build_filter_clause_with_token_bounds() {
+        let db = sea_orm::DatabaseConnection::Disconnected;
+        let service = UsageService::new(Arc::new(db));
+        let from = Utc::now() - chrono::Duration::hours(1);
+        let to = Utc::now();
+        let filter = UsageFilter {
+            tokens_gte: Some(500),
+            tokens_lt: Some(10_000),
+            ..Default::default()
+        };
+
+        let (clause, values) = service.build_filter_clause(from, to, &filter);
+        assert!(clause.contains("(input_tokens + output_tokens) >= $3"));
+        assert!(clause.contains("(input_tokens + output_tokens) < $4"));
+        assert_eq!(values.len(), 4);
     }
 
     #[test]

@@ -1,13 +1,26 @@
 'use client'
 
 import {
+  attachScheduleServicesMutation,
   deleteBackupScheduleMutation,
+  detachScheduleServiceMutation,
   disableBackupScheduleMutation,
   enableBackupScheduleMutation,
   getBackupScheduleOptions,
   getS3SourceOptions,
+  listScheduleServicesOptions,
+  listScheduleServicesQueryKey,
 } from '@/api/client/@tanstack/react-query.gen'
 import { BackupScheduleResponse } from '@/api/client/types.gen'
+import { ScheduleServicesSelector } from '@/components/backups/ScheduleServicesSelector'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,12 +71,16 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  Database,
   DatabaseBackup,
+  HardDrive,
   Loader2,
   MoreHorizontal,
   Pencil,
   Play,
+  Plus,
   Trash2,
+  X,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -205,6 +222,8 @@ export function ScheduleDetail() {
   const pageSize = 20
 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showAttachDialog, setShowAttachDialog] = useState(false)
+  const [pendingAttachIds, setPendingAttachIds] = useState<number[]>([])
 
   // ── Data fetching ──────────────────────────────────────────────────────────
 
@@ -275,6 +294,41 @@ export function ScheduleDetail() {
     },
     onError: () => toast.error('Failed to delete schedule'),
     onSettled: () => setShowDeleteDialog(false),
+  })
+
+  // ── Service attachment ────────────────────────────────────────────────────
+
+  const { data: attachedServices, isLoading: isLoadingServices } = useQuery({
+    ...listScheduleServicesOptions({ path: { id: scheduleId! } }),
+    enabled: !!scheduleId,
+  })
+
+  const attachMutation = useMutation({
+    ...attachScheduleServicesMutation(),
+    meta: { errorTitle: 'Failed to attach services' },
+    onSuccess: () => {
+      toast.success('Services attached')
+      void queryClient.invalidateQueries({
+        queryKey: listScheduleServicesQueryKey({
+          path: { id: scheduleId! },
+        }),
+      })
+      setShowAttachDialog(false)
+      setPendingAttachIds([])
+    },
+  })
+
+  const detachMutation = useMutation({
+    ...detachScheduleServiceMutation(),
+    meta: { errorTitle: 'Failed to detach service' },
+    onSuccess: () => {
+      toast.success('Service detached')
+      void queryClient.invalidateQueries({
+        queryKey: listScheduleServicesQueryKey({
+          path: { id: scheduleId! },
+        }),
+      })
+    },
   })
 
   // ── Breadcrumbs ────────────────────────────────────────────────────────────
@@ -391,6 +445,45 @@ export function ScheduleDetail() {
                 </dd>
               </div>
             )}
+            <div>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Backup targets
+              </dt>
+              <dd className="text-base sm:text-sm">
+                {s.target_all_services ? (
+                  <span>
+                    All databases{' '}
+                    <span className="text-muted-foreground">
+                      (includes future databases automatically)
+                    </span>
+                  </span>
+                ) : (
+                  <span>Specific databases (configured below)</span>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-base font-medium text-muted-foreground sm:text-sm">
+                Control plane backup
+              </dt>
+              <dd className="text-base sm:text-sm">
+                {s.include_control_plane ? (
+                  <span>
+                    Included{' '}
+                    <span className="text-muted-foreground">
+                      (Temps's own database is backed up every run)
+                    </span>
+                  </span>
+                ) : (
+                  <span>
+                    Skipped{' '}
+                    <span className="text-muted-foreground">
+                      (only external services are backed up)
+                    </span>
+                  </span>
+                )}
+              </dd>
+            </div>
           </dl>
         </CardContent>
       </Card>
@@ -550,6 +643,115 @@ export function ScheduleDetail() {
         {/* ── Config card ── */}
         {renderScheduleConfigCard(schedule)}
 
+        {/* ── Backup targets card ── */}
+        {/*
+         * In 'all databases' mode the join table is irrelevant — the
+         * fan-out targets every external service at run time. Show a
+         * hint instead of the attach/detach UI to avoid implying that
+         * any of those buttons would change behaviour. In 'specific'
+         * mode we surface the editable list.
+         */}
+        {schedule.target_all_services ? (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5" />
+                Backup targets
+              </CardTitle>
+              <CardDescription>
+                This schedule backs up every database on the host. New
+                databases are automatically included on the next run.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                To restrict this schedule to a specific list of databases,
+                edit the schedule and switch to <strong>Specific
+                databases</strong>.
+              </div>
+            </CardContent>
+          </Card>
+        ) : (
+        <Card>
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Database className="h-5 w-5" />
+                Backup targets
+              </CardTitle>
+              <CardDescription>
+                External services this schedule backs up on every run.
+                Currently in <strong>specific</strong> mode — only the
+                listed services are included.
+              </CardDescription>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setPendingAttachIds([])
+                setShowAttachDialog(true)
+              }}
+              className="shrink-0"
+            >
+              <Plus className="h-4 w-4 sm:mr-2" />
+              <span className="hidden sm:inline">Attach service</span>
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {isLoadingServices ? (
+              <div className="space-y-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : !attachedServices || attachedServices.length === 0 ? (
+              <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+                No services attached yet. Click <strong>Attach service</strong>{' '}
+                to add Postgres, Redis, MongoDB, or RustFS targets.
+              </div>
+            ) : (
+              <ul className="divide-y rounded-md border">
+                {attachedServices.map((svc) => {
+                  const Icon = svc.service_type === 's3' ? HardDrive : Database
+                  return (
+                    <li
+                      key={svc.id}
+                      className="flex items-center gap-3 px-3 py-2 text-sm"
+                    >
+                      <Icon
+                        className="h-4 w-4 text-muted-foreground"
+                        aria-hidden
+                      />
+                      <span className="flex-1 truncate">{svc.name}</span>
+                      <Badge variant="outline" className="text-xs">
+                        {svc.service_type}
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        disabled={detachMutation.isPending}
+                        onClick={() =>
+                          detachMutation.mutate({
+                            path: {
+                              id: scheduleId!,
+                              service_id: svc.id,
+                            },
+                          })
+                        }
+                        aria-label={`Detach ${svc.name}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+        )}
+
         {/* ── Run history table ── */}
         <Card>
           <CardHeader>
@@ -636,6 +838,50 @@ export function ScheduleDetail() {
           </CardContent>
         </Card>
       </div>
+
+      {/* ── Attach services dialog ── */}
+      <Dialog open={showAttachDialog} onOpenChange={setShowAttachDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Attach services</DialogTitle>
+            <DialogDescription>
+              Pick the external services to add to this schedule. Already-
+              attached services are hidden.
+            </DialogDescription>
+          </DialogHeader>
+          <ScheduleServicesSelector
+            value={pendingAttachIds}
+            onChange={setPendingAttachIds}
+            excludeIds={attachedServices?.map((s) => s.id) ?? []}
+            disabled={attachMutation.isPending}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowAttachDialog(false)}
+              disabled={attachMutation.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() =>
+                attachMutation.mutate({
+                  path: { id: scheduleId! },
+                  body: { service_ids: pendingAttachIds },
+                })
+              }
+              disabled={
+                attachMutation.isPending || pendingAttachIds.length === 0
+              }
+            >
+              {attachMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Attach
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Delete confirmation dialog ── */}
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>

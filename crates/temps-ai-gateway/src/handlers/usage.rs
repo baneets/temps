@@ -16,7 +16,7 @@ use crate::error::AiGatewayError;
 use crate::handlers::types::AiGatewayAppState;
 use crate::services::usage_service::{
     ConversationSummary, ModelUsage, ProviderUsage, TimeseriesBucket, UsageFilter, UsageLogEntry,
-    UsageSummary,
+    UsageLogPage, UsageSummary,
 };
 
 // ============================================================================
@@ -45,6 +45,7 @@ use crate::services::usage_service::{
         TimeseriesBucket,
         ModelUsage,
         UsageLogEntry,
+        UsageLogPage,
         ConversationSummary,
         UsageFilter,
     )),
@@ -103,6 +104,7 @@ impl UsageQueryParams {
             tags: self.tags.clone(),
             model: self.model.clone(),
             provider: self.provider.clone(),
+            ..Default::default()
         }
     }
 }
@@ -135,6 +137,7 @@ impl TimeseriesQueryParams {
             tags: self.tags.clone(),
             model: self.model.clone(),
             provider: self.provider.clone(),
+            ..Default::default()
         }
     }
 }
@@ -163,10 +166,16 @@ impl TopModelsQueryParams {
     }
 }
 
+/// Page size for the recent-requests endpoint. Defaults to 20, capped at 50.
+pub const RECENT_DEFAULT_LIMIT: u64 = 20;
+pub const RECENT_MAX_LIMIT: u64 = 50;
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RecentQueryParams {
-    /// Max results (defaults to 50, max 100)
+    /// Page size (defaults to 20, max 50)
     pub limit: Option<u64>,
+    /// Number of results to skip for pagination (defaults to 0)
+    pub offset: Option<u64>,
     /// Filter by user ID
     pub user_id: Option<i32>,
     /// Filter by conversation ID
@@ -177,6 +186,24 @@ pub struct RecentQueryParams {
     pub model: Option<String>,
     /// Filter by provider name
     pub provider: Option<String>,
+    /// Filter by HTTP status code (exact match)
+    pub status: Option<i16>,
+    /// Cost greater-than-or-equal, in microcents
+    pub cost_gte: Option<i64>,
+    /// Cost strictly greater-than, in microcents
+    pub cost_gt: Option<i64>,
+    /// Cost less-than-or-equal, in microcents
+    pub cost_lte: Option<i64>,
+    /// Cost strictly less-than, in microcents
+    pub cost_lt: Option<i64>,
+    /// Total tokens (input + output) greater-than-or-equal
+    pub tokens_gte: Option<i64>,
+    /// Total tokens (input + output) strictly greater-than
+    pub tokens_gt: Option<i64>,
+    /// Total tokens (input + output) less-than-or-equal
+    pub tokens_lte: Option<i64>,
+    /// Total tokens (input + output) strictly less-than
+    pub tokens_lt: Option<i64>,
 }
 
 impl RecentQueryParams {
@@ -187,7 +214,23 @@ impl RecentQueryParams {
             tags: self.tags.clone(),
             model: self.model.clone(),
             provider: self.provider.clone(),
+            status: self.status,
+            cost_gte: self.cost_gte,
+            cost_gt: self.cost_gt,
+            cost_lte: self.cost_lte,
+            cost_lt: self.cost_lt,
+            tokens_gte: self.tokens_gte,
+            tokens_gt: self.tokens_gt,
+            tokens_lte: self.tokens_lte,
+            tokens_lt: self.tokens_lt,
         }
+    }
+
+    /// Resolve the effective page size: default 20, clamped to [1, 50].
+    fn resolved_limit(&self) -> u64 {
+        self.limit
+            .unwrap_or(RECENT_DEFAULT_LIMIT)
+            .clamp(1, RECENT_MAX_LIMIT)
     }
 }
 
@@ -397,10 +440,22 @@ async fn get_usage_top_models(
     get,
     path = "/ai/usage/recent",
     params(
-        ("limit" = Option<u64>, Query, description = "Max results (defaults to 50, max 100)"),
+        ("limit" = Option<u64>, Query, description = "Page size (defaults to 20, max 50)"),
+        ("offset" = Option<u64>, Query, description = "Number of results to skip for pagination (defaults to 0)"),
+        ("provider" = Option<String>, Query, description = "Filter by provider name"),
+        ("model" = Option<String>, Query, description = "Filter by model name"),
+        ("status" = Option<i16>, Query, description = "Filter by HTTP status code (exact match)"),
+        ("cost_gte" = Option<i64>, Query, description = "Cost greater-than-or-equal, in microcents"),
+        ("cost_gt" = Option<i64>, Query, description = "Cost strictly greater-than, in microcents"),
+        ("cost_lte" = Option<i64>, Query, description = "Cost less-than-or-equal, in microcents"),
+        ("cost_lt" = Option<i64>, Query, description = "Cost strictly less-than, in microcents"),
+        ("tokens_gte" = Option<i64>, Query, description = "Total tokens greater-than-or-equal"),
+        ("tokens_gt" = Option<i64>, Query, description = "Total tokens strictly greater-than"),
+        ("tokens_lte" = Option<i64>, Query, description = "Total tokens less-than-or-equal"),
+        ("tokens_lt" = Option<i64>, Query, description = "Total tokens strictly less-than"),
     ),
     responses(
-        (status = 200, description = "Recent usage log entries", body = Vec<UsageLogEntry>),
+        (status = 200, description = "Page of recent usage log entries", body = UsageLogPage),
         (status = 401, description = "Unauthorized", body = ProblemDetails),
         (status = 403, description = "Insufficient permissions", body = ProblemDetails),
     ),
@@ -413,14 +468,15 @@ async fn get_usage_recent(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, AiGatewayRead);
 
-    let limit = std::cmp::min(params.limit.unwrap_or(50), 100);
+    let limit = params.resolved_limit();
+    let offset = params.offset.unwrap_or(0);
     let filter = params.to_filter();
-    let entries = app_state
+    let page = app_state
         .usage_service
-        .get_recent_filtered(limit, &filter)
+        .get_recent_filtered(limit, offset, &filter)
         .await?;
 
-    Ok(Json(entries))
+    Ok(Json(page))
 }
 
 #[utoipa::path(
@@ -589,6 +645,41 @@ mod tests {
         let json = "{}";
         let params: RecentQueryParams = serde_json::from_str(json).unwrap();
         assert!(params.limit.is_none());
+        assert!(params.offset.is_none());
+        assert!(params.status.is_none());
+        assert!(params.cost_gte.is_none());
+        // Unspecified limit resolves to the default page size.
+        assert_eq!(params.resolved_limit(), RECENT_DEFAULT_LIMIT);
+    }
+
+    #[test]
+    fn test_recent_query_params_limit_clamped_to_max() {
+        let params: RecentQueryParams = serde_json::from_str(r#"{"limit": 500}"#).unwrap();
+        assert_eq!(params.resolved_limit(), RECENT_MAX_LIMIT);
+    }
+
+    #[test]
+    fn test_recent_query_params_limit_floor_is_one() {
+        let params: RecentQueryParams = serde_json::from_str(r#"{"limit": 0}"#).unwrap();
+        assert_eq!(params.resolved_limit(), 1);
+    }
+
+    #[test]
+    fn test_recent_query_params_filters_map_to_usage_filter() {
+        let params: RecentQueryParams = serde_json::from_str(
+            r#"{"provider": "openai", "status": 429, "cost_gte": 100, "cost_lt": 5000,
+                "tokens_gte": 500, "tokens_lt": 10000}"#,
+        )
+        .unwrap();
+        let filter = params.to_filter();
+        assert_eq!(filter.provider.as_deref(), Some("openai"));
+        assert_eq!(filter.status, Some(429));
+        assert_eq!(filter.cost_gte, Some(100));
+        assert_eq!(filter.cost_lt, Some(5000));
+        assert_eq!(filter.cost_gt, None);
+        assert_eq!(filter.tokens_gte, Some(500));
+        assert_eq!(filter.tokens_lt, Some(10000));
+        assert_eq!(filter.tokens_gt, None);
     }
 
     #[test]

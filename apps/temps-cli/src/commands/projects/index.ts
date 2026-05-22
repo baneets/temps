@@ -24,7 +24,7 @@ export function registerProjectsCommands(program: Command): void {
   projects
     .command('create')
     .alias('new')
-    .description('Create a new project')
+    .description('Create a new project (git-based or manual deployment)')
     .option('-n, --name <name>', 'Project name')
     .option('-d, --description <description>', 'Project description')
     .option('--repo <repository>', 'Repository in owner/name format')
@@ -32,6 +32,13 @@ export function registerProjectsCommands(program: Command): void {
     .option('--directory <directory>', 'Root directory (relative to repo)')
     .option('--preset <preset>', 'Build preset (e.g., nextjs, nodejs, static, docker)')
     .option('--connection <id>', 'Git connection ID')
+    .option('--manual', 'Create a manual (non-git) project - deploy via Docker image or static files')
+    .option(
+      '--source-type <type>',
+      'Manual deployment method: manual (flexible), docker_image, or static_files'
+    )
+    .option('--image <image>', 'Docker image for the first deployment (manual mode)')
+    .option('--port <port>', 'Application/container port (manual mode, default: 3000)')
     .option('-y, --yes', 'Skip optional prompts (services, env vars, set-default)')
     .action(create)
 

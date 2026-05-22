@@ -11,9 +11,11 @@
  */
 
 import {
+  attachScheduleServicesMutation,
   createBackupScheduleMutation,
   getS3SourceOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import { ScheduleServicesSelector } from '@/components/backups/ScheduleServicesSelector'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -26,6 +28,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Switch } from '@/components/ui/switch'
 import {
   Select,
   SelectContent,
@@ -77,6 +80,20 @@ export function CreateBackupSchedule() {
     scheduleOptions[1].value,
   )
   const [customCron, setCustomCron] = useState('')
+  // 'all' (default) means the schedule backs up every database — including
+  // ones created after this schedule. 'specific' means it only backs up the
+  // services explicitly picked below. Default chosen to match what most
+  // operators want: "back up everything, even when I add a new DB later."
+  const [backupMode, setBackupMode] = useState<'all' | 'specific'>('all')
+  const [selectedServiceIds, setSelectedServiceIds] = useState<number[]>([])
+  // Default on: most operators want the control plane covered. Operators
+  // who only use Temps to orchestrate external DB backups can flip it off.
+  const [includeControlPlane, setIncludeControlPlane] = useState(true)
+
+  const attachMutation = useMutation({
+    ...attachScheduleServicesMutation(),
+    meta: { errorTitle: 'Failed to attach services to schedule' },
+  })
 
   // The mutation's generated error type is `ProblemDetails`. Adding an
   // explicit `onError: (err: unknown) => ...` widens that and breaks the
@@ -86,7 +103,26 @@ export function CreateBackupSchedule() {
   const createMutation = useMutation({
     ...createBackupScheduleMutation(),
     meta: { errorTitle: 'Failed to create backup schedule' },
-    onSuccess: () => {
+    onSuccess: async (created) => {
+      // In 'specific' mode, attach the picked services. In 'all' mode there
+      // is nothing to attach — the schedule's `target_all_services` flag is
+      // already set on the backend and the fan-out picks every DB at run
+      // time.
+      if (backupMode === 'specific' && selectedServiceIds.length > 0) {
+        try {
+          await attachMutation.mutateAsync({
+            path: { id: created.id },
+            body: { service_ids: selectedServiceIds },
+          })
+        } catch {
+          // Toast already raised by mutation meta; surface partial success.
+          toast.warning(
+            'Schedule created, but attaching services failed. You can retry from the schedule detail page.',
+          )
+          navigate(`/backups/s3-sources/${id}`)
+          return
+        }
+      }
       toast.success('Backup schedule created successfully')
       navigate(`/backups/s3-sources/${id}`)
     },
@@ -136,6 +172,26 @@ export function CreateBackupSchedule() {
       max_runtime_secs = Math.round(Number(form.max_runtime_hours) * 3600)
     }
 
+    if (backupMode === 'specific' && selectedServiceIds.length === 0) {
+      toast.error(
+        'Select at least one database, or switch back to "All databases."',
+      )
+      return
+    }
+    if (
+      backupMode === 'specific' &&
+      selectedServiceIds.length === 0 &&
+      !includeControlPlane
+    ) {
+      toast.error(
+        'This schedule would have nothing to back up. Enable the control plane or pick at least one database.',
+      )
+      return
+    }
+    if (backupMode === 'all' && !includeControlPlane) {
+      // Allowed (all DBs covered), nothing to block here.
+    }
+
     createMutation.mutate({
       body: {
         name: form.name,
@@ -147,6 +203,8 @@ export function CreateBackupSchedule() {
         enabled: form.enabled ?? true,
         tags: [],
         max_runtime_secs,
+        target_all_services: backupMode === 'all',
+        include_control_plane: includeControlPlane,
       },
     })
   }
@@ -273,6 +331,81 @@ export function CreateBackupSchedule() {
           </div>
 
           <div className="grid gap-2">
+            <Label>Backup targets</Label>
+            <RadioGroup
+              value={backupMode}
+              onValueChange={(v) => setBackupMode(v as 'all' | 'specific')}
+              className="gap-4"
+            >
+              <div className="flex items-start space-x-3 space-y-0">
+                <RadioGroupItem value="all" id="mode-all" />
+                <div className="grid gap-1 leading-none">
+                  <Label
+                    htmlFor="mode-all"
+                    className="text-sm font-medium leading-none"
+                  >
+                    All databases (recommended)
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Back up every database currently on the host — and any
+                    new database you create later, automatically.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-start space-x-3 space-y-0">
+                <RadioGroupItem value="specific" id="mode-specific" />
+                <div className="grid gap-1 leading-none">
+                  <Label
+                    htmlFor="mode-specific"
+                    className="text-sm font-medium leading-none"
+                  >
+                    Specific databases
+                  </Label>
+                  <p className="text-sm text-muted-foreground">
+                    Pick the databases this schedule should back up. New
+                    databases are not included unless you attach them.
+                  </p>
+                </div>
+              </div>
+            </RadioGroup>
+            {backupMode === 'specific' && (
+              <div className="mt-2 rounded-md border p-2">
+                <ScheduleServicesSelector
+                  value={selectedServiceIds}
+                  onChange={setSelectedServiceIds}
+                  disabled={
+                    createMutation.isPending || attachMutation.isPending
+                  }
+                />
+              </div>
+            )}
+            <div className="mt-3 flex items-start justify-between gap-3 rounded-md border p-3">
+              <div className="grid gap-1 leading-tight">
+                <Label
+                  htmlFor="include-control-plane"
+                  className="text-sm font-medium"
+                >
+                  Also back up the Temps control plane
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Includes Temps's own database (users, projects, service
+                  configs, audit logs, error groups). Recommended unless you
+                  use Temps purely as a backup orchestrator for external
+                  databases.
+                </p>
+              </div>
+              <Switch
+                id="include-control-plane"
+                checked={includeControlPlane}
+                onCheckedChange={setIncludeControlPlane}
+                disabled={
+                  createMutation.isPending || attachMutation.isPending
+                }
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-2">
             <Label htmlFor="max-runtime">Max runtime (hours)</Label>
             <Input
               id="max-runtime"
@@ -301,8 +434,13 @@ export function CreateBackupSchedule() {
           <Button variant="outline" asChild>
             <Link to={`/backups/s3-sources/${id}`}>Cancel</Link>
           </Button>
-          <Button onClick={handleSubmit} disabled={createMutation.isPending}>
-            {createMutation.isPending ? 'Creating…' : 'Create schedule'}
+          <Button
+            onClick={handleSubmit}
+            disabled={createMutation.isPending || attachMutation.isPending}
+          >
+            {createMutation.isPending || attachMutation.isPending
+              ? 'Creating…'
+              : 'Create schedule'}
           </Button>
         </CardFooter>
       </Card>

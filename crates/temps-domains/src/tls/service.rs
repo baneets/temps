@@ -1,7 +1,9 @@
 use anyhow::Result;
 use chrono::Utc;
-use hickory_resolver::config::{LookupIpStrategy, ResolveHosts, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::config::{
+    LookupIpStrategy, ResolveHosts, ResolverConfig, ResolverOpts, CLOUDFLARE,
+};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::Resolver;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
@@ -16,7 +18,7 @@ use super::providers::CertificateProvider;
 use super::repository::CertificateRepository;
 
 /// Type alias for the Tokio-based DNS resolver
-type TokioResolver = Resolver<TokioConnectionProvider>;
+type TokioResolver = Resolver<TokioRuntimeProvider>;
 
 pub struct TlsService {
     repository: Arc<dyn CertificateRepository>,
@@ -40,13 +42,15 @@ impl TlsService {
         options.ip_strategy = LookupIpStrategy::Ipv4Only;
         options.try_tcp_on_error = true;
 
+        // Building from a static, known-valid config cannot fail in practice.
         let resolver = Arc::new(
             Resolver::builder_with_config(
-                ResolverConfig::cloudflare(),
-                TokioConnectionProvider::default(),
+                ResolverConfig::udp_and_tcp(&CLOUDFLARE),
+                TokioRuntimeProvider::default(),
             )
             .with_options(options)
-            .build(),
+            .build()
+            .expect("failed to build DNS resolver from static Cloudflare config"),
         );
 
         Self {
@@ -724,14 +728,24 @@ impl TlsService {
 
     /// Resolve domain DNS information
     async fn resolve_domain_info(&self, domain: &str) -> DnsInfo {
+        use hickory_resolver::proto::rr::{RData, RecordType};
+
         let mut a_records = Vec::new();
         let mut aaaa_records = Vec::new();
         let mut error = None;
 
-        // Try IPv4 lookup
-        match self.resolver.ipv4_lookup(domain).await {
+        // Try IPv4 lookup. The generic `lookup` returns a `Lookup`; pull the
+        // A rdata out of each answer record (hickory 0.26).
+        match self.resolver.lookup(domain, RecordType::A).await {
             Ok(lookup) => {
-                a_records = lookup.iter().map(|ip| ip.to_string()).collect();
+                a_records = lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| match &record.data {
+                        RData::A(a) => Some(a.0.to_string()),
+                        _ => None,
+                    })
+                    .collect();
             }
             Err(e) => {
                 error = Some(format!("IPv4 lookup failed: {}", e));
@@ -739,9 +753,16 @@ impl TlsService {
         }
 
         // Try IPv6 lookup (if IPv4 succeeded or failed, we still try IPv6)
-        match self.resolver.ipv6_lookup(domain).await {
+        match self.resolver.lookup(domain, RecordType::AAAA).await {
             Ok(lookup) => {
-                aaaa_records = lookup.iter().map(|ip| ip.to_string()).collect();
+                aaaa_records = lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| match &record.data {
+                        RData::AAAA(aaaa) => Some(aaaa.0.to_string()),
+                        _ => None,
+                    })
+                    .collect();
             }
             Err(e) => {
                 if error.is_some() {

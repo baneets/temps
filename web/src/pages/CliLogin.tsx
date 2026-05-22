@@ -320,10 +320,15 @@ async function jsonRequest<T>(
   return (await res.json()) as T
 }
 
+// The auth plugin's routes are nested under `/api` by `temps-core`
+// (see `temps-core/src/plugin.rs`), so these endpoints live at
+// `/api/auth/cli/device/{lookup,approve,deny}` — NOT at the server root.
+// Hitting the unprefixed paths hits the SPA catch-all and returns HTML,
+// which silently leaves the page stuck on "unknown" with no Authorize button.
 async function fetchDeviceLookup(userCode: string): Promise<DeviceLookup> {
   return jsonRequest<DeviceLookup>(
     'GET',
-    `/auth/cli/device/lookup?user_code=${encodeURIComponent(userCode)}`,
+    `/api/auth/cli/device/lookup?user_code=${encodeURIComponent(userCode)}`,
   )
 }
 
@@ -331,7 +336,7 @@ async function postDeviceAction(
   action: 'approve' | 'deny',
   userCode: string,
 ): Promise<{ user_code: string; status: string }> {
-  return jsonRequest('POST', `/auth/cli/device/${action}`, {
+  return jsonRequest('POST', `/api/auth/cli/device/${action}`, {
     user_code: userCode,
   })
 }

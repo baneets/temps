@@ -19,6 +19,7 @@ pub mod autopilot_configs;
 pub mod autopilot_run_logs;
 pub mod autopilot_runs;
 pub mod backup_alerts;
+pub mod backup_schedule_services;
 pub mod backup_schedules;
 pub mod backups;
 pub mod challenge_sessions;

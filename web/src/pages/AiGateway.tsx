@@ -82,8 +82,11 @@ import {
   TrendingUp,
   DollarSign,
   Bot,
+  ChevronLeft,
   ChevronRight,
   ArrowLeft,
+  SlidersHorizontal,
+  X,
   Wrench,
   MessageSquare,
   AlertTriangle,
@@ -166,6 +169,11 @@ interface UsageLogEntry {
   status: number
   is_streaming: boolean
   is_byok: boolean
+}
+
+interface UsageLogPage {
+  entries: UsageLogEntry[]
+  total: number
 }
 
 interface ModelPricing {
@@ -334,11 +342,81 @@ function UsageAnalytics() {
       ),
   })
 
-  const { data: recentLogs } = useQuery({
-    queryKey: ['aiUsage', 'recent'],
+  // Recent Requests: pagination + filters. `pageSize` is user-configurable up
+  // to the backend max of 50. Filters reset the page back to 0 on change.
+  const [recentPage, setRecentPage] = useState(0)
+  const [recentPageSize, setRecentPageSize] = useState(20)
+  const [recentProvider, setRecentProvider] = useState('all')
+  const [recentStatus, setRecentStatus] = useState('all')
+  const [recentCostOp, setRecentCostOp] = useState<'gte' | 'gt' | 'lte' | 'lt'>('gte')
+  const [recentCostInput, setRecentCostInput] = useState('')
+  const [recentTokensOp, setRecentTokensOp] = useState<'gte' | 'gt' | 'lte' | 'lt'>('gte')
+  const [recentTokensInput, setRecentTokensInput] = useState('')
+  // The filter row is collapsed by default and only revealed on demand.
+  const [recentFiltersOpen, setRecentFiltersOpen] = useState(false)
+
+  // Cost is entered by the user in dollars; the API expects microcents.
+  const recentCostMicrocents = useMemo(() => {
+    const dollars = parseFloat(recentCostInput)
+    if (!Number.isFinite(dollars) || dollars < 0) return undefined
+    return Math.round(dollars * 1_000_000 * 100)
+  }, [recentCostInput])
+
+  // Tokens are entered as a plain integer count.
+  const recentTokensValue = useMemo(() => {
+    const n = parseInt(recentTokensInput, 10)
+    if (!Number.isFinite(n) || n < 0) return undefined
+    return n
+  }, [recentTokensInput])
+
+  const recentFilterParams = useMemo(() => {
+    const params: Record<string, string | undefined> = {}
+    if (recentProvider !== 'all') params.provider = recentProvider
+    if (recentStatus !== 'all') params.status = recentStatus
+    if (recentCostMicrocents !== undefined) {
+      params[`cost_${recentCostOp}`] = String(recentCostMicrocents)
+    }
+    if (recentTokensValue !== undefined) {
+      params[`tokens_${recentTokensOp}`] = String(recentTokensValue)
+    }
+    return params
+  }, [
+    recentProvider,
+    recentStatus,
+    recentCostOp,
+    recentCostMicrocents,
+    recentTokensOp,
+    recentTokensValue,
+  ])
+
+  const recentActiveFilterCount = Object.keys(recentFilterParams).length
+
+  const { data: recentLogsPage, isPlaceholderData: recentIsPlaceholder } = useQuery({
+    queryKey: ['aiUsage', 'recent', recentPage, recentPageSize, recentFilterParams],
     queryFn: () =>
-      fetchJson<UsageLogEntry[]>(buildUsageUrl('recent', { limit: '20' })),
+      fetchJson<UsageLogPage>(
+        buildUsageUrl('recent', {
+          limit: String(recentPageSize),
+          offset: String(recentPage * recentPageSize),
+          ...recentFilterParams,
+        })
+      ),
+    placeholderData: (prev) => prev,
   })
+
+  const recentLogs = recentLogsPage?.entries
+  const recentTotal = recentLogsPage?.total ?? 0
+  const recentTotalPages = Math.max(1, Math.ceil(recentTotal / recentPageSize))
+  const recentHasFilters = recentActiveFilterCount > 0
+
+  // Reset to the first page whenever filters or page size change, so the user
+  // never lands on an out-of-range page after narrowing the result set.
+  const recentResetKey = `${recentPageSize}|${JSON.stringify(recentFilterParams)}`
+  const [recentLastResetKey, setRecentLastResetKey] = useState(recentResetKey)
+  if (recentResetKey !== recentLastResetKey) {
+    setRecentLastResetKey(recentResetKey)
+    setRecentPage(0)
+  }
 
   const { data: pricingData } = useQuery({
     queryKey: ['aiPricing'],
@@ -633,16 +711,151 @@ function UsageAnalytics() {
 
       {/* Recent requests */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Recent Requests</CardTitle>
+        <CardHeader className="gap-3">
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="text-base">Recent Requests</CardTitle>
+            <Button
+              type="button"
+              variant={recentFiltersOpen ? 'secondary' : 'outline'}
+              size="sm"
+              onClick={() => setRecentFiltersOpen((open) => !open)}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+              <span className="hidden sm:inline">Filters</span>
+              {recentActiveFilterCount > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="ml-1 h-5 min-w-5 justify-center px-1 text-xs tabular-nums"
+                >
+                  {recentActiveFilterCount}
+                </Badge>
+              )}
+            </Button>
+          </div>
+          {/* Filter row — hidden until the user opens it, or while a filter is active */}
+          {(recentFiltersOpen || recentHasFilters) && (
+            <div className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3 sm:flex-row sm:flex-wrap sm:items-center">
+              <Select value={recentProvider} onValueChange={setRecentProvider}>
+                <SelectTrigger className="w-full sm:w-[160px]">
+                  <SelectValue placeholder="Provider" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All providers</SelectItem>
+                  {/* Source the full supported-provider set, not the time-windowed
+                      analytics query — the recent list isn't bound to that window. */}
+                  {AI_PROVIDERS.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={recentStatus} onValueChange={setRecentStatus}>
+                <SelectTrigger className="w-full sm:w-[150px]">
+                  <SelectValue placeholder="Status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All statuses</SelectItem>
+                  <SelectItem value="200">200 OK</SelectItem>
+                  <SelectItem value="400">400 Bad Request</SelectItem>
+                  <SelectItem value="401">401 Unauthorized</SelectItem>
+                  <SelectItem value="403">403 Forbidden</SelectItem>
+                  <SelectItem value="404">404 Not Found</SelectItem>
+                  <SelectItem value="429">429 Rate Limited</SelectItem>
+                  <SelectItem value="500">500 Server Error</SelectItem>
+                </SelectContent>
+              </Select>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={recentCostOp}
+                  onValueChange={(v) => setRecentCostOp(v as typeof recentCostOp)}
+                >
+                  <SelectTrigger className="w-[92px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="gte">Cost ≥</SelectItem>
+                    <SelectItem value="gt">Cost &gt;</SelectItem>
+                    <SelectItem value="lte">Cost ≤</SelectItem>
+                    <SelectItem value="lt">Cost &lt;</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="relative w-full sm:w-[110px]">
+                  <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                    $
+                  </span>
+                  <Input
+                    type="number"
+                    name="recent-cost-filter"
+                    aria-label="Filter by cost in dollars"
+                    min="0"
+                    step="0.01"
+                    inputMode="decimal"
+                    placeholder="0.00"
+                    value={recentCostInput}
+                    onChange={(e) => setRecentCostInput(e.target.value)}
+                    className="pl-6"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={recentTokensOp}
+                  onValueChange={(v) => setRecentTokensOp(v as typeof recentTokensOp)}
+                >
+                  <SelectTrigger className="w-[104px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="gte">Tokens ≥</SelectItem>
+                    <SelectItem value="gt">Tokens &gt;</SelectItem>
+                    <SelectItem value="lte">Tokens ≤</SelectItem>
+                    <SelectItem value="lt">Tokens &lt;</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input
+                  type="number"
+                  name="recent-tokens-filter"
+                  aria-label="Filter by total token count"
+                  min="0"
+                  step="100"
+                  inputMode="numeric"
+                  placeholder="0"
+                  value={recentTokensInput}
+                  onChange={(e) => setRecentTokensInput(e.target.value)}
+                  className="w-full sm:w-[100px]"
+                />
+              </div>
+              {recentHasFilters && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setRecentProvider('all')
+                    setRecentStatus('all')
+                    setRecentCostInput('')
+                    setRecentTokensInput('')
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                  Clear
+                </Button>
+              )}
+            </div>
+          )}
         </CardHeader>
         <CardContent>
           {!recentLogs || recentLogs.length === 0 ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
-              No recent requests
+              {recentHasFilters ? 'No requests match these filters' : 'No recent requests'}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div
+              className={`overflow-x-auto transition-opacity ${
+                recentIsPlaceholder ? 'opacity-60' : ''
+              }`}
+            >
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -707,6 +920,57 @@ function UsageAnalytics() {
                   ))}
                 </TableBody>
               </Table>
+            </div>
+          )}
+          {recentTotal > 0 && (
+            <div className="mt-4 flex flex-col gap-2 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <p className="text-xs text-muted-foreground">
+                  <span className="hidden sm:inline">
+                    Showing {recentPage * recentPageSize + 1}–
+                    {Math.min((recentPage + 1) * recentPageSize, recentTotal)} of{' '}
+                    {recentTotal.toLocaleString()}
+                  </span>
+                  <span className="sm:hidden">
+                    {recentPage + 1} / {recentTotalPages}
+                  </span>
+                </p>
+                <Select
+                  value={String(recentPageSize)}
+                  onValueChange={(v) => setRecentPageSize(Number(v))}
+                >
+                  <SelectTrigger className="h-8 w-[110px] text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[10, 20, 30, 50].map((size) => (
+                      <SelectItem key={size} value={String(size)}>
+                        {size} / page
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={recentPage === 0}
+                  onClick={() => setRecentPage((p) => Math.max(0, p - 1))}
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                  <span className="hidden sm:inline">Previous</span>
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={recentPage + 1 >= recentTotalPages}
+                  onClick={() => setRecentPage((p) => p + 1)}
+                >
+                  <span className="hidden sm:inline">Next</span>
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
             </div>
           )}
         </CardContent>

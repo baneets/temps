@@ -6,11 +6,11 @@ use cloudflare::framework::{
     auth::Credentials, client::async_api::Client, client::ClientConfig, Environment,
 };
 use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
-use hickory_resolver::name_server::TokioConnectionProvider;
-use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RData;
 use hickory_resolver::Resolver;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
@@ -714,11 +714,10 @@ impl DnsPropagationChecker {
         record_name: &str,
         expected_values: &[String],
     ) -> DnsServerResult {
-        // Create resolver config for this specific DNS server using hickory-resolver 0.25+ API
-        let name_server =
-            NameServerConfig::new(SocketAddr::new(IpAddr::V4(server.ip), 53), Protocol::Udp);
+        // Create resolver config for this specific DNS server (hickory 0.26 API).
+        let name_server = NameServerConfig::udp(IpAddr::V4(server.ip));
 
-        let mut resolver_config = ResolverConfig::new();
+        let mut resolver_config = ResolverConfig::default();
         resolver_config.add_name_server(name_server);
 
         // Configure resolver options
@@ -727,20 +726,38 @@ impl DnsPropagationChecker {
         resolver_opts.attempts = 2;
         resolver_opts.cache_size = 0; // Disable caching to get fresh results
 
-        // Build resolver using the new builder API
+        // Build resolver using the 0.26 builder API.
         let resolver =
-            Resolver::builder_with_config(resolver_config, TokioConnectionProvider::default())
+            match Resolver::builder_with_config(resolver_config, TokioRuntimeProvider::default())
                 .with_options(resolver_opts)
-                .build();
+                .build()
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    return DnsServerResult {
+                        server_name: server.name.to_string(),
+                        server_ip: server.ip.to_string(),
+                        found: false,
+                        values_found: Vec::new(),
+                        error: Some(format!("failed to build DNS resolver: {e}")),
+                    }
+                }
+            };
 
         // Query TXT records
         match resolver.txt_lookup(record_name).await {
             Ok(lookup) => {
                 let values_found: Vec<String> = lookup
+                    .answers()
                     .iter()
-                    .flat_map(|txt| {
-                        txt.iter()
-                            .map(|data| String::from_utf8_lossy(data).to_string())
+                    .filter_map(|record| match &record.data {
+                        RData::TXT(txt) => Some(
+                            txt.txt_data
+                                .iter()
+                                .map(|data| String::from_utf8_lossy(data).to_string())
+                                .collect::<String>(),
+                        ),
+                        _ => None,
                     })
                     .collect();
 

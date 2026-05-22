@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hickory_resolver::config::{
-    NameServerConfig, ResolverConfig as ClientResolverConfig, ResolverOpts,
+    NameServerConfig, ResolveHosts, ResolverConfig as ClientResolverConfig, ResolverOpts,
 };
-use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use tempfile::tempdir;
 use temps_dns_resolver::{ResolverConfig, ResolverHandle};
@@ -60,20 +60,24 @@ fn random_port() -> u16 {
 }
 
 fn client_for(server: SocketAddr) -> TokioResolver {
-    let mut cfg = ClientResolverConfig::new();
-    cfg.add_name_server(NameServerConfig::new(server, Protocol::Udp));
+    let mut cfg = ClientResolverConfig::default();
+    // The test resolver listens on a random localhost UDP port; point a
+    // UDP-only nameserver at exactly that address.
+    let mut name_server = NameServerConfig::udp(server.ip());
+    if let Some(conn) = name_server.connections.first_mut() {
+        conn.port = server.port();
+    }
+    cfg.add_name_server(name_server);
     let mut opts = ResolverOpts::default();
     // Don't fall through to the system resolver — we want hard failures
     // when our resolver can't answer.
-    opts.use_hosts_file = hickory_resolver::config::ResolveHosts::Never;
+    opts.use_hosts_file = ResolveHosts::Never;
     opts.attempts = 1;
     opts.timeout = Duration::from_secs(2);
-    TokioResolver::builder_with_config(
-        cfg,
-        hickory_resolver::name_server::TokioConnectionProvider::default(),
-    )
-    .with_options(opts)
-    .build()
+    TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .expect("failed to build test DNS client")
 }
 
 async fn install_changes_mock(server: &MockServer, body: serde_json::Value) {

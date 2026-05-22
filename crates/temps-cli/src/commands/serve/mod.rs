@@ -82,10 +82,9 @@ impl ServeCommand {
         self,
         extra_plugins: Vec<Box<dyn temps_core::plugin::TempsPlugin>>,
     ) -> anyhow::Result<()> {
-        // Install the rustls crypto provider once at startup. Both temps-domains
-        // and check-if-email-exists try to install it themselves — calling it here
-        // first satisfies the library's internal Once guard and prevents panics.
-        check_if_email_exists::initialize_crypto_provider();
+        // Install the rustls crypto provider once at startup, before any
+        // dependency (e.g. temps-domains) constructs a rustls client.
+        crate::install_crypto_provider();
 
         // Set screenshot provider from CLI flag (takes precedence over env var)
         // This allows: temps serve --screenshot-provider=noop

@@ -49,6 +49,8 @@ pub enum Relation {
     ProjectServices,
     #[sea_orm(has_many = "super::service_members::Entity")]
     Members,
+    #[sea_orm(has_many = "super::backup_schedule_services::Entity")]
+    BackupScheduleServices,
     #[sea_orm(
         belongs_to = "super::nodes::Entity",
         from = "Column::NodeId",
@@ -72,6 +74,12 @@ impl Related<super::project_services::Entity> for Entity {
 impl Related<super::service_members::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Members.def()
+    }
+}
+
+impl Related<super::backup_schedule_services::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::BackupScheduleServices.def()
     }
 }
 

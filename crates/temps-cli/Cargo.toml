@@ -56,7 +56,6 @@ temps-import = { path = "../temps-import" }
 temps-infra = { path = "../temps-infra" }
 temps-log-aggregator = { path = "../temps-log-aggregator" }
 temps-logs = { path = "../temps-logs" }
-# temps-mcp = { path = "../temps-mcp" }
 temps-migrations = { path = "../temps-migrations" }
 temps-monitoring = { path = "../temps-monitoring" }
 temps-notifications = { path = "../temps-notifications" }
@@ -75,7 +74,6 @@ temps-wireguard = { path = "../temps-wireguard" }
 tokio-util = { workspace = true }
 
 # CLI and runtime dependencies - reference from crates workspace
-check-if-email-exists = "0.11"
 clap = "4.4"
 colored = "2.0"
 chrono = { workspace = true }

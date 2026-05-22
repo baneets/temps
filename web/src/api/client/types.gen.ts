@@ -640,6 +640,32 @@ export type AssignRoleRequest = {
 };
 
 /**
+ * Body for `POST /api/backups/schedules/{id}/services` — attach external
+ * services to a backup schedule. Idempotent.
+ */
+export type AttachScheduleServicesRequest = {
+    /**
+     * External service ids to attach. Duplicates are de-duplicated server-side.
+     */
+    service_ids: Array<number>;
+};
+
+/**
+ * Response for `POST /api/backups/schedules/{id}/services`.
+ */
+export type AttachScheduleServicesResponse = {
+    /**
+     * Number of rows actually inserted (excludes rows skipped by
+     * `ON CONFLICT DO NOTHING`).
+     */
+    inserted: number;
+    /**
+     * Total number of services now attached to the schedule.
+     */
+    total_attached: number;
+};
+
+/**
  * IP address information in audit log
  */
 export type AuditLogIpInfo = {
@@ -950,6 +976,12 @@ export type BackupScheduleResponse = {
     description?: string | null;
     enabled: boolean;
     id: number;
+    /**
+     * When `true`, every run also produces a `control_plane` backup
+     * (Temps's own Postgres). When `false`, only the external service
+     * fan-out happens.
+     */
+    include_control_plane: boolean;
     last_run?: number | null;
     /**
      * Per-schedule wall-clock timeout override for backup jobs (seconds).
@@ -963,6 +995,12 @@ export type BackupScheduleResponse = {
     s3_source_id: number;
     schedule_expression: string;
     tags: Array<string>;
+    /**
+     * When `true`, the schedule auto-includes every external service on
+     * the host (and any future ones). When `false`, the schedule only
+     * targets services attached via `backup_schedule_services`.
+     */
+    target_all_services: boolean;
     updated_at: number;
 };
 
@@ -2132,6 +2170,13 @@ export type CreateBackupScheduleRequest = {
     description?: string | null;
     enabled: boolean;
     /**
+     * When `true` (default), every run also produces a `control_plane`
+     * backup of Temps's own database. Operators who use Temps purely as
+     * a backup orchestrator for external DBs can set this to `false` to
+     * keep the run history focused on those services.
+     */
+    include_control_plane?: boolean | null;
+    /**
      * Optional wall-clock timeout override for jobs created by this schedule
      * (seconds). When set, overrides the engine-family default. `null` means
      * "use engine default." The per-job `max_runtime_secs` in
@@ -2146,6 +2191,13 @@ export type CreateBackupScheduleRequest = {
     s3_source_id?: number | null;
     schedule_expression: string;
     tags: Array<string>;
+    /**
+     * When `true` (default), the schedule backs up every external service
+     * on the host — including databases created in the future. When
+     * `false`, the schedule backs up only the services explicitly attached
+     * via `POST /backups/schedules/{id}/services`. Omit to use the default.
+     */
+    target_all_services?: boolean | null;
 };
 
 export type CreateDsnRequest = {
@@ -12926,6 +12978,10 @@ export type UpdateBackupScheduleRequest = {
      */
     enabled?: boolean | null;
     /**
+     * Toggle whether the control-plane backup is produced on every run.
+     */
+    include_control_plane?: boolean | null;
+    /**
      * Per-schedule wall-clock timeout override (seconds).
      *
      * - `None` (field absent) — leave current value unchanged
@@ -12949,6 +13005,12 @@ export type UpdateBackupScheduleRequest = {
      * Replace the full tag list. Skipped when `None`.
      */
     tags?: Array<string> | null;
+    /**
+     * Toggle between "back up every database" (`true`) and "back up only
+     * the explicit list" (`false`). When set to `true`, the server clears
+     * the explicit membership rows for this schedule.
+     */
+    target_all_services?: boolean | null;
 };
 
 /**
@@ -17610,6 +17672,48 @@ export type ListExternalServiceBackupsResponses = {
 
 export type ListExternalServiceBackupsResponse = ListExternalServiceBackupsResponses[keyof ListExternalServiceBackupsResponses];
 
+export type ListServiceSchedulesData = {
+    body?: never;
+    path: {
+        /**
+         * External service ID
+         */
+        service_id: number;
+    };
+    query?: never;
+    url: '/backups/external-services/{service_id}/schedules';
+};
+
+export type ListServiceSchedulesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Service not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListServiceSchedulesError = ListServiceSchedulesErrors[keyof ListServiceSchedulesErrors];
+
+export type ListServiceSchedulesResponses = {
+    /**
+     * Schedules backing up this service
+     */
+    200: Array<BackupScheduleResponse>;
+};
+
+export type ListServiceSchedulesResponse = ListServiceSchedulesResponses[keyof ListServiceSchedulesResponses];
+
 export type ListS3SourcesData = {
     body?: never;
     path?: never;
@@ -18353,6 +18457,136 @@ export type ListScheduleRunsResponses = {
 };
 
 export type ListScheduleRunsResponse = ListScheduleRunsResponses[keyof ListScheduleRunsResponses];
+
+export type ListScheduleServicesData = {
+    body?: never;
+    path: {
+        /**
+         * Schedule ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}/services';
+};
+
+export type ListScheduleServicesErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListScheduleServicesError = ListScheduleServicesErrors[keyof ListScheduleServicesErrors];
+
+export type ListScheduleServicesResponses = {
+    /**
+     * Services attached to this schedule
+     */
+    200: Array<ExternalServiceSummary>;
+};
+
+export type ListScheduleServicesResponse = ListScheduleServicesResponses[keyof ListScheduleServicesResponses];
+
+export type AttachScheduleServicesData = {
+    body: AttachScheduleServicesRequest;
+    path: {
+        /**
+         * Schedule ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}/services';
+};
+
+export type AttachScheduleServicesErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Schedule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type AttachScheduleServicesError = AttachScheduleServicesErrors[keyof AttachScheduleServicesErrors];
+
+export type AttachScheduleServicesResponses = {
+    /**
+     * Services attached
+     */
+    200: AttachScheduleServicesResponse;
+};
+
+export type AttachScheduleServicesResponse2 = AttachScheduleServicesResponses[keyof AttachScheduleServicesResponses];
+
+export type DetachScheduleServiceData = {
+    body?: never;
+    path: {
+        /**
+         * Schedule ID
+         */
+        id: number;
+        /**
+         * External service ID
+         */
+        service_id: number;
+    };
+    query?: never;
+    url: '/backups/schedules/{id}/services/{service_id}';
+};
+
+export type DetachScheduleServiceErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type DetachScheduleServiceError = DetachScheduleServiceErrors[keyof DetachScheduleServiceErrors];
+
+export type DetachScheduleServiceResponses = {
+    /**
+     * Service detached (or was not attached)
+     */
+    204: void;
+};
+
+export type DetachScheduleServiceResponse = DetachScheduleServiceResponses[keyof DetachScheduleServiceResponses];
 
 export type GetBackupData = {
     body?: never;
