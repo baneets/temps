@@ -12,7 +12,7 @@ use tracing::{debug, error};
 use crate::errors::EmailError;
 use crate::providers::{
     EmailProvider, EmailProviderType, ScalewayCredentials, ScalewayProvider, SesCredentials,
-    SesProvider,
+    SesProvider, SmtpCredentials, SmtpProvider,
 };
 
 /// Service for managing email providers
@@ -36,6 +36,39 @@ pub struct CreateProviderRequest {
 pub enum ProviderCredentials {
     Ses(SesCredentials),
     Scaleway(ScalewayCredentials),
+    Smtp(SmtpCredentials),
+}
+
+impl ProviderCredentials {
+    /// Get the provider type that owns these credentials.
+    pub fn provider_type(&self) -> EmailProviderType {
+        match self {
+            ProviderCredentials::Ses(_) => EmailProviderType::Ses,
+            ProviderCredentials::Scaleway(_) => EmailProviderType::Scaleway,
+            ProviderCredentials::Smtp(_) => EmailProviderType::Smtp,
+        }
+    }
+}
+
+/// Request to update an existing email provider. All fields are optional —
+/// `None` means "leave this field unchanged". `provider_type` cannot be
+/// changed (the stored credentials format is fixed at creation time).
+#[derive(Debug, Clone, Default)]
+pub struct UpdateProviderRequest {
+    pub name: Option<String>,
+    pub region: Option<String>,
+    /// New credentials. Must match the existing provider's type or the
+    /// update is rejected. `None` keeps the encrypted blob as-is — this is
+    /// how operators rotate `name`/`region` without re-typing secrets.
+    pub credentials: Option<ProviderCredentials>,
+    pub is_active: Option<bool>,
+}
+
+/// Summary of what changed during an update. Used for audit logging.
+#[derive(Debug, Clone)]
+pub struct UpdateProviderOutcome {
+    pub provider: email_providers::Model,
+    pub changed_fields: Vec<String>,
 }
 
 /// Result of sending a test email
@@ -73,6 +106,7 @@ impl ProviderService {
         let credentials_json = match &request.credentials {
             ProviderCredentials::Ses(creds) => serde_json::to_string(creds)?,
             ProviderCredentials::Scaleway(creds) => serde_json::to_string(creds)?,
+            ProviderCredentials::Smtp(creds) => serde_json::to_string(creds)?,
         };
 
         // Encrypt credentials
@@ -160,6 +194,91 @@ impl ProviderService {
         Ok(result)
     }
 
+    /// Update an existing provider. Returns the updated row plus the list of
+    /// fields that actually changed (used by handlers for audit logging).
+    ///
+    /// `provider_type` is immutable. If `request.credentials` is `Some` and the
+    /// variant doesn't match the existing provider's type, the call fails with
+    /// `EmailError::Validation` rather than silently corrupting the row.
+    pub async fn update(
+        &self,
+        id: i32,
+        request: UpdateProviderRequest,
+    ) -> Result<UpdateProviderOutcome, EmailError> {
+        debug!("Updating email provider {}", id);
+
+        let existing = self.get(id).await?;
+        let existing_type = EmailProviderType::from_str(&existing.provider_type)?;
+        let mut changed_fields: Vec<String> = Vec::new();
+
+        let mut active: email_providers::ActiveModel = existing.clone().into();
+
+        if let Some(name) = request.name {
+            if name.trim().is_empty() {
+                return Err(EmailError::Validation(
+                    "Provider name cannot be empty".to_string(),
+                ));
+            }
+            if name != existing.name {
+                active.name = Set(name);
+                changed_fields.push("name".to_string());
+            }
+        }
+
+        if let Some(region) = request.region {
+            if region != existing.region {
+                active.region = Set(region);
+                changed_fields.push("region".to_string());
+            }
+        }
+
+        if let Some(is_active) = request.is_active {
+            if is_active != existing.is_active {
+                active.is_active = Set(is_active);
+                changed_fields.push("is_active".to_string());
+            }
+        }
+
+        if let Some(new_credentials) = request.credentials {
+            let new_type = new_credentials.provider_type();
+            if new_type != existing_type {
+                return Err(EmailError::Validation(format!(
+                    "Cannot change provider type from {} to {} on existing provider (id={})",
+                    existing_type, new_type, id
+                )));
+            }
+            let credentials_json = match &new_credentials {
+                ProviderCredentials::Ses(c) => serde_json::to_string(c)?,
+                ProviderCredentials::Scaleway(c) => serde_json::to_string(c)?,
+                ProviderCredentials::Smtp(c) => serde_json::to_string(c)?,
+            };
+            let encrypted = self
+                .encryption_service
+                .encrypt_string(&credentials_json)
+                .map_err(|e| EmailError::Encryption(e.to_string()))?;
+            active.credentials = Set(encrypted);
+            changed_fields.push("credentials".to_string());
+        }
+
+        // Skip the DB roundtrip if nothing changed.
+        if changed_fields.is_empty() {
+            return Ok(UpdateProviderOutcome {
+                provider: existing,
+                changed_fields,
+            });
+        }
+
+        let updated = active.update(self.db.as_ref()).await?;
+        debug!(
+            "Updated email provider {} (changed fields: {:?})",
+            id, changed_fields
+        );
+        Ok(UpdateProviderOutcome {
+            provider: updated,
+            changed_fields,
+        })
+    }
+
     /// Create an email provider instance from a database model
     pub async fn create_provider_instance(
         &self,
@@ -192,6 +311,14 @@ impl ProviderService {
                         e
                     })?;
                 Ok(Box::new(scaleway_provider))
+            }
+            EmailProviderType::Smtp => {
+                let credentials: SmtpCredentials = serde_json::from_str(&credentials_json)?;
+                let smtp_provider = SmtpProvider::new(&credentials).map_err(|e| {
+                    error!("Failed to create SMTP provider: {}", e);
+                    e
+                })?;
+                Ok(Box::new(smtp_provider))
             }
         }
     }
@@ -230,7 +357,11 @@ impl ProviderService {
         // Create provider instance
         let provider_instance = self.create_provider_instance(&provider).await?;
 
-        // Create a simple test email with provided from address
+        // Create a branded test email matching the notification provider design.
+        let timestamp = chrono::Utc::now()
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+        let provider_type_label = pretty_provider_type(&provider.provider_type);
         let test_request = ProviderSendRequest {
             from: from_address.to_string(),
             from_name: from_name.map(|s| s.to_string()),
@@ -238,60 +369,18 @@ impl ProviderService {
             cc: None,
             bcc: None,
             reply_to: None,
-            subject: format!("Temps Email Provider Test - {}", provider.name),
-            html: Some(format!(
-                r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Email Provider Test</title>
-</head>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-    <h1 style="color: #333;">✅ Email Provider Test Successful</h1>
-    <p>This is a test email from your Temps email provider configuration.</p>
-    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-    <table style="width: 100%; border-collapse: collapse;">
-        <tr>
-            <td style="padding: 8px 0; color: #666;">Provider Name:</td>
-            <td style="padding: 8px 0; font-weight: bold;">{}</td>
-        </tr>
-        <tr>
-            <td style="padding: 8px 0; color: #666;">Provider Type:</td>
-            <td style="padding: 8px 0; font-weight: bold;">{}</td>
-        </tr>
-        <tr>
-            <td style="padding: 8px 0; color: #666;">Region:</td>
-            <td style="padding: 8px 0; font-weight: bold;">{}</td>
-        </tr>
-        <tr>
-            <td style="padding: 8px 0; color: #666;">Test Time:</td>
-            <td style="padding: 8px 0; font-weight: bold;">{}</td>
-        </tr>
-    </table>
-    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-    <p style="color: #888; font-size: 12px;">
-        This email was sent as a test from Temps. If you received this email,
-        your email provider is configured correctly.
-    </p>
-</body>
-</html>"#,
-                provider.name,
-                provider.provider_type,
-                provider.region,
-                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            subject: format!("[Temps] Email provider test — {}", provider.name),
+            html: Some(render_test_email_html(
+                &provider.name,
+                &provider_type_label,
+                &provider.region,
+                &timestamp,
             )),
-            text: Some(format!(
-                "Email Provider Test Successful\n\n\
-                Provider Name: {}\n\
-                Provider Type: {}\n\
-                Region: {}\n\
-                Test Time: {}\n\n\
-                This email was sent as a test from Temps. If you received this email, \
-                your email provider is configured correctly.",
-                provider.name,
-                provider.provider_type,
-                provider.region,
-                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            text: Some(render_test_email_text(
+                &provider.name,
+                &provider_type_label,
+                &provider.region,
+                &timestamp,
             )),
             headers: None,
         };
@@ -349,6 +438,21 @@ impl ProviderService {
                     "project_id": credentials.project_id
                 }))
             }
+            EmailProviderType::Smtp => {
+                let credentials: SmtpCredentials = serde_json::from_str(&credentials_json)?;
+                Ok(serde_json::json!({
+                    "host": credentials.host,
+                    "port": credentials.port,
+                    "username": credentials
+                        .username
+                        .as_deref()
+                        .map(mask_string)
+                        .unwrap_or_default(),
+                    "password": credentials.password.as_ref().map(|_| "***".to_string()),
+                    "encryption": credentials.encryption,
+                    "accept_invalid_certs": credentials.accept_invalid_certs,
+                }))
+            }
         }
     }
 }
@@ -360,6 +464,162 @@ fn mask_string(s: &str) -> String {
     } else {
         format!("{}...{}", &s[..4], &s[s.len() - 4..])
     }
+}
+
+/// Human-readable label for a stored provider_type string. Falls back to the
+/// uppercased raw value for unknown variants so future additions still render.
+fn pretty_provider_type(raw: &str) -> String {
+    match raw.to_lowercase().as_str() {
+        "ses" => "AWS SES".to_string(),
+        "scaleway" => "Scaleway".to_string(),
+        "smtp" => "SMTP".to_string(),
+        other => other.to_uppercase(),
+    }
+}
+
+/// HTML-escape the small set of characters that matter inside an email body.
+/// Values shown in the test email come from the database (provider name,
+/// region) and are user-controlled, so we escape them to keep the message
+/// HTML-safe.
+fn escape_html(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Render the HTML body of the "test email provider" message. Visually
+/// matches the notification template (header bar, success badge, title,
+/// details table, footer) so it looks like a real Temps email rather than
+/// a debug ping. Kept as a free function so unit tests can call it without
+/// a `ProviderService` instance.
+pub(crate) fn render_test_email_html(
+    provider_name: &str,
+    provider_type_label: &str,
+    region: &str,
+    timestamp: &str,
+) -> String {
+    // "Success" palette — same accent/background as a positive notification.
+    let accent_color = "#16a34a";
+    let bg_color = "#ecfdf5";
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email provider test</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f3f4f6; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6; padding: 32px 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+        <tr><td align="center">
+            <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; width: 100%;">
+                <!-- Header -->
+                <tr><td style="padding: 24px 32px; background: #0f172a; border-radius: 8px 8px 0 0;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                            <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 18px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em;">Temps</td>
+                            <td align="right" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #94a3b8;">{timestamp}</td>
+                        </tr>
+                    </table>
+                </td></tr>
+
+                <!-- Status Badge -->
+                <tr><td style="padding: 24px 32px 0; background: #ffffff;">
+                    <table cellpadding="0" cellspacing="0">
+                        <tr><td style="padding: 4px 12px; background: {bg_color}; border: 1px solid {accent_color}22; border-radius: 100px;">
+                            <span style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; font-weight: 600; color: {accent_color};">&#10003; Test email</span>
+                        </td></tr>
+                    </table>
+                </td></tr>
+
+                <!-- Title -->
+                <tr><td style="padding: 12px 32px 0; background: #ffffff;">
+                    <h1 style="margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 20px; font-weight: 600; color: #111827; line-height: 1.4;">Email provider is working</h1>
+                </td></tr>
+
+                <!-- Message -->
+                <tr><td style="padding: 16px 32px 8px; background: #ffffff;">
+                    <p style="margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color: #374151; line-height: 1.7;">
+                        Your Temps email provider just delivered this message successfully. The provider is configured correctly and ready to send transactional and notification email. No action is required.
+                    </p>
+                </td></tr>
+
+                <!-- Provider details -->
+                <tr><td style="padding: 12px 32px 24px; background: #ffffff;">
+                    <table width="100%" cellpadding="0" cellspacing="0" style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px;">
+                        <tr>
+                            <td style="padding: 10px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #6b7280; white-space: nowrap; vertical-align: top; width: 130px;">Provider name</td>
+                            <td style="padding: 10px 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; color: #111827; font-weight: 600; word-break: break-all;">{provider_name}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-top: 1px solid #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Provider type</td>
+                            <td style="padding: 10px 14px; border-top: 1px solid #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; color: #111827; font-weight: 600;">{provider_type_label}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-top: 1px solid #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Region</td>
+                            <td style="padding: 10px 14px; border-top: 1px solid #e5e7eb; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; color: #111827; word-break: break-all;">{region}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 10px 14px; border-top: 1px solid #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Test time</td>
+                            <td style="padding: 10px 14px; border-top: 1px solid #e5e7eb; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; color: #111827;">{timestamp}</td>
+                        </tr>
+                    </table>
+                </td></tr>
+
+                <!-- Footer -->
+                <tr><td style="padding: 16px 32px; background: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
+                    <table width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                            <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #9ca3af;">Sent by Temps &middot; Self-hosted PaaS</td>
+                            <td align="right" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; color: #9ca3af;">Email provider test</td>
+                        </tr>
+                    </table>
+                </td></tr>
+            </table>
+        </td></tr>
+    </table>
+</body>
+</html>"#,
+        provider_name = escape_html(provider_name),
+        provider_type_label = escape_html(provider_type_label),
+        region = escape_html(region),
+        timestamp = escape_html(timestamp),
+        accent_color = accent_color,
+        bg_color = bg_color,
+    )
+}
+
+/// Plain-text alternative for the test email. Kept terse on purpose —
+/// the HTML body carries the full design; the plaintext is the fallback.
+pub(crate) fn render_test_email_text(
+    provider_name: &str,
+    provider_type_label: &str,
+    region: &str,
+    timestamp: &str,
+) -> String {
+    format!(
+        "Email provider test successful\n\
+         \n\
+         Your Temps email provider just delivered this message successfully. \
+         The provider is configured correctly and ready to send transactional \
+         and notification email. No action is required.\n\
+         \n\
+         Provider name:  {provider_name}\n\
+         Provider type:  {provider_type_label}\n\
+         Region:         {region}\n\
+         Test time:      {timestamp}\n\
+         \n\
+         Sent by Temps · Self-hosted PaaS\n",
+    )
 }
 
 #[cfg(test)]
@@ -391,6 +651,92 @@ mod tests {
         assert_eq!(mask_string("AKIAIOSFODNN7EXAMPLE"), "AKIA...MPLE");
         assert_eq!(mask_string("12345678"), "***"); // Exactly 8 chars
         assert_eq!(mask_string("123456789"), "1234...6789"); // 9 chars
+    }
+
+    #[test]
+    fn test_pretty_provider_type() {
+        assert_eq!(pretty_provider_type("ses"), "AWS SES");
+        assert_eq!(pretty_provider_type("SES"), "AWS SES");
+        assert_eq!(pretty_provider_type("scaleway"), "Scaleway");
+        assert_eq!(pretty_provider_type("smtp"), "SMTP");
+        // Unknown variants render as uppercase — future providers still look OK.
+        assert_eq!(pretty_provider_type("postmark"), "POSTMARK");
+    }
+
+    #[test]
+    fn test_escape_html_handles_dangerous_characters() {
+        assert_eq!(
+            escape_html("<script>alert('x')</script>"),
+            "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"
+        );
+        assert_eq!(escape_html("AT&T \"prod\""), "AT&amp;T &quot;prod&quot;");
+        // Plain ASCII passes through unchanged.
+        assert_eq!(escape_html("us-east-1"), "us-east-1");
+    }
+
+    #[test]
+    fn test_render_test_email_html_is_branded_and_safe() {
+        let html = render_test_email_html(
+            "Production SES",
+            "AWS SES",
+            "eu-west-1",
+            "2026-05-27 12:23:51 UTC",
+        );
+
+        // Brand: header bar + footer attribution must be present so it looks
+        // like a real Temps email rather than a debug ping.
+        assert!(html.contains(">Temps<"), "expected Temps header");
+        assert!(
+            html.contains("Sent by Temps"),
+            "expected footer attribution"
+        );
+        assert!(html.contains("Email provider is working"), "expected title");
+        assert!(html.contains("Test email"), "expected success badge");
+
+        // Provider details surface — operator needs all four lines.
+        assert!(html.contains("Production SES"));
+        assert!(html.contains("AWS SES"));
+        assert!(html.contains("eu-west-1"));
+        assert!(html.contains("2026-05-27 12:23:51 UTC"));
+
+        // Inline-styled <table> layout — Outlook-safe.
+        assert!(html.contains("<table"));
+        assert!(!html.contains("display: flex"));
+        assert!(!html.contains("display: grid"));
+    }
+
+    #[test]
+    fn test_render_test_email_html_escapes_provider_name() {
+        let html = render_test_email_html(
+            "<script>alert(1)</script>",
+            "SMTP",
+            "us-east-1",
+            "2026-05-27 12:00:00 UTC",
+        );
+        // The raw script tag must never appear in the body — would otherwise
+        // execute in any email client that renders HTML inline (most don't,
+        // but we don't rely on that).
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "raw user-controlled HTML must be escaped"
+        );
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn test_render_test_email_text_includes_provider_details() {
+        let text = render_test_email_text(
+            "Production SES",
+            "AWS SES",
+            "eu-west-1",
+            "2026-05-27 12:23:51 UTC",
+        );
+        assert!(text.contains("Email provider test successful"));
+        assert!(text.contains("Production SES"));
+        assert!(text.contains("AWS SES"));
+        assert!(text.contains("eu-west-1"));
+        assert!(text.contains("2026-05-27 12:23:51 UTC"));
+        assert!(text.contains("Sent by Temps"));
     }
 
     #[test]
@@ -723,6 +1069,232 @@ mod tests {
         assert!(result.is_ok());
         let updated = result.unwrap();
         assert!(updated.is_active);
+    }
+
+    // ========== Tests for update() ==========
+
+    fn ses_creds() -> ProviderCredentials {
+        ProviderCredentials::Ses(SesCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            endpoint_url: None,
+        })
+    }
+
+    #[test]
+    fn test_provider_credentials_type_helper() {
+        assert_eq!(ses_creds().provider_type(), EmailProviderType::Ses);
+        assert_eq!(
+            ProviderCredentials::Scaleway(ScalewayCredentials {
+                api_key: "k".to_string(),
+                project_id: "p".to_string(),
+            })
+            .provider_type(),
+            EmailProviderType::Scaleway,
+        );
+        assert_eq!(
+            ProviderCredentials::Smtp(crate::providers::SmtpCredentials {
+                host: "h".to_string(),
+                port: 587,
+                username: None,
+                password: None,
+                encryption: crate::providers::SmtpEncryption::Starttls,
+                accept_invalid_certs: false,
+            })
+            .provider_type(),
+            EmailProviderType::Smtp,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_renames_provider() {
+        let (_db, service) = setup_test_env().await;
+        let created = service
+            .create(CreateProviderRequest {
+                name: "Original".to_string(),
+                provider_type: EmailProviderType::Ses,
+                region: "us-east-1".to_string(),
+                credentials: ses_creds(),
+            })
+            .await
+            .unwrap();
+
+        let outcome = service
+            .update(
+                created.id,
+                UpdateProviderRequest {
+                    name: Some("Renamed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.provider.name, "Renamed");
+        assert_eq!(outcome.changed_fields, vec!["name".to_string()]);
+        // Credentials blob must not change when only name is updated.
+        assert_eq!(outcome.provider.credentials, created.credentials);
+    }
+
+    #[tokio::test]
+    async fn test_update_with_no_changes_is_noop() {
+        let (_db, service) = setup_test_env().await;
+        let created = service
+            .create(CreateProviderRequest {
+                name: "Same".to_string(),
+                provider_type: EmailProviderType::Ses,
+                region: "us-east-1".to_string(),
+                credentials: ses_creds(),
+            })
+            .await
+            .unwrap();
+
+        let outcome = service
+            .update(
+                created.id,
+                UpdateProviderRequest {
+                    name: Some("Same".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.changed_fields.is_empty());
+        assert_eq!(outcome.provider.id, created.id);
+    }
+
+    #[tokio::test]
+    async fn test_update_rejects_empty_name() {
+        let (_db, service) = setup_test_env().await;
+        let created = service
+            .create(CreateProviderRequest {
+                name: "Original".to_string(),
+                provider_type: EmailProviderType::Ses,
+                region: "us-east-1".to_string(),
+                credentials: ses_creds(),
+            })
+            .await
+            .unwrap();
+
+        let err = service
+            .update(
+                created.id,
+                UpdateProviderRequest {
+                    name: Some("   ".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmailError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_rejects_provider_type_mismatch() {
+        let (_db, service) = setup_test_env().await;
+        let created = service
+            .create(CreateProviderRequest {
+                name: "SES provider".to_string(),
+                provider_type: EmailProviderType::Ses,
+                region: "us-east-1".to_string(),
+                credentials: ses_creds(),
+            })
+            .await
+            .unwrap();
+
+        // Try to swap SES credentials for Scaleway ones — must fail.
+        let err = service
+            .update(
+                created.id,
+                UpdateProviderRequest {
+                    credentials: Some(ProviderCredentials::Scaleway(ScalewayCredentials {
+                        api_key: "k".to_string(),
+                        project_id: "p".to_string(),
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmailError::Validation(_)));
+    }
+
+    #[tokio::test]
+    async fn test_update_rotates_credentials_when_supplied() {
+        let (_db, service) = setup_test_env().await;
+        let created = service
+            .create(CreateProviderRequest {
+                name: "SES".to_string(),
+                provider_type: EmailProviderType::Ses,
+                region: "us-east-1".to_string(),
+                credentials: ses_creds(),
+            })
+            .await
+            .unwrap();
+
+        let new_creds = ProviderCredentials::Ses(SesCredentials {
+            access_key_id: "AKIAROTATEDKEY123456".to_string(),
+            secret_access_key: "newsecretrotatedvaluevaluevaluevaluevalue".to_string(),
+            endpoint_url: None,
+        });
+
+        let outcome = service
+            .update(
+                created.id,
+                UpdateProviderRequest {
+                    credentials: Some(new_creds),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.changed_fields, vec!["credentials".to_string()]);
+        assert_ne!(
+            outcome.provider.credentials, created.credentials,
+            "rotated credentials should re-encrypt to a different ciphertext"
+        );
+
+        // The masked response should expose the new prefix.
+        let masked = service.get_masked_credentials(&outcome.provider).unwrap();
+        assert_eq!(masked["access_key_id"], "AKIA...3456");
+    }
+
+    #[tokio::test]
+    async fn test_update_preserves_credentials_when_omitted() {
+        let (_db, service) = setup_test_env().await;
+        let created = service
+            .create(CreateProviderRequest {
+                name: "SES".to_string(),
+                provider_type: EmailProviderType::Ses,
+                region: "us-east-1".to_string(),
+                credentials: ses_creds(),
+            })
+            .await
+            .unwrap();
+
+        let outcome = service
+            .update(
+                created.id,
+                UpdateProviderRequest {
+                    region: Some("eu-west-1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.changed_fields.contains(&"region".to_string()));
+        assert!(
+            !outcome.changed_fields.contains(&"credentials".to_string()),
+            "credentials must not be listed when caller didn't supply them"
+        );
+        assert_eq!(
+            outcome.provider.credentials, created.credentials,
+            "encrypted blob must be byte-identical when caller omits credentials"
+        );
     }
 
     // ========== Unit Tests for TestEmailResult ==========
