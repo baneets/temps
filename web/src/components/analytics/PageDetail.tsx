@@ -1,4 +1,5 @@
 import {
+  getAiPageBreakdownOptions,
   getPagePathDetailOptions,
   getPagePathVisitorsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
@@ -34,6 +35,7 @@ import { format } from 'date-fns'
 import {
   ArrowLeft,
   BarChart3,
+  Bot,
   Clock,
   DoorOpen,
   DoorClosed,
@@ -124,6 +126,31 @@ export function PageDetail({
     enabled: !!startDate && !!endDate,
   })
 
+  // AI crawler activity for this exact path (from proxy logs, not the visitor
+  // JS SDK — bots don't run the SDK). `path`-scoped so the count is precise.
+  const { data: aiPageData, isLoading: aiLoading } = useQuery({
+    ...getAiPageBreakdownOptions({
+      query: {
+        project_id: project.id,
+        environment_id: environment,
+        path: pagePath,
+        start_time: startDate ? startDate.toISOString() : undefined,
+        end_time: endDate ? endDate.toISOString() : undefined,
+        limit: 1,
+      },
+    }),
+    enabled: !!startDate && !!endDate,
+  })
+
+  const aiStats = aiPageData?.items?.[0]
+
+  const goToAiLogs = () => {
+    const params = new URLSearchParams()
+    params.set('path', pagePath)
+    params.set('show_bots', 'yes')
+    navigate(`/projects/${project.slug}/logs?${params.toString()}`)
+  }
+
   const totalPages = visitorsData
     ? Math.ceil(visitorsData.total_count / perPage)
     : 0
@@ -150,8 +177,8 @@ export function PageDetail({
 
       {/* Summary stats */}
       {detailLoading ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          {[...Array(6)].map((_, i) => (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-4">
+          {[...Array(7)].map((_, i) => (
             <Card key={`stat-skeleton-${i}`}>
               <CardContent className="pt-4 pb-4">
                 {/* Matches StatCard: icon + label row, then value */}
@@ -165,7 +192,7 @@ export function PageDetail({
           ))}
         </div>
       ) : detailData ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-4">
           <StatCard
             label="Unique Visitors"
             value={detailData.unique_visitors.toLocaleString()}
@@ -198,6 +225,25 @@ export function PageDetail({
             value={`${detailData.exit_rate.toFixed(1)}%`}
             icon={<LogOut className="h-4 w-4 text-muted-foreground" />}
           />
+          <button
+            type="button"
+            onClick={goToAiLogs}
+            className="rounded-xl text-left transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            title="View AI crawler requests for this page"
+          >
+            <StatCard
+              label="AI Agents"
+              value={
+                aiLoading ? '…' : (aiStats?.agent_count ?? 0).toLocaleString()
+              }
+              icon={<Bot className="h-4 w-4 text-muted-foreground" />}
+              sub={
+                aiStats && aiStats.request_count > 0
+                  ? `${aiStats.request_count.toLocaleString()} requests`
+                  : undefined
+              }
+            />
+          </button>
         </div>
       ) : null}
 
@@ -572,9 +618,11 @@ interface StatCardProps {
   label: string
   value: string
   icon: React.ReactNode
+  /** Optional secondary line under the value (e.g. "1,234 requests"). */
+  sub?: string
 }
 
-function StatCard({ label, value, icon }: StatCardProps) {
+function StatCard({ label, value, icon, sub }: StatCardProps) {
   return (
     <Card>
       <CardContent className="pt-4 pb-4">
@@ -582,7 +630,12 @@ function StatCard({ label, value, icon }: StatCardProps) {
           {icon}
           <span className="text-xs text-muted-foreground">{label}</span>
         </div>
-        <p className="text-lg font-semibold">{value}</p>
+        <p className="text-lg font-semibold tabular-nums">{value}</p>
+        {sub && (
+          <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
+            {sub}
+          </p>
+        )}
       </CardContent>
     </Card>
   )

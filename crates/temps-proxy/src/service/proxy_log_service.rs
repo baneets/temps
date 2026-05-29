@@ -186,13 +186,22 @@ impl ProxyLogService {
             }
         }
 
-        // Detect bots/crawlers if not already detected
+        // Detect bots/crawlers if not already detected. AI-agent detection runs
+        // first so the canonical agent name (e.g. `GPTBot`, `ClaudeBot`) wins
+        // over the looser substring `CrawlerDetector` would otherwise return.
+        // That keeps `GROUP BY bot_name` aggregations stable on the analytics
+        // side and avoids a second `user_agent ILIKE` scan per request.
         if request.is_bot.is_none() {
             if let Some(ref ua_string) = request.user_agent {
-                let crawler_name =
-                    crate::crawler_detector::CrawlerDetector::get_crawler_name(Some(ua_string));
-                request.is_bot = Some(crawler_name.is_some());
-                request.bot_name = crawler_name;
+                if let Some(ai) = crate::ai_agent_detector::detect(Some(ua_string)) {
+                    request.is_bot = Some(true);
+                    request.bot_name = Some(ai.agent.to_string());
+                } else {
+                    let crawler_name =
+                        crate::crawler_detector::CrawlerDetector::get_crawler_name(Some(ua_string));
+                    request.is_bot = Some(crawler_name.is_some());
+                    request.bot_name = crawler_name;
+                }
             }
         }
 
@@ -282,6 +291,9 @@ impl ProxyLogService {
             || filters.device_type.is_some()
             || filters.is_bot.is_some()
             || filters.bot_name.is_some()
+            || filters.ai_provider.is_some()
+            || filters.ai_agent.is_some()
+            || filters.is_ai_agent.is_some()
             || filters.request_size_min.is_some()
             || filters.request_size_max.is_some()
             || filters.response_size_min.is_some()
@@ -372,6 +384,45 @@ impl ProxyLogService {
         }
         if let Some(bot_name) = filters.bot_name {
             query = query.filter(proxy_logs::Column::BotName.contains(&bot_name));
+        }
+
+        // AI agent filters use the canonical agent names persisted at ingest
+        // time. `bot_name` was set by `ai_agent_detector::detect`, so equality
+        // matches are sufficient — no SQL regex needed.
+        if let Some(agent) = filters.ai_agent {
+            query = query
+                .filter(proxy_logs::Column::IsBot.eq(true))
+                .filter(proxy_logs::Column::BotName.eq(agent));
+        }
+        if let Some(provider) = filters.ai_provider {
+            let agents_for_provider: Vec<String> = crate::ai_agent_detector::known_agents()
+                .iter()
+                .filter(|(_, m)| m.provider.eq_ignore_ascii_case(&provider))
+                .map(|(_, m)| m.agent.to_string())
+                .collect();
+            if agents_for_provider.is_empty() {
+                // Unknown provider — return no rows rather than the entire table.
+                query = query.filter(proxy_logs::Column::Id.eq(-1));
+            } else {
+                query = query
+                    .filter(proxy_logs::Column::IsBot.eq(true))
+                    .filter(proxy_logs::Column::BotName.is_in(agents_for_provider));
+            }
+        }
+        if let Some(true) = filters.is_ai_agent {
+            let known: Vec<String> = crate::ai_agent_detector::known_agents()
+                .iter()
+                .map(|(_, m)| m.agent.to_string())
+                .collect();
+            query = query
+                .filter(proxy_logs::Column::IsBot.eq(true))
+                .filter(proxy_logs::Column::BotName.is_in(known));
+        } else if let Some(false) = filters.is_ai_agent {
+            let known: Vec<String> = crate::ai_agent_detector::known_agents()
+                .iter()
+                .map(|(_, m)| m.agent.to_string())
+                .collect();
+            query = query.filter(proxy_logs::Column::BotName.is_not_in(known));
         }
 
         // Size filters
@@ -492,6 +543,9 @@ impl ProxyLogService {
             device_type: None,
             is_bot: None,
             bot_name: None,
+            ai_provider: None,
+            ai_agent: None,
+            is_ai_agent: None,
             request_size_min: None,
             request_size_max: None,
             response_size_min: None,
@@ -974,6 +1028,211 @@ impl ProxyLogService {
         valid_units.contains(&parts[1])
     }
 
+    /// Aggregate AI-agent traffic for a project over a time window.
+    ///
+    /// `bot_name` is the canonical agent name written at ingest time by
+    /// [`crate::ai_agent_detector::detect`], so this is a cheap `GROUP BY`
+    /// scoped to rows the detector already classified. Each row is mapped back
+    /// to its provider in Rust so the response carries the logo-ready
+    /// `(provider, agent, count)` triple the UI needs.
+    pub async fn get_ai_agent_breakdown(
+        &self,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+        limit: u64,
+    ) -> Result<Vec<AiAgentBreakdownRow>, ProxyLogServiceError> {
+        let known: Vec<&str> = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| m.agent)
+            .collect();
+
+        if known.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Pre-filter with `is_bot = true AND bot_name IN (...)` so the planner
+        // can use the existing (timestamp DESC) index on the hypertable instead
+        // of scanning everything.
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name IS NOT NULL".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        let mut next_idx = 3i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+
+        // Bind known agent names as an `ANY($N::text[])` so the SQL is stable
+        // even as we grow the taxonomy. The list comes from
+        // `ai_agent_detector::known_agents`, so it cannot contain anything
+        // user-supplied.
+        where_clauses.push(format!("bot_name = ANY(${}::text[])", next_idx));
+        let agents_owned: Vec<String> = known.iter().map(|s| (*s).to_owned()).collect();
+        values.push(agents_owned.into());
+
+        let sql = format!(
+            r#"
+            SELECT bot_name,
+                   COUNT(*)::bigint AS request_count,
+                   COUNT(DISTINCT client_ip)::bigint AS unique_ips,
+                   MAX(timestamp)::timestamptz AS last_seen
+            FROM proxy_logs
+            WHERE {where}
+            GROUP BY bot_name
+            ORDER BY request_count DESC
+            LIMIT {limit}
+            "#,
+            where = where_clauses.join(" AND "),
+            limit = std::cmp::min(limit, 100),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        // Map agent name -> (provider, purpose) once so we don't walk the
+        // taxonomy for every row.
+        let agent_index: std::collections::HashMap<
+            &'static str,
+            &'static crate::ai_agent_detector::AiAgentMatch,
+        > = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| (m.agent, m))
+            .collect();
+
+        let rows = results
+            .into_iter()
+            .filter_map(|row| {
+                let agent: String = row.try_get("", "bot_name").ok()?;
+                let meta = agent_index.get(agent.as_str())?;
+                Some(AiAgentBreakdownRow {
+                    provider: meta.provider.to_string(),
+                    agent: meta.agent.to_string(),
+                    purpose: meta.purpose.as_str().to_string(),
+                    request_count: row.try_get("", "request_count").unwrap_or(0),
+                    unique_ips: row.try_get("", "unique_ips").unwrap_or(0),
+                    last_seen: row
+                        .try_get::<chrono::DateTime<Utc>>("", "last_seen")
+                        .ok()
+                        .map(|d| d.to_rfc3339()),
+                })
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
+    /// Aggregate which pages AI agents crawled most over a time window.
+    ///
+    /// Same pre-filter as [`Self::get_ai_agent_breakdown`] (`is_bot = true AND
+    /// bot_name IN (known)`), but grouped by `path`. Each row carries the total
+    /// request count, the number of *distinct* AI agents that hit the page, and
+    /// the last time any agent touched it — so the UI can answer "what content
+    /// are the bots most interested in, and how broadly?".
+    pub async fn get_ai_page_breakdown(
+        &self,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        path: Option<String>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+        limit: u64,
+    ) -> Result<Vec<AiPageBreakdownRow>, ProxyLogServiceError> {
+        let known: Vec<&str> = crate::ai_agent_detector::known_agents()
+            .iter()
+            .map(|(_, m)| m.agent)
+            .collect();
+
+        if known.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name IS NOT NULL".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> = vec![start_time.into(), end_time.into()];
+        let mut next_idx = 3i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+        // Exact-path filter so callers can ask "how many AI agents hit THIS
+        // page?" and get a single precise row regardless of `limit`.
+        if let Some(ref p) = path {
+            where_clauses.push(format!("path = ${}", next_idx));
+            values.push(p.clone().into());
+            next_idx += 1;
+        }
+
+        where_clauses.push(format!("bot_name = ANY(${}::text[])", next_idx));
+        let agents_owned: Vec<String> = known.iter().map(|s| (*s).to_owned()).collect();
+        values.push(agents_owned.into());
+
+        let sql = format!(
+            r#"
+            SELECT path,
+                   COUNT(*)::bigint AS request_count,
+                   COUNT(DISTINCT bot_name)::bigint AS agent_count,
+                   MAX(timestamp)::timestamptz AS last_seen
+            FROM proxy_logs
+            WHERE {where}
+            GROUP BY path
+            ORDER BY request_count DESC
+            LIMIT {limit}
+            "#,
+            where = where_clauses.join(" AND "),
+            limit = std::cmp::min(limit, 100),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        let rows = results
+            .into_iter()
+            .map(|row| AiPageBreakdownRow {
+                path: row.try_get("", "path").unwrap_or_default(),
+                request_count: row.try_get("", "request_count").unwrap_or(0),
+                agent_count: row.try_get("", "agent_count").unwrap_or(0),
+                last_seen: row
+                    .try_get::<chrono::DateTime<Utc>>("", "last_seen")
+                    .ok()
+                    .map(|d| d.to_rfc3339()),
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
     /// Convert a status code class like "2xx", "3xx", "4xx", "5xx" to a (min, max) range.
     /// Returns None if the class is not recognized.
     fn status_class_range(class: &str) -> Option<(i16, i16)> {
@@ -1035,6 +1294,35 @@ pub struct TodayStatsResponse {
     /// Date for which stats are returned
     #[schema(example = "2025-10-23")]
     pub date: String,
+}
+
+/// One row in the AI-agent analytics breakdown. `agent` is the canonical
+/// crawler name (e.g. `GPTBot`, `Claude-User`), `provider` is the vendor used
+/// for grouping + logos. The UI mirrors the browsers card and ranks by
+/// `request_count`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentBreakdownRow {
+    pub provider: String,
+    pub agent: String,
+    pub purpose: String,
+    pub request_count: i64,
+    pub unique_ips: i64,
+    /// Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+    #[schema(example = "2026-05-29T12:00:00Z")]
+    pub last_seen: Option<String>,
+}
+
+/// One row in the AI-crawled-pages breakdown. `agent_count` is the number of
+/// *distinct* AI agents that hit this path, so the UI can show both how heavily
+/// and how broadly a page is being crawled.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiPageBreakdownRow {
+    pub path: String,
+    pub request_count: i64,
+    pub agent_count: i64,
+    /// Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+    #[schema(example = "2026-05-29T12:00:00Z")]
+    pub last_seen: Option<String>,
 }
 
 /// Health summary for a single project (last 1 hour)

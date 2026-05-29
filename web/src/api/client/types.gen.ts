@@ -534,6 +534,42 @@ export type AggregatedBucketsResponse = {
 export type AggregationLevel = 'events' | 'sessions' | 'visitors';
 
 /**
+ * Response wrapping the AI agent breakdown rows.
+ */
+export type AiAgentBreakdownResponse = {
+    end_time: string;
+    items: Array<AiAgentBreakdownRow>;
+    start_time: string;
+};
+
+/**
+ * One row in the AI-agent analytics breakdown. `agent` is the canonical
+ * crawler name (e.g. `GPTBot`, `Claude-User`), `provider` is the vendor used
+ * for grouping + logos. The UI mirrors the browsers card and ranks by
+ * `request_count`.
+ */
+export type AiAgentBreakdownRow = {
+    agent: string;
+    /**
+     * Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+     */
+    last_seen?: string | null;
+    provider: string;
+    purpose: string;
+    request_count: number;
+    unique_ips: number;
+};
+
+/**
+ * Static descriptor for one entry in the known-AI-agents taxonomy.
+ */
+export type AiAgentDescriptor = {
+    agent: string;
+    provider: string;
+    purpose: string;
+};
+
+/**
  * Global AI configuration settings. Controls the default config repo
  * containing `.claude/` directory (skills, MCP servers, plugins) that
  * gets overlaid into every agent sandbox.
@@ -548,6 +584,30 @@ export type AiConfigSettings = {
      * Branch of the config repo to use.
      */
     config_repo_branch?: string;
+};
+
+/**
+ * Response wrapping the AI page breakdown rows.
+ */
+export type AiPageBreakdownResponse = {
+    end_time: string;
+    items: Array<AiPageBreakdownRow>;
+    start_time: string;
+};
+
+/**
+ * One row in the AI-crawled-pages breakdown. `agent_count` is the number of
+ * *distinct* AI agents that hit this path, so the UI can show both how heavily
+ * and how broadly a page is being crawled.
+ */
+export type AiPageBreakdownRow = {
+    agent_count: number;
+    /**
+     * Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+     */
+    last_seen?: string | null;
+    path: string;
+    request_count: number;
 };
 
 export type AlertRuleResponse = {
@@ -7008,6 +7068,13 @@ export type KillJobBody = {
      * `@vercel/sandbox`, which also accepts a signal override).
      */
     force?: boolean;
+};
+
+/**
+ * Response listing every AI agent the detector knows about.
+ */
+export type KnownAiAgentsResponse = {
+    items: Array<AiAgentDescriptor>;
 };
 
 /**
@@ -36402,6 +36469,21 @@ export type GetProxyLogsData = {
          */
         bot_name?: string | null;
         /**
+         * Filter by AI provider (e.g. `OpenAI`, `Anthropic`, `Perplexity`). Matches
+         * the canonical provider returned by the AI agent detector.
+         */
+        ai_provider?: string | null;
+        /**
+         * Filter by AI agent name (e.g. `GPTBot`, `ChatGPT-User`). Equivalent to
+         * filtering `bot_name` against a known AI taxonomy.
+         */
+        ai_agent?: string | null;
+        /**
+         * When `true`, only return requests classified as known AI agents
+         * (regardless of provider/agent). Mutually compatible with the above.
+         */
+        is_ai_agent?: boolean | null;
+        /**
          * Filter by minimum request size in bytes
          */
         request_size_min?: number | null;
@@ -36469,6 +36551,22 @@ export type GetProxyLogsResponses = {
 
 export type GetProxyLogsResponse = GetProxyLogsResponses[keyof GetProxyLogsResponses];
 
+export type ListKnownAiAgentsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/proxy-logs/ai-agents/known';
+};
+
+export type ListKnownAiAgentsResponses = {
+    /**
+     * Known AI agents
+     */
+    200: KnownAiAgentsResponse;
+};
+
+export type ListKnownAiAgentsResponse = ListKnownAiAgentsResponses[keyof ListKnownAiAgentsResponses];
+
 export type GetProxyLogByRequestIdData = {
     body?: never;
     path: {
@@ -36500,6 +36598,114 @@ export type GetProxyLogByRequestIdResponses = {
 };
 
 export type GetProxyLogByRequestIdResponse = GetProxyLogByRequestIdResponses[keyof GetProxyLogByRequestIdResponses];
+
+export type GetAiAgentBreakdownData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Filter by project ID (recommended for per-project analytics).
+         */
+        project_id?: number | null;
+        /**
+         * Filter by environment ID.
+         */
+        environment_id?: number | null;
+        /**
+         * Start time (ISO 8601). Defaults to `end_time - 7d`.
+         */
+        start_time?: string | null;
+        /**
+         * End time (ISO 8601). Defaults to now.
+         */
+        end_time?: string | null;
+        /**
+         * Maximum rows to return. Capped at 100 server-side.
+         */
+        limit?: number | null;
+        /**
+         * Optional exact path filter. Only used by the AI pages breakdown — when
+         * set, returns the single matching page so callers can ask "how many AI
+         * agents hit this page?".
+         */
+        path?: string | null;
+    };
+    url: '/proxy-logs/stats/ai-agents';
+};
+
+export type GetAiAgentBreakdownErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetAiAgentBreakdownResponses = {
+    /**
+     * AI agent breakdown
+     */
+    200: AiAgentBreakdownResponse;
+};
+
+export type GetAiAgentBreakdownResponse = GetAiAgentBreakdownResponses[keyof GetAiAgentBreakdownResponses];
+
+export type GetAiPageBreakdownData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Filter by project ID (recommended for per-project analytics).
+         */
+        project_id?: number | null;
+        /**
+         * Filter by environment ID.
+         */
+        environment_id?: number | null;
+        /**
+         * Start time (ISO 8601). Defaults to `end_time - 7d`.
+         */
+        start_time?: string | null;
+        /**
+         * End time (ISO 8601). Defaults to now.
+         */
+        end_time?: string | null;
+        /**
+         * Maximum rows to return. Capped at 100 server-side.
+         */
+        limit?: number | null;
+        /**
+         * Optional exact path filter. Only used by the AI pages breakdown — when
+         * set, returns the single matching page so callers can ask "how many AI
+         * agents hit this page?".
+         */
+        path?: string | null;
+    };
+    url: '/proxy-logs/stats/ai-pages';
+};
+
+export type GetAiPageBreakdownErrors = {
+    /**
+     * Invalid parameters
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetAiPageBreakdownResponses = {
+    /**
+     * AI page breakdown
+     */
+    200: AiPageBreakdownResponse;
+};
+
+export type GetAiPageBreakdownResponse = GetAiPageBreakdownResponses[keyof GetAiPageBreakdownResponses];
 
 export type GetProjectsHealthData = {
     body?: never;

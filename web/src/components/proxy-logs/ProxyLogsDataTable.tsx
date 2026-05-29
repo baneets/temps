@@ -1,5 +1,6 @@
 import { getProxyLogsOptions } from '@/api/client/@tanstack/react-query.gen'
 import { ProxyLogResponse } from '@/api/client/types.gen'
+import { AiAgentLogo } from '@/components/ui/ai-agent-logo'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -77,6 +78,9 @@ interface FilterState {
   device_type?: string
   is_bot?: boolean | null
   bot_name?: string
+  ai_provider?: string
+  ai_agent?: string
+  is_ai_agent?: boolean | null
   request_size_min?: string
   request_size_max?: string
   response_size_min?: string
@@ -103,6 +107,50 @@ type ColumnKey =
   | 'bot_name'
   | 'cache_status'
   | 'upstream_host'
+
+/**
+ * Mirror of the backend AI-agent taxonomy (`temps-proxy::ai_agent_detector`).
+ * Keep in sync when adding providers there. We hardcode here so the dropdown
+ * doesn't need an extra round-trip on first paint; the backend remains the
+ * source of truth for matching.
+ */
+const AI_PROVIDERS: { provider: string; agents: string[] }[] = [
+  {
+    provider: 'OpenAI',
+    agents: ['GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'OpenAI'],
+  },
+  {
+    provider: 'Anthropic',
+    agents: ['ClaudeBot', 'Claude-SearchBot', 'Claude-User', 'anthropic-ai'],
+  },
+  { provider: 'Perplexity', agents: ['PerplexityBot', 'Perplexity-User'] },
+  { provider: 'Google', agents: ['GoogleOther'] },
+  { provider: 'Apple', agents: ['Applebot', 'Applebot-Extended'] },
+  { provider: 'Meta', agents: ['Meta-ExternalAgent', 'Meta-ExternalFetcher'] },
+  { provider: 'Amazon', agents: ['Amazonbot'] },
+  { provider: 'ByteDance', agents: ['Bytespider'] },
+  { provider: 'Common Crawl', agents: ['CCBot'] },
+  { provider: 'Cohere', agents: ['cohere-ai', 'cohere-training-data-crawler'] },
+  { provider: 'Diffbot', agents: ['Diffbot'] },
+  { provider: 'You.com', agents: ['YouBot'] },
+  { provider: 'DuckDuckGo', agents: ['DuckAssistBot'] },
+  { provider: 'Brave', agents: ['Bravebot'] },
+  { provider: 'Andi', agents: ['Andibot'] },
+  { provider: 'Omgili', agents: ['Omgilibot', 'Omgili'] },
+  { provider: 'ImageSift', agents: ['ImagesiftBot'] },
+  { provider: 'Timpi', agents: ['Timpibot'] },
+  { provider: 'Kangaroo', agents: ['Kangaroo Bot'] },
+  { provider: 'Mistral', agents: ['MistralAI-User'] },
+  { provider: 'xAI', agents: ['GrokBot'] },
+]
+
+const AGENT_TO_PROVIDER: Record<string, string> = AI_PROVIDERS.reduce(
+  (acc, { provider, agents }) => {
+    for (const agent of agents) acc[agent] = provider
+    return acc
+  },
+  {} as Record<string, string>
+)
 
 const STORAGE_KEY = 'proxy-logs-visible-columns'
 
@@ -156,6 +204,9 @@ function parseFiltersFromParams(params: URLSearchParams): FilterState {
   f.device_type = str('device_type')
   f.is_bot = bool('is_bot')
   f.bot_name = str('bot_name')
+  f.ai_provider = str('ai_provider')
+  f.ai_agent = str('ai_agent')
+  f.is_ai_agent = bool('is_ai_agent')
   f.request_size_min = str('request_size_min')
   f.request_size_max = str('request_size_max')
   f.response_size_min = str('response_size_min')
@@ -195,6 +246,9 @@ function serializeFiltersToParams(
     'device_type',
     'is_bot',
     'bot_name',
+    'ai_provider',
+    'ai_agent',
+    'is_ai_agent',
     'request_size_min',
     'request_size_max',
     'response_size_min',
@@ -330,6 +384,9 @@ export function ProxyLogsDataTable({
         device_type: filters.device_type || null,
         is_bot: filters.is_bot,
         bot_name: filters.bot_name || null,
+        ai_provider: filters.ai_provider || null,
+        ai_agent: filters.ai_agent || null,
+        is_ai_agent: filters.is_ai_agent,
         request_size_min: filters.request_size_min
           ? parseInt(filters.request_size_min)
           : null,
@@ -451,8 +508,89 @@ export function ProxyLogsDataTable({
       { key: 'upstream_host', label: 'Upstream', sortable: true },
     ]
 
+  const aiAgentActive =
+    filters.is_ai_agent === true ||
+    !!filters.ai_provider ||
+    !!filters.ai_agent
+
   return (
     <div className="space-y-4">
+      {/* AI Agents quick-filter row. Clicking a provider pill sets
+          ai_provider + flips is_ai_agent so the table re-fetches with the
+          server-side `bot_name IN (agents_of_provider)` predicate. */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-muted-foreground mr-1">AI agents:</span>
+        <Button
+          variant={
+            filters.is_ai_agent === true && !filters.ai_provider
+              ? 'default'
+              : 'outline'
+          }
+          size="sm"
+          className="h-7 gap-1.5"
+          onClick={() => {
+            const next: FilterState = {
+              ...filters,
+              is_ai_agent: filters.is_ai_agent === true ? null : true,
+              ai_provider: undefined,
+              ai_agent: undefined,
+            }
+            setFilters(next)
+            setPendingFilters(next)
+            setPage(1)
+          }}
+        >
+          <AiAgentLogo provider="OpenAI" size={14} className="opacity-60" />
+          All AI traffic
+        </Button>
+        {AI_PROVIDERS.slice(0, 8).map((p) => {
+          const active = filters.ai_provider === p.provider
+          return (
+            <Button
+              key={p.provider}
+              variant={active ? 'default' : 'outline'}
+              size="sm"
+              className="h-7 gap-1.5"
+              onClick={() => {
+                const next: FilterState = {
+                  ...filters,
+                  ai_provider: active ? undefined : p.provider,
+                  ai_agent: undefined,
+                  is_ai_agent: active ? null : true,
+                }
+                setFilters(next)
+                setPendingFilters(next)
+                setPage(1)
+              }}
+            >
+              <AiAgentLogo provider={p.provider} size={14} />
+              {p.provider}
+            </Button>
+          )
+        })}
+        {aiAgentActive && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs"
+            onClick={() => {
+              const next: FilterState = {
+                ...filters,
+                ai_provider: undefined,
+                ai_agent: undefined,
+                is_ai_agent: null,
+              }
+              setFilters(next)
+              setPendingFilters(next)
+              setPage(1)
+            }}
+          >
+            <X className="h-3 w-3 mr-1" />
+            Clear AI
+          </Button>
+        )}
+      </div>
+
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex items-center gap-2">
@@ -813,6 +951,62 @@ export function ProxyLogsDataTable({
                 />
               </div>
 
+              <div>
+                <Label>AI Provider</Label>
+                <Select
+                  value={pendingFilters.ai_provider || 'all'}
+                  onValueChange={(v) =>
+                    setPendingFilters({
+                      ...pendingFilters,
+                      ai_provider: v === 'all' ? undefined : v,
+                      ai_agent: undefined,
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All providers</SelectItem>
+                    {AI_PROVIDERS.map((p) => (
+                      <SelectItem key={p.provider} value={p.provider}>
+                        {p.provider}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div>
+                <Label>AI Agent</Label>
+                <Select
+                  value={pendingFilters.ai_agent || 'all'}
+                  onValueChange={(v) =>
+                    setPendingFilters({
+                      ...pendingFilters,
+                      ai_agent: v === 'all' ? undefined : v,
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All agents</SelectItem>
+                    {(pendingFilters.ai_provider
+                      ? AI_PROVIDERS.find(
+                          (p) => p.provider === pendingFilters.ai_provider
+                        )?.agents ?? []
+                      : AI_PROVIDERS.flatMap((p) => p.agents)
+                    ).map((agent) => (
+                      <SelectItem key={agent} value={agent}>
+                        {agent}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
               {/* Infrastructure */}
               <div>
                 <Label>Cache Status</Label>
@@ -953,6 +1147,20 @@ export function ProxyLogsDataTable({
                   }
                 />
                 <Label htmlFor="is-bot">Is Bot</Label>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="is-ai-agent"
+                  checked={pendingFilters.is_ai_agent === true}
+                  onCheckedChange={(checked) =>
+                    setPendingFilters({
+                      ...pendingFilters,
+                      is_ai_agent: checked ? true : null,
+                    })
+                  }
+                />
+                <Label htmlFor="is-ai-agent">Is AI Agent</Label>
               </div>
 
               <div className="flex items-center space-x-2">
@@ -1241,7 +1449,22 @@ function ProxyLogTableRow({
           </TableCell>
         )}
         {visibleColumns.has('bot_name') && (
-          <TableCell className="text-xs">{log.bot_name || '-'}</TableCell>
+          <TableCell className="text-xs">
+            {log.bot_name ? (
+              <span className="inline-flex items-center gap-1.5">
+                {AGENT_TO_PROVIDER[log.bot_name] && (
+                  <AiAgentLogo
+                    provider={AGENT_TO_PROVIDER[log.bot_name]}
+                    agent={log.bot_name}
+                    size={14}
+                  />
+                )}
+                {log.bot_name}
+              </span>
+            ) : (
+              '-'
+            )}
+          </TableCell>
         )}
         {visibleColumns.has('cache_status') && (
           <TableCell>
@@ -1364,10 +1587,21 @@ function ProxyLogInlineDetail({ log }: { log: ProxyLogResponse }) {
         />
         <DetailField label="OS" value={log.operating_system} />
         {log.is_bot && (
-          <DetailField
-            label="Bot"
-            value={log.bot_name || 'Detected as bot'}
-          />
+          <div className="space-y-0.5 min-w-0">
+            <p className="text-xs text-muted-foreground">Bot</p>
+            <div className="flex items-center gap-1.5 min-w-0">
+              {log.bot_name && AGENT_TO_PROVIDER[log.bot_name] && (
+                <AiAgentLogo
+                  provider={AGENT_TO_PROVIDER[log.bot_name]}
+                  agent={log.bot_name}
+                  size={14}
+                />
+              )}
+              <p className="text-sm truncate">
+                {log.bot_name || 'Detected as bot'}
+              </p>
+            </div>
+          </div>
         )}
         <DetailField label="Referrer" value={log.referrer} mono />
 

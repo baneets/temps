@@ -1,3 +1,4 @@
+export { AiAgentsChart } from './AiAgentsChart'
 export { AnalyticsMetrics } from './AnalyticsMetrics'
 export { BrowsersChart } from './BrowsersChart'
 export { ChannelsChart } from './ChannelsChart'

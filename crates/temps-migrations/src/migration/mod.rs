@@ -103,6 +103,7 @@ mod m20260522_000002_oidc_role_mappings;
 mod m20260526_000001_add_preview_envs_on_demand;
 mod m20260526_000002_add_trust_idp_email_to_oidc_providers;
 mod m20260528_000001_add_proxy_logs_listing_indexes;
+mod m20260529_000001_add_proxy_logs_filter_indexes;
 
 pub struct Migrator;
 
@@ -209,6 +210,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260526_000001_add_preview_envs_on_demand::Migration),
             Box::new(m20260526_000002_add_trust_idp_email_to_oidc_providers::Migration),
             Box::new(m20260528_000001_add_proxy_logs_listing_indexes::Migration),
+            Box::new(m20260529_000001_add_proxy_logs_filter_indexes::Migration),
         ]
     }
 }

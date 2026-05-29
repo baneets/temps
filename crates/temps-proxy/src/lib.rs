@@ -8,6 +8,7 @@
 //! - Static file serving
 //! - Request/response filtering
 
+pub mod ai_agent_detector;
 pub mod branded_404;
 pub mod config;
 pub mod crawler_detector;
