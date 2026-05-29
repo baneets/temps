@@ -8,13 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
--
+- CLI: `TEMPS_CONTEXT` environment variable pins the active context for a shell/CI session without mutating `.contexts.json`; surfaced in `context ls`, `context use`, and `whoami`, with a one-time warning when it names a context that doesn't exist.
 
 ### Changed
--
+- Proxy: the load balancer now binds its listeners (80/443) immediately and loads the route table asynchronously, instead of blocking startup on a full route load. Cuts proxy start time from seconds to milliseconds; a request arriving before the first load briefly waits for it rather than being misrouted.
 
 ### Fixed
--
+- CLI: api-key login now validates against the server passed via the positional argument or `--url` before checking the key, so logging into a named server no longer validates against the active context / localhost default and wipes credentials on failure.
 
 
 ## [0.1.0-beta.23] - 2026-05-29
