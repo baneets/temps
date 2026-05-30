@@ -164,12 +164,22 @@ impl ProxyLogBatchWriter {
             }
         }
 
-        // Detect bots/crawlers if not already detected
+        // Detect bots/crawlers if not already detected. AI-agent detection runs
+        // first so the canonical agent name (e.g. `GPTBot`, `ClaudeBot`) is
+        // stored in `bot_name` — `CrawlerDetector` only returns a loose UA
+        // substring (e.g. `ClaudeBot/1.0` -> `"Bot/"`), which never matches the
+        // AI-agent analytics taxonomy. This is the live ingest path, so without
+        // this the AI Agents page stays empty. Mirrors `ProxyLogService`.
         if entry.is_bot.is_none() {
             if let Some(ref ua_string) = entry.user_agent {
-                let crawler_name = CrawlerDetector::get_crawler_name(Some(ua_string));
-                entry.is_bot = Some(crawler_name.is_some());
-                entry.bot_name = crawler_name;
+                if let Some(ai) = crate::ai_agent_detector::detect(Some(ua_string)) {
+                    entry.is_bot = Some(true);
+                    entry.bot_name = Some(ai.agent.to_string());
+                } else {
+                    let crawler_name = CrawlerDetector::get_crawler_name(Some(ua_string));
+                    entry.is_bot = Some(crawler_name.is_some());
+                    entry.bot_name = crawler_name;
+                }
             }
         }
 
@@ -572,5 +582,92 @@ mod tests {
         writer.enrich_entry(&mut entry).await;
 
         assert_eq!(entry.is_bot, Some(true));
+    }
+
+    /// Regression test for the AI Agents analytics page showing no agents:
+    /// the live ingest path (this batch writer) must classify AI crawlers with
+    /// their CANONICAL taxonomy name (e.g. `ClaudeBot`), not the loose
+    /// `CrawlerDetector` substring (e.g. `Bot/`). The analytics query filters
+    /// `bot_name = ANY(known_agents)`, so a substring never matches and the
+    /// page stays empty. See `ai_agent_detector`.
+    #[tokio::test]
+    async fn test_enrich_entry_detects_ai_agent_canonical_name() {
+        let db = Arc::new(DatabaseConnection::default());
+        let ip_service = create_test_ip_service(db.clone());
+        let (_, writer) = ProxyLogBatchWriter::new(db, ip_service);
+
+        // (user_agent, expected canonical bot_name) across several providers.
+        let cases = [
+            (
+                "Mozilla/5.0 (compatible; ClaudeBot/1.0; +https://www.anthropic.com)",
+                "ClaudeBot",
+            ),
+            (
+                "Mozilla/5.0 (compatible; OAI-SearchBot/1.3; +https://openai.com/searchbot)",
+                "OAI-SearchBot",
+            ),
+            (
+                "Mozilla/5.0 (compatible; PerplexityBot/1.0; +https://perplexity.ai/bot)",
+                "PerplexityBot",
+            ),
+            ("CCBot/2.0 (https://commoncrawl.org/faq/)", "CCBot"),
+            (
+                "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)",
+                "Meta-ExternalAgent",
+            ),
+        ];
+
+        for (ua, expected) in cases {
+            let mut entry = CreateProxyLogRequest {
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                query_string: None,
+                host: "example.com".to_string(),
+                status_code: 200,
+                response_time_ms: None,
+                request_source: "proxy".to_string(),
+                is_system_request: false,
+                routing_status: "routed".to_string(),
+                project_id: None,
+                environment_id: None,
+                deployment_id: None,
+                session_id: None,
+                visitor_id: None,
+                container_id: None,
+                upstream_host: None,
+                error_message: None,
+                client_ip: None,
+                user_agent: Some(ua.to_string()),
+                referrer: None,
+                request_id: "req-ai".to_string(),
+                ip_geolocation_id: None,
+                browser: None,
+                browser_version: None,
+                operating_system: None,
+                device_type: None,
+                is_bot: None,
+                bot_name: None,
+                request_size_bytes: None,
+                response_size_bytes: None,
+                cache_status: None,
+                request_headers: None,
+                response_headers: None,
+                trace_id: None,
+                error_group_id: None,
+            };
+
+            writer.enrich_entry(&mut entry).await;
+
+            assert_eq!(
+                entry.is_bot,
+                Some(true),
+                "UA should be flagged as bot: {ua}"
+            );
+            assert_eq!(
+                entry.bot_name.as_deref(),
+                Some(expected),
+                "UA {ua} must classify as canonical `{expected}`, not a CrawlerDetector substring"
+            );
+        }
     }
 }
