@@ -8,13 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.26] - 2026-06-03
+
+### Added
 - **ClickHouse backend for OTel traces** (opt-in, Phase 0–1 of ADR-016): when `TEMPS_CLICKHOUSE_*` is configured, distributed traces/spans are stored in and served from ClickHouse instead of TimescaleDB — making trace list, duration sort, and pagination columnar-fast at millions of traces. The `OtelStorage` span-domain methods (`store_spans`, `query_spans`, `query_trace_summaries`, `count_traces`, `get_trace`, GenAI trace reads) run natively against ClickHouse via a `ClickHouseOtelStorage` that delegates all non-span methods (metrics, logs, insights, health, quota) to the existing TimescaleDB store; the three mutable control rows stay in Postgres. Direct ingest (ClickHouse is the system of record, no fan-out). Off by default — the PG-only path is unchanged. Benchmarked query-time `GROUP BY` (23ms at 400k traces) over a materialized view for simplicity. New `spans` table (`ReplacingMergeTree`, monthly partitions, 90-day TTL) + idempotent CH migration runner.
+- **ClickHouse backends for resource metrics and proxy/request logs** (opt-in, same `TEMPS_CLICKHOUSE_*` switch): when ClickHouse is configured, `temps-metrics` and `temps-proxy` route their writes and reads to ClickHouse (`service_metrics` / `proxy_logs` `ReplacingMergeTree` tables) instead of TimescaleDB, alongside the traces and analytics-events backends — so all four observability domains live in one consistent `temps` database (configurable). Off by default; the PG-only path is byte-identical. Each domain ships an idempotent CH migration runner with allowlist-validated database names.
+- **`otel_trace_summaries` pre-aggregated trace table (TimescaleDB path)**: one indexed row per trace (root-span rollup — name, service, kind, duration, span/error counts), maintained by an upsert on span ingest and backfilled from existing spans in a chunked migration. Replaces the per-request `GROUP BY trace_id` over the spans hypertable, turning **sort-by-duration** from a sort-after-aggregate into an index scan (≈46× faster, `Index Scan` with no `Sort` node). This is the TimescaleDB equivalent of the columnar speed-up ClickHouse gives the traces list.
+- **`temps backfill clickhouse --domain`**: copies historical proxy-logs, traces, and resource-metrics from TimescaleDB into ClickHouse so the UI shows a continuous record after enabling the backend (analytics events already replicate live via the outbox). New `--domain events|proxy-logs|traces|metrics|all` flag (defaults to `events` — existing behavior preserved). Idempotent (`_version` = source timestamp → `ReplacingMergeTree` dedup on re-runs), keyset paging on the unique `id` for proxy/spans and lossless OFFSET-within-time-slices for the keyless `service_metrics` hypertable, with an INSERT-time-TTL guard that warns up front and reconciles the landed count.
+- **`temps migrate` plan + per-migration reporting**: prints the pending-migration plan up front, applies each migration one at a time with a ✓/✗ line and timing, and a final summary; on failure it stops, marks the failed migration, and lists the ones not reached. Prints "already up to date" and exits cleanly when there's nothing to apply.
 
 ### Fixed
 - **Trace count/pagination parity**: `count_traces` now applies the same `status` and `min_duration_ms` filters as `query_trace_summaries`, so paginated totals match the result set (fixed in both the ClickHouse and TimescaleDB paths).
 - **Trace name search**: `name_pattern` substring search now escapes LIKE metacharacters (`%`, `_`, `\`), so a literal `%` no longer matches everything (both backends).
-- **Secret masking**: ClickHouse connection configs (`temps-otel` and `temps-analytics-backend`) now mask the password in their `Debug` output, preventing accidental leak via `{:?}` logging.
+- **Secret masking**: ClickHouse connection configs (`temps-otel`, `temps-metrics`, `temps-proxy`, and `temps-analytics-backend`) now mask the password in their `Debug` output, preventing accidental leak via `{:?}` logging.
 - **GenAI event timestamps**: an unparsable event timestamp now falls back to the Unix epoch with a warning, instead of being silently relabelled to the current time (both backends).
+- **ClickHouse data-model hardening (audit pass)**: dropped the `events_5m_mv` SummingMergeTree — fed by an at-least-once outbox while the base table dedups, it double-counted and was never read; added `FINAL` to the aggregating `proxy_logs` reads so a re-run/insert-retry's duplicate rows can't inflate request/error/byte counts; made metric-label JSON serialize deterministically (`BTreeMap`) so the same series can't split across the CH dedup key; and dropped the unused (0-row, no reader) `sessions` table. All via forward-only CH migrations.
 
 ### Added
 - **Surrounding lines in log search** (grep -C): a "Context ± lines" input in the History Logs viewer shows N raw log lines before and after every search match, inline. Configurable 0–50 (default off, persisted), overlapping windows between nearby matches merge into one continuous block, and context lines are returned in the same `/logs/search` response — no extra requests. Backend adds `context_lines` to the log search filter and per-match `before`/`after` context (`temps-log-aggregator`); the surrounding lines are raw neighbors that ignore the level/text filters, the way `grep -C` does. The matched search term is highlighted inline in the message, and the matched ("origin") line is visually anchored against the dimmed context — mirroring Datadog's "view in context".
@@ -36,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AI agents analytics overview**: the AI Agents page (`/analytics/ai-agents`, now in the analytics sidebar) is a full overview rather than two tables. A new **"AI agents over time"** stacked bar chart plots crawler request volume per time bucket, split by provider or agent, with a per-bucket tooltip listing each series' count and a total. Below it, a card grid surfaces **Top Agents**, **Top Providers**, **Crawl purpose** (model training / search indexing / user fetch, from the AI taxonomy), **Response status** (2xx/3xx/4xx/5xx — are crawlers being served or hitting broken/blocked pages?), and **Top Pages crawled**. All read from request logs (`is_bot = true`). New endpoints: `GET /proxy-logs/stats/ai-agents/timeline` (time-bucketed, server-side gap-filled via a `generate_series` spine so the x-axis stays continuous; bucket width auto-selected from the window or overridden via `?bucket=`, validated against an interval allowlist) and `GET /proxy-logs/stats/ai-status`.
 
 ### Changed
+- **Compression CODECs on the ClickHouse telemetry tables** (`spans`, `service_metrics`, `proxy_logs`, `events`): `Delta`/`DoubleDelta` on timestamps, `Gorilla` on metric values, and `ZSTD` on the JSON-text columns, applied via non-destructive `ALTER … MODIFY COLUMN`. Measured on existing data: `service_metrics` −52%, `proxy_logs` −34% on disk.
 - Cumulative counter metrics (`_total`/`_count`) now display the running total in stat tiles and rate-of-change in charts, computed via a TimescaleDB LAG window query.
 - `service_metrics` raw retention 7 → 30 days; daily-aggregate retention 2 years → 1 year.
 - MinIO removed from the S3 service creation UI; RustFS is now the sole default object-storage engine.
