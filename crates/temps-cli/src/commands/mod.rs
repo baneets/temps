@@ -3,6 +3,7 @@ pub mod api_key;
 pub mod backfill;
 pub mod backup;
 pub mod build;
+pub mod ch_backfill_domains;
 pub mod deploy;
 pub mod doctor;
 pub mod domain;
