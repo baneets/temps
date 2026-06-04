@@ -1871,6 +1871,44 @@ impl LoadBalancer {
     }
 }
 
+/// Returns true when `host` (or its wildcard parent) has an active TLS
+/// certificate stored in the database. Used to make the HTTP→HTTPS redirect
+/// per-domain rather than a global toggle: redirect only when a cert exists,
+/// serve plain HTTP otherwise. Mirrors the wildcard lookup in `tls_cert_loader`.
+async fn host_has_active_cert(db: &DbConnection, host: &str) -> bool {
+    // Exact match
+    let exact = domains::Entity::find()
+        .filter(domains::Column::Domain.eq(host))
+        .filter(domains::Column::Status.eq("active"))
+        .filter(domains::Column::Certificate.is_not_null())
+        .one(db)
+        .await
+        .ok()
+        .flatten();
+    if exact.is_some() {
+        return true;
+    }
+
+    // Wildcard match: api.example.com → *.example.com
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() >= 2 {
+        let wildcard = format!("*.{}", parts[1..].join("."));
+        let wc = domains::Entity::find()
+            .filter(domains::Column::Domain.eq(&wildcard))
+            .filter(domains::Column::Status.eq("active"))
+            .filter(domains::Column::Certificate.is_not_null())
+            .one(db)
+            .await
+            .ok()
+            .flatten();
+        if wc.is_some() {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[async_trait]
 impl ProxyHttp for LoadBalancer {
     type CTX = ProxyContext;
@@ -2870,10 +2908,21 @@ impl ProxyHttp for LoadBalancer {
             return Ok(true);
         }
 
-        // HTTP to HTTPS redirect for non-TLS connections
-        // This MUST come after ACME challenge handling to allow Let's Encrypt HTTP-01 validation
-        // Skip redirect when disable_https_redirect is set (e.g., local development)
-        if !self.disable_https_redirect && !self.is_tls_connection(session) {
+        // HTTP to HTTPS redirect for non-TLS connections.
+        // This MUST come after ACME challenge handling to allow Let's Encrypt HTTP-01 validation.
+        //
+        // Redirect is per-domain: we only redirect when the requesting host
+        // actually has an active TLS certificate in the database (exact match or
+        // wildcard parent). This means HTTP-only installs (sslip.io quick/local
+        // modes, no cert provisioned) never get redirected, while hosts that
+        // have gone through SSL provisioning get automatic HTTPS enforcement.
+        //
+        // `disable_https_redirect` is a global escape hatch (set by the service
+        // unit in local/testing mode) that bypasses the check entirely.
+        let needs_redirect = !self.disable_https_redirect
+            && !self.is_tls_connection(session)
+            && host_has_active_cert(self.db.as_ref(), &ctx.host).await;
+        if needs_redirect {
             // Build the HTTPS redirect URL preserving path and query string
             let redirect_url = if let Some(query) = &ctx.query_string {
                 format!(

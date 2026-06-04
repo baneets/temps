@@ -812,9 +812,18 @@ impl MarkDeploymentCompleteJob {
             .await?;
 
         // ── Phase 4: Emit DeploymentSucceeded event ──────────────────────
-        // Get deployment URL from environment: prefer custom host, fall back to preview domain
+        // Get deployment URL from environment: prefer custom host, fall back to preview domain.
+        // Use the scheme from external_url so HTTP-only installs (sslip.io quick/local
+        // modes) don't emit dead https:// links for custom-host environments.
         let url = if !active_environment.host.as_ref().is_empty() {
-            Some(format!("https://{}", active_environment.host.as_ref()))
+            let scheme = if let Some(ref cs) = self.config_service {
+                cs.get_url_scheme()
+                    .await
+                    .unwrap_or_else(|_| "https".to_string())
+            } else {
+                "https".to_string()
+            };
+            Some(format!("{}://{}", scheme, active_environment.host.as_ref()))
         } else if !active_environment.subdomain.as_ref().is_empty() {
             // No custom host set — construct URL from preview domain
             if let Some(ref config_service) = self.config_service {

@@ -117,6 +117,10 @@ pub struct AppSettingsResponse {
 
     // Outbound TLS verification toggle
     pub insecure_tls: bool,
+
+    /// Whether `temps setup` has been run at least once. The web onboarding
+    /// wizard checks this field on load and skips itself when true.
+    pub setup_complete: bool,
 }
 
 /// Agent sandbox settings with masked per-provider credentials.
@@ -253,6 +257,7 @@ impl From<AppSettings> for AppSettingsResponse {
                 private_address: settings.multi_node.private_address,
             },
             insecure_tls: settings.insecure_tls,
+            setup_complete: settings.setup_complete,
         }
     }
 }

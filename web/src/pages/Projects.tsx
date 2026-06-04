@@ -3,8 +3,10 @@ import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { useDashboardAnalytics } from '@/hooks/useDashboardAnalytics'
 import { useDashboardHealth } from '@/hooks/useDashboardHealth'
 import { usePageTitle } from '@/hooks/usePageTitle'
+import { useSettings } from '@/hooks/useSettings'
 import { ExternalConnectivityAlert } from '@/components/alerts/ExternalConnectivityAlert'
 import { DiskSpaceAlert } from '@/components/alerts/DiskSpaceAlert'
+import { GettingStartedCard } from '@/components/dashboard/GettingStartedCard'
 import { MetricCard } from '@/components/dashboard/MetricCard'
 import { ProjectCard } from '@/components/dashboard/ProjectCard'
 import { ImprovedOnboardingDashboard } from '@/components/onboarding/ImprovedOnboardingDashboard'
@@ -102,6 +104,11 @@ export function Projects() {
   const { setBreadcrumbs } = useBreadcrumbs()
   const navigate = useNavigate()
   const [page, setPage] = useState(1)
+
+  // Server-side setup completion flag — set by `temps setup` (all modes).
+  // Takes precedence over localStorage so installs configured via CLI never
+  // hit the "Configure Base Domain" wizard wall.
+  const { data: settings, isLoading: settingsLoading } = useSettings()
 
   const { data: projectsData, isLoading } = useQuery({
     ...getProjectsOptions({
@@ -238,12 +245,19 @@ export function Projects() {
         })
 
   // Show the onboarding flow only when the user hasn't finished it AND
-  // there are no projects. Once onboarding is marked `complete` (stored
-  // in localStorage by ImprovedOnboardingDashboard), fall through to
-  // the regular Projects page — which has its own empty state with
-  // "Create new project" / "Import project" CTAs. That keeps the
-  // 100%-progress screen from being a dead end.
-  if (!isLoading && !hasProjects && !isOnboardingComplete()) {
+  // there are no projects. Two completion signals are checked:
+  //   1. settings.setup_complete — server-side, set by `temps setup` (all
+  //      modes). Installs configured via CLI bypass the wizard entirely so
+  //      the "Configure Base Domain" wall never appears.
+  //   2. localStorage temps_onboarding_state.currentStep === 'complete' —
+  //      set by ImprovedOnboardingDashboard when the user clicks through.
+  // Either signal is sufficient to skip the wizard.
+  const setupComplete = settings?.setup_complete === true
+  const wizardDone = setupComplete || isOnboardingComplete()
+
+  // Wait for settings to load before deciding — avoids a flash of the wizard
+  // on installs where setup_complete is true but the fetch hasn't resolved yet.
+  if (!isLoading && !settingsLoading && !hasProjects && !wizardDone) {
     return (
       <div className="sm:p-8">
         <ImprovedOnboardingDashboard />
@@ -255,6 +269,7 @@ export function Projects() {
     <div className="p-4 sm:p-8 space-y-6">
       <ExternalConnectivityAlert showInDashboard dismissible />
       <DiskSpaceAlert dismissible />
+      <GettingStartedCard />
 
       {/* Metric cards (merged from former Dashboard page). */}
       <div className="grid gap-3 grid-cols-2 sm:gap-4 md:grid-cols-4 md:gap-6">

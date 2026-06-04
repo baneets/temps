@@ -1198,6 +1198,11 @@ async fn update_app_settings(
         app_settings.external_url = Some(url.to_string());
     }
 
+    // Mark setup as complete so the web onboarding wizard knows to skip
+    // itself — prevents the "Configure Base Domain" wall from appearing
+    // on installs already configured via `temps setup`.
+    app_settings.setup_complete = true;
+
     let now = Utc::now();
     let settings_json = app_settings.to_json();
 

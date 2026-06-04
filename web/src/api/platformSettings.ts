@@ -134,6 +134,9 @@ export interface PlatformSettings extends AppSettings {
   attack_mode?: boolean
   build_limits: BuildLimitsSettings
   monitoring: MonitoringSettings
+  /** Set to true by `temps setup` once initial configuration has been applied.
+   * The web onboarding wizard checks this and skips itself when true. */
+  setup_complete: boolean
 }
 
 /**

@@ -777,6 +777,8 @@ export type AppSettings = {
     rate_limiting?: RateLimitSettings;
     screenshots?: ScreenshotSettings;
     security_headers?: SecurityHeadersSettings;
+    /** Set to true by `temps setup` once initial configuration has been applied. */
+    setup_complete?: boolean;
 };
 
 /**
@@ -799,6 +801,9 @@ export type AppSettingsResponse = {
     rate_limiting: RateLimitSettings;
     screenshots: ScreenshotSettings;
     security_headers: SecurityHeadersSettings;
+    /** Set to true by `temps setup` once initial configuration has been applied.
+     * The web onboarding wizard checks this and skips itself when true. */
+    setup_complete: boolean;
 };
 
 export type ArchiveMode = 'off' | 'on' | 'always' | 'unknown';

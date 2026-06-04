@@ -69,6 +69,13 @@ pub struct AppSettings {
     /// Metrics observability settings. Controls the MetricsStore backend,
     /// scrape interval, and tiered retention windows.
     pub monitoring: MonitoringSettings,
+
+    /// Set to `true` by `temps setup` (all modes) once initial configuration
+    /// has been applied. The web onboarding wizard reads this from the server
+    /// and skips itself when true, preventing the "Configure Base Domain" wall
+    /// from appearing on installs that were already configured via the CLI.
+    #[serde(default)]
+    pub setup_complete: bool,
 }
 
 /// Control-plane build resource limits.
@@ -529,6 +536,7 @@ impl Default for AppSettings {
             insecure_tls: false,
             build_limits: BuildLimitsSettings::default(),
             monitoring: MonitoringSettings::default(),
+            setup_complete: false,
         }
     }
 }

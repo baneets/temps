@@ -530,6 +530,18 @@ impl ConfigService {
             .unwrap_or_else(|| "http://localho.st".to_string()))
     }
 
+    /// Derive the URL scheme from `external_url` — returns "http" or "https".
+    /// Defaults to "https" when no external_url is configured (production
+    /// assumption) and to the actual scheme otherwise, so HTTP-only sslip.io
+    /// installs emit `http://` links instead of dead `https://` ones.
+    pub async fn get_url_scheme(&self) -> Result<String, ConfigServiceError> {
+        let settings = self.get_settings().await?;
+        Ok(match settings.external_url.as_deref() {
+            Some(url) if url.starts_with("http://") => "http".to_string(),
+            _ => "https".to_string(),
+        })
+    }
+
     /// Get the application settings
     pub async fn get_settings(&self) -> Result<AppSettings, ConfigServiceError> {
         let record = settings::Entity::find_by_id(1)

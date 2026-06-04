@@ -164,6 +164,43 @@ export function ImprovedOnboardingDashboard() {
     hasProjects,
   ])
 
+  // Fast-forward past domain steps when setup_complete is true.
+  // `temps setup` (all modes) already configured preview_domain and
+  // external_url, so Base Domain / Network / Domain Challenge / External URL
+  // steps are redundant. Jump straight to git-provider (or project if
+  // git is already connected). Only fires on the first render with no
+  // saved state so manual wizard progress isn't overwritten.
+  useEffect(() => {
+    if (!settings?.setup_complete) return
+    if (hasAutoSkipped || !domainsData || !connections) return
+    if (savedState.currentStep || completedSteps.length > 0) return
+
+    queueMicrotask(() => {
+      const skippedDomainSteps: OnboardingStep[] = [
+        'exposure',
+        'base-domain',
+        'network-mode',
+        'network-setup',
+        'domain-challenge',
+        'external-url',
+        'screenshot-setup',
+      ]
+      const nextStep: OnboardingStep = hasConnections ? 'project' : 'git-provider'
+      setCompletedSteps(skippedDomainSteps)
+      setCurrentStep(nextStep)
+      setWantsExpose(true)
+      setHasAutoSkipped(true)
+    })
+  }, [
+    settings?.setup_complete,
+    hasAutoSkipped,
+    domainsData,
+    connections,
+    hasConnections,
+    savedState.currentStep,
+    completedSteps.length,
+  ])
+
   // Smart initialization: infer progress from system state on first load
   useEffect(() => {
     // Only run if we haven't set up state yet and data is loaded

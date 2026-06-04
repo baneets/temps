@@ -795,12 +795,14 @@ pub async fn list_containers(
         }
     }
 
-    // Resolve preview_domain and env subdomain for per-service URLs
-    let preview_domain = temps_entities::settings::Entity::find()
+    // Resolve preview_domain, URL scheme, and env subdomain for per-service URLs.
+    let settings_row = temps_entities::settings::Entity::find()
         .one(state.db.as_ref())
         .await
         .ok()
-        .flatten()
+        .flatten();
+    let preview_domain = settings_row
+        .as_ref()
         .and_then(|s| {
             s.data
                 .get("preview_domain")
@@ -808,6 +810,19 @@ pub async fn list_containers(
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| "localho.st".to_string());
+    // Derive the URL scheme from external_url so HTTP-only installs
+    // (sslip.io quick/local modes) don't emit dead https:// links.
+    let url_scheme = settings_row
+        .as_ref()
+        .and_then(|s| s.data.get("external_url").and_then(|v| v.as_str()))
+        .map(|u| {
+            if u.starts_with("http://") {
+                "http"
+            } else {
+                "https"
+            }
+        })
+        .unwrap_or("https");
 
     let env_subdomain = temps_entities::environments::Entity::find_by_id(environment_id)
         .one(state.db.as_ref())
@@ -851,7 +866,7 @@ pub async fn list_containers(
                     } else {
                         label
                     };
-                    format!("https://{}.{}", label, preview_domain)
+                    format!("{}://{}.{}", url_scheme, label, preview_domain)
                 })
             });
             ContainerInfoResponse::from_info(info, node_name, service_name, service_url)
@@ -1492,11 +1507,13 @@ pub async fn get_container_detail(
             .unwrap_or(false);
 
         if is_public {
-            let preview_domain = temps_entities::settings::Entity::find()
+            let settings_row2 = temps_entities::settings::Entity::find()
                 .one(state.db.as_ref())
                 .await
                 .ok()
-                .flatten()
+                .flatten();
+            let preview_domain = settings_row2
+                .as_ref()
                 .and_then(|s| {
                     s.data
                         .get("preview_domain")
@@ -1504,6 +1521,17 @@ pub async fn get_container_detail(
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "localho.st".to_string());
+            let url_scheme2 = settings_row2
+                .as_ref()
+                .and_then(|s| s.data.get("external_url").and_then(|v| v.as_str()))
+                .map(|u| {
+                    if u.starts_with("http://") {
+                        "http"
+                    } else {
+                        "https"
+                    }
+                })
+                .unwrap_or("https");
 
             let env_subdomain = temps_entities::environments::Entity::find_by_id(environment_id)
                 .one(state.db.as_ref())
@@ -1519,7 +1547,7 @@ pub async fn get_container_detail(
                 } else {
                     label
                 };
-                format!("https://{}.{}", label, preview_domain)
+                format!("{}://{}.{}", url_scheme2, label, preview_domain)
             })
         } else {
             None
