@@ -220,7 +220,7 @@ export function ImportProject() {
                     main_branch: data.branch,
                     repo_name: selectedRepository.name || '',
                     repo_owner: selectedRepository.owner || '',
-                    git_url: '',
+                    git_url: undefined,
                     git_provider_connection_id: selectedConnectionId!,
                     project_type:
                       data.preset === 'custom' ? 'static' : undefined,

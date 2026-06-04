@@ -604,7 +604,7 @@ export function ProjectConfigurator({
             main_branch: finalData.branch,
             repo_name: repository.name || '',
             repo_owner: repository.owner || '',
-            git_url: repository.clone_url || repository.ssh_url || '',
+            git_url: repository.clone_url || repository.ssh_url || undefined,
             git_provider_connection_id: connectionId,
             project_type:
               finalData.preset === 'custom' ? 'static' : finalData.preset,
