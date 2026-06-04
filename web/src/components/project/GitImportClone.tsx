@@ -577,7 +577,7 @@ export function GitImportClone({
                   main_branch: data.branch,
                   repo_name: selectedRepository.name || '',
                   repo_owner: selectedRepository.owner || owner || '',
-                  git_url: useGitUrl ? gitUrl : '',
+                  git_url: useGitUrl ? gitUrl : undefined,
                   git_provider_connection_id: useGitUrl
                     ? undefined
                     : Number(selectedConnection),
