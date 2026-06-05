@@ -13,12 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live per-migration progress streaming: prints `→ [N/total] name` / `✓ [N/total] name (timing)` as each migration applies
 - `run_migrations_streaming` in `temps-database`: fires `Started`/`Finished` events per migration for caller progress callbacks
 - `get_pending_migration_names` helper in `temps-database`: read-only query of unapplied migration names
+- **Effective metrics storage backend on the settings page**: `GET /api/settings` now returns the `monitoring` block (with the ClickHouse DSN masked to a `clickhouse_url_set` boolean) plus an `effective_metrics_store` field. The latter reconciles the `monitoring.store` toggle with the server's `TEMPS_CLICKHOUSE_*` configuration — so the Metrics Monitoring page shows the backend the runtime is *actually* using, and warns when ClickHouse is selected but its env vars aren't configured (the runtime silently falls back to TimescaleDB in that case). Previously the page rendered client-side defaults because the response omitted `monitoring` entirely.
+- **AI-agent pages endpoint** on proxy logs (`get_ai_agent_pages`): lists the pages a given AI crawler/agent visited, with input validation (empty agent rejected, unknown agent returns empty).
+- Command palette entries for Sandboxes, Build Limits, and Metrics Monitoring.
 
 ### Changed
--
+- Sandbox image is now built **on demand only** (first agent run), never at startup. The agents plugin previously warmed up the image at boot and, when the prebuilt GHCR image wasn't published yet, fell through to a multi-minute local Docker build on every startup — bogging down the host before any agent run was requested.
 
 ### Fixed
 - Chart tooltips stopped working after a `forwardRef` wrapper changed `ChartTooltip`'s component type identity; recharts matches tooltip children by type so the wrapped component was silently never registered. Reverted `ChartTooltip` to the raw `RechartsPrimitive.Tooltip`.
+- **Metrics settings save no longer wipes the ClickHouse DSN**: the update path now preserves the stored `clickhouse_url` when the masked payload omits it, so saving unrelated monitoring settings doesn't clear the DSN and trip the "clickhouse_url required when store is ClickHouse" validation.
+- **HTTP-01 certificate renewal**: HTTP-01 domains now renew through the order-based ACME flow (`acme_orders`) instead of the direct `renew_certificate` path, so a renewal that needs validation stays visible and recoverable in the certificate-management UI rather than leaving the domain stuck.
+- **Remote deployment hostnames**: remote (non-git-push) deployments built their slug from the environment slug, producing URLs like `<env>-<n>` that diverged from the git-push path. They now use the project slug so all deployment hostnames read `<project>-<n>`.
+- Runtime History log viewer now defaults to a 24h time range (was 1h).
+- Date-range picker preserves the user's time-of-day inputs across calendar clicks (react-day-picker normalizes selected days to local midnight, which previously wiped the time).
+- `DeploymentActivityGraph` day labels flex to the responsive square heights so they stay aligned at any width.
 
 
 ## [0.1.0-beta.26] - 2026-06-03
