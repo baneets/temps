@@ -5735,7 +5735,7 @@ export type GatewayStatus = {
     host_port?: number | null;
     /**
      * Image reference the container was created with (e.g.
-     * `kfsoftware/temps-preview-gateway:dev`).
+     * `ghcr.io/gotempsh/temps-preview-gateway:latest`).
      */
     image?: string | null;
     /**
@@ -14387,7 +14387,7 @@ export type UpgradeExternalServiceRequest = {
 export type UpgradeRequest = {
     /**
      * Image reference to pull and run (e.g.
-     * `kfsoftware/temps-preview-gateway:0.2.1`). Empty resets to default.
+     * `ghcr.io/gotempsh/temps-preview-gateway:latest`). Empty resets to default.
      */
     image: string;
 };
