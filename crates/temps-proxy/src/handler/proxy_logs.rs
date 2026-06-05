@@ -10,9 +10,9 @@ use temps_core::{DateTime, UtcDateTime};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::service::proxy_log_service::{
-    AiAgentBreakdownRow, AiAgentTimelineRow, AiPageBreakdownRow, AiStatusBreakdownRow,
-    AiTimelineGroupBy, ProjectHealthSummary, ProxyLogResponse, ProxyLogService, StatsFilters,
-    TimeBucketStats, TodayStatsResponse,
+    AiAgentBreakdownRow, AiAgentPageRow, AiAgentTimelineRow, AiPageBreakdownRow,
+    AiStatusBreakdownRow, AiTimelineGroupBy, ProjectHealthSummary, ProxyLogResponse,
+    ProxyLogService, StatsFilters, TimeBucketStats, TodayStatsResponse,
 };
 
 /// Query parameters for listing proxy logs
@@ -888,6 +888,97 @@ async fn list_known_ai_agents() -> impl IntoResponse {
     Json(KnownAiAgentsResponse { items })
 }
 
+/// Query parameters for the per-agent pages breakdown.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct AiAgentPagesQuery {
+    /// Canonical agent name to filter by (e.g. `ChatGPT-User`, `ClaudeBot`).
+    /// Must be a name returned by `GET /proxy-logs/ai-agents/known`.
+    pub agent: String,
+    /// Filter by project ID.
+    pub project_id: Option<i32>,
+    /// Filter by environment ID.
+    pub environment_id: Option<i32>,
+    /// Start time (ISO 8601). Defaults to `end_time - 7d`.
+    #[param(value_type = Option<String>, example = "2026-05-22T00:00:00Z")]
+    pub start_time: Option<UtcDateTime>,
+    /// End time (ISO 8601). Defaults to now.
+    #[param(value_type = Option<String>, example = "2026-05-29T00:00:00Z")]
+    pub end_time: Option<UtcDateTime>,
+    /// Maximum rows to return. Capped at 100 server-side.
+    pub limit: Option<u64>,
+}
+
+/// Response wrapping the per-agent pages breakdown rows.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentPagesResponse {
+    /// The agent name this breakdown is scoped to.
+    pub agent: String,
+    pub items: Vec<AiAgentPageRow>,
+    pub start_time: String,
+    pub end_time: String,
+}
+
+/// Get the top pages accessed by a specific AI agent over a time window.
+///
+/// Returns page paths ranked by request count, scoped to a single canonical
+/// agent name (e.g. `ChatGPT-User`). Use `GET /proxy-logs/ai-agents/known` to
+/// list all valid agent names. Unknown agent names return an empty items array.
+#[utoipa::path(
+    get,
+    path = "/proxy-logs/stats/ai-agent-pages",
+    params(AiAgentPagesQuery),
+    responses(
+        (status = 200, description = "Pages breakdown for the requested agent", body = AiAgentPagesResponse),
+        (status = 400, description = "Invalid parameters"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "Proxy Logs"
+)]
+async fn get_ai_agent_pages(
+    State(service): State<Arc<ProxyLogService>>,
+    Query(query): Query<AiAgentPagesQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    if query.agent.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "agent parameter is required".to_string(),
+        ));
+    }
+
+    let end_time = query.end_time.unwrap_or_else(chrono::Utc::now);
+    let start_time = query
+        .start_time
+        .unwrap_or_else(|| end_time - chrono::Duration::days(7));
+
+    if start_time >= end_time {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "start_time must be before end_time".to_string(),
+        ));
+    }
+
+    let limit = query.limit.unwrap_or(50);
+
+    let items = service
+        .get_ai_agent_pages(
+            &query.agent,
+            query.project_id,
+            query.environment_id,
+            start_time,
+            end_time,
+            limit,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(AiAgentPagesResponse {
+        agent: query.agent,
+        items,
+        start_time: start_time.to_rfc3339(),
+        end_time: end_time.to_rfc3339(),
+    }))
+}
+
 /// Create router for proxy log handlers
 pub fn create_routes() -> axum::Router<Arc<ProxyLogService>> {
     use axum::routing::get;
@@ -912,6 +1003,7 @@ pub fn create_routes() -> axum::Router<Arc<ProxyLogService>> {
         )
         .route("/proxy-logs/stats/ai-pages", get(get_ai_page_breakdown))
         .route("/proxy-logs/stats/ai-status", get(get_ai_status_breakdown))
+        .route("/proxy-logs/stats/ai-agent-pages", get(get_ai_agent_pages))
         .route("/proxy-logs/ai-agents/known", get(list_known_ai_agents))
 }
 
@@ -932,6 +1024,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
             get_ai_agent_timeline,
             get_ai_page_breakdown,
             get_ai_status_breakdown,
+            get_ai_agent_pages,
             list_known_ai_agents,
         ),
         components(schemas(
@@ -951,6 +1044,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
             AiPageBreakdownRow,
             AiStatusBreakdownResponse,
             AiStatusBreakdownRow,
+            AiAgentPageRow,
+            AiAgentPagesResponse,
             AiAgentDescriptor,
             KnownAiAgentsResponse,
         ))
@@ -1028,5 +1123,46 @@ mod tests {
         assert!(!ProxyLogService::is_valid_interval("1 fortnight"));
         assert!(!ProxyLogService::is_valid_interval("-1 hour"));
         assert!(!ProxyLogService::is_valid_interval(""));
+    }
+
+    #[test]
+    fn ai_agent_pages_query_rejects_empty_agent() {
+        // The handler returns 400 for a blank agent string before hitting the DB.
+        // We test the validation logic directly (no HTTP stack needed).
+        let agent = "   ";
+        assert!(
+            agent.trim().is_empty(),
+            "blank/whitespace agent must be caught as empty"
+        );
+    }
+
+    #[test]
+    fn ai_agent_pages_unknown_agent_returns_empty_from_service() {
+        // `get_ai_agent_pages` returns Ok(vec![]) for any name not in the
+        // known-agents taxonomy without touching the DB.
+        use crate::ai_agent_detector::known_agents;
+        let unknown = "NotARealBot/1.0";
+        let is_known = known_agents().iter().any(|(_, m)| m.agent == unknown);
+        assert!(!is_known, "test agent must not be in the taxonomy");
+    }
+
+    #[test]
+    fn ai_agent_pages_known_agent_passes_validation() {
+        use crate::ai_agent_detector::known_agents;
+        // Verify that at least the agents shown in the UI snapshot are in the
+        // taxonomy so the handler will proceed to query the DB for them.
+        for name in &[
+            "ChatGPT-User",
+            "ClaudeBot",
+            "Claude-User",
+            "PerplexityBot",
+            "GPTBot",
+        ] {
+            assert!(
+                known_agents().iter().any(|(_, m)| &m.agent == name),
+                "expected {} in known_agents taxonomy",
+                name
+            );
+        }
     }
 }

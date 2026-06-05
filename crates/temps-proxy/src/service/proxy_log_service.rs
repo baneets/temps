@@ -1329,6 +1329,88 @@ impl ProxyLogService {
         Ok(rows)
     }
 
+    /// Pages breakdown for a *single* AI agent over a time window.
+    ///
+    /// Groups `proxy_logs` by `path` but pre-filters to one canonical
+    /// `bot_name` (e.g. `"ChatGPT-User"`), so the caller can answer "which
+    /// pages did ChatGPT users visit, and how many times?". The agent name is
+    /// validated against `ai_agent_detector::known_agents` so unknown strings
+    /// return an empty result rather than a table scan.
+    pub async fn get_ai_agent_pages(
+        &self,
+        agent: &str,
+        project_id: Option<i32>,
+        environment_id: Option<i32>,
+        start_time: UtcDateTime,
+        end_time: UtcDateTime,
+        limit: u64,
+    ) -> Result<Vec<AiAgentPageRow>, ProxyLogServiceError> {
+        let known = crate::ai_agent_detector::known_agents();
+        if !known.iter().any(|(_, m)| m.agent == agent) {
+            return Ok(vec![]);
+        }
+
+        let mut where_clauses: Vec<String> = vec![
+            "timestamp >= $1".to_string(),
+            "timestamp < $2".to_string(),
+            "is_bot = true".to_string(),
+            "bot_name = $3".to_string(),
+        ];
+        let mut values: Vec<sea_orm::Value> =
+            vec![start_time.into(), end_time.into(), agent.to_owned().into()];
+        let mut next_idx = 4i32;
+
+        if let Some(pid) = project_id {
+            where_clauses.push(format!("project_id = ${}", next_idx));
+            values.push(pid.into());
+            next_idx += 1;
+        }
+        if let Some(eid) = environment_id {
+            where_clauses.push(format!("environment_id = ${}", next_idx));
+            values.push(eid.into());
+            next_idx += 1;
+        }
+        let _ = next_idx;
+
+        let sql = format!(
+            r#"
+            SELECT path,
+                   COUNT(*)::bigint AS request_count,
+                   COUNT(DISTINCT client_ip)::bigint AS unique_ips,
+                   MAX(timestamp)::timestamptz AS last_seen
+            FROM proxy_logs
+            WHERE {where}
+            GROUP BY path
+            ORDER BY request_count DESC
+            LIMIT {limit}
+            "#,
+            where = where_clauses.join(" AND "),
+            limit = std::cmp::min(limit, 100),
+        );
+
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Postgres,
+            &sql,
+            values,
+        );
+        let results = self.db.query_all(stmt).await?;
+
+        let rows = results
+            .into_iter()
+            .map(|row| AiAgentPageRow {
+                path: row.try_get("", "path").unwrap_or_default(),
+                request_count: row.try_get("", "request_count").unwrap_or(0),
+                unique_ips: row.try_get("", "unique_ips").unwrap_or(0),
+                last_seen: row
+                    .try_get::<chrono::DateTime<Utc>>("", "last_seen")
+                    .ok()
+                    .map(|d| d.to_rfc3339()),
+            })
+            .collect();
+
+        Ok(rows)
+    }
+
     /// Time-bucketed AI-agent request counts, split by provider or by agent.
     ///
     /// Same pre-filter as [`Self::get_ai_agent_breakdown`] (`is_bot = true AND
@@ -1718,6 +1800,20 @@ pub struct AiPageBreakdownRow {
     pub path: String,
     pub request_count: i64,
     pub agent_count: i64,
+    /// Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
+    #[schema(example = "2026-05-29T12:00:00Z")]
+    pub last_seen: Option<String>,
+}
+
+/// One row in the pages-by-agent breakdown. Returned by
+/// [`ProxyLogService::get_ai_agent_pages`] for a single named agent.
+/// `unique_ips` counts distinct client IPs that hit this path via that agent
+/// (same definition as the per-agent unique-IPs in [`AiAgentBreakdownRow`]).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentPageRow {
+    pub path: String,
+    pub request_count: i64,
+    pub unique_ips: i64,
     /// Last-seen timestamp in RFC3339 format, or `None` if no rows matched.
     #[schema(example = "2026-05-29T12:00:00Z")]
     pub last_seen: Option<String>,
