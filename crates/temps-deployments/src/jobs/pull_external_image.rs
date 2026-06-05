@@ -5,6 +5,7 @@
 //! and only the pre-built image reference is provided.
 
 use async_trait::async_trait;
+use bollard::auth::DockerCredentials;
 use bollard::query_parameters::CreateImageOptionsBuilder;
 use bollard::Docker;
 use futures::StreamExt;
@@ -70,6 +71,9 @@ pub struct PullExternalImageJob {
     log_service: Option<Arc<LogService>>,
     /// Log ID for this job's logs
     log_id: Option<String>,
+    /// Optional registry credentials for private registries.
+    /// When set, passed as the X-Registry-Auth header to the Docker daemon.
+    registry_credentials: Option<DockerCredentials>,
 }
 
 impl std::fmt::Debug for PullExternalImageJob {
@@ -96,12 +100,18 @@ impl PullExternalImageJob {
             docker,
             log_service: None,
             log_id: None,
+            registry_credentials: None,
         }
     }
 
     pub fn with_log_service(mut self, log_service: Arc<LogService>, log_id: String) -> Self {
         self.log_service = Some(log_service);
         self.log_id = Some(log_id);
+        self
+    }
+
+    pub fn with_registry_credentials(mut self, credentials: DockerCredentials) -> Self {
+        self.registry_credentials = Some(credentials);
         self
     }
 
@@ -189,10 +199,11 @@ impl WorkflowTask for PullExternalImageJob {
             .from_image(&self.image_ref)
             .build();
 
-        // Use None for authentication - relies on Docker daemon's credentials (~/.docker/config.json)
-        let mut stream = self
-            .docker
-            .create_image(Some(create_image_options), None, None);
+        let mut stream = self.docker.create_image(
+            Some(create_image_options),
+            None,
+            self.registry_credentials.clone(),
+        );
 
         let mut pull_succeeded = false;
         let mut last_error: Option<String> = None;

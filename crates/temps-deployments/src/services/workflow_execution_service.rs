@@ -1309,13 +1309,30 @@ impl WorkflowExecutionService {
                     .and_then(|v| v.as_i64())
                     .map(|id| id as i32);
 
-                let job = PullExternalImageJob::new(
+                let mut job = PullExternalImageJob::new(
                     db_job.job_id.clone(),
                     image_ref,
                     external_image_id,
                     self.docker.clone(),
                 )
                 .with_log_service(self.log_service.clone(), db_job.log_id.clone());
+
+                // Pass private registry credentials when configured
+                if let Ok(settings) = self.config_service.get_settings().await {
+                    let reg = &settings.docker_registry;
+                    if reg.enabled {
+                        if let (Some(username), Some(password)) =
+                            (reg.username.clone(), reg.password.clone())
+                        {
+                            job = job.with_registry_credentials(bollard::auth::DockerCredentials {
+                                username: Some(username),
+                                password: Some(password),
+                                serveraddress: reg.registry_url.clone(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
 
                 Ok(Arc::new(job))
             }
