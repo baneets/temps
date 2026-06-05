@@ -315,7 +315,7 @@ export default function HistoryLogViewer({
   const [selectedLevels, setSelectedLevels] = useState<LogLevel[]>([])
   const [searchText, setSearchText] = useState('')
   const [debouncedText, setDebouncedText] = useState('')
-  const [timeRange, setTimeRange] = useState('1h')
+  const [timeRange, setTimeRange] = useState('24h')
   // Custom range, only meaningful when timeRange === CUSTOM_RANGE_VALUE.
   // Stored as DateRange (from react-day-picker) so the existing
   // DateRangePicker component can both read and write it without translation.

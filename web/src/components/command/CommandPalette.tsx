@@ -26,6 +26,7 @@ import {
   Bell,
   BellPlus,
   Bot,
+  Box,
   Boxes,
   Cloud,
   CreditCard,
@@ -34,6 +35,7 @@ import {
   FileLock2,
   Folder,
   FolderPlus,
+  Gauge,
   GitBranch,
   Globe,
   HardDrive,
@@ -80,6 +82,12 @@ const mainNavItems: NavigationItem[] = [
     url: '/projects',
     icon: Folder,
     keywords: ['apps', 'applications', 'sites'],
+  },
+  {
+    title: 'Sandboxes',
+    url: '/sandboxes',
+    icon: Box,
+    keywords: ['sandbox', 'sandboxes', 'workspace', 'shell', 'terminal', 'environment'],
   },
   {
     title: 'Create New Project',
@@ -245,6 +253,12 @@ const settingsNavItems: NavigationItem[] = [
     keywords: ['docker', 'registry', 'container', 'image'],
   },
   {
+    title: 'Build Limits',
+    url: '/settings/build-limits',
+    icon: Gauge,
+    keywords: ['build', 'limits', 'concurrency', 'resources', 'cpu', 'memory'],
+  },
+  {
     title: 'Backups',
     url: '/backups',
     icon: DatabaseBackup,
@@ -280,6 +294,12 @@ const settingsNavItems: NavigationItem[] = [
     url: '/settings/disk-monitoring',
     icon: HardDrive,
     keywords: ['disk', 'space', 'storage', 'alerts', 'monitoring'],
+  },
+  {
+    title: 'Metrics Monitoring',
+    url: '/settings/metrics-monitoring',
+    icon: BarChart3,
+    keywords: ['metrics', 'monitoring', 'thresholds', 'alerts', 'cpu', 'memory', 'resources'],
   },
   // Utility
   {
@@ -364,6 +384,12 @@ const projectNavItems: NavigationItem[] = [
     keywords: ['pages', 'views', 'pageviews', 'analytics'],
   },
   {
+    title: 'AI Agents',
+    url: 'analytics/ai-agents',
+    icon: Bot,
+    keywords: ['ai', 'agents', 'bots', 'llm', 'analytics', 'traffic'],
+  },
+  {
     title: 'Session Replays',
     url: 'analytics/replays',
     icon: Monitor,
@@ -422,6 +448,12 @@ const projectNavItems: NavigationItem[] = [
     url: 'traces',
     icon: Workflow,
     keywords: ['traces', 'opentelemetry', 'otel', 'spans', 'tracing', 'distributed'],
+  },
+  {
+    title: 'AI Crawlers',
+    url: 'ai-crawlers',
+    icon: Bot,
+    keywords: ['ai', 'crawlers', 'bots', 'gptbot', 'googlebot', 'scrapers', 'observe'],
   },
   {
     title: 'Project Settings',

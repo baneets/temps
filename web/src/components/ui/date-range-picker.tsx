@@ -21,12 +21,56 @@ interface DateRangePickerProps {
   showTime?: boolean
 }
 
+// Copy the hours/minutes/seconds/millis from `source` onto the calendar day in
+// `target`, returning a new Date. react-day-picker hands back days normalized to
+// local midnight, so without this every calendar click would silently wipe the
+// time the user set in the time inputs.
+function withTimeFrom(target: Date, source: Date): Date {
+  const merged = new Date(target)
+  merged.setHours(
+    source.getHours(),
+    source.getMinutes(),
+    source.getSeconds(),
+    source.getMilliseconds()
+  )
+  return merged
+}
+
 export function DateRangePicker({
   date,
   onDateChange,
   className,
   showTime = false,
 }: DateRangePickerProps) {
+  // react-day-picker's range onSelect returns days at local midnight. When
+  // showTime is on we preserve whatever time-of-day the user already chose
+  // (carried on the previous from/to), and default a fresh end day to the end
+  // of that day so the selected last day's data is actually included rather
+  // than the range collapsing to the start of it.
+  const handleSelect = (range: DateRange | undefined) => {
+    if (!onDateChange) return
+    if (!showTime || !range) {
+      onDateChange(range)
+      return
+    }
+    const from = range.from
+      ? withTimeFrom(
+          range.from,
+          // Keep the previous start time if we had one; otherwise start of day.
+          date?.from ?? new Date(new Date(range.from).setHours(0, 0, 0, 0))
+        )
+      : undefined
+    const to = range.to
+      ? withTimeFrom(
+          range.to,
+          // Keep the previous end time if we had one; otherwise end of day so
+          // the full selected last day is covered.
+          date?.to ?? new Date(new Date(range.to).setHours(23, 59, 59, 999))
+        )
+      : undefined
+    onDateChange({ from, to })
+  }
+
   return (
     <div className={cn('grid gap-2', className)}>
       <Popover>
@@ -69,7 +113,7 @@ export function DateRangePicker({
             mode="range"
             defaultMonth={date?.from}
             selected={date}
-            onSelect={onDateChange}
+            onSelect={handleSelect}
             numberOfMonths={2}
             className="max-w-screen"
           />

@@ -163,31 +163,32 @@ export function DeploymentActivityGraph({ projectId }: DeploymentActivityGraphPr
         </h3>
       </div>
 
-      <div className="overflow-x-auto w-full">
-        <div className="inline-flex flex-col min-w-full">
+      <div className="w-full">
+        <div className="flex w-full flex-col">
           {/* Graph grid */}
-          <div className="flex gap-2 w-full">
-            {/* Day labels - showing Mon, Wed, Fri */}
-            <div className="flex flex-col gap-0.5 justify-start flex-shrink-0 text-[10px] text-muted-foreground">
-              <div className="h-3 mb-1" /> {/* Spacer for month row */}
-              <div className="h-3" /> {/* Sunday - empty */}
-              <div className="h-3 flex items-center">Mon</div>
-              <div className="h-3" /> {/* Tuesday - empty */}
-              <div className="h-3 flex items-center">Wed</div>
-              <div className="h-3" /> {/* Thursday - empty */}
-              <div className="h-3 flex items-center">Fri</div>
-              <div className="h-3" /> {/* Saturday - empty */}
+          <div className="flex w-full gap-2">
+            {/* Day labels - showing Mon, Wed, Fri. Rows flex to track the
+                responsive square heights so labels stay aligned at any width. */}
+            <div className="flex flex-col gap-0.5 justify-start flex-shrink-0 text-[10px] leading-none text-muted-foreground">
+              <div className="h-3 mb-0.5" /> {/* Spacer for month row */}
+              <div className="flex-1" /> {/* Sunday - empty */}
+              <div className="flex flex-1 items-center">Mon</div>
+              <div className="flex-1" /> {/* Tuesday - empty */}
+              <div className="flex flex-1 items-center">Wed</div>
+              <div className="flex-1" /> {/* Thursday - empty */}
+              <div className="flex flex-1 items-center">Fri</div>
+              <div className="flex-1" /> {/* Saturday - empty */}
             </div>
 
-            {/* Container for month labels and activity squares */}
-            <div className="flex flex-col gap-0.5">
+            {/* Container for month labels and activity squares - fills remaining width */}
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
               {/* Month labels - positioned above squares */}
               <div className="flex gap-0.5 mb-0.5 h-3 text-[10px] text-muted-foreground">
                 {graphData.weeks.map((week, weekIdx) => {
                   // Check if this week starts a new month
                   const firstDayInRange = week.find((d) => d.isInRange)
                   if (!firstDayInRange) {
-                    return <div key={weekIdx} className="w-3" />
+                    return <div key={weekIdx} className="min-w-0 flex-1" />
                   }
 
                   const monthLabel = format(firstDayInRange.day, 'MMM')
@@ -198,7 +199,7 @@ export function DeploymentActivityGraph({ projectId }: DeploymentActivityGraphPr
                   return (
                     <div
                       key={weekIdx}
-                      className="w-3 flex items-center justify-start"
+                      className="min-w-0 flex-1 flex items-center justify-start overflow-visible whitespace-nowrap"
                     >
                       {isFirstWeekOfMonth && <span>{monthLabel}</span>}
                     </div>
@@ -206,14 +207,14 @@ export function DeploymentActivityGraph({ projectId }: DeploymentActivityGraphPr
                 })}
               </div>
 
-              {/* Activity squares - all 7 days */}
+              {/* Activity squares - all 7 days. Week columns flex to fill width. */}
               <div className="flex gap-0.5">
                 {graphData.weeks.map((week, weekIdx) => (
-                  <div key={weekIdx} className="flex flex-col gap-0.5">
+                  <div key={weekIdx} className="flex min-w-0 flex-1 flex-col gap-0.5">
                     {week.map((day, dayIdx) => {
                       // If day is outside the range, show it as invisible/empty (no background)
                       if (!day.isInRange) {
-                        return <div key={dayIdx} className="w-3 h-3" />
+                        return <div key={dayIdx} className="aspect-square w-full" />
                       }
 
                       // Render all days in range with their intensity color (including 0 = muted)
@@ -223,7 +224,7 @@ export function DeploymentActivityGraph({ projectId }: DeploymentActivityGraphPr
                       return (
                         <div
                           key={day.date}
-                          className={`w-3 h-3 rounded-sm transition-colors cursor-pointer ${getIntensityColor(day.level)} ${isToday ? 'ring-1 ring-blue-500 dark:ring-blue-400' : ''}`}
+                          className={`aspect-square w-full rounded-sm transition-colors cursor-pointer ${getIntensityColor(day.level)} ${isToday ? 'ring-1 ring-blue-500 dark:ring-blue-400' : ''}`}
                           onMouseEnter={(e) => {
                             const rect = e.currentTarget.getBoundingClientRect()
                             setTooltip({
