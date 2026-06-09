@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.29] - 2026-06-09
+
+### Added
 - **Historical deployment container logs**: runtime container logs used to vanish the moment a deployment was superseded and its containers were torn down — making it impossible to debug "what did the container that ran a few days ago actually print?". Now, just before a previous deployment's containers are stopped and removed (`MarkDeploymentCompleteJob::cancel_previous_deployments`), each container's logs are captured to a plain-text file under the data dir (via `LogService`) and recorded in a new `deployment_container_logs` table. New read endpoints `GET /api/projects/{project_id}/deployments/{deployment_id}/container-logs` (list) and `.../container-logs/{log_id}` (content), and a "Captured container logs" section on the deployment detail page, let you read the logs of a container that no longer exists (e.g. `web-2`). Capture is best-effort and tail-capped at 8 MiB — it never blocks or fails a deployment.
 - **`project_scope_guard!` and `deny_deployment_token!` auth macros** (`temps-auth`) plus `AuthContext::is_scoped_to_project`: the missing tenant-boundary primitive that confines a project-bound deployment token to its own project. `permission_guard!` proves a caller holds a permission; these prove the resource is theirs.
 
