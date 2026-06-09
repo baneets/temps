@@ -373,11 +373,27 @@ export function DomainDetail() {
   const activeOrder = order && !isOrderTerminal ? order : undefined
 
   const challengeData = activeOrder?.authorizations as ChallengeData | undefined
-  const hasDnsChallenge = !!activeOrder && domain.verification_method === 'dns-01'
+
+  // The domain's verification_method is normally 'dns-01' or 'http-01', but legacy rows
+  // (and tls-alpn-01) carry values the UI has no branch for — which previously rendered
+  // an empty card (blank page) while the domain sat in challenge_requested. The ACME
+  // order itself always stores the concrete challenge type it was created with
+  // (authorizations.challenge_type), so prefer that when the domain field is unrecognised.
+  const KNOWN_METHODS = ['dns-01', 'http-01'] as const
+  type KnownMethod = (typeof KNOWN_METHODS)[number]
+  const isKnownMethod = (m?: string | null): m is KnownMethod =>
+    !!m && (KNOWN_METHODS as readonly string[]).includes(m)
+  const effectiveMethod: KnownMethod | undefined = isKnownMethod(domain.verification_method)
+    ? domain.verification_method
+    : isKnownMethod(challengeData?.challenge_type)
+      ? challengeData?.challenge_type
+      : undefined
+
+  const hasDnsChallenge = !!activeOrder && effectiveMethod === 'dns-01'
   const dnsTxtRecords = challengeData?.dns_txt_records || []
   const hasDnsValues = dnsTxtRecords.length > 0
   const hasHttpChallenge =
-    !!activeOrder && domain.verification_method === 'http-01' && !!challengeData
+    !!activeOrder && effectiveMethod === 'http-01' && !!challengeData
 
   const isPendingState =
     domain.status === 'challenge_requested' ||
@@ -545,7 +561,7 @@ export function DomainDetail() {
               />
             )}
 
-            {isPendingState && domain.verification_method === 'dns-01' && (
+            {isPendingState && effectiveMethod === 'dns-01' && (
               <>
                 <div className="flex items-center justify-between">
                   <h2 className="text-lg font-semibold">DNS challenge required</h2>
@@ -649,7 +665,7 @@ export function DomainDetail() {
               </>
             )}
 
-            {isPendingState && domain.verification_method === 'http-01' && (
+            {isPendingState && effectiveMethod === 'http-01' && (
               <>
                 {hasHttpChallenge && challengeData ? (
                   <HttpChallengePanel
@@ -702,6 +718,83 @@ export function DomainDetail() {
                     </AlertDescription>
                   </Alert>
                 )}
+              </>
+            )}
+
+            {/* Fallback: pending domain whose verification method we can't classify
+                (legacy "acme", "tls-alpn-01", or null — with no order to disambiguate).
+                Previously this rendered an empty card (blank page). Surface the order
+                status and the create/verify path so the user is never stranded. */}
+            {isPendingState && !effectiveMethod && (
+              <>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold">Certificate challenge required</h2>
+                  <Badge variant={getStatusBadgeVariant(domain.status)}>{domain.status}</Badge>
+                </div>
+                <div className="space-y-3 rounded-lg border border-gray-950/10 p-4">
+                  <p className="text-sm text-muted-foreground">
+                    {!activeOrder
+                      ? isOrderTerminal
+                        ? `Previous order ended with status "${order?.status}". Create a new ACME order to continue.`
+                        : 'Create an ACME order to begin certificate provisioning for this domain.'
+                      : 'An ACME order exists for this domain. Once any required DNS or HTTP records are in place, verify to finalize the certificate.'}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {canCreateOrder ? (
+                      <Button
+                        onClick={handleCreateOrder}
+                        disabled={!canManageCertificates || createOrder.isPending}
+                      >
+                        {createOrder.isPending ? (
+                          <>
+                            <Loader2 className="mr-2 size-4 animate-spin" />
+                            Creating…
+                          </>
+                        ) : (
+                          <>
+                            <Shield className="mr-2 size-4" />
+                            {isOrderTerminal ? 'Create new order' : 'Create order'}
+                          </>
+                        )}
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          onClick={handleCompleteDns}
+                          disabled={finalizeOrder.isPending || !canManageCertificates}
+                        >
+                          {finalizeOrder.isPending ? (
+                            <>
+                              <Loader2 className="mr-2 size-4 animate-spin" />
+                              Verifying…
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle className="mr-2 size-4" />
+                              Verify &amp; finalize
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={handleCancelOrder}
+                          disabled={!canManageCertificates}
+                        >
+                          <XCircle className="mr-2 size-4" />
+                          Cancel order
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                  {hasDnsValues && (
+                    <div className="space-y-2 pt-1">
+                      <p className="text-xs text-muted-foreground">
+                        Challenge record{dnsTxtRecords.length > 1 ? 's' : ''} for this order:
+                      </p>
+                      <DnsRecordsList keyPrefix="current-fallback" />
+                    </div>
+                  )}
+                </div>
               </>
             )}
 
@@ -890,7 +983,7 @@ export function DomainDetail() {
 
         {CurrentVariant}
 
-        {domain.verification_method === 'http-01' &&
+        {effectiveMethod === 'http-01' &&
           isPendingState &&
           !hasHttpChallenge && (
             <Alert>
