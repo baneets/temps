@@ -2563,10 +2563,13 @@ impl ProxyHttp for LoadBalancer {
                         response.insert_header("Cache-Control", "no-store")?;
                         response.insert_header("X-Request-ID", &ctx.request_id)?;
                         response.insert_header("Content-Type", "application/json")?;
-                        let body_bytes = Bytes::from(format!(
-                            r#"{{"status":"wake_pending","environment_id":{},"message":"Environment is starting, please retry"}}"#,
-                            env_id
-                        ));
+                        // Body carries no environment_id: it has no authorization
+                        // significance and the client keys retries off Retry-After,
+                        // not the id. This response goes to an unauthenticated
+                        // client (a sleeping env has no auth context yet).
+                        let body_bytes = Bytes::from_static(
+                            br#"{"status":"wake_pending","message":"Environment is starting, please retry"}"#,
+                        );
                         session
                             .write_response_header(Box::new(response), false)
                             .await?;
@@ -2649,10 +2652,11 @@ impl ProxyHttp for LoadBalancer {
                             response.insert_header("X-Request-ID", &ctx.request_id)?;
                             response.insert_header("Content-Type", "application/json")?;
 
-                            let body_bytes = Bytes::from(format!(
-                                r#"{{"status":"wake_pending","environment_id":{},"message":"Environment is starting, please retry"}}"#,
-                                env_id
-                            ));
+                            // No environment_id in the body — see the wake_throttled
+                            // response above. Detail stays server-side in the log line.
+                            let body_bytes = Bytes::from_static(
+                                br#"{"status":"wake_pending","message":"Environment is starting, please retry"}"#,
+                            );
 
                             session
                                 .write_response_header(Box::new(response), false)
@@ -2678,11 +2682,13 @@ impl ProxyHttp for LoadBalancer {
                         response.insert_header("X-Request-ID", &ctx.request_id)?;
                         response.insert_header("Content-Type", "application/json")?;
 
-                        let body_bytes = Bytes::from(format!(
-                            r#"{{"status":"wake_failed","environment_id":{},"message":"Failed to start environment: {}"}}"#,
-                            env_id,
-                            e.to_string().replace('"', "\\\"")
-                        ));
+                        // Static body: do not interpolate the OnDemandError Display
+                        // string (it can carry container/deployment context) or the
+                        // environment_id into a response served to an unauthenticated
+                        // client. The detailed error is logged server-side above.
+                        let body_bytes = Bytes::from_static(
+                            br#"{"status":"wake_failed","message":"Failed to start environment, please retry"}"#,
+                        );
 
                         session
                             .write_response_header(Box::new(response), false)

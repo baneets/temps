@@ -272,6 +272,12 @@ impl ServeCommand {
                     db.clone(),
                     Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
                     queue.clone(),
+                    // Control plane has no self node row; its locally-deployed
+                    // containers carry node_id=NULL, which is treated as local.
+                    // Remote-worker containers (node_id != NULL) are skipped so a
+                    // multi-node deployment's wake/sleep no longer reverts on a
+                    // failed local start. See issue #126.
+                    None,
                 ))
             });
 

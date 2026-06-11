@@ -97,6 +97,16 @@ pub struct OnDemandManager {
     /// Database connection for state transitions.
     db: Arc<DatabaseConnection>,
 
+    /// Identity of the node this proxy runs on, used to decide which of a
+    /// deployment's containers this process can start/stop via the local Docker
+    /// daemon. Containers with `node_id == NULL` are control-plane-local (the
+    /// deploy pipeline only stamps a `node_id` on remote worker deployments), so
+    /// a container is "local" iff its `node_id` is NULL **or** equals this value.
+    /// `None` means "control plane with no self node row" — only NULL-node
+    /// containers are local, which is the single-node and current control-plane
+    /// reality. See [`Self::is_local_container`].
+    local_node_id: Option<i32>,
+
     /// Container lifecycle operations (injected).
     container_lifecycle: Arc<dyn ContainerLifecycle>,
 
@@ -141,6 +151,7 @@ impl OnDemandManager {
         db: Arc<DatabaseConnection>,
         container_lifecycle: Arc<dyn ContainerLifecycle>,
         queue: Arc<dyn JobQueue>,
+        local_node_id: Option<i32>,
     ) -> Self {
         Self {
             last_activity: DashMap::new(),
@@ -148,10 +159,24 @@ impl OnDemandManager {
             wake_states: DashMap::new(),
             sleeping_by_domain: DashMap::new(),
             db,
+            local_node_id,
             container_lifecycle,
             queue,
             route_reloaded: Notify::new(),
             wake_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_WAKE_WAITERS)),
+        }
+    }
+
+    /// Whether a container with the given `node_id` lives on this proxy's node
+    /// and can therefore be started/stopped via the local Docker daemon.
+    ///
+    /// A `NULL` `node_id` is always local: the deploy pipeline only stamps a
+    /// `node_id` when scheduling onto a remote worker, so control-plane-local
+    /// containers carry no node. Otherwise it must match [`Self::local_node_id`].
+    fn is_local_container(&self, node_id: Option<i32>) -> bool {
+        match node_id {
+            None => true,
+            Some(id) => self.local_node_id == Some(id),
         }
     }
 
@@ -175,7 +200,7 @@ impl OnDemandManager {
         db: Arc<DatabaseConnection>,
         container_lifecycle: Arc<dyn ContainerLifecycle>,
     ) -> Self {
-        Self::new(db, container_lifecycle, Arc::new(tests::NoopQueue))
+        Self::new(db, container_lifecycle, Arc::new(tests::NoopQueue), None)
     }
 
     // ── Activity Tracking ──
@@ -403,13 +428,36 @@ impl OnDemandManager {
             None => return Ok(false),
         };
 
-        let containers = deployment_containers::Entity::find()
+        let all_containers = deployment_containers::Entity::find()
             .filter(deployment_containers::Column::DeploymentId.eq(deployment_id))
             .filter(deployment_containers::Column::DeletedAt.is_null())
             .all(self.db.as_ref())
             .await?;
 
-        // Stop all containers in parallel, tracking failures
+        // Only stop containers this node owns via the local Docker daemon.
+        // A remote worker's containers are stopped by that worker's own idle
+        // sweep; trying to stop them here would fail and revert the sleep,
+        // pinning a multi-node environment permanently awake. (Symmetric with
+        // the wake path's local/remote partition.)
+        let remote_count = all_containers
+            .iter()
+            .filter(|c| !self.is_local_container(c.node_id))
+            .count();
+        if remote_count > 0 {
+            warn!(
+                environment_id = environment_id,
+                deployment_id = deployment_id,
+                remote_count = remote_count,
+                "Sleep stops only this node's containers; remote worker containers \
+                 are left for their own node's idle sweep"
+            );
+        }
+        let containers: Vec<_> = all_containers
+            .into_iter()
+            .filter(|c| self.is_local_container(c.node_id))
+            .collect();
+
+        // Stop all local containers in parallel, tracking failures
         let stop_futures: Vec<_> = containers
             .iter()
             .map(|c| {
@@ -571,13 +619,13 @@ impl OnDemandManager {
             .current_deployment_id
             .ok_or(OnDemandError::NoDeployment { environment_id })?;
 
-        let containers = deployment_containers::Entity::find()
+        let all_containers = deployment_containers::Entity::find()
             .filter(deployment_containers::Column::DeploymentId.eq(deployment_id))
             .filter(deployment_containers::Column::DeletedAt.is_null())
             .all(self.db.as_ref())
             .await?;
 
-        if containers.is_empty() {
+        if all_containers.is_empty() {
             warn!(
                 environment_id = environment_id,
                 "No containers found to wake"
@@ -593,6 +641,61 @@ impl OnDemandManager {
             return Ok(());
         }
 
+        // Only this node's containers can be started via the local Docker
+        // daemon. Containers owned by a remote worker node do not exist on this
+        // daemon, so attempting a local `start_container` for them would fail
+        // and trigger a full partial-wake revert — breaking scale-to-zero for
+        // any multi-node deployment. Partition and start only the local set.
+        //
+        // NOTE: remote containers are NOT yet woken (the worker-side wake RPC
+        // does not exist). When a deployment is split across nodes we wake the
+        // local containers and warn; a fully-remote environment has nothing this
+        // proxy can start, so we surface that as an explicit error rather than
+        // claiming a successful wake.
+        let (containers, remote_containers): (Vec<_>, Vec<_>) = all_containers
+            .into_iter()
+            .partition(|c| self.is_local_container(c.node_id));
+
+        if !remote_containers.is_empty() {
+            warn!(
+                environment_id = environment_id,
+                deployment_id = deployment_id,
+                remote_count = remote_containers.len(),
+                local_count = containers.len(),
+                "Wake skips containers owned by remote worker nodes; remote wake \
+                 is not yet supported, only local containers will be started"
+            );
+        }
+
+        if containers.is_empty() {
+            // Every container for this deployment lives on a remote node and we
+            // cannot start any of them from here. Revert sleeping=false so the
+            // DB doesn't claim the env is awake when nothing was started, and
+            // return an error so the request gets an honest retryable 503.
+            error!(
+                environment_id = environment_id,
+                deployment_id = deployment_id,
+                remote_count = remote_containers.len(),
+                "All containers for this environment are owned by remote nodes; \
+                 cannot wake from this node, reverting to sleeping"
+            );
+            let _ = self
+                .db
+                .execute(Statement::from_sql_and_values(
+                    sea_orm::DatabaseBackend::Postgres,
+                    "UPDATE environments SET sleeping = true WHERE id = $1",
+                    [environment_id.into()],
+                ))
+                .await;
+            return Err(OnDemandError::ContainerOperation {
+                container_id: "remote".to_string(),
+                reason: format!(
+                    "All {} container(s) are on remote nodes; remote wake is not supported",
+                    remote_containers.len()
+                ),
+            });
+        }
+
         info!(
             environment_id = environment_id,
             deployment_id = deployment_id,
@@ -600,7 +703,7 @@ impl OnDemandManager {
             "Waking environment"
         );
 
-        // Start all containers in parallel
+        // Start all local containers in parallel
         let start_results: Vec<Result<String, OnDemandError>> = {
             let futures: Vec<_> = containers
                 .iter()
@@ -1478,6 +1581,7 @@ mod tests {
             Arc::new(db),
             Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
             queue,
+            None,
         );
 
         let result = manager.wake_environment(1, 30).await;
@@ -1844,12 +1948,13 @@ mod tests {
         let result = manager.sleep_environment(1).await.unwrap();
         assert!(result);
 
-        // All 3 containers should have been stopped
+        // Only the local container (node_id=NULL) is stopped here. The two on
+        // remote worker nodes (2 and 3) are stopped by their own node's idle
+        // sweep — this proxy's Docker daemon can't reach them (issue #126).
         let stopped = lifecycle.stopped_containers();
-        assert_eq!(stopped.len(), 3);
-        assert!(stopped.contains(&"container-1".to_string()));
-        assert!(stopped.contains(&"container-2".to_string()));
-        assert!(stopped.contains(&"container-3".to_string()));
+        assert_eq!(stopped, vec!["container-1".to_string()]);
+        assert!(!stopped.contains(&"container-2".to_string()));
+        assert!(!stopped.contains(&"container-3".to_string()));
     }
 
     // ── Sleeping domain lookup with port stripping ──
@@ -3114,7 +3219,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_wake_multiple_containers_multi_node() {
-        // 3 containers across different nodes, all should be started
+        // 3 containers across different nodes: one local (node_id=NULL) and two
+        // on remote workers. The control-plane proxy can only start the local
+        // one via its Docker daemon — attempting to start the remote ones would
+        // fail and revert the entire wake (issue #126). It must start ONLY the
+        // local container and skip the remote ones.
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_exec_results(vec![MockExecResult {
                 last_insert_id: 0,
@@ -3126,7 +3235,12 @@ mod tests {
                 make_container(2, 100, "remote-c1", Some(2)),
                 make_container(3, 100, "remote-c2", Some(3)),
             ]])
-            // NOTIFY
+            // last_activity_at UPDATE after a successful wake
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // NOTIFY route_table_changes
             .append_exec_results(vec![MockExecResult {
                 last_insert_id: 0,
                 rows_affected: 0,
@@ -3142,9 +3256,12 @@ mod tests {
         let result = manager.wake_environment(1, 30).await;
         assert!(result.is_ok());
 
-        let mut started = lifecycle.started_containers();
-        started.sort();
-        assert_eq!(started, vec!["local-c", "remote-c1", "remote-c2"]);
+        // Only the local container is started; remote-owned ones are skipped.
+        assert_eq!(
+            lifecycle.started_containers(),
+            vec!["local-c"],
+            "must start only the local (NULL-node) container; remote wake is not supported"
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -3457,10 +3574,10 @@ mod tests {
         let slept = manager.sweep_idle_environments().await;
         assert_eq!(slept, vec![1], "Sweep should put env 1 to sleep");
 
-        // Step 4: Verify containers were actually stopped
-        let mut stopped = lifecycle.stopped_containers();
-        stopped.sort();
-        assert_eq!(stopped, vec!["app-c1", "app-c2"]);
+        // Step 4: Verify the local container was stopped. app-c2 lives on remote
+        // node 2, so this proxy's idle sweep leaves it for that node's own sweep
+        // (issue #126) — only app-c1 (node_id=NULL) is stopped here.
+        assert_eq!(lifecycle.stopped_containers(), vec!["app-c1".to_string()]);
     }
 
     #[tokio::test]
@@ -3842,5 +3959,167 @@ mod tests {
         // Debug trait
         let debug_str = format!("{:?}", info);
         assert!(debug_str.contains("SleepingEnvironmentInfo"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  MULTI-NODE node_id FILTERING (issue #126)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_is_local_container_node_filter() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let lifecycle = Arc::new(MockLifecycle::new());
+
+        // Control-plane manager (no self node id): only NULL-node containers
+        // are local.
+        let cp = OnDemandManager::new_test(Arc::new(db), Arc::clone(&lifecycle) as _);
+        assert!(cp.is_local_container(None), "NULL node is always local");
+        assert!(
+            !cp.is_local_container(Some(2)),
+            "a remote-node container is not local on a control plane with no self node"
+        );
+
+        // Manager bound to node 7: NULL is local, node 7 is local, node 8 is not.
+        let db2 = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let node7 = OnDemandManager::new(
+            Arc::new(db2),
+            Arc::clone(&lifecycle) as _,
+            Arc::new(NoopQueue),
+            Some(7),
+        );
+        assert!(node7.is_local_container(None), "NULL node is always local");
+        assert!(node7.is_local_container(Some(7)), "own node id is local");
+        assert!(
+            !node7.is_local_container(Some(8)),
+            "a different node id is not local"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wake_starts_only_local_containers_skips_remote() {
+        // A deployment with one local (node_id=NULL) and one remote (node_id=2)
+        // container. The proxy must start ONLY the local one and leave the
+        // remote one alone — it must NOT attempt a local start that fails and
+        // reverts the whole wake. Regression for issue #126.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // UPDATE sleeping=false WHERE sleeping=true -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find_by_id for env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            // containers query: one local, one remote
+            .append_query_results(vec![vec![
+                make_container(1, 100, "local-1", None),
+                make_container(2, 100, "remote-1", Some(2)),
+            ]])
+            // last_activity_at UPDATE after success
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new_test(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(
+            result.is_ok(),
+            "wake should succeed using the local container"
+        );
+
+        // Only the local container was started; the remote one was skipped.
+        assert_eq!(
+            lifecycle.started_containers(),
+            vec!["local-1"],
+            "must start only the local (NULL-node) container, skipping the remote one"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wake_all_remote_containers_errors_and_reverts() {
+        // Every container is owned by a remote node. The proxy cannot start any
+        // of them locally, so it must revert sleeping and return an error rather
+        // than falsely report a successful wake.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // UPDATE sleeping=false -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find_by_id env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), false)]])
+            // containers query: all remote
+            .append_query_results(vec![vec![
+                make_container(1, 100, "remote-1", Some(2)),
+                make_container(2, 100, "remote-2", Some(3)),
+            ]])
+            // Revert UPDATE sleeping=true
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new_test(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let result = manager.wake_environment(1, 30).await;
+        assert!(matches!(
+            result.unwrap_err(),
+            OnDemandError::ContainerOperation { .. }
+        ));
+        // Nothing was started locally.
+        assert!(
+            lifecycle.started_containers().is_empty(),
+            "no container should be started when all are remote"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sleep_stops_only_local_containers_skips_remote() {
+        // Symmetric with wake: sleep stops only this node's containers, leaving
+        // a remote worker's containers for that worker's own idle sweep.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // UPDATE sleeping=true WHERE sleeping=false -> 1 row
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // find_by_id env
+            .append_query_results(vec![vec![make_env_model(1, 10, Some(100), true)]])
+            // containers: one local, one remote
+            .append_query_results(vec![vec![
+                make_container(1, 100, "local-1", None),
+                make_container(2, 100, "remote-1", Some(2)),
+            ]])
+            // NOTIFY
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
+            .into_connection();
+
+        let lifecycle = Arc::new(MockLifecycle::new());
+        let manager = OnDemandManager::new_test(
+            Arc::new(db),
+            Arc::clone(&lifecycle) as Arc<dyn ContainerLifecycle>,
+        );
+
+        let slept = manager.sleep_environment(1).await.unwrap();
+        assert!(slept, "sleep should succeed stopping the local container");
+        assert_eq!(
+            lifecycle.stopped_containers(),
+            vec!["local-1"],
+            "must stop only the local container, leaving the remote one running"
+        );
     }
 }
