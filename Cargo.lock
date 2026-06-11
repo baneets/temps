@@ -10462,7 +10462,7 @@ dependencies = [
 
 [[package]]
 name = "temps-agent"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -10498,7 +10498,7 @@ dependencies = [
 
 [[package]]
 name = "temps-agents"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -10542,7 +10542,7 @@ dependencies = [
 
 [[package]]
 name = "temps-agents-mcp-proxy"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "serde",
  "serde_json",
@@ -10550,7 +10550,7 @@ dependencies = [
 
 [[package]]
 name = "temps-ai-gateway"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -10580,7 +10580,7 @@ dependencies = [
 
 [[package]]
 name = "temps-analytics"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10610,7 +10610,7 @@ dependencies = [
 
 [[package]]
 name = "temps-analytics-backend"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10627,7 +10627,7 @@ dependencies = [
 
 [[package]]
 name = "temps-analytics-events"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10660,7 +10660,7 @@ dependencies = [
 
 [[package]]
 name = "temps-analytics-funnels"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10681,7 +10681,7 @@ dependencies = [
 
 [[package]]
 name = "temps-analytics-performance"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -10704,7 +10704,7 @@ dependencies = [
 
 [[package]]
 name = "temps-analytics-session-replay"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10730,7 +10730,7 @@ dependencies = [
 
 [[package]]
 name = "temps-audit"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -10751,7 +10751,7 @@ dependencies = [
 
 [[package]]
 name = "temps-auth"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "argon2",
@@ -10792,7 +10792,7 @@ dependencies = [
 
 [[package]]
 name = "temps-backup"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -10836,7 +10836,7 @@ dependencies = [
 
 [[package]]
 name = "temps-backup-core"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10856,7 +10856,7 @@ dependencies = [
 
 [[package]]
 name = "temps-blob"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10905,7 +10905,7 @@ dependencies = [
 
 [[package]]
 name = "temps-cli"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "argon2",
@@ -11004,7 +11004,7 @@ dependencies = [
 
 [[package]]
 name = "temps-config"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -11035,7 +11035,7 @@ dependencies = [
 
 [[package]]
 name = "temps-core"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -11073,7 +11073,7 @@ dependencies = [
 
 [[package]]
 name = "temps-database"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "futures",
@@ -11091,7 +11091,7 @@ dependencies = [
 
 [[package]]
 name = "temps-deployer"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11127,7 +11127,7 @@ dependencies = [
 
 [[package]]
 name = "temps-deployments"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11191,7 +11191,7 @@ dependencies = [
 
 [[package]]
 name = "temps-dns"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11229,7 +11229,7 @@ dependencies = [
 
 [[package]]
 name = "temps-dns-resolver"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11250,7 +11250,7 @@ dependencies = [
 
 [[package]]
 name = "temps-domains"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11291,7 +11291,7 @@ dependencies = [
 
 [[package]]
 name = "temps-edge"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -11332,7 +11332,7 @@ dependencies = [
 
 [[package]]
 name = "temps-email"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11372,7 +11372,7 @@ dependencies = [
 
 [[package]]
 name = "temps-email-tracking"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -11405,7 +11405,7 @@ dependencies = [
 
 [[package]]
 name = "temps-embeddings"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -11416,7 +11416,7 @@ dependencies = [
 
 [[package]]
 name = "temps-entities"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "chrono",
  "sea-orm",
@@ -11430,7 +11430,7 @@ dependencies = [
 
 [[package]]
 name = "temps-environments"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "argon2",
@@ -11459,7 +11459,7 @@ dependencies = [
 
 [[package]]
 name = "temps-error-tracking"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11531,7 +11531,7 @@ dependencies = [
 
 [[package]]
 name = "temps-external-plugins"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "axum 0.8.9",
  "chrono",
@@ -11556,7 +11556,7 @@ dependencies = [
 
 [[package]]
 name = "temps-file-store"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "bytes",
@@ -11571,7 +11571,7 @@ dependencies = [
 
 [[package]]
 name = "temps-geo"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -11592,7 +11592,7 @@ dependencies = [
 
 [[package]]
 name = "temps-git"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11640,7 +11640,7 @@ dependencies = [
 
 [[package]]
 name = "temps-git-credential"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "chrono",
  "nix 0.29.0",
@@ -11681,7 +11681,7 @@ dependencies = [
 
 [[package]]
 name = "temps-import"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
@@ -11708,7 +11708,7 @@ dependencies = [
 
 [[package]]
 name = "temps-import-docker"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "bollard",
@@ -11731,7 +11731,7 @@ dependencies = [
 
 [[package]]
 name = "temps-import-types"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11768,7 +11768,7 @@ dependencies = [
 
 [[package]]
 name = "temps-infra"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -11792,7 +11792,7 @@ dependencies = [
 
 [[package]]
 name = "temps-kv"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11845,7 +11845,7 @@ dependencies = [
 
 [[package]]
 name = "temps-log-aggregator"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "aws-sdk-s3",
@@ -11880,7 +11880,7 @@ dependencies = [
 
 [[package]]
 name = "temps-logs"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-stream",
  "bollard",
@@ -11900,7 +11900,7 @@ dependencies = [
 
 [[package]]
 name = "temps-memory"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "thiserror 2.0.18",
@@ -11909,7 +11909,7 @@ dependencies = [
 
 [[package]]
 name = "temps-metrics"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -11936,7 +11936,7 @@ dependencies = [
 
 [[package]]
 name = "temps-migrations"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "sea-orm",
@@ -11949,7 +11949,7 @@ dependencies = [
 
 [[package]]
 name = "temps-monitoring"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11973,7 +11973,7 @@ dependencies = [
 
 [[package]]
 name = "temps-network"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "bollard",
@@ -12002,7 +12002,7 @@ dependencies = [
 
 [[package]]
 name = "temps-notifications"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12032,7 +12032,7 @@ dependencies = [
 
 [[package]]
 name = "temps-observability"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12059,7 +12059,7 @@ dependencies = [
 
 [[package]]
 name = "temps-otel"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -12101,7 +12101,7 @@ dependencies = [
 
 [[package]]
 name = "temps-plugin-sdk"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "axum 0.8.9",
  "clap",
@@ -12126,7 +12126,7 @@ dependencies = [
 
 [[package]]
 name = "temps-presets"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12145,7 +12145,7 @@ dependencies = [
 
 [[package]]
 name = "temps-preview-gateway"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "tokio",
@@ -12155,7 +12155,7 @@ dependencies = [
 
 [[package]]
 name = "temps-projects"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -12193,7 +12193,7 @@ dependencies = [
 
 [[package]]
 name = "temps-providers"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12250,7 +12250,7 @@ dependencies = [
 
 [[package]]
 name = "temps-proxy"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "argon2",
@@ -12320,7 +12320,7 @@ dependencies = [
 
 [[package]]
 name = "temps-pty-agent"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "bytes",
  "clap",
@@ -12338,7 +12338,7 @@ dependencies = [
 
 [[package]]
 name = "temps-query"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "bytes",
@@ -12372,7 +12372,7 @@ dependencies = [
 
 [[package]]
 name = "temps-query-postgres"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12428,7 +12428,7 @@ dependencies = [
 
 [[package]]
 name = "temps-queue"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "log",
  "serde",
@@ -12441,7 +12441,7 @@ dependencies = [
 
 [[package]]
 name = "temps-revenue"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12475,7 +12475,7 @@ dependencies = [
 
 [[package]]
 name = "temps-routes"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12499,7 +12499,7 @@ dependencies = [
 
 [[package]]
 name = "temps-sandbox"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "argon2",
  "async-stream",
@@ -12533,7 +12533,7 @@ dependencies = [
 
 [[package]]
 name = "temps-screenshots"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12559,7 +12559,7 @@ dependencies = [
 
 [[package]]
 name = "temps-static-files"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "axum 0.8.9",
  "temps-config",
@@ -12571,7 +12571,7 @@ dependencies = [
 
 [[package]]
 name = "temps-status-page"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12604,7 +12604,7 @@ dependencies = [
 
 [[package]]
 name = "temps-vulnerability-scanner"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12636,7 +12636,7 @@ dependencies = [
 
 [[package]]
 name = "temps-webhooks"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12667,7 +12667,7 @@ dependencies = [
 
 [[package]]
 name = "temps-wireguard"
-version = "0.1.0-beta.30"
+version = "0.1.0-beta.31"
 dependencies = [
  "base64 0.22.1",
  "defguard_wireguard_rs",

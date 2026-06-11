@@ -8,10 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Filter runtime history logs by deployment**: the history log viewer now has a Deployment dropdown that scopes logs to a single deployment, alongside the existing environment/service/level/time filters. Selecting a deployment also defaults the time range to that deployment's lifespan (so you don't have to guess timestamps) and is reflected in the URL via `?deploy_id=` for shareable deep links. Backing this, the chunk `deploy_id` was switched from `uuid` to `integer` to match the deployment id (`deployments.id`) the system actually tags containers with — the previous `uuid` typing meant the collector silently parsed the integer deploy label to `NULL`, so every chunk stored no deployment and the filter matched nothing. The log collector now parses the `sh.temps.deploy_id` label as an `i32`, and the search path filters chunks by deployment at both the index (SQL) and line level.
+-
 
 ### Changed
 -
+
+### Fixed
+-
+
+
+## [0.1.0-beta.31] - 2026-06-11
+
+### Added
+- **Filter runtime history logs by deployment**: the history log viewer now has a Deployment dropdown that scopes logs to a single deployment, alongside the existing environment/service/level/time filters. Selecting a deployment also defaults the time range to that deployment's lifespan (so you don't have to guess timestamps) and is reflected in the URL via `?deploy_id=` for shareable deep links. Backing this, the chunk `deploy_id` was switched from `uuid` to `integer` to match the deployment id (`deployments.id`) the system actually tags containers with — the previous `uuid` typing meant the collector silently parsed the integer deploy label to `NULL`, so every chunk stored no deployment and the filter matched nothing. The log collector now parses the `sh.temps.deploy_id` label as an `i32`, and the search path filters chunks by deployment at both the index (SQL) and line level.
+
+### Changed
+- **Runtime History log filters and timestamps** (#130): the History log filter controls are regrouped into a single cluster — a scope row (environment / service / deployment / time range) over a refine row (search / context lines / columns), with the level chips labeled — so they read as one intentional filter axis instead of floating buttons. Row timestamps now prefix the weekday and date (e.g. `Mon Jun 10 13:23:18.361`) automatically when the visible logs span more than one calendar day, so a multi-day filter no longer leaves you guessing which day a line belongs to; single-day views stay compact (time only).
 
 ### Fixed
 - **On-demand wake now waits for the app to actually accept connections, not just for Docker to report `Running`**: `ContainerLifecycleAdapter::is_container_healthy` (the readiness gate `do_wake` polls before completing a scale-to-zero wake) checked only `ContainerStatus::Running`, so a wake could finish before the application inside had bound its port — the first request would then be proxied to a not-yet-listening upstream and get a spurious 503. It now TCP-probes the container's lowest published host port on loopback after confirming `Running` (short timeout, treated as not-ready-yet on failure); the lowest port is chosen deterministically (Docker reports ports unordered), and containers with no published port fall back to the `Running` check. Scoped to local single-node containers (remote-node wake is tracked separately). Closes the last independent first-request 503 path on local on-demand environments (follow-up to the routing fix in v0.1.0-beta.30).
