@@ -758,6 +758,46 @@ fn build_ch_metrics_store(config: &ServerConfig) -> Option<Arc<dyn temps_metrics
     Some(store as Arc<dyn MetricsStore>)
 }
 
+/// Build the console health/readiness router.
+///
+/// Two unauthenticated probes, mounted at the document root so a supervisor
+/// (systemd, an external load balancer, or `temps upgrade`'s post-restart
+/// health gate) can poll them directly:
+///
+/// - `GET /healthz` — **liveness**: always `200 OK` as long as the process is
+///   serving HTTP. It does not assert that plugins finished initializing, so a
+///   supervisor can tell "process is up" from "process is wedged" without
+///   restarting a console that is merely mid-warmup.
+/// - `GET /readyz` — **readiness**: `200 OK` only after plugin two-phase init
+///   has completed (the shared `ready` flag is flipped at the same point the
+///   legacy oneshot `ready_signal` fires, immediately before `axum::serve`).
+///   Returns `503 Service Unavailable` while warming up. This is the gate the
+///   split-topology upgrade flow polls before declaring a console upgrade
+///   successful — binding the port is NOT sufficient, because the router would
+///   otherwise answer 200 while every real route still 500s during warmup.
+///
+/// The flag lives in an `Arc<AtomicBool>` shared with the serve loop rather
+/// than reading the oneshot, so the probe stays truthful for the entire process
+/// lifetime (the oneshot fires exactly once and is then consumed).
+fn health_router(ready: Arc<std::sync::atomic::AtomicBool>) -> Router {
+    use axum::routing::get;
+
+    let readyz = {
+        let ready = ready.clone();
+        move || async move {
+            if ready.load(std::sync::atomic::Ordering::Relaxed) {
+                (StatusCode::OK, "ready")
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "initializing")
+            }
+        }
+    };
+
+    Router::new()
+        .route("/healthz", get(|| async { (StatusCode::OK, "ok") }))
+        .route("/readyz", get(readyz))
+}
+
 /// Initialize and start the console API server
 pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
     let ConsoleApiParams {
@@ -774,6 +814,15 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         admin_gate_service: provided_admin_gate_service,
         admin_gate_handle: provided_admin_gate_handle,
     } = params;
+
+    // Readiness flag for the `/readyz` probe. Starts `false` (not ready) and is
+    // flipped to `true` at the same point the legacy `ready_signal` fires —
+    // after the full plugin system has initialized and immediately before the
+    // listeners begin serving. The health router (mounted on the public surface
+    // below) reads this so a supervisor or the split-topology upgrade gate can
+    // tell "warming up" (503) from "serving" (200) for the process's lifetime.
+    let ready_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // PRE-VALIDATE all plugin dependencies BEFORE initializing plugin manager
     // This ensures clear error messages if any critical resources are missing
     debug!("Pre-validating plugin dependencies...");
@@ -1646,7 +1695,15 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
 
     // Wrap each surface in /api like the original single-router did, except
     // for the SPA fallback which serves the dashboard at the document root.
-    let public_app = Router::new().nest("/api", public_router);
+    // Health probes (`/healthz`, `/readyz`) live at the document root on the
+    // PUBLIC surface so they are reachable without auth and without the admin
+    // gate — a supervisor or load balancer must be able to poll them even when
+    // the admin IP allowlist is active. The public surface is also the one that
+    // exists in every topology (single- and dual-listener), so probes work
+    // regardless of `console_admin_address`.
+    let public_app = Router::new()
+        .merge(health_router(ready_flag.clone()))
+        .nest("/api", public_router);
     let admin_app = Router::new()
         .nest("/api", admin_router)
         .fallback(serve_static_file);
@@ -1693,6 +1750,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             let admin_listener = TcpListener::bind(admin_addr).await?;
             info!("Console ADMIN API server listening on {}", admin_addr);
 
+            // Plugins are fully initialized at this point; flip readiness so
+            // `/readyz` answers 200 and notify the legacy oneshot waiter.
+            ready_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(signal) = ready_signal {
                 let _ = signal.send(());
                 debug!("Console API ready signal sent");
@@ -1722,6 +1782,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             let listener = TcpListener::bind(&config.console_address).await?;
             info!("Console API server listening on {}", config.console_address);
 
+            // Plugins are fully initialized at this point; flip readiness so
+            // `/readyz` answers 200 and notify the legacy oneshot waiter.
+            ready_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(signal) = ready_signal {
                 let _ = signal.send(());
                 debug!("Console API ready signal sent");
@@ -1738,4 +1801,75 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
 
     info!("Console API server exited");
     Ok(())
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tower::ServiceExt; // for `oneshot`
+
+    /// Send a single GET to the health router and return the status code.
+    async fn get_status(ready: Arc<AtomicBool>, path: &str) -> StatusCode {
+        let app = health_router(ready);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        resp.status()
+    }
+
+    #[tokio::test]
+    async fn healthz_is_always_ok_regardless_of_readiness() {
+        // Liveness must not depend on warmup state: a process that is serving
+        // HTTP is alive even while plugins initialize.
+        let not_ready = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            get_status(not_ready.clone(), "/healthz").await,
+            StatusCode::OK
+        );
+
+        let ready = Arc::new(AtomicBool::new(true));
+        assert_eq!(get_status(ready, "/healthz").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readyz_is_503_until_ready_then_200() {
+        // The upgrade health-gate depends on this: binding the port is not
+        // enough — `/readyz` must stay 503 until plugin init flips the flag.
+        let flag = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            get_status(flag.clone(), "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "readyz must report 503 while the console is warming up"
+        );
+
+        flag.store(true, Ordering::Relaxed);
+        assert_eq!(
+            get_status(flag, "/readyz").await,
+            StatusCode::OK,
+            "readyz must report 200 once plugins are initialized"
+        );
+    }
+
+    #[tokio::test]
+    async fn readyz_reflects_live_flag_flips() {
+        // The probe reads the shared flag on every request (it does not latch),
+        // so a flag that flips back to false (e.g. a future drain signal) is
+        // observed immediately.
+        let flag = Arc::new(AtomicBool::new(true));
+        assert_eq!(get_status(flag.clone(), "/readyz").await, StatusCode::OK);
+        flag.store(false, Ordering::Relaxed);
+        assert_eq!(
+            get_status(flag, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

@@ -118,5 +118,11 @@ uuid = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }
 
+[dev-dependencies]
+# `tower`'s `util` feature provides `ServiceExt::oneshot`, used to drive the
+# console health router through a single request in unit tests without binding
+# a real listener. Already present transitively; pinned here for test use.
+tower = { workspace = true }
+
 [build-dependencies]
 chrono = { workspace = true }

@@ -276,6 +276,39 @@ impl ProxyCommand {
         // start() calls tokio::spawn, so it must run inside the runtime context.
         rt.block_on(async { route_reload_subscriber.start() });
 
+        // Wire the admin gate from boot-time config (env vars take precedence,
+        // else the `settings` DB row). This 404s requests to admin/management
+        // routes that fall outside the allowlist before they ever reach the
+        // console listener — the same network-layer enforcement `temps serve`
+        // gives the in-process proxy. We only need the resolved handle here, not
+        // the full `AdminGateService` (which exists to back the console's
+        // persist API). `new` fails CLOSED on a DB error, so a broken settings
+        // row refuses to boot rather than opening the gate.
+        //
+        // NOTE: this is boot-time config only. Live admin-gate edits made
+        // through the console's API swap the console's in-process handle but do
+        // NOT yet propagate to this separate proxy process — operators must
+        // restart `temps proxy` to pick up a changed allowlist. Cross-process
+        // admin-gate refresh is tracked as ADR-017 Phase 3.
+        let admin_gate_handle = match rt.block_on(
+            crate::commands::serve::admin_gate_service::AdminGateService::new(
+                db.clone(),
+                &config.admin_allowed_ips,
+                &config.admin_allowed_hosts,
+                config.admin_trust_forwarded_for,
+            ),
+        ) {
+            Ok((_service, handle)) => Some(handle),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to initialize admin gate: {}. Refusing to start the proxy with \
+                     an unresolved gate. Fix the `settings` row or set TEMPS_ADMIN_ALLOWED_IPS / \
+                     TEMPS_ADMIN_ALLOWED_HOSTS.",
+                    e
+                ));
+            }
+        };
+
         let shutdown_signal = Box::new(CtrlCShutdownSignal::new(
             Duration::from_secs(30),
             db.clone(),
@@ -290,8 +323,8 @@ impl ProxyCommand {
             route_table,
             shutdown_signal,
             config.clone(),
-            None, // on-demand not available in standalone proxy mode
-            None, // admin gate not wired in standalone proxy mode
+            None, // on-demand not available in standalone proxy mode (ADR-017 Phase 2)
+            admin_gate_handle,
         ) {
             Ok(_) => {
                 info!("Proxy server exited");
