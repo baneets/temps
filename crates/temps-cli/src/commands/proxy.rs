@@ -5,6 +5,7 @@ use std::time::Duration;
 use temps_config::ServerConfig;
 use temps_core::CookieCrypto;
 use temps_database::DbConnection;
+use temps_proxy::on_demand::{ContainerLifecycle, OnDemandManager};
 use temps_proxy::ProxyShutdownSignal;
 use tracing::{debug, error, info, warn};
 
@@ -240,6 +241,82 @@ impl ProxyCommand {
             queue.clone(),
         ));
 
+        // ── On-demand / scale-to-zero (ADR-017 Phase 2) ──
+        //
+        // In the split topology the proxy process — NOT the console — owns the
+        // OnDemandManager: it watches request activity on the hot path, sleeps
+        // idle containers, and wakes them on the first request. Containers run on
+        // the proxy's host, so it talks to the local Docker socket directly.
+        //
+        // Best-effort: if Docker is unavailable, on-demand is disabled and the
+        // proxy still serves everything else. The manager and the sleeping
+        // callback MUST be wired before `start_listening()` below, so the
+        // listener's initial load populates sleeping domains and on-demand
+        // configs on the very first pass (mirroring `temps serve`).
+        //
+        // Cross-process wake correctness: `do_wake` publishes ForceRouteReload on
+        // this process's queue AND fires raw PG `NOTIFY route_table_changes`. In
+        // split mode the deploy/wake state lives in the DB; this proxy's own
+        // RouteTableListener (started below) observes the NOTIFY, reloads the
+        // table, and the sleeping callback calls `notify_route_reloaded()`. The
+        // wake caller's `wait_for_route_reload` then unblocks — and the bounded
+        // re-resolve loop is the correctness guarantee if the signal is missed.
+        let on_demand_manager: Option<Arc<OnDemandManager>> = {
+            let docker = rt.block_on(async {
+                let docker = bollard::Docker::connect_with_defaults()
+                    .map_err(|e| anyhow::anyhow!("Docker connect failed: {}", e))?;
+                docker
+                    .ping()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
+                Ok::<_, anyhow::Error>(docker)
+            });
+            match docker {
+                Ok(docker) => {
+                    let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                        Arc::new(docker),
+                        true,
+                        "temps".to_string(),
+                    );
+                    let adapter = crate::commands::serve::proxy::ContainerLifecycleAdapter::new(
+                        Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>,
+                    );
+                    Some(Arc::new(OnDemandManager::new(
+                        db.clone(),
+                        Arc::new(adapter) as Arc<dyn ContainerLifecycle>,
+                        queue.clone(),
+                        // Standalone proxy on the control-plane host: locally
+                        // deployed containers carry node_id=NULL (treated as
+                        // local); remote-worker containers are skipped. Same
+                        // semantics as `temps serve`. See issue #126.
+                        None,
+                    )))
+                }
+                Err(e) => {
+                    warn!(
+                        "Docker not available — on-demand scale-to-zero wake is disabled \
+                         for this proxy: {}",
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
+        // Register the sleeping-domain callback on the route table BEFORE the
+        // listener's initial load, so sleeping domains + on-demand configs are
+        // populated on the first pass and `notify_route_reloaded()` fires after
+        // every subsequent reload (this is what `wait_for_route_reload` waits on
+        // after a wake). Mirrors the wiring in `temps serve`.
+        if let Some(ref on_demand_manager) = on_demand_manager {
+            register_on_demand_sleeping_callback(&route_table, Arc::clone(on_demand_manager));
+
+            // Background idle sweep: stops idle containers via the local Docker
+            // socket. Only this process runs it in split mode — the console does
+            // not instantiate an OnDemandManager.
+            on_demand_manager.start_sweep_task(Duration::from_secs(60));
+        }
+
         // Start route table listener
         info!("Starting route table listener...");
         rt.block_on(async { listener.start_listening().await })?;
@@ -323,7 +400,7 @@ impl ProxyCommand {
             route_table,
             shutdown_signal,
             config.clone(),
-            None, // on-demand not available in standalone proxy mode (ADR-017 Phase 2)
+            on_demand_manager, // wired in split mode (ADR-017 Phase 2); None if Docker unavailable
             admin_gate_handle,
         ) {
             Ok(_) => {
@@ -335,5 +412,161 @@ impl ProxyCommand {
                 Err(anyhow::anyhow!("Failed to start proxy server: {}", e))
             }
         }
+    }
+}
+
+/// Build the on-demand sleeping-domain callback for the standalone proxy's
+/// [`OnDemandManager`].
+///
+/// On every route-table load the callback rebuilds the manager's sleeping-domain
+/// index and on-demand config set from the freshly loaded routes, then fires
+/// `notify_route_reloaded()` to release any request parked in the wake path
+/// (`wait_for_route_reload`). This is the split-mode equivalent of the wiring in
+/// `temps serve`. Split out from registration so the closure can be unit-tested
+/// directly, without standing up a Pingora server or firing it through a real
+/// route-table load.
+fn build_on_demand_sleeping_callback(
+    manager: Arc<OnDemandManager>,
+) -> temps_routes::route_table::OnSleepingCallback {
+    Arc::new(move |entries, on_demand_configs| {
+        manager.clear_sleeping_domains();
+        for entry in entries {
+            manager.register_sleeping_domain(
+                entry.domain.clone(),
+                temps_proxy::on_demand::SleepingEnvironmentInfo {
+                    environment_id: entry.environment_id,
+                    project_id: entry.project_id,
+                    deployment_id: entry.deployment_id,
+                    wake_timeout_seconds: entry.wake_timeout_seconds,
+                },
+            );
+        }
+        for config in on_demand_configs {
+            manager.register_on_demand_environment(
+                config.environment_id,
+                config.idle_timeout_seconds,
+                config.wake_timeout_seconds,
+            );
+        }
+        manager.notify_route_reloaded();
+    })
+}
+
+/// Install the on-demand sleeping-domain callback on `route_table`. Must be
+/// registered BEFORE the route-table listener's first load so the initial load
+/// populates on-demand state.
+fn register_on_demand_sleeping_callback(
+    route_table: &Arc<temps_proxy::CachedPeerTable>,
+    manager: Arc<OnDemandManager>,
+) {
+    route_table.set_on_sleeping_callback(build_on_demand_sleeping_callback(manager));
+}
+
+#[cfg(test)]
+mod on_demand_callback_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use temps_proxy::on_demand::OnDemandError;
+    use temps_routes::route_table::{OnDemandConfigEntry, SleepingEnvironmentEntry};
+
+    /// A `ContainerLifecycle` that does nothing — these tests exercise the
+    /// callback's bookkeeping (registering sleeping domains + configs), not
+    /// container I/O, so the lifecycle is never actually called.
+    struct NoopLifecycle;
+
+    #[async_trait]
+    impl ContainerLifecycle for NoopLifecycle {
+        async fn start_container(&self, _id: &str) -> Result<(), OnDemandError> {
+            Ok(())
+        }
+        async fn stop_container(&self, _id: &str) -> Result<(), OnDemandError> {
+            Ok(())
+        }
+        async fn is_container_healthy(&self, _id: &str) -> Result<bool, OnDemandError> {
+            Ok(true)
+        }
+    }
+
+    fn test_manager() -> Arc<OnDemandManager> {
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let (queue, _rx): (Arc<dyn temps_core::JobQueue>, _) =
+            temps_queue::BroadcastQueueService::create_job_queue_arc_with_receiver(16);
+        Arc::new(OnDemandManager::new(
+            db,
+            Arc::new(NoopLifecycle) as Arc<dyn ContainerLifecycle>,
+            queue,
+            None,
+        ))
+    }
+
+    fn sleeping_entry(domain: &str, env_id: i32) -> SleepingEnvironmentEntry {
+        SleepingEnvironmentEntry {
+            domain: domain.to_string(),
+            environment_id: env_id,
+            project_id: 7,
+            deployment_id: 100 + env_id,
+            wake_timeout_seconds: 45,
+        }
+    }
+
+    #[test]
+    fn callback_registers_sleeping_domains_for_wake_lookup() {
+        // This is the heart of split-mode wake-on-request: after a route load,
+        // the proxy must be able to map an incoming hostname to a sleeping
+        // environment so the request hot path can wake it.
+        let manager = test_manager();
+        let callback = build_on_demand_sleeping_callback(manager.clone());
+
+        callback(
+            vec![sleeping_entry("app.example.com", 1)],
+            vec![OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 45,
+            }],
+        );
+
+        let found = manager
+            .get_sleeping_environment("app.example.com")
+            .expect("registered sleeping domain must be resolvable");
+        assert_eq!(found.environment_id, 1);
+        assert_eq!(found.project_id, 7);
+        assert_eq!(found.deployment_id, 101);
+        assert_eq!(found.wake_timeout_seconds, 45);
+
+        // A domain that was never registered must not resolve.
+        assert!(manager
+            .get_sleeping_environment("unknown.example.com")
+            .is_none());
+    }
+
+    #[test]
+    fn callback_clears_stale_sleeping_domains_on_reload() {
+        // Each load rebuilds the index from scratch: an environment that woke up
+        // (and so is absent from the next load's sleeping set) must no longer be
+        // resolvable as sleeping, or the proxy would try to wake an already-awake
+        // env on the next request.
+        let manager = test_manager();
+        let callback = build_on_demand_sleeping_callback(manager.clone());
+
+        // First load: two sleeping envs.
+        callback(
+            vec![
+                sleeping_entry("a.example.com", 1),
+                sleeping_entry("b.example.com", 2),
+            ],
+            vec![],
+        );
+        assert!(manager.get_sleeping_environment("a.example.com").is_some());
+        assert!(manager.get_sleeping_environment("b.example.com").is_some());
+
+        // Second load: only `b` is still sleeping (`a` woke up). `a` must be gone.
+        callback(vec![sleeping_entry("b.example.com", 2)], vec![]);
+        assert!(
+            manager.get_sleeping_environment("a.example.com").is_none(),
+            "a domain absent from the latest load must be cleared"
+        );
+        assert!(manager.get_sleeping_environment("b.example.com").is_some());
     }
 }

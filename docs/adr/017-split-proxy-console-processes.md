@@ -567,6 +567,28 @@ Target files:
   is the correctness path; confirm `notify_route_reloaded()` is called by the
   sleeping callback in the standalone proxy as described in §2.
 
+**Status: implemented.** `temps proxy` now constructs the `OnDemandManager` from
+the local Docker socket (best-effort: on-demand is disabled if Docker is
+unavailable), registers the sleeping callback via the extracted
+`build_on_demand_sleeping_callback` / `register_on_demand_sleeping_callback`
+helpers before the route-table listener's first load, starts the idle sweep, and
+passes `Some(on_demand_manager)` to `setup_proxy_server`. Rather than relocating
+`ContainerLifecycleAdapter` to a new crate, the `commands::serve::proxy` module
+was made `pub(crate)` so the standalone command reuses the existing adapter.
+security-auditor APPROVE (faithful parity with `temps serve`; no new
+request-path surface).
+
+**Operator note (Docker trust boundary):** in the split topology `temps proxy`
+requires — and is trusted with — access to the local Docker socket
+(root-equivalent on most hosts), because the containers it wakes/sleeps run on
+its host. This is the same capability the single-binary `temps serve` already
+grants its in-process proxy, but operators running a dedicated proxy process
+should not expose that socket more broadly than expected. `local_node_id` is
+`None` (control-plane host), so the proxy only manages `node_id=NULL` containers
+and never touches a remote worker's containers; running `temps proxy` on a
+worker host would silently skip that worker's own deployments (a functional gap,
+not a cross-node action) — a self-node-id resolution is deferred hardening.
+
 ### Phase 3 — Ops/upgrade integration and docs
 
 Target files:

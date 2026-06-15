@@ -2,7 +2,7 @@ pub(crate) mod admin_gate;
 mod admin_gate_handler;
 pub(crate) mod admin_gate_service;
 pub mod console;
-mod proxy;
+pub(crate) mod proxy;
 mod shutdown;
 
 use clap::{Args, ValueEnum};
