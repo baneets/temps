@@ -182,6 +182,27 @@ impl GitHubProvider {
             .expect("Failed to build reqwest client with static config")
     }
 
+    /// Client for streaming archive downloads. Unlike [`get_client`]'s 30s total
+    /// timeout (right for small JSON API calls, but it aborts a large tarball
+    /// mid-stream → "error reading chunk: error decoding response body"), this
+    /// uses a *generous* 15-minute total ceiling plus tighter connect and
+    /// per-read-inactivity bounds. The total timeout is the hard backstop that
+    /// guarantees the request can never hang forever (covering every phase —
+    /// connect, waiting for response headers, redirect, and body), while the
+    /// 15-minute budget is ample for even very large repositories. Redirects are
+    /// still never followed automatically (we validate + follow the one archive
+    /// hop manually).
+    fn get_archive_client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .user_agent("Temps-Engine/1.0")
+            .timeout(std::time::Duration::from_secs(15 * 60))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to build reqwest archive client with static config")
+    }
+
     /// Retry configuration for GitHub API calls.
     fn retry_config() -> temps_core::retry::RetryConfig {
         temps_core::retry::RetryConfig::new(3)
@@ -239,6 +260,60 @@ impl GitHubProvider {
             reqwest::header::HeaderValue::from_static("2022-11-28"),
         );
         headers
+    }
+
+    /// SSRF guard for the one redirect we follow manually: the archive-download
+    /// 302. The redirect target must be HTTPS and a GitHub-owned host, never an
+    /// arbitrary address (which could be internal, e.g. cloud metadata).
+    ///
+    /// For github.com the signed archive lives on `codeload.github.com` (and
+    /// historically `objects.githubusercontent.com`). For GitHub Enterprise the
+    /// archive is served from the configured API host's registrable domain, so
+    /// we additionally allow any host under that domain.
+    fn validate_archive_redirect_host(
+        &self,
+        redirect_url: &reqwest::Url,
+    ) -> Result<(), GitProviderError> {
+        if redirect_url.scheme() != "https" {
+            return Err(GitProviderError::ApiError(format!(
+                "Refusing to follow archive redirect to non-HTTPS URL: {}",
+                redirect_url
+            )));
+        }
+
+        let host = redirect_url.host_str().ok_or_else(|| {
+            GitProviderError::ApiError(format!(
+                "Archive redirect URL has no host: {}",
+                redirect_url
+            ))
+        })?;
+        let host = host.to_ascii_lowercase();
+
+        // Public github.com archive hosts.
+        const ALLOWED_SUFFIXES: [&str; 2] = [
+            ".github.com",            // codeload.github.com
+            ".githubusercontent.com", // objects.githubusercontent.com
+        ];
+        let allowed_public =
+            host == "github.com" || ALLOWED_SUFFIXES.iter().any(|suffix| host.ends_with(suffix));
+
+        // GitHub Enterprise: allow the API host's registrable domain. e.g. an
+        // api_url of `https://ghe.example.com/api/v3` permits `*.ghe.example.com`
+        // / `ghe.example.com` archive hosts.
+        let allowed_enterprise = reqwest::Url::parse(&self.api_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            .map(|api_host| host == api_host || host.ends_with(&format!(".{}", api_host)))
+            .unwrap_or(false);
+
+        if allowed_public || allowed_enterprise {
+            Ok(())
+        } else {
+            Err(GitProviderError::ApiError(format!(
+                "Refusing to follow archive redirect to non-GitHub host '{}' (from {})",
+                host, redirect_url
+            )))
+        }
     }
 
     /// Refresh an access token using a refresh token
@@ -1355,19 +1430,34 @@ impl GitProviderService for GitHubProvider {
         let target_dir = std::path::PathBuf::from(target_dir);
         let access_token = access_token.map(|s| s.to_string());
 
-        tokio::task::spawn_blocking(move || {
+        // libgit2's clone has no network timeout — a stalled fetch would hang
+        // the whole deployment indefinitely. Bound it so the job fails fast with
+        // a clear error instead of getting stuck. The orphaned blocking task is
+        // abandoned (it holds no locks the caller needs); the partial clone is
+        // cleaned up by the caller's directory reset before any retry.
+        const CLONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+        let join = tokio::task::spawn_blocking(move || {
             let target = target_dir.as_path();
             if let Some(token) = &access_token {
                 super::git_ops::clone_repo_with_token(&clone_url, target, token, None)
             } else {
                 super::git_ops::clone_repo(&clone_url, target, None)
             }
-        })
-        .await
-        .map_err(|e| GitProviderError::Other(format!("Git clone task failed: {}", e)))?
-        .map_err(|e| GitProviderError::Other(format!("Git clone failed: {}", e)))?;
+        });
 
-        Ok(())
+        match tokio::time::timeout(CLONE_TIMEOUT, join).await {
+            Ok(joined) => {
+                joined
+                    .map_err(|e| GitProviderError::Other(format!("Git clone task failed: {}", e)))?
+                    .map_err(|e| GitProviderError::Other(format!("Git clone failed: {}", e)))?;
+                Ok(())
+            }
+            Err(_) => Err(GitProviderError::Other(format!(
+                "Git clone timed out after {}s",
+                CLONE_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     async fn get_commit(
@@ -1561,6 +1651,7 @@ impl GitProviderService for GitHubProvider {
         repo: &str,
         ref_spec: &str,
         target_path: &std::path::Path,
+        progress: Option<&crate::services::git_provider::ArchiveProgressSender>,
     ) -> Result<(), GitProviderError> {
         info!(
             "Downloading archive for {}/{} at ref {}",
@@ -1573,17 +1664,65 @@ impl GitProviderService for GitHubProvider {
             self.api_url, owner, repo, ref_spec
         );
 
-        let client = self.get_client();
-        let mut headers = self.get_headers(access_token);
-        // For archive downloads, we need to accept the tarball media type
-        headers.insert(
-            "Accept",
-            reqwest::header::HeaderValue::from_static("application/vnd.github.v3.raw"),
-        );
+        // Use the archive client (no total timeout — large tarballs stream for
+        // longer than the 30s API timeout, which would otherwise abort mid-body).
+        let client = self.get_archive_client();
+        let headers = self.get_headers(access_token);
 
+        // GitHub's tarball endpoint always answers with a 302 redirect to a
+        // short-lived signed URL on `codeload.github.com` (or the Enterprise
+        // host). Our shared client uses `redirect::Policy::none()` as an SSRF
+        // defense, so we must follow this hop *manually* — and only after
+        // validating the redirect target is a GitHub-owned host, so a
+        // compromised/spoofed response can't bounce us to an internal address.
+        debug!("Archive: sending initial tarball request to {}", url);
         let response = self
             .send_with_retry(|| client.get(&url).headers(headers.clone()))
             .await?;
+
+        let status = response.status();
+        debug!("Archive: initial response status {}", status);
+        let response = if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    GitProviderError::ApiError(format!(
+                        "Archive download for {}/{} returned {} with no Location header",
+                        owner, repo, status
+                    ))
+                })?
+                .to_string();
+
+            let redirect_url = reqwest::Url::parse(&location).map_err(|e| {
+                GitProviderError::ApiError(format!(
+                    "Archive redirect Location is not a valid URL ({}): {}",
+                    location, e
+                ))
+            })?;
+
+            // SSRF guard: only follow the redirect to a GitHub-owned host.
+            self.validate_archive_redirect_host(&redirect_url)?;
+            debug!(
+                "Archive: following validated redirect to host {}",
+                redirect_url.host_str().unwrap_or("?")
+            );
+
+            // Fetch the signed URL WITHOUT the Authorization header. The signed
+            // codeload URL is pre-authenticated via query params; forwarding the
+            // bearer token to a redirect target would needlessly leak it.
+            let resp = client.get(redirect_url).send().await.map_err(|e| {
+                GitProviderError::ApiError(format!(
+                    "Failed to download archive from redirect target: {}",
+                    e
+                ))
+            })?;
+            debug!("Archive: redirect-target response status {}", resp.status());
+            resp
+        } else {
+            response
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1597,15 +1736,61 @@ impl GitProviderService for GitHubProvider {
             )));
         }
 
+        // Cap the total bytes written: the client `.timeout()` bounds idle/stall
+        // time but not the size of a steady stream, so an unexpectedly huge (or
+        // hostile) tarball could otherwise fill the control-plane volume. Reject
+        // an oversized `Content-Length` up front, and enforce the same ceiling
+        // while streaming in case the header lies or is absent.
+        const MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GiB
+        if let Some(len) = response.content_length() {
+            if len > MAX_ARCHIVE_BYTES {
+                return Err(GitProviderError::ApiError(format!(
+                    "Archive too large: Content-Length {} exceeds limit {} bytes",
+                    len, MAX_ARCHIVE_BYTES
+                )));
+            }
+        }
+
         // Stream the response body to a file
         let mut file = tokio::fs::File::create(target_path)
             .await
             .map_err(|e| GitProviderError::Other(format!("Failed to create file: {}", e)))?;
 
+        let total_bytes = response.content_length();
+        debug!(
+            "Archive: streaming body to {} (content_length={:?})",
+            target_path.display(),
+            total_bytes
+        );
+        // Emit a progress update at most every ~512 KiB so a slow link still
+        // shows steady movement without flooding the log.
+        const PROGRESS_STEP: u64 = 512 * 1024;
+        let mut next_progress_at: u64 = PROGRESS_STEP;
+        let mut written: u64 = 0;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
                 .map_err(|e| GitProviderError::ApiError(format!("Failed to read chunk: {}", e)))?;
+            written = written.saturating_add(chunk.len() as u64);
+            if written > MAX_ARCHIVE_BYTES {
+                // Best-effort cleanup of the partial file before bailing.
+                let _ = tokio::fs::remove_file(target_path).await;
+                return Err(GitProviderError::ApiError(format!(
+                    "Archive exceeded maximum size of {} bytes mid-stream",
+                    MAX_ARCHIVE_BYTES
+                )));
+            }
+            if let Some(tx) = progress {
+                if written >= next_progress_at {
+                    // Ignore send errors: a dropped receiver just means nobody is
+                    // listening for progress, which must not fail the download.
+                    let _ = tx.send(crate::services::git_provider::ArchiveProgress {
+                        downloaded_bytes: written,
+                        total_bytes,
+                    });
+                    next_progress_at = written.saturating_add(PROGRESS_STEP);
+                }
+            }
             use tokio::io::AsyncWriteExt;
             file.write_all(&chunk)
                 .await
@@ -2250,5 +2435,94 @@ mod scoped_token_tests {
             !req.repositories.as_ref().unwrap()[0].contains('/'),
             "GitHub rejects `owner/repo` form; pass bare repo name only"
         );
+    }
+}
+
+#[cfg(test)]
+mod archive_redirect_tests {
+    use super::*;
+
+    fn provider(api_url: Option<&str>) -> GitHubProvider {
+        GitHubProvider::new(
+            api_url.map(String::from),
+            AuthMethod::PersonalAccessToken {
+                token: "t".to_string(),
+            },
+        )
+    }
+
+    fn check(api_url: Option<&str>, url: &str) -> Result<(), GitProviderError> {
+        let p = provider(api_url);
+        p.validate_archive_redirect_host(&reqwest::Url::parse(url).unwrap())
+    }
+
+    #[test]
+    fn allows_github_codeload_and_objects_hosts() {
+        // The real 302 target for public github.com tarballs.
+        assert!(check(
+            None,
+            "https://codeload.github.com/owner/repo/legacy.tar.gz/main"
+        )
+        .is_ok());
+        assert!(check(None, "https://objects.githubusercontent.com/foo").is_ok());
+        assert!(check(None, "https://github.com/owner/repo/archive/x.tar.gz").is_ok());
+    }
+
+    #[test]
+    fn allows_enterprise_host_under_api_domain() {
+        // GHE: api_url host is ghe.example.com → archive host *.ghe.example.com ok.
+        assert!(check(
+            Some("https://ghe.example.com/api/v3"),
+            "https://codeload.ghe.example.com/owner/repo/legacy.tar.gz/main"
+        )
+        .is_ok());
+        assert!(check(
+            Some("https://ghe.example.com/api/v3"),
+            "https://ghe.example.com/foo"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_internal_and_metadata_targets() {
+        // The SSRF cases this guard exists for.
+        assert!(check(None, "https://169.254.169.254/latest/meta-data/").is_err());
+        assert!(check(None, "https://localhost/foo").is_err());
+        assert!(check(None, "https://10.0.0.5/foo").is_err());
+    }
+
+    #[test]
+    fn rejects_non_https_redirect() {
+        assert!(check(None, "http://codeload.github.com/owner/repo").is_err());
+    }
+
+    #[test]
+    fn rejects_lookalike_and_suffix_spoof_hosts() {
+        // Attacker-controlled domains that merely *contain* github text.
+        assert!(check(None, "https://github.com.evil.example/foo").is_err());
+        assert!(check(None, "https://evilgithub.com/foo").is_err());
+        assert!(check(None, "https://notgithubusercontent.com/foo").is_err());
+        // Enterprise api host must not leak access to the public github.com.
+        assert!(check(
+            Some("https://ghe.example.com/api/v3"),
+            "https://evil.example/foo"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn userinfo_uses_connect_host_not_userinfo() {
+        // `host_str()` returns the real connect host, so userinfo can't spoof it.
+        // Legit host with attacker userinfo → allowed (we connect to codeload).
+        assert!(check(None, "https://evil.example@codeload.github.com/foo").is_ok());
+        // Attacker host with legit-looking userinfo → rejected (we'd connect to evil).
+        assert!(check(None, "https://codeload.github.com@evil.example/foo").is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_dot_fqdn() {
+        // `codeload.github.com.` ends with `com.`, not `.github.com` → rejected.
+        // Locks in url-crate parsing behavior against dependency bumps.
+        assert!(check(None, "https://codeload.github.com./foo").is_err());
     }
 }

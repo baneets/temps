@@ -27,6 +27,24 @@ pub enum GitOpsError {
     },
 }
 
+/// Snapshot of a clone's network transfer, surfaced from libgit2's
+/// `transfer_progress` callback. All counts are cumulative for the fetch.
+#[derive(Debug, Clone, Copy)]
+pub struct CloneProgress {
+    /// Objects received so far.
+    pub received_objects: usize,
+    /// Total objects the remote advertised (0 until known).
+    pub total_objects: usize,
+    /// Objects already indexed locally.
+    pub indexed_objects: usize,
+    /// Bytes received over the wire so far.
+    pub received_bytes: usize,
+}
+
+/// A progress sink invoked from libgit2's (synchronous) transfer callback.
+/// Must be cheap and non-blocking — typically it pushes onto a channel.
+pub type ProgressCallback<'a> = dyn FnMut(CloneProgress) + Send + 'a;
+
 /// Clone a repository (public, no auth) into `target_dir`.
 ///
 /// If `branch` is provided, clones only that branch.
@@ -37,7 +55,17 @@ pub fn clone_repo(
     target_dir: &Path,
     branch: Option<&str>,
 ) -> Result<Repository, GitOpsError> {
-    clone_repo_inner(url, target_dir, branch, true)
+    clone_repo_inner(url, target_dir, branch, true, None)
+}
+
+/// Like [`clone_repo`], but reports network transfer progress via `progress`.
+pub fn clone_repo_with_progress(
+    url: &str,
+    target_dir: &Path,
+    branch: Option<&str>,
+    progress: &mut ProgressCallback<'_>,
+) -> Result<Repository, GitOpsError> {
+    clone_repo_inner(url, target_dir, branch, true, Some(progress))
 }
 
 fn clone_repo_inner(
@@ -45,10 +73,17 @@ fn clone_repo_inner(
     target_dir: &Path,
     branch: Option<&str>,
     shallow: bool,
+    progress: Option<&mut ProgressCallback<'_>>,
 ) -> Result<Repository, GitOpsError> {
     let mut builder = RepoBuilder::new();
 
     let mut fetch_opts = FetchOptions::new();
+
+    if let Some(progress) = progress {
+        let mut callbacks = RemoteCallbacks::new();
+        install_progress_callback(&mut callbacks, progress);
+        fetch_opts.remote_callbacks(callbacks);
+    }
 
     if let Some(branch) = branch {
         builder.branch(branch);
@@ -67,6 +102,24 @@ fn clone_repo_inner(
         })
 }
 
+/// Wire libgit2's `transfer_progress` callback to a [`ProgressCallback`].
+/// Returning `true` keeps the transfer going (we never cancel from here;
+/// cancellation/timeout is enforced by the async wrapper around the clone).
+fn install_progress_callback<'cb>(
+    callbacks: &mut RemoteCallbacks<'cb>,
+    progress: &'cb mut ProgressCallback<'cb>,
+) {
+    callbacks.transfer_progress(move |stats| {
+        progress(CloneProgress {
+            received_objects: stats.received_objects(),
+            total_objects: stats.total_objects(),
+            indexed_objects: stats.indexed_objects(),
+            received_bytes: stats.received_bytes(),
+        });
+        true
+    });
+}
+
 /// Clone a repository with HTTPS token authentication.
 ///
 /// The token is injected via git2's credential callback rather than
@@ -82,7 +135,25 @@ pub fn clone_repo_with_token(
     token: &str,
     branch: Option<&str>,
 ) -> Result<Repository, GitOpsError> {
-    clone_repo_with_credentials(url, target_dir, "x-access-token", token, branch)
+    clone_repo_with_credentials_inner(url, target_dir, "x-access-token", token, branch, None)
+}
+
+/// Like [`clone_repo_with_token`], but reports transfer progress via `progress`.
+pub fn clone_repo_with_token_and_progress(
+    url: &str,
+    target_dir: &Path,
+    token: &str,
+    branch: Option<&str>,
+    progress: &mut ProgressCallback<'_>,
+) -> Result<Repository, GitOpsError> {
+    clone_repo_with_credentials_inner(
+        url,
+        target_dir,
+        "x-access-token",
+        token,
+        branch,
+        Some(progress),
+    )
 }
 
 /// Clone a repository with custom username + token authentication.
@@ -93,6 +164,29 @@ pub fn clone_repo_with_credentials(
     token: &str,
     branch: Option<&str>,
 ) -> Result<Repository, GitOpsError> {
+    clone_repo_with_credentials_inner(url, target_dir, username, token, branch, None)
+}
+
+/// Like [`clone_repo_with_credentials`], but reports transfer progress.
+pub fn clone_repo_with_credentials_and_progress(
+    url: &str,
+    target_dir: &Path,
+    username: &str,
+    token: &str,
+    branch: Option<&str>,
+    progress: &mut ProgressCallback<'_>,
+) -> Result<Repository, GitOpsError> {
+    clone_repo_with_credentials_inner(url, target_dir, username, token, branch, Some(progress))
+}
+
+fn clone_repo_with_credentials_inner(
+    url: &str,
+    target_dir: &Path,
+    username: &str,
+    token: &str,
+    branch: Option<&str>,
+    progress: Option<&mut ProgressCallback<'_>>,
+) -> Result<Repository, GitOpsError> {
     let username = username.to_string();
     let token = token.to_string();
     let mut builder = RepoBuilder::new();
@@ -101,6 +195,9 @@ pub fn clone_repo_with_credentials(
     callbacks.credentials(move |_url, _username_from_url, _allowed_types| {
         Cred::userpass_plaintext(&username, &token)
     });
+    if let Some(progress) = progress {
+        install_progress_callback(&mut callbacks, progress);
+    }
 
     let mut fetch_opts = FetchOptions::new();
     fetch_opts.remote_callbacks(callbacks);
@@ -384,7 +481,7 @@ mod tests {
         let target_dir = TempDir::new().unwrap();
         let source_url = format!("file://{}", source_dir.path().display());
         // Use shallow=false since local transport doesn't support shallow fetch
-        let result = clone_repo_inner(&source_url, target_dir.path(), Some("feature"), false);
+        let result = clone_repo_inner(&source_url, target_dir.path(), Some("feature"), false, None);
         assert!(result.is_ok(), "Clone failed: {:?}", result.err());
     }
 

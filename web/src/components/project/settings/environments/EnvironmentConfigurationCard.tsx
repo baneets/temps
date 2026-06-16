@@ -78,7 +78,8 @@ export function EnvironmentConfigurationCard({
     memory_limit: environment.deployment_config?.memoryLimit?.toString() ?? '',
     replicas: environment.deployment_config?.replicas?.toString() ?? '1',
     exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
-    attack_mode: environment.attack_mode ?? false,
+    attack_mode:
+      (environment as { attack_mode?: boolean }).attack_mode ?? false,
     protected: environment.protected ?? false,
     anti_affinity: environment.deployment_config?.antiAffinity ?? true,
     target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
@@ -131,7 +132,8 @@ export function EnvironmentConfigurationCard({
         environment.deployment_config?.memoryLimit?.toString() ?? '',
       replicas: environment.deployment_config?.replicas?.toString() ?? '1',
       exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
-      attack_mode: environment.attack_mode ?? false,
+      attack_mode:
+        (environment as { attack_mode?: boolean }).attack_mode ?? false,
       protected: environment.protected ?? false,
       anti_affinity: environment.deployment_config?.antiAffinity ?? true,
       target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
@@ -297,7 +299,21 @@ export function EnvironmentConfigurationCard({
                       </p>
                     </div>
                     <div>
-                      <Label>CPU Limit (cores)</Label>
+                      <div className="flex items-center justify-between">
+                        <Label>CPU Limit (cores)</Label>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-auto px-1 py-0 text-xs text-muted-foreground"
+                          disabled={formData.cpu_limit === ''}
+                          onClick={() =>
+                            setFormData((prev) => ({ ...prev, cpu_limit: '' }))
+                          }
+                        >
+                          No limit
+                        </Button>
+                      </div>
                       <Input
                         type="number"
                         step="any"
@@ -309,10 +325,11 @@ export function EnvironmentConfigurationCard({
                             cpu_limit: e.target.value,
                           }))
                         }
-                        placeholder="e.g., 1"
+                        placeholder="No limit"
                       />
                       <p className="text-xs text-muted-foreground mt-1">
-                        Maximum CPU cores (e.g., 0.5, 1, 2)
+                        Maximum CPU cores (e.g., 0.5, 1, 2). Leave empty for no
+                        limit.
                       </p>
                     </div>
                   </div>
@@ -340,7 +357,24 @@ export function EnvironmentConfigurationCard({
                       </p>
                     </div>
                     <div>
-                      <Label>Memory Limit (MB)</Label>
+                      <div className="flex items-center justify-between">
+                        <Label>Memory Limit (MB)</Label>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-auto px-1 py-0 text-xs text-muted-foreground"
+                          disabled={formData.memory_limit === ''}
+                          onClick={() =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              memory_limit: '',
+                            }))
+                          }
+                        >
+                          No limit
+                        </Button>
+                      </div>
                       <Input
                         type="number"
                         value={formData.memory_limit}
@@ -350,10 +384,10 @@ export function EnvironmentConfigurationCard({
                             memory_limit: e.target.value,
                           }))
                         }
-                        placeholder="e.g., 256"
+                        placeholder="No limit"
                       />
                       <p className="text-xs text-muted-foreground mt-1">
-                        Maximum memory allocation
+                        Maximum memory allocation. Leave empty for no limit.
                       </p>
                     </div>
                   </div>

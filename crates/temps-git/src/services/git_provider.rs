@@ -418,6 +418,20 @@ pub struct ScopedTokenGrant {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Progress update emitted while streaming a repository archive download.
+/// `total_bytes` is `None` when the server streams chunked without a
+/// `Content-Length` (GitHub's codeload always does).
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+/// Thread-safe sink for [`ArchiveProgress`] updates. The provider sends throttled
+/// updates here while streaming; the caller drains the receiver and logs them.
+/// `try_send`-style (unbounded) so a slow logger never backpressures the download.
+pub type ArchiveProgressSender = tokio::sync::mpsc::UnboundedSender<ArchiveProgress>;
+
 /// Trait that all git providers must implement
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -630,7 +644,12 @@ pub trait GitProviderService: Send + Sync {
         access_token: Option<&str>,
     ) -> Result<(), GitProviderError>;
 
-    /// Download repository archive (tarball/zip) for a specific ref (branch, tag, or commit)
+    /// Download repository archive (tarball/zip) for a specific ref (branch, tag, or commit).
+    ///
+    /// When `progress` is `Some`, the implementation sends throttled
+    /// [`ArchiveProgress`] updates as it streams the body, so callers can surface
+    /// download progress (important on slow links where a large archive can take
+    /// minutes). Pass `None` to skip progress reporting.
     async fn download_archive(
         &self,
         access_token: &str,
@@ -638,6 +657,7 @@ pub trait GitProviderService: Send + Sync {
         repo: &str,
         ref_spec: &str, // Can be branch name, tag, or commit SHA
         target_path: &std::path::Path,
+        progress: Option<&ArchiveProgressSender>,
     ) -> Result<(), GitProviderError>;
 
     /// Create a ProjectSource for framework detection and file access

@@ -257,12 +257,55 @@ pub struct ResolvedEnvVarResponse {
     pub include_in_preview: bool,
 }
 
+/// Deserializer for `Option<Option<i32>>` that distinguishes an absent field
+/// from an explicit JSON `null`:
+/// - field absent → `None` (leave the column unchanged)
+/// - field present with JSON `null` → `Some(None)` (clear the column → "no limit")
+/// - field present with a number → `Some(Some(n))` (set to value)
+///
+/// Serde's standard `Option<Option<T>>` only handles absent vs. `null` at the
+/// outermost level; nested `null` → `Some(None)` requires this custom impl.
+fn deserialize_optional_optional_i32<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<i32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // This function is only invoked when the key is *present* — serde uses the
+    // field's `#[serde(default)]` (→ `None`, "leave unchanged") when the key is
+    // absent. So a present JSON `null` deserializes to `Value::Null` → `Some(None)`
+    // (clear → "no limit"), and a present number → `Some(Some(n))` (set).
+    //
+    // Deserialize the value as `serde_json::Value` (NOT `Option<Value>`): the
+    // latter collapses a present `null` to `None`, losing the "clear" signal.
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        v => {
+            let n: i32 = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            Ok(Some(Some(n)))
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, ToSchema)]
 pub struct UpdateEnvironmentSettingsRequest {
-    pub cpu_request: Option<i32>,
-    pub cpu_limit: Option<i32>,
-    pub memory_request: Option<i32>,
-    pub memory_limit: Option<i32>,
+    /// Minimum (request) CPU in microcores. Send JSON `null` to clear (no request).
+    /// Absent leaves the current value unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_optional_i32")]
+    pub cpu_request: Option<Option<i32>>,
+    /// Maximum (limit) CPU in microcores. Send JSON `null` to clear → "no limit".
+    /// Absent leaves the current value unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_optional_i32")]
+    pub cpu_limit: Option<Option<i32>>,
+    /// Minimum (request) memory in MB. Send JSON `null` to clear (no request).
+    /// Absent leaves the current value unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_optional_i32")]
+    pub memory_request: Option<Option<i32>>,
+    /// Maximum (limit) memory in MB. Send JSON `null` to clear → "no limit".
+    /// Absent leaves the current value unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_optional_i32")]
+    pub memory_limit: Option<Option<i32>>,
     pub branch: Option<String>,
     pub replicas: Option<i32>,
     /// Port exposed by the container (overrides project-level port for this environment)
@@ -404,4 +447,35 @@ pub struct ProjectSecretEnvironmentInfo {
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct GetProjectSecretsQuery {
     pub environment_id: Option<i32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four resource fields must distinguish three JSON states so the UI's
+    /// "No limit" action (which sends `null`) actually clears the stored value
+    /// instead of being treated as "leave unchanged".
+    #[test]
+    fn resource_fields_distinguish_absent_null_and_value() {
+        // Field absent → None (leave unchanged)
+        let absent: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"branch":"main"}"#).unwrap();
+        assert_eq!(absent.cpu_limit, None);
+        assert_eq!(absent.memory_limit, None);
+
+        // Field present as JSON null → Some(None) (clear → "no limit")
+        let cleared: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"cpu_limit":null,"memory_limit":null}"#).unwrap();
+        assert_eq!(cleared.cpu_limit, Some(None));
+        assert_eq!(cleared.memory_limit, Some(None));
+
+        // Field present with a number → Some(Some(n)) (set)
+        let set: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"cpu_limit":2000000,"memory_request":128}"#).unwrap();
+        assert_eq!(set.cpu_limit, Some(Some(2_000_000)));
+        assert_eq!(set.memory_request, Some(Some(128)));
+        // memory_limit was absent in that payload
+        assert_eq!(set.memory_limit, None);
+    }
 }

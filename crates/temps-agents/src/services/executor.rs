@@ -3912,6 +3912,7 @@ mod tests {
             _repo_name: &str,
             _branch_or_ref: &str,
             _archive_path: &std::path::Path,
+            _progress: Option<&temps_git::ArchiveProgressSender>,
         ) -> Result<(), GitProviderManagerError> {
             Err(GitProviderManagerError::Other("not used".into()))
         }

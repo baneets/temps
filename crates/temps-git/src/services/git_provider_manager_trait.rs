@@ -83,7 +83,11 @@ pub trait GitProviderManagerTrait: Send + Sync {
         repo_name: &str,
     ) -> Result<RepositoryInfo, GitProviderManagerError>;
 
-    /// Download repository archive (tarball/zipball)
+    /// Download repository archive (tarball/zipball).
+    ///
+    /// When `progress` is `Some`, throttled [`ArchiveProgress`] updates are sent
+    /// as the body streams, so callers can surface download progress on slow
+    /// links. Pass `None` to skip progress reporting.
     async fn download_archive(
         &self,
         connection_id: i32,
@@ -91,6 +95,7 @@ pub trait GitProviderManagerTrait: Send + Sync {
         repo_name: &str,
         branch_or_ref: &str,
         archive_path: &Path,
+        progress: Option<&crate::services::git_provider::ArchiveProgressSender>,
     ) -> Result<(), GitProviderManagerError>;
 
     /// Push files to a new branch and create a pull request

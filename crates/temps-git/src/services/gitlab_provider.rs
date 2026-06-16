@@ -69,6 +69,22 @@ impl GitLabProvider {
             .expect("Failed to build reqwest client with static config")
     }
 
+    /// Client for streaming archive downloads. Uses a *generous* 15-minute total
+    /// timeout (the 30s API timeout would abort a large archive mid-stream) plus
+    /// tighter connect + per-read-inactivity bounds. The total timeout is the
+    /// hard backstop guaranteeing the request can never hang forever, covering
+    /// every phase (connect, response headers, body) — ample for large repos.
+    fn get_archive_client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .user_agent("Temps-Engine/1.0")
+            .timeout(std::time::Duration::from_secs(15 * 60))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to build reqwest archive client with static config")
+    }
+
     /// Retry configuration for GitLab API calls.
     fn retry_config() -> temps_core::retry::RetryConfig {
         temps_core::retry::RetryConfig::new(3)
@@ -1045,7 +1061,11 @@ impl GitProviderService for GitLabProvider {
         let target_dir = std::path::PathBuf::from(target_dir);
         let access_token = access_token.map(|s| s.to_string());
 
-        tokio::task::spawn_blocking(move || {
+        // libgit2's clone has no network timeout — a stalled fetch would hang
+        // the deployment indefinitely. Bound it so the job fails fast instead.
+        const CLONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+        let join = tokio::task::spawn_blocking(move || {
             let target = target_dir.as_path();
             if let Some(token) = &access_token {
                 // GitLab uses "oauth2" as the username for token auth
@@ -1055,12 +1075,20 @@ impl GitProviderService for GitLabProvider {
             } else {
                 super::git_ops::clone_repo(&clone_url, target, None)
             }
-        })
-        .await
-        .map_err(|e| GitProviderError::Other(format!("Git clone task failed: {}", e)))?
-        .map_err(|e| GitProviderError::Other(format!("Git clone failed: {}", e)))?;
+        });
 
-        Ok(())
+        match tokio::time::timeout(CLONE_TIMEOUT, join).await {
+            Ok(joined) => {
+                joined
+                    .map_err(|e| GitProviderError::Other(format!("Git clone task failed: {}", e)))?
+                    .map_err(|e| GitProviderError::Other(format!("Git clone failed: {}", e)))?;
+                Ok(())
+            }
+            Err(_) => Err(GitProviderError::Other(format!(
+                "Git clone timed out after {}s",
+                CLONE_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     async fn get_commit(
@@ -1231,6 +1259,7 @@ impl GitProviderService for GitLabProvider {
         repo: &str,
         ref_spec: &str,
         target_path: &std::path::Path,
+        progress: Option<&crate::services::git_provider::ArchiveProgressSender>,
     ) -> Result<(), GitProviderError> {
         info!(
             "Downloading GitLab archive for {}/{} at ref {}",
@@ -1248,7 +1277,8 @@ impl GitProviderService for GitLabProvider {
             self.base_url, encoded_project, encoded_ref
         );
 
-        let client = self.get_client();
+        // Archive client: no total timeout so large archives can stream fully.
+        let client = self.get_archive_client();
         let headers = self.get_headers(access_token);
 
         let response = self
@@ -1267,15 +1297,50 @@ impl GitProviderService for GitLabProvider {
             )));
         }
 
+        // Cap total bytes written so an unexpectedly huge (or hostile) archive
+        // can't fill the control-plane volume; the client timeout bounds stall
+        // time, not stream size.
+        const MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GiB
+        if let Some(len) = response.content_length() {
+            if len > MAX_ARCHIVE_BYTES {
+                return Err(GitProviderError::ApiError(format!(
+                    "Archive too large: Content-Length {} exceeds limit {} bytes",
+                    len, MAX_ARCHIVE_BYTES
+                )));
+            }
+        }
+
+        let total_bytes = response.content_length();
+
         // Stream the response body to a file
         let mut file = tokio::fs::File::create(target_path)
             .await
             .map_err(|e| GitProviderError::Other(format!("Failed to create file: {}", e)))?;
 
+        const PROGRESS_STEP: u64 = 512 * 1024;
+        let mut next_progress_at: u64 = PROGRESS_STEP;
+        let mut written: u64 = 0;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
                 .map_err(|e| GitProviderError::ApiError(format!("Failed to read chunk: {}", e)))?;
+            written = written.saturating_add(chunk.len() as u64);
+            if let Some(tx) = progress {
+                if written >= next_progress_at {
+                    let _ = tx.send(crate::services::git_provider::ArchiveProgress {
+                        downloaded_bytes: written,
+                        total_bytes,
+                    });
+                    next_progress_at = written.saturating_add(PROGRESS_STEP);
+                }
+            }
+            if written > MAX_ARCHIVE_BYTES {
+                let _ = tokio::fs::remove_file(target_path).await;
+                return Err(GitProviderError::ApiError(format!(
+                    "Archive exceeded maximum size of {} bytes mid-stream",
+                    MAX_ARCHIVE_BYTES
+                )));
+            }
             use tokio::io::AsyncWriteExt;
             file.write_all(&chunk)
                 .await

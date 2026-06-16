@@ -4402,7 +4402,8 @@ impl GitProviderManager {
             template_owner, template_repo, template_ref
         );
 
-        // Use the provider service to download the archive
+        // Use the provider service to download the archive (no progress sink:
+        // template downloads are not surfaced in a deployment log stream).
         provider_service
             .download_archive(
                 &access_token,
@@ -4410,6 +4411,7 @@ impl GitProviderManager {
                 &template_repo,
                 template_ref,
                 &archive_path,
+                None,
             )
             .await?;
 
@@ -4841,6 +4843,7 @@ impl GitProviderManagerTrait for GitProviderManager {
         repo_name: &str,
         branch_or_ref: &str,
         archive_path: &Path,
+        progress: Option<&crate::services::git_provider::ArchiveProgressSender>,
     ) -> Result<(), super::git_provider_manager_trait::GitProviderManagerError> {
         use super::git_provider_manager_trait::GitProviderManagerError as TraitError;
 
@@ -4869,6 +4872,7 @@ impl GitProviderManagerTrait for GitProviderManager {
                 repo_name,
                 branch_or_ref,
                 archive_path,
+                progress,
             )
             .await
         {
@@ -4896,6 +4900,7 @@ impl GitProviderManagerTrait for GitProviderManager {
                         repo_name,
                         branch_or_ref,
                         archive_path,
+                        progress,
                     )
                     .await
                     .map_err(|err| {

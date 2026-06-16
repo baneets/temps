@@ -503,24 +503,46 @@ impl ContainerHealthMonitor {
             }
         };
 
-        // Check CPU
-        if stats.cpu_percent > self.config.cpu_threshold_percent {
+        // Check CPU.
+        //
+        // `stats.cpu_percent` is the raw Docker number where 100% == one core, so
+        // a container *allowed* 2 cores can hit 200% while only being 100%
+        // utilised. We must compare the threshold against utilisation relative to
+        // the container's CPU limit — otherwise a 2-core container fires at ~95%
+        // raw (≈47% of its limit), nowhere near saturation. `cpu_used_cores`
+        // (= raw% / 100) is surfaced alongside so the alarm is actionable.
+        let cpu_utilization = stats.cpu_utilization_percent();
+        let cpu_used_cores = stats.cpu_percent / 100.0;
+        if cpu_utilization > self.config.cpu_threshold_percent {
+            let limit_label = match stats.cpu_limit_cores {
+                Some(cores) if cores > 0.0 => format!("{cores:.2} core limit"),
+                _ => "no limit (per-core)".to_string(),
+            };
             self.handle_resource_threshold(
                 container,
                 deployment,
                 AlarmType::HighCpu,
                 AlarmSeverity::Warning,
                 format!(
-                    "Container '{}' CPU at {:.1}%",
-                    container.container_name, stats.cpu_percent
+                    "Container '{}' CPU at {:.0}% of limit",
+                    container.container_name, cpu_utilization
                 ),
                 format!(
-                    "Container '{}' CPU usage is at {:.1}%, above the {:.0}% threshold.",
-                    container.container_name, stats.cpu_percent, self.config.cpu_threshold_percent,
+                    "Container '{}' CPU usage is at {:.0}% of its {} ({:.2} cores in use), above the {:.0}% threshold.",
+                    container.container_name,
+                    cpu_utilization,
+                    limit_label,
+                    cpu_used_cores,
+                    self.config.cpu_threshold_percent,
                 ),
                 serde_json::json!({
                     "container_name": container.container_name,
+                    // Utilisation relative to the CPU limit — what the threshold is compared against.
+                    "cpu_utilization_percent": cpu_utilization,
+                    // Raw Docker percentage (100% == one core) and the cores it maps to.
                     "cpu_percent": stats.cpu_percent,
+                    "cpu_used_cores": cpu_used_cores,
+                    "cpu_limit_cores": stats.cpu_limit_cores,
                     "threshold_percent": self.config.cpu_threshold_percent,
                 }),
             )
@@ -624,9 +646,19 @@ impl ContainerHealthMonitor {
         };
 
         let mut points = vec![
+            // Raw Docker CPU percentage (100% == one core). Drives the
+            // "cores in use" view; NOT directly comparable to a flat threshold.
             make_point(
                 "container.cpu_percent",
                 stats.cpu_percent,
+                MetricKind::Gauge,
+            ),
+            // CPU usage relative to the container's CPU limit (100% == limit
+            // fully saturated). This is the metric alert rules should threshold
+            // against — see `container_default_seeds()` in the evaluator.
+            make_point(
+                "container.cpu_utilization_percent",
+                stats.cpu_utilization_percent(),
                 MetricKind::Gauge,
             ),
             make_point(
@@ -635,6 +667,15 @@ impl ContainerHealthMonitor {
                 MetricKind::Gauge,
             ),
         ];
+
+        // Surface the configured CPU limit so dashboards can render "used / limit".
+        if let Some(limit_cores) = stats.cpu_limit_cores {
+            points.push(make_point(
+                "container.cpu_limit_cores",
+                limit_cores,
+                MetricKind::Gauge,
+            ));
+        }
 
         if let Some(mem_pct) = stats.memory_percent {
             points.push(make_point(

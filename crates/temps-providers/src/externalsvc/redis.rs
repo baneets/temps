@@ -1292,6 +1292,18 @@ impl ExternalService for RedisService {
         };
 
         let start = Instant::now();
+
+        // `get_multiplexed_async_connection()` spawns a background pump task
+        // that owns the socket and lives until every connection handle is
+        // dropped. We open one per 30s health cycle, so the only safe pattern
+        // is to keep the single `conn` we create bound in this scope and let it
+        // drop here (which signals the pump to exit). The hazard is the outer
+        // `timeout`: if it fires while the connect future is still in flight,
+        // the future is cancelled and any half-established connection + pump
+        // task is orphaned. Binding `conn` and only ever cancelling the
+        // connect — never a live, returned connection — keeps teardown
+        // deterministic. (Redis 0.28 `MultiplexedConnection` has no explicit
+        // close; drop is the documented teardown.)
         let probe = async {
             let client = Client::open(url.as_str()).map_err(|e| format!("open failed: {}", e))?;
             let mut conn = client
@@ -1305,6 +1317,9 @@ impl ExternalService for RedisService {
             if reply.to_uppercase() != "PONG" {
                 return Err(format!("unexpected PING reply: {}", reply));
             }
+            // Drop the connection explicitly before the future resolves so the
+            // pump task is signalled to exit within this scope, not later.
+            drop(conn);
             Ok::<(), String>(())
         };
 

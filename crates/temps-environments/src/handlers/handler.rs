@@ -938,10 +938,12 @@ pub async fn update_environment_settings(
     };
 
     let updated_settings = EnvironmentSettingsUpdatedFields {
-        cpu_request: settings.cpu_request,
-        cpu_limit: settings.cpu_limit,
-        memory_request: settings.memory_request,
-        memory_limit: settings.memory_limit,
+        // Flatten double-Option: Some(Some(n)) -> Some(n) (set),
+        // Some(None) -> None (cleared), None -> None (unchanged).
+        cpu_request: settings.cpu_request.flatten(),
+        cpu_limit: settings.cpu_limit.flatten(),
+        memory_request: settings.memory_request.flatten(),
+        memory_limit: settings.memory_limit.flatten(),
         branch: settings.branch,
         replicas: settings.replicas,
         security_updated: settings.security.is_some(),
