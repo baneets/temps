@@ -589,22 +589,48 @@ and never touches a remote worker's containers; running `temps proxy` on a
 worker host would silently skip that worker's own deployments (a functional gap,
 not a cross-node action) — a self-node-id resolution is deferred hardening.
 
-### Phase 3 — Ops/upgrade integration and docs
+### Phase 3 — Ops/upgrade integration (shipped)
 
-Target files:
+**Status: implemented**, scoped down from the original plan per the automation
+boundary below. What shipped:
 
-- `crates/temps-cli/src/commands/upgrade.rs`: detect split mode (check env var
-  `TEMPS_ROLE=console`, or a `--split` flag), restart only the console unit,
-  log a proxy-restart notice.
-- `scripts/deploy.sh`: add `--topology=split` mode; emit
-  `temps-proxy.service` + `temps-console.service` unit files.
-- `temps doctor` (`crates/temps-cli/src/commands/doctor.rs` or equivalent):
-  compare proxy and console binary versions; warn on skew.
-- Documentation: add a "Split Topology" section to the self-hosting guide
-  covering split startup, upgrade sequence, and monitoring.
-- Store a `version` row in the DB on console startup (e.g. in the
-  `settings` or a new `system_versions` table) so the proxy can detect skew
-  at startup.
+- **Version-skew detector.** The console records its own binary version on
+  startup in `AppSettings.console_version` (`crates/temps-core/src/app_settings.rs`),
+  written via `ConfigService::update_setting_field` in `serve/mod.rs` for **both**
+  `--role=all` and `--role=console`. The standalone `temps proxy` reads it on
+  startup (`crates/temps-cli/src/commands/proxy.rs`) and logs WARN on mismatch,
+  INFO on match, DEBUG when absent — via a pure, total `compare_versions(proxy,
+  console) -> SkewStatus` helper (never panics on garbage/absent, never blocks
+  startup). `console_version` is self-recorded state: it is intentionally absent
+  from `AppSettingsResponse` and the PATCH path so an operator cannot overwrite it.
+- **`temps upgrade --split`.** Opt-in flag that, after the binary swap, **prints**
+  the split-topology console-restart steps (restart the operator-run console,
+  confirm via `curl /readyz`). The default `temps upgrade` output is unchanged.
+  It does **not** run `systemctl`, does **not** restart/manage any process, and
+  does **not** poll any health endpoint — see the automation boundary below.
+
+Deliberately **not** done here (deferred / out of scope): emitting systemd units,
+a `deploy.sh --topology=split` mode, and a self-hosting-guide doc section. systemd
+is owned by the operator's `deploy.sh` (which lives in the deploy tooling, not this
+repo), not by the `temps` binary.
+
+### Automation boundary
+
+The split topology has a deliberate split of responsibility over who restarts what:
+
+| When | What | Owner / mechanism |
+|---|---|---|
+| **Install time** | systemd unit setup | The operator's `deploy.sh` — automated at install (operator runs the installer). Not the `temps` binary. |
+| **Runtime** | the **proxy** (`temps proxy`, binds :80/:443) | A **systemd-managed, always-on** service with `Restart=on-failure`. This is the piece that must never blink. |
+| **Runtime** | the **console** (`temps serve --role=console`) | **Operator-run and operator-restarted.** Intentionally **not** auto-managed by `temps` — it is whatever the operator runs it as (a manual process, a custom unit, a supervised job). |
+| **Upgrade time** | console restart | The **operator's manual action.** `temps upgrade --split` only **prints** the steps; it never executes them. |
+
+The principle (CLAUDE.md: *let the user configure and control their setup — show
+status, give instructions, don't do things silently on their behalf*): `temps`
+records the information needed to make a safe call (the version-skew warning) and
+prints the guidance, but never silently restarts, manages, or health-checks a
+process on the operator's behalf. The always-on proxy is the only systemd-managed
+half; upgrading the console is a deliberate operator action.
 
 ## References
 

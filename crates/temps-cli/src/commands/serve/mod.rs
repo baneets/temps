@@ -190,6 +190,29 @@ impl ServeCommand {
             });
         }
 
+        // ADR-017 Phase 3: record the console's binary version so a sibling
+        // standalone `temps proxy` can WARN on version skew during a rolling
+        // upgrade. This runs for BOTH ServeRole::All and ServeRole::Console —
+        // the role branches happen later, so this single write covers both.
+        // Best-effort: skew detection is advisory and must never fail startup.
+        {
+            let db_for_version = db.clone();
+            let serve_config_for_version = serve_config.clone();
+            let console_version = crate::commands::upgrade::current_version_tag();
+            rt.block_on(async move {
+                let config_service =
+                    temps_config::ConfigService::new(serve_config_for_version, db_for_version);
+                if let Err(e) = config_service
+                    .update_setting_field(|settings| {
+                        settings.console_version = Some(console_version);
+                    })
+                    .await
+                {
+                    tracing::warn!("Failed to record console version for skew detection: {}", e);
+                }
+            });
+        }
+
         info!(
             "Starting Temps server on {} and {}",
             self.address,

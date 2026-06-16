@@ -9,6 +9,49 @@ use temps_proxy::on_demand::{ContainerLifecycle, OnDemandManager};
 use temps_proxy::ProxyShutdownSignal;
 use tracing::{debug, error, info, warn};
 
+/// Outcome of comparing the running proxy binary version against the console
+/// version recorded in settings (ADR-017 Phase 3). Pure/total — never panics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkewStatus {
+    /// Proxy and console report the same version tag.
+    Match,
+    /// Versions differ — schema-skew risk during a rolling upgrade.
+    Skew { proxy: String, console: String },
+    /// Console version not recorded (absent/None/empty) — cannot compare.
+    Unknown,
+}
+
+/// Compare the proxy's binary version against the console's recorded version.
+///
+/// Total function: `None` (or empty/whitespace-only) console → `Unknown`;
+/// equal tags → `Match`; otherwise → `Skew`. Comparison is exact string
+/// equality on the already-normalized tags produced by
+/// [`crate::commands::upgrade::current_version_tag`] (both processes are the
+/// same binary family, so the tag formats are identical). Surrounding
+/// whitespace is trimmed defensively. No indexing, no unwrap, no parse —
+/// arbitrary/garbage input cannot panic.
+pub fn compare_versions(proxy: &str, console: Option<&str>) -> SkewStatus {
+    match console {
+        None => SkewStatus::Unknown,
+        Some(console) => {
+            let p = proxy.trim();
+            let c = console.trim();
+            if c.is_empty() {
+                // Treat an empty recorded version as "not recorded" rather than
+                // a skew, to avoid a false alarm if some path ever writes `""`.
+                SkewStatus::Unknown
+            } else if p == c {
+                SkewStatus::Match
+            } else {
+                SkewStatus::Skew {
+                    proxy: p.to_string(),
+                    console: c.to_string(),
+                }
+            }
+        }
+    }
+}
+
 /// Shutdown signal implementation for Ctrl+C with resource cleanup and timeout
 struct CtrlCShutdownSignal {
     cleanup_timeout: Duration,
@@ -208,7 +251,43 @@ impl ProxyCommand {
             );
 
             match config_service.get_settings().await {
-                Ok(settings) => Ok::<Option<String>, anyhow::Error>(Some(settings.preview_domain)),
+                Ok(settings) => {
+                    // ADR-017 Phase 3: version-skew detection. The console records
+                    // its binary version on startup; warn if this proxy's binary
+                    // differs (during a rolling upgrade the proxy may read tables a
+                    // newer console has already migrated — schema-skew risk).
+                    // Best-effort: this only logs and never aborts startup.
+                    let proxy_version = crate::commands::upgrade::current_version_tag();
+                    match compare_versions(&proxy_version, settings.console_version.as_deref()) {
+                        SkewStatus::Match => {
+                            info!(
+                                proxy_version = %proxy_version,
+                                "Version check: proxy and console both on {}",
+                                proxy_version
+                            );
+                        }
+                        SkewStatus::Skew { proxy, console } => {
+                            warn!(
+                                proxy_version = %proxy,
+                                console_version = %console,
+                                "VERSION SKEW: this proxy ({}) differs from the console ({}). \
+                                 During a rolling upgrade the proxy may read tables a newer \
+                                 console has already migrated — schema-skew risk. Upgrade the \
+                                 proxy to match the console.",
+                                proxy, console
+                            );
+                        }
+                        SkewStatus::Unknown => {
+                            debug!(
+                                proxy_version = %proxy_version,
+                                "Version check: console version not recorded yet; \
+                                 skipping skew detection (proxy on {})",
+                                proxy_version
+                            );
+                        }
+                    }
+                    Ok::<Option<String>, anyhow::Error>(Some(settings.preview_domain))
+                }
                 Err(e) => {
                     warn!("Failed to fetch preview_domain from settings: {}, using default 'localhost'", e);
                     Ok(Some("localhost".to_string()))
@@ -568,5 +647,61 @@ mod on_demand_callback_tests {
             "a domain absent from the latest load must be cleared"
         );
         assert!(manager.get_sleeping_environment("b.example.com").is_some());
+    }
+}
+
+#[cfg(test)]
+mod skew_tests {
+    use super::{compare_versions, SkewStatus};
+
+    #[test]
+    fn test_compare_versions_match() {
+        assert_eq!(
+            compare_versions("v0.1.0", Some("v0.1.0")),
+            SkewStatus::Match
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_skew() {
+        assert_eq!(
+            compare_versions("v0.1.0", Some("v0.2.0")),
+            SkewStatus::Skew {
+                proxy: "v0.1.0".into(),
+                console: "v0.2.0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_absent_is_unknown() {
+        assert_eq!(compare_versions("v0.1.0", None), SkewStatus::Unknown);
+    }
+
+    #[test]
+    fn test_compare_versions_empty_console_is_unknown() {
+        assert_eq!(compare_versions("v0.1.0", Some("")), SkewStatus::Unknown);
+        assert_eq!(compare_versions("v0.1.0", Some("   ")), SkewStatus::Unknown);
+    }
+
+    #[test]
+    fn test_compare_versions_trims_whitespace_match() {
+        assert_eq!(
+            compare_versions("v0.1.0", Some(" v0.1.0 ")),
+            SkewStatus::Match
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_garbage_does_not_panic() {
+        // Total: arbitrary bytes must not panic, must classify as Skew/Match.
+        assert_eq!(
+            compare_versions("????", Some("v0.1.0")),
+            SkewStatus::Skew {
+                proxy: "????".into(),
+                console: "v0.1.0".into()
+            }
+        );
+        assert_eq!(compare_versions("", Some("")), SkewStatus::Unknown);
     }
 }

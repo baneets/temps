@@ -462,6 +462,19 @@ async fn get_disk_status(
     Ok(Json(status))
 }
 
+/// Restore settings fields that are recorded by the system itself and must not
+/// be writable through the public `PUT /settings` API, copying them from the
+/// current DB state onto the incoming payload.
+///
+/// Currently just `console_version` (ADR-017 Phase 3): a starting console
+/// process records its binary version so a sibling `temps proxy` can warn on
+/// version skew. The GET response never carries it, so without this an operator
+/// round-trip would either spoof it or silently wipe it (`#[serde(default)]` →
+/// `None`). Kept as a small pure helper so the invariant is unit-testable.
+fn preserve_self_recorded_fields(incoming: &mut AppSettings, current: &AppSettings) {
+    incoming.console_version = current.console_version.clone();
+}
+
 /// Update application settings
 #[utoipa::path(
     tag = "Settings",
@@ -530,6 +543,15 @@ async fn update_settings(
     // them (e.g. a fresh credential save via the AI Providers page).
     match app_state.config_service.get_settings().await {
         Ok(current_settings) => {
+            // `console_version` is self-recorded state, written only by a starting
+            // console process (ADR-017 Phase 3 skew detection) and never exposed in
+            // the GET response. Always restore it from the DB so an operator's
+            // settings save can neither overwrite it (spoofing the skew check) nor
+            // silently wipe it (a GET-then-PUT round-trip carries no value →
+            // `#[serde(default)]` → None). Done first, before any field is moved
+            // out of `current_settings` below.
+            preserve_self_recorded_fields(&mut settings, &current_settings);
+
             // Per-provider credentials: keep existing unless caller supplied a new one
             for (id, current_cfg) in current_settings.agent_sandbox.providers.iter() {
                 match settings.agent_sandbox.providers.get_mut(id) {
@@ -1117,5 +1139,67 @@ mod tests {
             response.effective_metrics_store,
             MetricsStoreKind::TimescaleDb
         );
+    }
+
+    // ADR-017 Phase 3: `console_version` is self-recorded by a starting console
+    // and must never be writable via the public PUT /settings API. The GET
+    // response strips it, so a normal UI round-trip sends no value — without the
+    // preserve step that would wipe the stored version (degrading skew
+    // detection), and a crafted body could spoof it.
+    #[test]
+    fn update_preserves_console_version_when_payload_omits_it() {
+        // Simulates the common UI round-trip: GET (no console_version) then PUT.
+        let mut incoming = AppSettings::default();
+        assert_eq!(incoming.console_version, None);
+
+        let current = AppSettings {
+            console_version: Some("v0.1.0".into()),
+            ..Default::default()
+        };
+
+        preserve_self_recorded_fields(&mut incoming, &current);
+        assert_eq!(
+            incoming.console_version.as_deref(),
+            Some("v0.1.0"),
+            "an omitted console_version must be restored from the DB, not wiped"
+        );
+    }
+
+    #[test]
+    fn update_rejects_attempt_to_overwrite_console_version() {
+        // An operator (or crafted client) tries to spoof the recorded version.
+        let mut incoming = AppSettings {
+            console_version: Some("v9.9.9-spoofed".into()),
+            ..Default::default()
+        };
+        let current = AppSettings {
+            console_version: Some("v0.1.0".into()),
+            ..Default::default()
+        };
+
+        preserve_self_recorded_fields(&mut incoming, &current);
+        assert_eq!(
+            incoming.console_version.as_deref(),
+            Some("v0.1.0"),
+            "the API must not be able to overwrite the self-recorded console_version"
+        );
+    }
+
+    // The precondition that makes the preserve step necessary: the GET response
+    // never carries console_version, so the field cannot round-trip from a
+    // client and would default to None on any PUT.
+    #[test]
+    fn response_never_exposes_console_version() {
+        let settings = AppSettings {
+            console_version: Some("v0.1.0".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&AppSettingsResponse::from(settings))
+            .expect("serialize response");
+        assert!(
+            !json.contains("console_version"),
+            "console_version must not appear in the settings response"
+        );
+        assert!(!json.contains("v0.1.0"));
     }
 }

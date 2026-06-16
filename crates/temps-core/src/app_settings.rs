@@ -76,6 +76,19 @@ pub struct AppSettings {
     /// from appearing on installs that were already configured via the CLI.
     #[serde(default)]
     pub setup_complete: bool,
+
+    /// Binary version tag (e.g. "v0.1.0") of the *console* process
+    /// (`temps serve`, role=all or role=console) that last started. Written
+    /// on console startup; read by the standalone `temps proxy` to detect
+    /// version skew during a rolling upgrade (ADR-017 Phase 3). `None` on
+    /// installs that never ran a console build carrying this field.
+    ///
+    /// This is informational state written by the binary itself — NOT an
+    /// operator-tunable setting. It is intentionally absent from
+    /// `AppSettingsResponse` and the PATCH path so an operator cannot
+    /// accidentally overwrite the self-recorded value.
+    #[serde(default)]
+    pub console_version: Option<String>,
 }
 
 /// Control-plane build resource limits.
@@ -537,6 +550,7 @@ impl Default for AppSettings {
             build_limits: BuildLimitsSettings::default(),
             monitoring: MonitoringSettings::default(),
             setup_complete: false,
+            console_version: None,
         }
     }
 }
