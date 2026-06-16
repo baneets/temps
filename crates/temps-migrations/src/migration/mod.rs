@@ -117,6 +117,7 @@ mod m20260601_000010_add_service_id_to_alarms;
 mod m20260603_000001_create_otel_trace_summaries;
 mod m20260609_000001_create_deployment_container_logs;
 mod m20260611_000001_change_log_deploy_id_to_integer;
+mod m20260615_000001_add_environment_attack_mode;
 
 pub struct Migrator;
 
@@ -237,6 +238,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260603_000001_create_otel_trace_summaries::Migration),
             Box::new(m20260609_000001_create_deployment_container_logs::Migration),
             Box::new(m20260611_000001_change_log_deploy_id_to_integer::Migration),
+            Box::new(m20260615_000001_add_environment_attack_mode::Migration),
         ]
     }
 }

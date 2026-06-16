@@ -650,6 +650,13 @@ impl EnvironmentService {
         if let Some(protected) = settings.protected {
             active_model.protected = Set(protected);
         }
+        // attack_mode is a tri-state Option<Option<bool>> on the entity (not in
+        // deployment_config). `Some(inner)` applies the change: inner `None`
+        // clears the override (NULL → inherit project), inner `Some(b)` sets it.
+        // Outer `None` leaves the column unchanged.
+        if let Some(attack_mode) = settings.attack_mode {
+            active_model.attack_mode = Set(attack_mode);
+        }
         active_model.updated_at = Set(chrono::Utc::now());
 
         let updated_environment = active_model
@@ -1132,6 +1139,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            attack_mode: None,
             last_activity_at: None,
         };
 
@@ -1176,6 +1184,7 @@ mod tests {
                     target_labels: None,
                     anti_affinity: None,
                     protected: None,
+                    attack_mode: None,
                     on_demand: None,
                     idle_timeout_seconds: None,
                     wake_timeout_seconds: None,
@@ -1215,6 +1224,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping,
+            attack_mode: None,
             last_activity_at: None,
         }
     }

@@ -139,6 +139,11 @@ pub struct EnvironmentResponse {
     /// When true, the environment's containers are currently stopped due to
     /// inactivity (on-demand mode) and will start on the next request.
     pub sleeping: bool,
+    /// Per-environment CAPTCHA attack-mode override.
+    /// `null` means inherit the project-level `attack_mode`; `true`/`false`
+    /// explicitly enable/disable the challenge for this environment. Always
+    /// serialized (NOT skipped) so the UI can distinguish `null` from `false`.
+    pub attack_mode: Option<bool>,
     /// Last proxied request timestamp (epoch millis) for on-demand environments.
     /// NULL when on-demand is disabled or no traffic has been received yet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,6 +188,7 @@ impl From<temps_entities::environments::Model> for EnvironmentResponse {
             deployment_config: env.deployment_config,
             protected: env.protected,
             sleeping: env.sleeping,
+            attack_mode: env.attack_mode,
             last_activity_at,
             estimated_sleep_at,
         }
@@ -288,6 +294,31 @@ where
     }
 }
 
+/// Deserializer for `Option<Option<bool>>` that distinguishes an absent field
+/// from an explicit JSON `null`:
+/// - field absent → `None` (leave the column unchanged)
+/// - field present with JSON `null` → `Some(None)` (clear the column → inherit project)
+/// - field present with a bool → `Some(Some(b))` (override for this environment)
+///
+/// Mirrors `deserialize_optional_optional_i32`: deserialize the value as
+/// `serde_json::Value` (NOT `Option<Value>`) so a present `null` survives as the
+/// "clear → inherit" signal instead of collapsing to `None` ("leave unchanged").
+fn deserialize_optional_optional_bool<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<bool>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        v => {
+            let b: bool = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            Ok(Some(Some(b)))
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, ToSchema)]
 pub struct UpdateEnvironmentSettingsRequest {
     /// Minimum (request) CPU in microcores. Send JSON `null` to clear (no request).
@@ -347,6 +378,12 @@ pub struct UpdateEnvironmentSettingsRequest {
     /// Deployments must be promoted from another environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protected: Option<bool>,
+    /// Per-environment CAPTCHA attack-mode override (tri-state):
+    /// - absent → leave the current override unchanged
+    /// - JSON `null` → clear the override (inherit the project-level setting)
+    /// - `true`/`false` → override the project setting for this environment
+    #[serde(default, deserialize_with = "deserialize_optional_optional_bool")]
+    pub attack_mode: Option<Option<bool>>,
     /// Enable on-demand mode (scale-to-zero). Containers are stopped after
     /// idle_timeout_seconds of no traffic and started on the next request.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,5 +514,32 @@ mod tests {
         assert_eq!(set.memory_request, Some(Some(128)));
         // memory_limit was absent in that payload
         assert_eq!(set.memory_limit, None);
+    }
+
+    /// `attack_mode` is a tri-state override (`Option<Option<bool>>`) so the UI
+    /// can leave it unchanged (absent), clear it to inherit the project setting
+    /// (JSON `null`), or override it (true/false). Each JSON state must map to a
+    /// distinct value, mirroring the resource fields above.
+    #[test]
+    fn attack_mode_distinguishes_absent_null_and_value() {
+        // Field absent → None (leave unchanged)
+        let absent: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"branch":"main"}"#).unwrap();
+        assert_eq!(absent.attack_mode, None);
+
+        // Field present as JSON null → Some(None) (clear → inherit project)
+        let cleared: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"attack_mode":null}"#).unwrap();
+        assert_eq!(cleared.attack_mode, Some(None));
+
+        // Field present as true → Some(Some(true)) (override on)
+        let enabled: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"attack_mode":true}"#).unwrap();
+        assert_eq!(enabled.attack_mode, Some(Some(true)));
+
+        // Field present as false → Some(Some(false)) (override off)
+        let disabled: UpdateEnvironmentSettingsRequest =
+            serde_json::from_str(r#"{"attack_mode":false}"#).unwrap();
+        assert_eq!(disabled.attack_mode, Some(Some(false)));
     }
 }

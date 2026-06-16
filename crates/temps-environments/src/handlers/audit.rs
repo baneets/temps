@@ -11,6 +11,10 @@ pub struct EnvironmentSettingsUpdatedFields {
     pub branch: Option<String>,
     pub replicas: Option<i32>,
     pub security_updated: bool,
+    /// Per-environment attack-mode override change (tri-state):
+    /// `None` = unchanged, `Some(None)` = cleared (inherit project),
+    /// `Some(Some(b))` = overridden.
+    pub attack_mode: Option<Option<bool>>,
 }
 
 // Add these new audit structs after the other audit structs

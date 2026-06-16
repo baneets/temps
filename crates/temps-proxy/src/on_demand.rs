@@ -1467,6 +1467,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                attack_mode: None,
                 last_activity_at: None,
             }]])
             // containers query
@@ -1544,6 +1545,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                attack_mode: None,
                 last_activity_at: None,
             }]])
             // containers query
@@ -1712,6 +1714,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                attack_mode: None,
                 last_activity_at: None,
             }]])
             // containers
@@ -1783,6 +1786,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                attack_mode: None,
                 last_activity_at: None,
             }]])
             .into_connection();
@@ -1858,6 +1862,7 @@ mod tests {
                 is_preview: false,
                 protected: false,
                 sleeping: false,
+                attack_mode: None,
                 last_activity_at: None,
             }]])
             // containers (3 replicas)
@@ -2239,6 +2244,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: true,
+            attack_mode: None,
             last_activity_at: None,
         };
 
@@ -2343,6 +2349,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            attack_mode: None,
             last_activity_at: None,
         };
 
@@ -2459,6 +2466,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            attack_mode: None,
             last_activity_at: None,
         };
 
@@ -2558,6 +2566,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping,
+            attack_mode: None,
             last_activity_at: None,
         }
     }

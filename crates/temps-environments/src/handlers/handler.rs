@@ -150,6 +150,7 @@ pub async fn get_environments(
             deployment_config: env.deployment_config.clone(),
             protected: env.protected,
             sleeping: env.sleeping,
+            attack_mode: env.attack_mode,
             last_activity_at: env.last_activity_at.map(|t| t.timestamp_millis()),
             estimated_sleep_at: if !env.sleeping {
                 env.deployment_config
@@ -218,6 +219,7 @@ pub async fn get_environment(
         deployment_config: env.deployment_config.clone(),
         protected: env.protected,
         sleeping: env.sleeping,
+        attack_mode: env.attack_mode,
         last_activity_at: env.last_activity_at.map(|t| t.timestamp_millis()),
         estimated_sleep_at: if !env.sleeping {
             env.deployment_config
@@ -947,6 +949,7 @@ pub async fn update_environment_settings(
         branch: settings.branch,
         replicas: settings.replicas,
         security_updated: settings.security.is_some(),
+        attack_mode: settings.attack_mode,
     };
 
     let audit_event = EnvironmentSettingsUpdatedAudit {
@@ -985,6 +988,7 @@ pub async fn update_environment_settings(
         deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        attack_mode: updated_environment.attack_mode,
         last_activity_at: updated_environment
             .last_activity_at
             .map(|t| t.timestamp_millis()),
@@ -1087,6 +1091,7 @@ pub async fn update_environment_subdomain(
         deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        attack_mode: updated_environment.attack_mode,
         last_activity_at: updated_environment
             .last_activity_at
             .map(|t| t.timestamp_millis()),
@@ -1240,6 +1245,7 @@ pub async fn wake_environment(
         deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        attack_mode: updated_environment.attack_mode,
         last_activity_at: updated_environment
             .last_activity_at
             .map(|t| t.timestamp_millis()),
@@ -1379,6 +1385,7 @@ pub async fn sleep_environment(
         deployment_config: updated_environment.deployment_config.clone(),
         protected: updated_environment.protected,
         sleeping: updated_environment.sleeping,
+        attack_mode: updated_environment.attack_mode,
         last_activity_at: updated_environment
             .last_activity_at
             .map(|t| t.timestamp_millis()),
@@ -1543,6 +1550,7 @@ pub async fn create_environment(
             deployment_config: environment.deployment_config.clone(),
             protected: environment.protected,
             sleeping: environment.sleeping,
+            attack_mode: environment.attack_mode,
             last_activity_at: environment.last_activity_at.map(|t| t.timestamp_millis()),
             estimated_sleep_at: if !environment.sleeping {
                 environment

@@ -53,6 +53,33 @@ interface SecurityConfig {
   }
 }
 
+/** Select value for the tri-state environment attack-mode override. */
+type AttackModeSelect = 'inherit' | 'on' | 'off'
+
+/**
+ * Map the environment's nullable `attack_mode` to the select value.
+ * `null`/`undefined` → "inherit" (use the project setting); `true` → "on";
+ * `false` → "off". Keeping these distinct is what lets an environment opt out
+ * of (or into) attack mode independently of the project default.
+ */
+function attackModeToSelect(value: boolean | null | undefined): AttackModeSelect {
+  if (value === true) return 'on'
+  if (value === false) return 'off'
+  return 'inherit'
+}
+
+/**
+ * Map the select value back to the API payload. "inherit" sends `null` so the
+ * column is cleared and the project setting applies; "on"/"off" send the
+ * explicit override. Sending `false` for "off" is intentional — it forces
+ * attack mode off even when the project has it on.
+ */
+function attackModeToPayload(value: AttackModeSelect): boolean | null {
+  if (value === 'on') return true
+  if (value === 'off') return false
+  return null
+}
+
 export function EnvironmentConfigurationCard({
   project,
   environment,
@@ -78,8 +105,10 @@ export function EnvironmentConfigurationCard({
     memory_limit: environment.deployment_config?.memoryLimit?.toString() ?? '',
     replicas: environment.deployment_config?.replicas?.toString() ?? '1',
     exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
-    attack_mode:
-      (environment as { attack_mode?: boolean }).attack_mode ?? false,
+    // Tri-state attack mode: 'inherit' (null → use the project setting),
+    // 'on' (true → force on) or 'off' (false → force off). Map the nullable
+    // boolean from the API to the select value.
+    attack_mode: attackModeToSelect(environment.attack_mode),
     protected: environment.protected ?? false,
     anti_affinity: environment.deployment_config?.antiAffinity ?? true,
     target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
@@ -132,8 +161,7 @@ export function EnvironmentConfigurationCard({
         environment.deployment_config?.memoryLimit?.toString() ?? '',
       replicas: environment.deployment_config?.replicas?.toString() ?? '1',
       exposed_port: environment.deployment_config?.exposedPort?.toString() ?? '',
-      attack_mode:
-        (environment as { attack_mode?: boolean }).attack_mode ?? false,
+      attack_mode: attackModeToSelect(environment.attack_mode),
       protected: environment.protected ?? false,
       anti_affinity: environment.deployment_config?.antiAffinity ?? true,
       target_nodes: (environment.deployment_config?.targetNodes ?? []) as number[],
@@ -211,6 +239,8 @@ export function EnvironmentConfigurationCard({
           ? parseInt(formData.exposed_port)
           : null,
         protected: formData.protected,
+        // Tri-state: null clears the override (inherit project), true/false force it.
+        attack_mode: attackModeToPayload(formData.attack_mode),
         anti_affinity: formData.anti_affinity,
         target_nodes:
           formData.target_nodes.length > 0 ? formData.target_nodes : null,
@@ -729,18 +759,31 @@ export function EnvironmentConfigurationCard({
                   <div className="flex-1 min-w-0">
                     <Label className="text-sm font-medium">Attack Mode</Label>
                     <p className="text-xs text-muted-foreground">
-                      Enable attack mode for development/testing
+                      Require a CAPTCHA challenge for visitors. Inherit uses the
+                      project default (currently{' '}
+                      {project.attack_mode ? 'on' : 'off'}).
                     </p>
                   </div>
-                  <Switch
-                    checked={formData.attack_mode}
-                    onCheckedChange={(checked) =>
+                  <Select
+                    value={formData.attack_mode}
+                    onValueChange={(value) =>
                       setFormData((prev) => ({
                         ...prev,
-                        attack_mode: checked,
+                        attack_mode: value as AttackModeSelect,
                       }))
                     }
-                  />
+                  >
+                    <SelectTrigger className="w-full sm:w-[180px]">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="inherit">
+                        Inherit ({project.attack_mode ? 'on' : 'off'})
+                      </SelectItem>
+                      <SelectItem value="on">On</SelectItem>
+                      <SelectItem value="off">Off</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="flex items-start sm:items-center gap-3 p-3 border rounded-lg">

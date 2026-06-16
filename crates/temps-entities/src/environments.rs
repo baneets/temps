@@ -37,6 +37,12 @@ pub struct Model {
     /// When true, the environment's containers have been stopped due to inactivity
     /// (on-demand mode). They will be started on the next incoming request.
     pub sleeping: bool,
+    /// Per-environment override for the CAPTCHA attack-mode challenge.
+    /// `None` (NULL) means inherit the project-level `attack_mode` setting;
+    /// `Some(true)`/`Some(false)` explicitly enable/disable the challenge for
+    /// this environment, taking precedence over the project default.
+    /// (A nullable boolean column maps to `Option<bool>` automatically.)
+    pub attack_mode: Option<bool>,
     /// Last proxied request timestamp for on-demand environments.
     /// Persisted periodically by the idle sweep, not on every request.
     pub last_activity_at: Option<DBDateTime>,
