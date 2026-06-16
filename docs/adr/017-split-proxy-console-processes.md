@@ -1102,3 +1102,507 @@ An operator or reviewer can sign off when all of the following are true:
 - [ ] Both process journals produce valid structured JSONL under their own unit
   names; proxy-log rows appear in DB for traffic that arrived while the console
   was offline.
+
+---
+
+## Phase 4 — Zero-downtime proxy restarts via Pingora graceful upgrade
+
+> **LINUX-ONLY CAVEAT (read first).** Pingora's FD-transfer mechanism lives in
+> `pingora-core-0.8.0/src/server/transfer_fd/mod.rs`. The entire module is
+> gated `#[cfg(target_os = "linux")]` (lines 15–29) and uses `SCM_RIGHTS`
+> (`socket::ControlMessageOwned::ScmRights`) over a Unix domain socket to pass
+> live file descriptors from the old process to the new one. **This cannot work
+> on macOS.** Unlike the console zero-downtime test (which ran correctly on the
+> dev Mac), the proxy graceful-upgrade handoff requires a Linux host for any
+> live verification. The design, compilation, and unit tests can all be
+> developed on macOS; the end-to-end proof of zero dropped requests is deferred
+> to a Linux environment.
+
+### 4.1 Framing: the remaining asymmetry
+
+Phases 1–3 achieved zero-downtime **console** restarts: when `temps-console`
+is stopped and restarted, `temps-proxy` continues serving `:80`/`:443` without
+a blip (proven live: 120/120 requests served through a console kill-cycle).
+The Production-Readiness Plan documents this explicitly in Workstream 6,
+scenario S5: _"proxy restart — acknowledged blip."_
+
+The proxy is the always-on half. Restarting it today (e.g. for a binary
+upgrade that ships Pingora config changes or new proxy-log schema) causes a
+brief `:80`/`:443` outage while the new process binds its listeners. On a
+typical Linux host that blip is 2–5 seconds — acceptable in many deployments
+but not the zero-downtime contract the split topology set out to achieve in
+full.
+
+**The key unlock:** `upgrade: false` was hardcoded at
+`crates/temps-proxy/src/server.rs:316` with the comment _"Disable upgrade
+mode to avoid 'Console API failed to start: channel closed' error"_. That
+error originated in the **monolith**: `temps serve` ran the Pingora upgrade
+machinery inside the same process as the console Axum runtime and the
+in-process tokio channels. Pingora's FD-transfer and signal machinery
+interfered with those channels during startup, producing the spurious
+`channel closed` panic.
+
+**The split (Phases 1–2) removes that conflict entirely.** `temps proxy` is
+now a clean, standalone Pingora server. It has no in-process console, no
+in-process tokio channels shared with any other subsystem, and no
+`start_console_api` call. The reason `upgrade: false` was necessary in the
+monolith **no longer applies** in the split topology. Phase 4 turns this
+observation into a concrete design.
+
+### 4.2 What Pingora 0.8.0 provides (already a dependency — no version bump)
+
+All of the following are present in the pinned `pingora-core-0.8.0` crate.
+
+**`Opt.upgrade: bool`** (`server/configuration/mod.rs:164`) — the `--upgrade`
+flag on the Pingora `Opt` struct. When `true`, the new process connects to
+`upgrade_sock` and receives the old process's listening FDs instead of binding
+fresh sockets.
+
+**`ServerConf.pid_file: String`** (`server/configuration/mod.rs:51`, default
+`"/tmp/pingora.pid"`) — path where the Pingora server writes its PID on
+startup. Used by the operator (or `ExecReload`) to find the old process.
+
+**`ServerConf.upgrade_sock: String`** (`server/configuration/mod.rs:56`,
+default `"/tmp/pingora_upgrade.sock"`) — Unix socket path over which the old
+process passes its live listening FDs to the new one via `SCM_RIGHTS`. Both
+processes must agree on this path.
+
+**`ServerConf.grace_period_seconds: Option<u64>`**
+(`server/configuration/mod.rs:79`) — after the old process finishes
+transferring FDs, it waits this many seconds before broadcasting graceful
+shutdown to its services. In-flight requests complete during this window.
+
+**`ServerConf.graceful_shutdown_timeout_seconds: Option<u64>`**
+(`server/configuration/mod.rs:81`) — hard ceiling on the graceful drain. When
+elapsed, the old process exits unconditionally.
+
+**Signal semantics** (`server/mod.rs:143–170`, `UnixShutdownSignalWatch`):
+
+| Signal | Meaning | Pingora action |
+|---|---|---|
+| `SIGQUIT` | Graceful upgrade | Transfer FDs via `upgrade_sock`, then drain in-flight requests for `grace_period_seconds`, then exit |
+| `SIGTERM` | Graceful shutdown | Drain in-flight requests for `grace_period_seconds`, then exit (no FD transfer) |
+| `SIGINT` / Ctrl+C | Fast shutdown | Exit immediately |
+
+**`SO_REUSEPORT`** (`listeners/l4.rs:98`, `set_reuse_port` at line 179) — the
+`TcpSocketOptions` struct in `l4.rs` includes `so_reuseport: Option<bool>`.
+When enabled, both the old and the new process can be bound to the same
+port simultaneously during the FD handoff window, preventing any
+`EADDRINUSE` between the two.
+
+**SIGQUIT flow** (`server/mod.rs:270–316`): on `ShutdownSignal::GracefulUpgrade`,
+the server calls `fds.send_to_sock(upgrade_sock)` to transfer the listening
+sockets, then sleeps for the configured `CLOSE_TIMEOUT` (5 s hardcoded, plus
+`grace_period_seconds`), then broadcasts graceful shutdown and lets in-flight
+requests drain within `graceful_shutdown_timeout_seconds`.
+
+### 4.3 Design
+
+#### 4.3.1 New `--upgrade` flag on `temps proxy`
+
+Add an `--upgrade` boolean flag to `ProxyCommand`
+(`crates/temps-cli/src/commands/proxy.rs`). When absent (default), startup is
+unchanged. When present, the flag is forwarded into the Pingora `Opt`:
+
+```rust
+// (illustrative — proxy.rs execute())
+let opt = Opt {
+    upgrade: args.upgrade,  // NEW: driven by --upgrade CLI flag
+    daemon: false,
+    nocapture: false,
+    test: false,
+    conf: None,
+};
+```
+
+This is the only code change that touches `Opt`. All other Pingora upgrade
+machinery is already in the crate and activates when `opt.upgrade == true`.
+
+#### 4.3.2 `ServerConf` fields
+
+The Pingora `Server::new(Some(opt))` call in `setup_proxy_server` currently
+receives a default `ServerConf` (embedded inside the `Server::new`
+implementation). To configure `pid_file`, `upgrade_sock`, and grace periods,
+the `ServerConf` must be explicitly constructed and applied. The Pingora API
+allows post-construction mutation via `server.configuration`:
+
+```rust
+// (illustrative — setup_proxy_server, after Server::new)
+let mut server = pingora_core::server::Server::new(Some(opt))?;
+// Apply upgrade-capable configuration
+{
+    let conf = Arc::make_mut(&mut server.configuration);
+    conf.pid_file = format!("{}/temps-proxy.pid", data_dir);
+    conf.upgrade_sock = format!("{}/temps-proxy-upgrade.sock", data_dir);
+    conf.grace_period_seconds = Some(30);          // 30 s drain window
+    conf.graceful_shutdown_timeout_seconds = Some(60); // hard ceiling
+}
+server.bootstrap();
+```
+
+`data_dir` is already available in `ProxyConfig` (read from `TEMPS_DATA_DIR`
+or `~/.temps`). The paths `<data_dir>/temps-proxy.pid` and
+`<data_dir>/temps-proxy-upgrade.sock` are canonical for this deployment.
+
+Default proposal for grace periods:
+
+| Setting | Value | Rationale |
+|---|---|---|
+| `grace_period_seconds` | 30 | Covers typical in-flight HTTP/2 multiplexed requests and ACME renewals; operators can extend |
+| `graceful_shutdown_timeout_seconds` | 60 | Hard ceiling; after 60 s, any stuck request is likely a bug |
+
+#### 4.3.3 SO_REUSEPORT on proxy listeners
+
+The call `proxy_service.add_tcp(&proxy_config.address)` at `server.rs:337`
+currently uses the default `TcpSocketOptions` which has `so_reuseport: None`
+(disabled). For the graceful-upgrade handoff window the old and new process
+co-exist briefly both bound to `:80`/`:443`. Enabling `SO_REUSEPORT` prevents
+`EADDRINUSE` during that window.
+
+```rust
+// (illustrative — server.rs, replacing the plain add_tcp call)
+use pingora_core::listeners::l4::{ServerAddress, TcpSocketOptions};
+
+let tcp_opts = TcpSocketOptions {
+    so_reuseport: Some(true),
+    ..Default::default()
+};
+proxy_service.add_tcp_with_settings(
+    &proxy_config.address,
+    ServerAddress::Tcp(proxy_config.address.clone(), Some(tcp_opts.clone())),
+);
+// Same for TLS if configured
+if let Some(ref tls_address) = proxy_config.tls_address {
+    proxy_service.add_tls_with_settings(
+        tls_address,
+        None,         // addr override via ServerAddress
+        tls_settings,
+    );
+}
+```
+
+The `SO_REUSEPORT` call path in Pingora is `l4.rs:179`: `socket.set_reuse_port(reuseport)`.
+This is a `#[cfg(unix)]` path and compiles on Linux and macOS alike, but the
+port-sharing behaviour differs: on Linux, both sockets accept connections
+independently (true load distribution); on macOS it also compiles but the
+kernel port-sharing semantics differ. Since the overlapping window is
+<5 seconds and both processes are running on the same host under systemd, the
+difference is benign.
+
+#### 4.3.4 Replace `ShutdownSignalBridge` with Pingora's standard signal handler
+
+The current `ShutdownSignalBridge` (`server.rs:182–208`) wraps
+`Box<dyn ProxyShutdownSignal>` and **always** emits
+`ShutdownSignal::FastShutdown` — meaning the proxy can only hard-stop, never
+gracefully upgrade or gracefully drain.
+
+`RunArgs` already has a default that uses `UnixShutdownSignalWatch`, which
+listens for all three signals correctly. In split mode with
+`upgrade`-capable configuration, the `ShutdownSignalBridge` must be replaced
+with the standard handler:
+
+```rust
+// (illustrative — setup_proxy_server, replacing current run_args construction)
+let run_args = if use_standard_signals {
+    // Use Pingora's native Unix signal handler:
+    // SIGQUIT = graceful upgrade, SIGTERM = graceful drain, SIGINT = fast
+    RunArgs::default()
+} else {
+    // Legacy path for monolith or test: custom shutdown_signal
+    RunArgs {
+        shutdown_signal: Box::new(ShutdownSignalBridge::new(shutdown_signal)),
+    }
+};
+server.run(run_args);
+```
+
+The `use_standard_signals` flag can be set when the proxy is launched as a
+standalone process (i.e., from `ProxyCommand::execute`, not from
+`serve/mod.rs`). The monolith path (`serve/mod.rs`) continues passing a custom
+`ShutdownSignalBridge` so it can coordinate the combined proxy+console shutdown
+sequence as before.
+
+**Signal semantic change — must be documented in the operator guide:**
+
+| Signal | Before Phase 4 | After Phase 4 (`temps proxy` standalone) |
+|---|---|---|
+| `SIGQUIT` | Not handled (process exits via default handler) | Graceful upgrade — transfers FDs, drains in-flight, exits |
+| `SIGTERM` | Not handled (process exits via default handler) | Graceful drain — drains in-flight requests, exits |
+| `SIGINT` / Ctrl+C | Custom bridge fires `FastShutdown` | Fast shutdown — exits immediately |
+
+Operators relying on `SIGTERM` to abruptly kill the proxy must switch to
+`SIGKILL` if they need an immediate stop. This is standard UNIX process
+management practice and consistent with how nginx and Pingora document their
+own signal semantics.
+
+### 4.4 Operator upgrade sequence
+
+This section describes the steps an operator (or their systemd unit) takes to
+perform a zero-downtime proxy binary upgrade on a Linux host.
+
+#### 4.4.1 Manual procedure
+
+```bash
+# 1. Download the new binary alongside the running one
+curl -L https://... -o /usr/local/bin/temps-new
+chmod +x /usr/local/bin/temps-new
+
+# 2. (Optional) Validate the new binary before the handoff
+/usr/local/bin/temps-new proxy --test
+
+# 3. Start the NEW process in upgrade mode.
+#    It connects to the upgrade socket and receives the old process's
+#    listening FDs — no bind gap, no EADDRINUSE.
+/usr/local/bin/temps-new proxy --upgrade &
+NEW_PID=$!
+
+# 4. Send SIGQUIT to the OLD process.
+#    It transfers FDs (already done in step 3), waits grace_period_seconds
+#    (30 s) to drain in-flight requests, then exits.
+kill -QUIT $(cat /var/run/temps-proxy.pid)
+
+# 5. Wait for the old process to exit
+wait $(cat /var/run/temps-proxy.pid) 2>/dev/null || true
+
+# 6. Replace the binary on disk
+mv /usr/local/bin/temps-new /usr/local/bin/temps
+
+# 7. Verify
+curl -sf http://localhost:80/_temps/healthz
+```
+
+At no point between steps 3 and 4 are `:80`/`:443` unbound. The old process
+is draining while the new process is already accepting new connections.
+
+#### 4.4.2 systemd integration (recommended)
+
+The standard systemd pattern for Pingora-style graceful upgrades uses
+`KillMode=none` (systemd does not kill the process group — the old process
+exits itself after the drain) and `ExecReload` to trigger the handoff:
+
+```ini
+# /etc/systemd/system/temps-proxy.service
+[Unit]
+Description=Temps Proxy (Pingora, port 80/443)
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/var/lib/temps/temps-proxy.pid
+ExecStart=/usr/local/bin/temps proxy \
+  --address 0.0.0.0:80 \
+  --tls-address 0.0.0.0:443 \
+  --database-url ${TEMPS_DATABASE_URL}
+ExecReload=/bin/sh -c '\
+  /usr/local/bin/temps proxy --upgrade & \
+  sleep 2 && kill -QUIT $MAINPID'
+KillMode=none
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+With this unit file:
+
+- `systemctl start temps-proxy` — normal startup (no `--upgrade`).
+- `systemctl reload temps-proxy` — triggers `ExecReload`: starts a new process
+  with `--upgrade` (connects to the upgrade socket, receives FDs), then sends
+  `SIGQUIT` to the old process (`$MAINPID`). The old process drains and exits;
+  the new process is now the main server. systemd tracks the new PID via
+  `PIDFile` on the next write.
+- `systemctl restart temps-proxy` — a hard restart (kills old, starts new,
+  brief blip). Use `reload` for zero-downtime, `restart` only for recovery.
+
+`Type=forking` + `PIDFile` tells systemd to wait for the new process to write
+its PID before considering the service started. The PID file path must match
+`ServerConf.pid_file` (i.e. `<data_dir>/temps-proxy.pid`).
+
+**Automation boundary:** consistent with the boundary established in ADR §7
+and the Phase 3 automation boundary table, the `temps` binary does **not**
+manage systemd units, does not run `systemctl reload`, and does not
+auto-restart itself. The operator owns the systemd unit lifecycle. The
+`ExecReload` line is a template that the operator's `deploy.sh` emits when
+`--topology=split` is set.
+
+#### 4.4.3 `temps upgrade --split` guidance extension
+
+The Phase 3 implementation of `temps upgrade --split` currently prints
+guidance for restarting the **console** only. Phase 4 should extend the
+printed guidance to also cover the proxy graceful-upgrade sequence, so that
+`temps upgrade --split` prints both:
+
+```
+Console upgrade:
+  1. systemctl restart temps-console
+  2. curl -s http://<console_address>/readyz   # wait for 200
+
+Proxy upgrade (zero-downtime, Linux only):
+  1. Download the new binary alongside the running one
+  2. /usr/local/bin/temps proxy --upgrade &
+  3. kill -QUIT $(cat <data_dir>/temps-proxy.pid)
+  4. Verify: curl -sf http://localhost:80/_temps/healthz
+  Or if using systemd: systemctl reload temps-proxy
+```
+
+This is guidance only. `temps upgrade --split` still never executes systemd
+commands on the operator's behalf.
+
+### 4.5 Interplay with on-demand and route table during overlap
+
+During the brief window when the old process is draining and the new process
+is already accepting connections, two `temps proxy` instances run concurrently.
+Each has its own in-memory state:
+
+**`CachedPeerTable` (route table):** both processes load routes from the same
+PostgreSQL DB and subscribe to `LISTEN route_table_changes`. During the overlap
+(typically 5–30 s), both route tables are current from the same source of
+truth. Routing correctness is maintained.
+
+**`OnDemandManager` (scale-to-zero):** the idle sweep task and wake-slot
+semaphore are per-process. During the overlap, two idle sweeps may run
+briefly. This is **benign**: scale-to-zero sleep transitions are guarded by
+an atomic DB `UPDATE ... WHERE sleeping = false` (see `on_demand.rs`), so two
+concurrent sweeps that both observe a sleeping environment will race on the
+DB, and only one wins — the other sees 0 rows updated and skips the stop.
+Wake-slot semaphores are local; two concurrent wakes from different processes
+both proceed to wake the container — the second `start_container` call finds
+the container already running and returns immediately (Docker is idempotent on
+already-running containers). Verify this assertion on Linux with the S4 variant
+of the test plan below (S4-overlap: on-demand wake initiated during the
+old/new overlap window).
+
+**Proxy-log batch writer:** both processes flush proxy log rows to the same
+`proxy_logs` table, keyed by request. Concurrent writes from two processes are
+additive and benign — the DB constraint is on the individual log row, not a
+unique constraint that would cause conflicts.
+
+**Admin gate:** both processes hold their own `AdminGateHandle` snapshot,
+refreshed independently every N seconds from the DB. During the overlap, both
+snapshots are current; no correctness issue.
+
+### 4.6 Alternatives considered within Phase 4
+
+#### a. External load balancer + two permanent proxy instances
+
+Run two `temps proxy` instances behind an L4 load balancer (e.g. HAProxy).
+Upgrade one at a time; the other always serves traffic.
+
+Pros: no special signal handling; standard blue/green.
+
+Cons: requires an L4 load balancer that single-node operators do not have. Adds
+a new process to the topology. Doubles the per-proxy resource footprint. Adds
+operational complexity (LB config, health checks, weighted routing).
+
+**Not recommended for the single-node target.**
+
+#### b. Accept the ~2-5 s proxy restart blip (status quo)
+
+Do nothing for Phase 4. Document the blip in S5 of the failure-test matrix.
+Most production operators tolerate a few seconds of downtime during a planned
+binary upgrade, especially if upgrades are infrequent and scheduled during low
+traffic.
+
+Pros: zero implementation work; no signal-semantic change; no Linux-only
+testing gap.
+
+Cons: the split topology's stated goal was zero-downtime for the full system,
+not just the console half. Leaves the proxy as the single remaining restart
+source of truth for `:80`/`:443` downtime.
+
+**Recommended as the documented no-op fallback.** Operators who do not need
+zero-downtime proxy upgrades can skip Phase 4 entirely; the `--upgrade` flag
+is opt-in and the default behaviour is unchanged.
+
+#### c. SIGHUP config reload without process restart
+
+Handle `SIGHUP` to reload configuration (TLS certificates, route hints, etc.)
+without replacing the binary.
+
+Pros: useful for cert rotation; no FD transfer needed.
+
+Cons: does not help with binary upgrades (the whole point of Phase 4). Pingora
+does not natively support `SIGHUP` config reload; adding it would require a
+custom `ShutdownSignalWatch` implementation and a config-diff reload path
+inside the proxy itself. This is a separate feature, orthogonal to Phase 4.
+
+**Not a substitute for graceful upgrade; out of scope.**
+
+**Phase 4 recommendation:** implement the Pingora graceful upgrade path for
+binary upgrades. Accept-the-blip is the documented fallback for operators on
+macOS dev hosts or who do not require zero-downtime proxy upgrades. Option (a)
+and (c) are not recommended.
+
+### 4.7 Test plan (Linux host required)
+
+The following test mirrors the Phase 1–3 console zero-downtime test
+(120 requests, count 200s) and extends it to cover the proxy upgrade handoff.
+
+**Prerequisites:**
+
+- Linux host (Hetzner cpx22 or equivalent)
+- `temps proxy` running with `pid_file` and `upgrade_sock` configured
+- A deployed app route accessible via the proxy (e.g. `http://app.example.com/`)
+- New `temps` binary with Phase 4 changes compiled
+
+**Test procedure:**
+
+```bash
+# Terminal 1 — sustained HTTP load against the proxy
+for i in $(seq 1 200); do
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://app.example.com/)
+  echo "$i $STATUS"
+  sleep 0.1
+done | tee /tmp/proxy-upgrade-test.log
+
+# Terminal 2 — trigger graceful upgrade mid-loop (after ~5 s)
+sleep 5
+/usr/local/bin/temps-new proxy --upgrade &
+sleep 2
+kill -QUIT $(cat /var/lib/temps/temps-proxy.pid)
+```
+
+**Pass criteria:**
+
+- Zero non-200 responses in `/tmp/proxy-upgrade-test.log` (no `000` connection-
+  refused, no `502`, no `503`).
+- The old process PID disappears from `ps` within `grace_period_seconds + 30` s.
+- The new process writes a new PID to `<data_dir>/temps-proxy.pid`.
+- `curl -sf http://localhost:80/_temps/healthz` returns 200 after the handoff.
+
+**macOS caveat:** running this test on macOS will fail at the SIGQUIT step —
+`transfer_fd/mod.rs` is `#[cfg(target_os = "linux")]` and the FD-send call
+will silently no-op (the `#[cfg]` guards prevent compilation of the send path;
+the old process will SIGQUIT-exit without transferring FDs, causing the new
+process to time out waiting on the upgrade socket and fall back to fresh
+binding — which will fail with `EADDRINUSE` if `SO_REUSEPORT` is the only
+guard). **Do not attempt the live upgrade test on macOS.** Compile and unit
+test on macOS; live proof on Linux only.
+
+**Additional scenario S4-overlap** (verify on-demand during overlap):
+
+Initiate an on-demand wake to a sleeping environment in the 5-second overlap
+window (after `--upgrade` process starts, before old process exits). Confirm
+the request eventually returns 200. This validates the benign-concurrent-wake
+assessment in §4.5.
+
+### 4.8 Effort and risk
+
+| Dimension | Assessment |
+|---|---|
+| **Effort** | ~1–2 days: flip `Opt.upgrade` to a CLI flag, configure `ServerConf` fields, enable `SO_REUSEPORT` on listeners, replace `ShutdownSignalBridge` with the standard `RunArgs::default()` path in the standalone proxy, extend `temps upgrade --split` guidance text |
+| **Risk** | MEDIUM |
+| **Primary risk** | Signal-semantic change: replacing `ShutdownSignalBridge` with `UnixShutdownSignalWatch` means `SIGTERM` now drains gracefully instead of being unhandled. Operators using `SIGTERM` for force-kill must switch to `SIGKILL`. This is a breaking change in signal behaviour that must be documented. |
+| **Secondary risk** | Linux-only verification gap: the FD-transfer path cannot be exercised on the dev Mac. Code can be compiled and reviewed on macOS, but a production-readiness sign-off requires at least one Linux run of the test in §4.7. |
+| **Tertiary risk** | `ServerConf` mutation after `Server::new`: the Pingora `Server` struct exposes `configuration` as `Arc<ServerConf>`; `Arc::make_mut` requires the Arc to not be aliased at the point of mutation. This must be done before `server.bootstrap()` (which aliases the conf into services). The illustrative snippet in §4.3.2 follows this ordering. |
+| **Mitigation** | Gate the `--upgrade` flag behind an explicit opt-in; default behaviour is unchanged. The Phase 3 console ZDT is unaffected regardless of whether Phase 4 is implemented. |
+
+**Deliberately out of scope for Phase 4:**
+
+- Automated proxy restart via `temps upgrade` (proxy lifecycle is
+  operator-owned, consistent with the automation boundary in ADR §7 and the
+  Phase 3 boundary table).
+- Multi-node proxy upgrade coordination (requires cross-node health checks;
+  Tier C scope).
+- `SIGHUP` config-only reload (separate feature, §4.6c).
