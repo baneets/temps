@@ -1773,7 +1773,9 @@ impl GitProviderService for GitHubProvider {
                 .map_err(|e| GitProviderError::ApiError(format!("Failed to read chunk: {}", e)))?;
             written = written.saturating_add(chunk.len() as u64);
             if written > MAX_ARCHIVE_BYTES {
-                // Best-effort cleanup of the partial file before bailing.
+                // Best-effort cleanup of the partial file before bailing. Drop the
+                // handle first so the file isn't held open during removal.
+                drop(file);
                 let _ = tokio::fs::remove_file(target_path).await;
                 return Err(GitProviderError::ApiError(format!(
                     "Archive exceeded maximum size of {} bytes mid-stream",

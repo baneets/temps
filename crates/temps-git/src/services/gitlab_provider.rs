@@ -85,6 +85,68 @@ impl GitLabProvider {
             .expect("Failed to build reqwest archive client with static config")
     }
 
+    /// SSRF guard for archive-download redirects.
+    ///
+    /// GitLab's archive endpoint streams the body directly today, so the happy
+    /// path never redirects. But self-hosted GitLab behind a CDN/object store
+    /// *can* 302 to a signed URL, and the archive client uses
+    /// `redirect::Policy::none()` — so if we ever follow a redirect manually it
+    /// MUST be gated here, exactly like the GitHub provider. Without this guard a
+    /// compromised or misconfigured upstream could bounce the download to an
+    /// internal address (e.g. cloud metadata at 169.254.169.254).
+    ///
+    /// Only HTTPS redirects to the GitLab instance's own registrable domain are
+    /// allowed: for `base_url = https://gitlab.example.com` that's
+    /// `gitlab.example.com` and any `*.gitlab.example.com` (covers an object-store
+    /// subdomain), plus the public `*.gitlab.com` / `*.gitlab-static.net` hosts.
+    fn validate_archive_redirect_host(
+        &self,
+        redirect_url: &reqwest::Url,
+    ) -> Result<(), GitProviderError> {
+        if redirect_url.scheme() != "https" {
+            return Err(GitProviderError::ApiError(format!(
+                "Refusing to follow archive redirect to non-HTTPS URL: {}",
+                redirect_url
+            )));
+        }
+
+        let host = redirect_url
+            .host_str()
+            .ok_or_else(|| {
+                GitProviderError::ApiError(format!(
+                    "Archive redirect URL has no host: {}",
+                    redirect_url
+                ))
+            })?
+            .to_ascii_lowercase();
+
+        // Public gitlab.com archive/object-store hosts.
+        const ALLOWED_SUFFIXES: [&str; 2] = [
+            ".gitlab.com",        // *.gitlab.com
+            ".gitlab-static.net", // gitlab.com's object storage CDN
+        ];
+        let allowed_public =
+            host == "gitlab.com" || ALLOWED_SUFFIXES.iter().any(|suffix| host.ends_with(suffix));
+
+        // Self-hosted: allow the configured instance host and its subdomains.
+        // e.g. base_url `https://gitlab.example.com` permits `gitlab.example.com`
+        // and `*.gitlab.example.com` (an object-store subdomain).
+        let allowed_instance = reqwest::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+            .map(|base_host| host == base_host || host.ends_with(&format!(".{}", base_host)))
+            .unwrap_or(false);
+
+        if allowed_public || allowed_instance {
+            Ok(())
+        } else {
+            Err(GitProviderError::ApiError(format!(
+                "Refusing to follow archive redirect to non-GitLab host '{}' (from {})",
+                host, redirect_url
+            )))
+        }
+    }
+
     /// Retry configuration for GitLab API calls.
     fn retry_config() -> temps_core::retry::RetryConfig {
         temps_core::retry::RetryConfig::new(3)
@@ -1285,6 +1347,50 @@ impl GitProviderService for GitLabProvider {
             .send_with_retry(|| client.get(&url).headers(headers.clone()))
             .await?;
 
+        // GitLab usually streams the archive directly, but self-hosted instances
+        // behind a CDN/object store can answer with a 302 to a signed URL. The
+        // archive client uses `redirect::Policy::none()` (SSRF defense), so follow
+        // that one hop manually — but only after validating the target host, and
+        // without forwarding the auth token (the signed URL is self-authenticating
+        // and forwarding the token to a redirect target would needlessly leak it).
+        let response = if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    GitProviderError::ApiError(format!(
+                        "Archive download for {}/{} returned {} with no Location header",
+                        owner,
+                        repo,
+                        response.status()
+                    ))
+                })?
+                .to_string();
+
+            let redirect_url = reqwest::Url::parse(&location).map_err(|e| {
+                GitProviderError::ApiError(format!(
+                    "Archive redirect Location is not a valid URL ({}): {}",
+                    location, e
+                ))
+            })?;
+
+            self.validate_archive_redirect_host(&redirect_url)?;
+            debug!(
+                "Archive: following validated redirect to host {}",
+                redirect_url.host_str().unwrap_or("?")
+            );
+
+            client.get(redirect_url).send().await.map_err(|e| {
+                GitProviderError::ApiError(format!(
+                    "Failed to download archive from redirect target: {}",
+                    e
+                ))
+            })?
+        } else {
+            response
+        };
+
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response
@@ -1325,6 +1431,16 @@ impl GitProviderService for GitLabProvider {
             let chunk = chunk
                 .map_err(|e| GitProviderError::ApiError(format!("Failed to read chunk: {}", e)))?;
             written = written.saturating_add(chunk.len() as u64);
+            // Enforce the size ceiling BEFORE writing this chunk so an oversized
+            // stream can't put even one over-limit chunk on disk.
+            if written > MAX_ARCHIVE_BYTES {
+                drop(file);
+                let _ = tokio::fs::remove_file(target_path).await;
+                return Err(GitProviderError::ApiError(format!(
+                    "Archive exceeded maximum size of {} bytes mid-stream",
+                    MAX_ARCHIVE_BYTES
+                )));
+            }
             if let Some(tx) = progress {
                 if written >= next_progress_at {
                     let _ = tx.send(crate::services::git_provider::ArchiveProgress {
@@ -1333,13 +1449,6 @@ impl GitProviderService for GitLabProvider {
                     });
                     next_progress_at = written.saturating_add(PROGRESS_STEP);
                 }
-            }
-            if written > MAX_ARCHIVE_BYTES {
-                let _ = tokio::fs::remove_file(target_path).await;
-                return Err(GitProviderError::ApiError(format!(
-                    "Archive exceeded maximum size of {} bytes mid-stream",
-                    MAX_ARCHIVE_BYTES
-                )));
             }
             use tokio::io::AsyncWriteExt;
             file.write_all(&chunk)
@@ -1737,5 +1846,89 @@ impl GitProviderService for GitLabProvider {
             base_branch: mr.target_branch,
             head_sha: mr.sha,
         })
+    }
+}
+
+#[cfg(test)]
+mod archive_redirect_tests {
+    use super::*;
+
+    fn provider(base_url: Option<&str>) -> GitLabProvider {
+        GitLabProvider::new(
+            base_url.map(String::from),
+            AuthMethod::PersonalAccessToken {
+                token: "t".to_string(),
+            },
+        )
+    }
+
+    fn check(base_url: Option<&str>, url: &str) -> Result<(), GitProviderError> {
+        provider(base_url).validate_archive_redirect_host(&reqwest::Url::parse(url).unwrap())
+    }
+
+    #[test]
+    fn allows_public_gitlab_hosts() {
+        // Default base_url is https://gitlab.com.
+        assert!(check(None, "https://gitlab.com/owner/repo/-/archive/main.tar.gz").is_ok());
+        assert!(check(None, "https://storage.gitlab-static.net/foo").is_ok());
+        assert!(check(None, "https://cdn.gitlab.com/foo").is_ok());
+    }
+
+    #[test]
+    fn allows_self_hosted_instance_and_subdomains() {
+        // Self-hosted base host + an object-store subdomain under it.
+        assert!(check(
+            Some("https://gitlab.example.com"),
+            "https://gitlab.example.com/foo"
+        )
+        .is_ok());
+        assert!(check(
+            Some("https://gitlab.example.com"),
+            "https://objects.gitlab.example.com/signed/blob"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_internal_and_metadata_targets() {
+        // The SSRF cases this guard exists for.
+        assert!(check(None, "https://169.254.169.254/latest/meta-data/").is_err());
+        assert!(check(None, "https://localhost/foo").is_err());
+        assert!(check(None, "https://10.0.0.5/foo").is_err());
+    }
+
+    #[test]
+    fn rejects_non_https_redirect() {
+        assert!(check(None, "http://gitlab.com/owner/repo").is_err());
+    }
+
+    #[test]
+    fn rejects_lookalike_and_suffix_spoof_hosts() {
+        // Attacker-controlled domains that merely *contain* gitlab text.
+        assert!(check(None, "https://gitlab.com.evil.example/foo").is_err());
+        assert!(check(None, "https://evilgitlab.com/foo").is_err());
+        assert!(check(None, "https://notgitlab-static.net/foo").is_err());
+        // A self-hosted instance host must not leak access to an unrelated host.
+        assert!(check(
+            Some("https://gitlab.example.com"),
+            "https://evil.example/foo"
+        )
+        .is_err());
+        // ...and a self-hosted instance does NOT implicitly trust public gitlab.com
+        // is the inverse — public is always allowed, which is intended (mirrors the
+        // tarball flow); the spoof guard is the suffix-boundary check above.
+    }
+
+    #[test]
+    fn userinfo_uses_connect_host_not_userinfo() {
+        // `host_str()` returns the real connect host, so userinfo can't spoof it.
+        assert!(check(None, "https://evil.example@gitlab.com/foo").is_ok());
+        assert!(check(None, "https://gitlab.com@evil.example/foo").is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_dot_fqdn() {
+        // `gitlab.com.` ends with `com.`, not `.gitlab.com` → rejected.
+        assert!(check(None, "https://gitlab.com./foo").is_err());
     }
 }
