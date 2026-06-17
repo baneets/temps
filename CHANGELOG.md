@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.34] - 2026-06-17
+
+### Added
 - **Anonymous product telemetry.** Temps now reports anonymous, aggregate
   usage events (deploy attempted vs. succeeded/failed, project/service/feature
   creation, where instances stall) so maintainers can tell whether the platform
@@ -30,12 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `shm_size_mb` setting (container `/dev/shm`), fixing "could not resize shared
   memory segment … No space left on device" under parallel-query load. Changing
   it recreates the container (shared memory is fixed at create time).
-
-### Changed
--
-
-### Fixed
--
 
 
 ## [0.1.0-beta.33] - 2026-06-17
