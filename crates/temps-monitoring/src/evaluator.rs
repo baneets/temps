@@ -1040,8 +1040,12 @@ fn rustfs_default_seeds() -> Vec<RuleSeed> {
 fn container_default_seeds() -> Vec<RuleSeed> {
     vec![
         RuleSeed {
+            // Threshold against utilisation relative to the container's CPU
+            // limit (100% == limit saturated), NOT raw `container.cpu_percent`
+            // where 100% == one core — a 2-core container would otherwise fire
+            // at ~95% raw (≈47% of its limit), nowhere near saturation.
             name: "High CPU usage",
-            metric_name: "container.cpu_percent",
+            metric_name: "container.cpu_utilization_percent",
             threshold: 90.0,
             comparator: ">",
             severity: "warning",
@@ -1263,7 +1267,9 @@ mod tests {
             .iter()
             .map(|r| r.metric_name.clone().unwrap())
             .collect();
-        assert!(names.contains(&"container.cpu_percent".to_string()));
+        // The CPU rule thresholds limit-relative utilisation, not raw
+        // `container.cpu_percent` (100% == one core) — see the seed comment.
+        assert!(names.contains(&"container.cpu_utilization_percent".to_string()));
         assert!(names.contains(&"container.memory_percent".to_string()));
     }
 

@@ -258,14 +258,15 @@ fn deserialize_optional_optional_i64<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    // `Option<Option<i64>>` with serde's standard behaviour only handles
-    // absent vs. `null` at the outermost level; nested `null` → `Some(None)`
-    // requires a custom impl.
-    let outer: Option<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
-    match outer {
-        None => Ok(None),
-        Some(serde_json::Value::Null) => Ok(Some(None)),
-        Some(v) => {
+    // This function is only invoked when the key is *present* — serde uses the
+    // field's `#[serde(default)]` (→ `None`, "leave unchanged") for an absent key.
+    // Deserialize as `serde_json::Value` (NOT `Option<Value>`): the latter
+    // collapses a present `null` to `None`, losing the "clear" signal, so a
+    // present `null` → `Value::Null` → `Some(None)` (clear), number → `Some(Some(n))`.
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(Some(None)),
+        v => {
             let n: i64 = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
             Ok(Some(Some(n)))
         }

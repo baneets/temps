@@ -1641,10 +1641,33 @@ impl ExternalService for MongodbService {
         );
 
         let start = Instant::now();
-        let probe = async {
-            let client = MongoClient::with_uri_str(&uri)
-                .await
-                .map_err(|e| format!("connect failed: {}", e))?;
+
+        // The mongodb `Client` is a pooled, Arc-backed handle that spawns a
+        // per-server background monitor task and holds pooled sockets. Building
+        // a fresh one every 30s health cycle (and dropping it implicitly) leaks
+        // connections + monitor tasks: pool/monitor teardown on `Drop` is
+        // asynchronous and the runtime never waits for it. Worse, wrapping the
+        // whole connect+ping in `timeout` means a slow probe (degraded Mongo —
+        // exactly when we probe most) cancels the future mid-connect, orphaning
+        // a half-open socket and its monitor task.
+        //
+        // Fix: build the client first, bound only the connect+ping with the
+        // timeout (so cancellation can't strand an in-flight connect with a
+        // live client), then ALWAYS call `client.shutdown().immediate()` to
+        // deterministically close every pooled connection and stop the monitor
+        // before the next cycle. The client is created locally with no clones
+        // or cursor handles, so `shutdown` returns promptly.
+        let client = match MongoClient::with_uri_str(&uri).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(HealthProbeResult::down(format!(
+                    "mongodb probe to {}:{} connect failed: {}",
+                    cfg.host, cfg.port, e
+                )));
+            }
+        };
+
+        let ping = async {
             client
                 .database("admin")
                 .run_command(doc! { "ping": 1 })
@@ -1652,8 +1675,14 @@ impl ExternalService for MongodbService {
                 .map_err(|e| format!("ping failed: {}", e))?;
             Ok::<(), String>(())
         };
+        let probe_outcome = tokio::time::timeout(PROBE_TIMEOUT, ping).await;
 
-        match tokio::time::timeout(PROBE_TIMEOUT, probe).await {
+        // Tear the pool + monitor down before returning, regardless of outcome.
+        // `immediate(true)` skips waiting for in-use resources (cursors/sessions) —
+        // there are none here (local client, no clones), so close promptly.
+        client.shutdown().immediate(true).await;
+
+        match probe_outcome {
             Err(_) => Ok(HealthProbeResult::down(format!(
                 "mongodb probe to {}:{} timed out after {}s",
                 cfg.host,

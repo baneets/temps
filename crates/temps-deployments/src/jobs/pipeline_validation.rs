@@ -220,6 +220,7 @@ impl GitProviderManagerTrait for MockGitProviderManager {
         _repo_name: &str,
         _branch_or_ref: &str,
         _archive_path: &Path,
+        _progress: Option<&temps_git::ArchiveProgressSender>,
     ) -> Result<(), GitProviderManagerError> {
         Err(GitProviderManagerError::Other(
             "Mock: not implemented".to_string(),

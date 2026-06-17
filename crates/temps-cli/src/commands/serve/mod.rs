@@ -1,17 +1,40 @@
-mod admin_gate;
+pub(crate) mod admin_gate;
 mod admin_gate_handler;
-mod admin_gate_service;
+pub(crate) mod admin_gate_service;
 pub mod console;
-mod proxy;
+pub(crate) mod proxy;
 mod shutdown;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub use console::start_console_api;
 pub use proxy::start_proxy_server;
+
+/// Which halves of the control plane this `temps serve` process runs.
+///
+/// The default (`All`) is the single-binary control plane that has always
+/// existed: the Pingora proxy (:80/:443) and the console (API + web + plugins +
+/// background workers) run together in one process. `Console` runs only the
+/// console half, leaving the proxy to a separate `temps proxy` process, so the
+/// console can be upgraded/restarted without dropping production traffic on
+/// :80/:443 (see ADR-017). There is intentionally no `Proxy` role here — the
+/// proxy half is the existing standalone `temps proxy` command, not a role of
+/// `serve`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+pub enum ServeRole {
+    /// Run both the proxy and the console in one process (the default,
+    /// backwards-compatible single-binary control plane).
+    #[default]
+    All,
+    /// Run only the console (API + web + plugins + background workers); do NOT
+    /// bind :80/:443 and do NOT start the on-demand wake manager (those belong
+    /// to the proxy process). Pair with a separate `temps proxy`.
+    Console,
+}
 
 #[derive(Args)]
 pub struct ServeCommand {
@@ -66,6 +89,17 @@ pub struct ServeCommand {
     /// Worker nodes use this address to reach services (databases, etc.) on the control plane.
     #[arg(long, env = "TEMPS_PRIVATE_ADDRESS")]
     pub private_address: Option<String>,
+
+    /// Which halves of the control plane to run in this process.
+    ///
+    /// `all` (default) runs the proxy (:80/:443) and the console together —
+    /// the single-binary control plane. `console` runs only the console so it
+    /// can be upgraded independently of the proxy; pair it with a separate
+    /// `temps proxy` process (ADR-017 split topology). In `console` mode a
+    /// stable `--console-address` / `TEMPS_CONSOLE_ADDRESS` is REQUIRED so the
+    /// sibling proxy has a fixed address to forward console traffic to.
+    #[arg(long, value_enum, default_value_t = ServeRole::All, env = "TEMPS_ROLE")]
+    pub role: ServeRole,
 }
 
 impl ServeCommand {
@@ -101,6 +135,24 @@ impl ServeCommand {
             std::env::set_var("TEMPS_CONSOLE_ADMIN_ADDRESS", admin);
         }
 
+        // In split (`--role=console`) mode the console must bind a STABLE,
+        // known address: the sibling `temps proxy` forwards console/UI traffic
+        // to it (proxy `ProxyConfig.console_address`). The default is a random
+        // localhost port (`ServerConfig::get_random_console_address`), which a
+        // separate proxy process cannot discover — so require it explicitly and
+        // fail fast with a clear message rather than binding an ephemeral port
+        // the proxy will never find. (In `all` mode the proxy is in-process and
+        // reads the resolved address directly, so the random default is fine.)
+        if self.role == ServeRole::Console && self.console_address.is_none() {
+            anyhow::bail!(
+                "`temps serve --role=console` requires a stable console address.\n\n\
+                 Set --console-address (or TEMPS_CONSOLE_ADDRESS), e.g. \
+                 `--console-address 127.0.0.1:8081`, and point the sibling \
+                 `temps proxy --console-address <same>` at it. Without it the \
+                 console would bind a random port the proxy process cannot find."
+            );
+        }
+
         let serve_config = Arc::new(temps_config::ServerConfig::new(
             self.address.clone(),
             self.database_url.clone(),
@@ -134,6 +186,29 @@ impl ServeCommand {
                     .await
                 {
                     tracing::error!("Failed to update private address setting: {}", e);
+                }
+            });
+        }
+
+        // ADR-017 Phase 3: record the console's binary version so a sibling
+        // standalone `temps proxy` can WARN on version skew during a rolling
+        // upgrade. This runs for BOTH ServeRole::All and ServeRole::Console —
+        // the role branches happen later, so this single write covers both.
+        // Best-effort: skew detection is advisory and must never fail startup.
+        {
+            let db_for_version = db.clone();
+            let serve_config_for_version = serve_config.clone();
+            let console_version = crate::commands::upgrade::current_version_tag();
+            rt.block_on(async move {
+                let config_service =
+                    temps_config::ConfigService::new(serve_config_for_version, db_for_version);
+                if let Err(e) = config_service
+                    .update_setting_field(|settings| {
+                        settings.console_version = Some(console_version);
+                    })
+                    .await
+                {
+                    tracing::warn!("Failed to record console version for skew detection: {}", e);
                 }
             });
         }
@@ -258,28 +333,40 @@ impl ServeCommand {
             }
         };
 
+        // The on-demand wake manager is a PROXY-side concern: it watches request
+        // activity, sleeps idle containers, and wakes them on the first request
+        // through the proxy. In split (`--role=console`) mode the proxy runs in a
+        // separate `temps proxy` process that owns its own OnDemandManager
+        // (ADR-017 Phase 2), so the console process must NOT construct one — it
+        // has no proxy request path to drive it and would start a second, useless
+        // idle-sweep task competing to stop containers. Skip it here in console
+        // mode; the console's wake API reaches the proxy via PG NOTIFY instead.
         let on_demand_manager: Option<Arc<temps_proxy::on_demand::OnDemandManager>> =
-            docker_handle.as_ref().map(|docker| {
-                let docker_runtime = temps_deployer::docker::DockerRuntime::new(
-                    docker.clone(),
-                    true,
-                    "temps".to_string(),
-                );
-                let adapter = proxy::ContainerLifecycleAdapter::new(
-                    Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
-                );
-                Arc::new(temps_proxy::on_demand::OnDemandManager::new(
-                    db.clone(),
-                    Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
-                    queue.clone(),
-                    // Control plane has no self node row; its locally-deployed
-                    // containers carry node_id=NULL, which is treated as local.
-                    // Remote-worker containers (node_id != NULL) are skipped so a
-                    // multi-node deployment's wake/sleep no longer reverts on a
-                    // failed local start. See issue #126.
-                    None,
-                ))
-            });
+            if self.role == ServeRole::Console {
+                None
+            } else {
+                docker_handle.as_ref().map(|docker| {
+                    let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                        docker.clone(),
+                        true,
+                        "temps".to_string(),
+                    );
+                    let adapter = proxy::ContainerLifecycleAdapter::new(
+                        Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>
+                    );
+                    Arc::new(temps_proxy::on_demand::OnDemandManager::new(
+                        db.clone(),
+                        Arc::new(adapter) as Arc<dyn temps_proxy::on_demand::ContainerLifecycle>,
+                        queue.clone(),
+                        // Control plane has no self node row; its locally-deployed
+                        // containers carry node_id=NULL, which is treated as local.
+                        // Remote-worker containers (node_id != NULL) are skipped so a
+                        // multi-node deployment's wake/sleep no longer reverts on a
+                        // failed local start. See issue #126.
+                        None,
+                    ))
+                })
+            };
 
         // Register the on-demand sleeping-domain callback on the shared route
         // table BEFORE starting the listener, so the listener's (background)
@@ -377,14 +464,8 @@ impl ServeCommand {
             );
         }
 
-        // Start console API server in background (non-blocking).
-        // The proxy does NOT wait for the console to be ready. This ensures that
-        // deployed applications remain reachable even if console initialization
-        // fails (e.g. Docker check, GeoIP validation, plugin init). Console API
-        // requests will get connection-refused until the console finishes starting,
-        // but that is far better than all proxied traffic being down.
+        // Build the console params once; both roles consume them.
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-
         let params = console::ConsoleApiParams {
             db: db.clone(),
             config: serve_config.clone(),
@@ -401,6 +482,42 @@ impl ServeCommand {
             admin_gate_service: Some(admin_gate_service),
             admin_gate_handle: Some(admin_gate_handle.clone()),
         };
+
+        if self.role == ServeRole::Console {
+            // Split topology (ADR-017): run ONLY the console. The proxy lives in a
+            // separate `temps proxy` process, so we never bind :80/:443 here. The
+            // console future runs to completion on the main runtime and IS the
+            // blocking foreground task (mirroring how the proxy blocks in `all`
+            // mode). This is what makes the console independently restartable:
+            // killing/upgrading this process leaves the sibling proxy — and all
+            // production traffic on :80/:443 — untouched.
+            //
+            // The route-table listeners started above still run so this process's
+            // CachedPeerTable stays warm (used by the console's own routing
+            // views), but the authoritative table that serves production traffic
+            // is the one in the proxy process, kept fresh over PG NOTIFY.
+            info!(
+                "Starting in split mode: console only (proxy runs as a separate \
+                 `temps proxy` process). Health: GET {}/readyz",
+                serve_config.console_address
+            );
+            return rt.block_on(async move {
+                start_console_api(params).await.map_err(|e| {
+                    tracing::error!("❌ Console API failed: {}", e);
+                    tracing::error!("Error details: {:?}", e);
+                    e
+                })
+            });
+        }
+
+        // Single-binary mode (`--role=all`, the default): start the console in
+        // the background (non-blocking) and let the proxy block the main thread.
+        //
+        // The proxy does NOT wait for the console to be ready. This ensures that
+        // deployed applications remain reachable even if console initialization
+        // fails (e.g. Docker check, GeoIP validation, plugin init). Console API
+        // requests will get connection-refused until the console finishes starting,
+        // but that is far better than all proxied traffic being down.
         rt.spawn(async move {
             match start_console_api(params).await {
                 Ok(()) => {

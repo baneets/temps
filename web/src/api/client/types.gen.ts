@@ -772,6 +772,19 @@ export type AppSettings = {
      * hardware that already has its own per-host headroom).
      */
     build_limits?: BuildLimitsSettings;
+    /**
+     * Binary version tag (e.g. "v0.1.0") of the *console* process
+     * (`temps serve`, role=all or role=console) that last started. Written
+     * on console startup; read by the standalone `temps proxy` to detect
+     * version skew during a rolling upgrade (ADR-017 Phase 3). `None` on
+     * installs that never ran a console build carrying this field.
+     *
+     * This is informational state written by the binary itself — NOT an
+     * operator-tunable setting. It is intentionally absent from
+     * `AppSettingsResponse` and the PATCH path so an operator cannot
+     * accidentally overwrite the self-recorded value.
+     */
+    console_version?: string | null;
     container_logs?: ContainerLogSettings;
     disk_space_alert?: DiskSpaceAlertSettings;
     dns_provider?: DnsProviderSettings;
@@ -4859,6 +4872,13 @@ export type EnvironmentInfo = {
 };
 
 export type EnvironmentResponse = {
+    /**
+     * Per-environment CAPTCHA attack-mode override.
+     * `null` means inherit the project-level `attack_mode`; `true`/`false`
+     * explicitly enable/disable the challenge for this environment. Always
+     * serialized (NOT skipped) so the UI can distinguish `null` from `false`.
+     */
+    attack_mode?: boolean | null;
     branch?: string | null;
     created_at: number;
     current_deployment_id?: number | null;
@@ -13967,11 +13987,26 @@ export type UpdateEnvironmentSettingsRequest = {
      */
     anti_affinity?: boolean | null;
     /**
+     * Per-environment CAPTCHA attack-mode override (tri-state):
+     * - absent → leave the current override unchanged
+     * - JSON `null` → clear the override (inherit the project-level setting)
+     * - `true`/`false` → override the project setting for this environment
+     */
+    attack_mode?: boolean | null;
+    /**
      * Enable/disable automatic deployments for this environment
      */
     automatic_deploy?: boolean | null;
     branch?: string | null;
+    /**
+     * Maximum (limit) CPU in microcores. Send JSON `null` to clear → "no limit".
+     * Absent leaves the current value unchanged.
+     */
     cpu_limit?: number | null;
+    /**
+     * Minimum (request) CPU in microcores. Send JSON `null` to clear (no request).
+     * Absent leaves the current value unchanged.
+     */
     cpu_request?: number | null;
     /**
      * Port exposed by the container (overrides project-level port for this environment)
@@ -13987,7 +14022,15 @@ export type UpdateEnvironmentSettingsRequest = {
      * Seconds of inactivity before stopping containers (60-86400). Default: 300.
      */
     idle_timeout_seconds?: number | null;
+    /**
+     * Maximum (limit) memory in MB. Send JSON `null` to clear → "no limit".
+     * Absent leaves the current value unchanged.
+     */
     memory_limit?: number | null;
+    /**
+     * Minimum (request) memory in MB. Send JSON `null` to clear (no request).
+     * Absent leaves the current value unchanged.
+     */
     memory_request?: number | null;
     /**
      * Enable on-demand mode (scale-to-zero). Containers are stopped after

@@ -377,9 +377,40 @@ impl DownloadRepoJob {
             )
         })?;
 
-        // Try download archive first (faster)
+        // Try download archive first (faster). Wire a progress channel so the
+        // download — which can take minutes on a slow link for a large repo —
+        // shows steady movement in the deployment log instead of appearing stuck.
         let archive_path = temp_dir.join("source.tar.gz");
-        match self
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<temps_git::ArchiveProgress>();
+        let progress_logger = {
+            let log_writer = context.log_writer.clone();
+            let log_id = self.log_id.clone();
+            let log_service = self.log_service.clone();
+            tokio::spawn(async move {
+                while let Some(p) = progress_rx.recv().await {
+                    let mb = p.downloaded_bytes as f64 / (1024.0 * 1024.0);
+                    let msg = match p.total_bytes {
+                        Some(total) if total > 0 => {
+                            let total_mb = total as f64 / (1024.0 * 1024.0);
+                            let pct = (p.downloaded_bytes as f64 / total as f64) * 100.0;
+                            format!(
+                                "⬇️ Downloading archive: {mb:.1} MB / {total_mb:.1} MB ({pct:.0}%)"
+                            )
+                        }
+                        _ => format!("⬇️ Downloading archive: {mb:.1} MB"),
+                    };
+                    if let (Some(ref log_id), Some(ref log_service)) = (&log_id, &log_service) {
+                        let _ = log_service
+                            .append_structured_log(log_id, LogLevel::Info, msg.clone())
+                            .await;
+                    }
+                    let _ = log_writer.write_log(msg).await;
+                }
+            })
+        };
+
+        let download_result = self
             .git_provider_manager
             .download_archive(
                 connection_id,
@@ -387,9 +418,15 @@ impl DownloadRepoJob {
                 &self.repo_name,
                 &checkout_ref,
                 &archive_path,
+                Some(&progress_tx),
             )
-            .await
-        {
+            .await;
+        // Drop the sender so the drain task's recv() loop ends, then await it so
+        // any final progress line is flushed before we log the outcome.
+        drop(progress_tx);
+        let _ = progress_logger.await;
+
+        match download_result {
             Ok(()) => {
                 self.log(
                     context,
@@ -793,6 +830,7 @@ mod tests {
             _repo_name: &str,
             _branch_or_ref: &str,
             _archive_path: &Path,
+            _progress: Option<&temps_git::ArchiveProgressSender>,
         ) -> Result<(), GitProviderManagerError> {
             // Mock returns error to test fallback to clone
             Err(GitProviderManagerError::Other(

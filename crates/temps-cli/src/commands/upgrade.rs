@@ -94,6 +94,16 @@ pub struct UpgradeCommand {
     #[arg(long)]
     pub check: bool,
 
+    /// Print split-topology (ADR-017) console-restart guidance after the
+    /// upgrade. In split mode the proxy (`temps proxy`, a systemd-managed,
+    /// always-on service binding :80/:443) is untouched by an upgrade — only
+    /// the CONSOLE process you run (`temps serve --role=console`) needs a
+    /// manual restart to pick up the new binary. This flag ONLY prints the
+    /// steps; temps does NOT restart, manage, or health-check anything for
+    /// you. Default output (without `--split`) is unchanged.
+    #[arg(long)]
+    pub split: bool,
+
     /// DEPRECATED: alias for `--channel stable`. Kept for backward compat
     /// with existing scripts; will be removed in a future release. New
     /// callers should use `--channel stable` (or just omit the flag — it's
@@ -326,6 +336,18 @@ impl UpgradeCommand {
         );
         println!("  Run `temps --version` to verify.");
 
+        // Split topology (ADR-017): the upgrade swapped the on-disk binary but
+        // did NOT restart anything. The proxy is systemd-managed and keeps
+        // serving :80/:443 on the OLD binary until its own process recycles;
+        // the operator-run console must be restarted by hand to load the new
+        // binary. We only PRINT the steps — see `restart_guidance`. With
+        // `--split` absent this returns an empty string and nothing extra
+        // prints, so the default output is unchanged.
+        let guidance = restart_guidance(self.split);
+        if !guidance.is_empty() {
+            print!("{guidance}");
+        }
+
         Ok(())
     }
 
@@ -477,6 +499,47 @@ impl UpgradeCommand {
             .trim_end_matches('/')
             .to_string()
     }
+}
+
+/// Build the post-upgrade console-restart guidance for split topology
+/// (ADR-017 Phase 3). PURE: returns the exact text to print, performs no
+/// I/O, and starts/stops/health-checks NOTHING.
+///
+/// - `split == false` → returns an empty string (default `temps upgrade`
+///   output is unchanged; the caller prints nothing extra).
+/// - `split == true`  → returns multi-line guidance explaining that the
+///   systemd-managed PROXY keeps serving :80/:443 untouched, and that the
+///   operator must MANUALLY restart the console process they run
+///   (`temps serve --role=console`), then confirm readiness via
+///   `curl -fsS http://<console-address>/readyz`.
+fn restart_guidance(split: bool) -> String {
+    if !split {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str("  Split topology (ADR-017) — finish the upgrade manually:\n");
+    out.push('\n');
+    out.push_str("  The new binary is in place, but temps did NOT restart anything.\n");
+    out.push_str("  • The PROXY (`temps proxy`) is your systemd-managed, always-on\n");
+    out.push_str("    service that serves :80/:443. It keeps running and serving\n");
+    out.push_str("    traffic untouched — you do not restart it for a console upgrade.\n");
+    out.push_str("  • The CONSOLE (`temps serve --role=console`) is NOT managed by\n");
+    out.push_str("    temps. It is whatever YOU run it as — a manual process, a custom\n");
+    out.push_str("    systemd unit, a supervised job, etc. You must restart it yourself\n");
+    out.push_str("    so it loads the new binary.\n");
+    out.push('\n');
+    out.push_str("  1. Restart however you run the console, for example:\n");
+    out.push_str("       # if you run it as a manual/foreground process: stop it, then\n");
+    out.push_str("       temps serve --role=console --console-address <host:port>\n");
+    out.push_str("       # if you wrapped it in your own unit, restart that unit instead\n");
+    out.push('\n');
+    out.push_str("  2. Confirm the console is ready (expects 'ready' / HTTP 200):\n");
+    out.push_str("       curl -fsS http://<console-address>/readyz\n");
+    out.push('\n');
+    out.push_str("  temps does NOT restart, manage, or health-check the console for you.\n");
+    out
 }
 
 /// Extract the clean version tag from the compiled TEMPS_VERSION string.
@@ -1091,6 +1154,36 @@ mod tests {
     }
 
     #[test]
+    fn test_restart_guidance_default_is_empty() {
+        // Without --split, the default upgrade output must be unchanged:
+        // the helper contributes nothing.
+        assert_eq!(restart_guidance(false), "");
+    }
+
+    #[test]
+    fn test_restart_guidance_split_mentions_console_restart_and_readyz() {
+        let g = restart_guidance(true);
+        assert!(!g.is_empty());
+        // Targets the CONSOLE the operator runs, not the proxy.
+        assert!(g.contains("temps serve --role=console"));
+        // Readiness confirmation via /readyz curl line.
+        assert!(g.contains("/readyz"));
+        assert!(g.contains("curl"));
+        // Explicit that temps manages/restarts nothing.
+        assert!(g.contains("does NOT restart"));
+        // Reassures that the always-on proxy / :80/:443 is untouched.
+        assert!(g.contains(":80/:443") || g.to_lowercase().contains("untouched"));
+    }
+
+    #[test]
+    fn test_restart_guidance_split_does_not_invoke_systemctl() {
+        // Guidance must not tell the operator (or imply temps will run)
+        // systemctl — the console is unmanaged by design.
+        let g = restart_guidance(true);
+        assert!(!g.contains("systemctl"));
+    }
+
+    #[test]
     fn test_platform_target() {
         // Just verify it doesn't panic on the current platform
         let result = platform_target();
@@ -1328,6 +1421,7 @@ mod tests {
             path: None,
             yes: false,
             check: false,
+            split: false,
             stable: false,
             tier: None,
             license_path: None,
@@ -1348,6 +1442,7 @@ mod tests {
             path: None,
             yes: false,
             check: false,
+            split: false,
             stable: true,
             tier: None,
             license_path: None,
@@ -1368,6 +1463,7 @@ mod tests {
             path: None,
             yes: false,
             check: false,
+            split: false,
             stable: true,
             tier: None,
             license_path: None,
@@ -1386,6 +1482,7 @@ mod tests {
             path: None,
             yes: false,
             check: false,
+            split: false,
             stable: false,
             tier: None,
             license_path: None,
@@ -1404,6 +1501,7 @@ mod tests {
             path: None,
             yes: false,
             check: false,
+            split: false,
             stable: false,
             tier,
             license_path: None,

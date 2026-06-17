@@ -324,7 +324,10 @@ impl Default for ContainerInfo {
 pub struct ContainerStats {
     pub container_id: String,
     pub container_name: String,
-    /// CPU usage percentage (0-100)
+    /// Raw Docker CPU usage percentage, where **100% == one full core**.
+    /// A container saturating 2 cores reads `200.0`, 4 cores `400.0`, etc.
+    /// This is NOT bounded to 0-100 — to compare against a threshold you must
+    /// normalise against the CPU limit; use [`ContainerStats::cpu_utilization_percent`].
     pub cpu_percent: f64,
     /// CPU limit applied to the container, in whole cores (e.g. `1.0`).
     /// None if no limit is set. Lets the UI render "0.5 / 1.0 cores".
@@ -369,6 +372,33 @@ impl Default for ContainerStats {
             started_at: None,
             timestamp: chrono::Utc::now(),
         }
+    }
+}
+
+impl ContainerStats {
+    /// CPU usage as a percentage of the container's *allowed* CPU, suitable for
+    /// threshold comparison (a value of `100.0` means the container is using its
+    /// entire CPU allocation).
+    ///
+    /// `cpu_percent` is the raw Docker number where 100% == one core, so a
+    /// container allowed 2 cores can legitimately reach 200% while still being
+    /// only 100% utilised. Alarms must compare against *this* value, not the raw
+    /// `cpu_percent`, otherwise a 2-core container fires at ~95% raw (≈47% of its
+    /// limit) — well below saturation.
+    ///
+    /// When the container has an explicit limit (`cpu_limit_cores`), the ceiling
+    /// is `limit * 100` raw percent. With no limit set there is no fixed ceiling,
+    /// so we normalise per-core (ceiling = 100% raw = one core saturated); this
+    /// keeps the threshold meaningful for uncapped containers without firing the
+    /// instant a container exceeds a single core's worth of legitimate work —
+    /// callers that want host-relative behaviour should special-case `None`.
+    pub fn cpu_utilization_percent(&self) -> f64 {
+        let ceiling_cores = match self.cpu_limit_cores {
+            Some(cores) if cores > 0.0 => cores,
+            // No (or invalid) limit: treat one core as the reference ceiling.
+            _ => 1.0,
+        };
+        self.cpu_percent / ceiling_cores
     }
 }
 
@@ -655,6 +685,59 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn stats_with_cpu(cpu_percent: f64, cpu_limit_cores: Option<f64>) -> ContainerStats {
+        ContainerStats {
+            cpu_percent,
+            cpu_limit_cores,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_cpu_utilization_with_limit() {
+        // 2-core limit, container using 1.8 cores (180% raw) -> 90% of its limit.
+        let stats = stats_with_cpu(180.0, Some(2.0));
+        assert!((stats.cpu_utilization_percent() - 90.0).abs() < 1e-9);
+
+        // The whole point of the bugfix: 95% raw on a 2-core limit is only ~47%
+        // utilised and must NOT cross a 90% threshold.
+        let stats = stats_with_cpu(95.0, Some(2.0));
+        assert!(stats.cpu_utilization_percent() < 90.0);
+        assert!((stats.cpu_utilization_percent() - 47.5).abs() < 1e-9);
+
+        // Fully saturating a 2-core limit (200% raw) reads exactly 100%.
+        let stats = stats_with_cpu(200.0, Some(2.0));
+        assert!((stats.cpu_utilization_percent() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cpu_utilization_fractional_limit() {
+        // 0.5-core limit, container using half a core (50% raw) -> 100% utilised.
+        let stats = stats_with_cpu(50.0, Some(0.5));
+        assert!((stats.cpu_utilization_percent() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cpu_utilization_no_limit_is_per_core() {
+        // No limit -> one core is the reference ceiling, so raw% == utilisation%.
+        let stats = stats_with_cpu(95.0, None);
+        assert!((stats.cpu_utilization_percent() - 95.0).abs() < 1e-9);
+
+        let stats = stats_with_cpu(250.0, None);
+        assert!((stats.cpu_utilization_percent() - 250.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cpu_utilization_zero_or_invalid_limit_falls_back_to_one_core() {
+        // A zero/negative limit is treated as "no limit" (one-core ceiling)
+        // rather than dividing by zero.
+        let stats = stats_with_cpu(120.0, Some(0.0));
+        assert!((stats.cpu_utilization_percent() - 120.0).abs() < 1e-9);
+
+        let stats = stats_with_cpu(120.0, Some(-1.0));
+        assert!((stats.cpu_utilization_percent() - 120.0).abs() < 1e-9);
+    }
 
     #[test]
     fn test_build_request_creation() {

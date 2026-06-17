@@ -5,8 +5,52 @@ use std::time::Duration;
 use temps_config::ServerConfig;
 use temps_core::CookieCrypto;
 use temps_database::DbConnection;
+use temps_proxy::on_demand::{ContainerLifecycle, OnDemandManager};
 use temps_proxy::ProxyShutdownSignal;
 use tracing::{debug, error, info, warn};
+
+/// Outcome of comparing the running proxy binary version against the console
+/// version recorded in settings (ADR-017 Phase 3). Pure/total — never panics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkewStatus {
+    /// Proxy and console report the same version tag.
+    Match,
+    /// Versions differ — schema-skew risk during a rolling upgrade.
+    Skew { proxy: String, console: String },
+    /// Console version not recorded (absent/None/empty) — cannot compare.
+    Unknown,
+}
+
+/// Compare the proxy's binary version against the console's recorded version.
+///
+/// Total function: `None` (or empty/whitespace-only) console → `Unknown`;
+/// equal tags → `Match`; otherwise → `Skew`. Comparison is exact string
+/// equality on the already-normalized tags produced by
+/// [`crate::commands::upgrade::current_version_tag`] (both processes are the
+/// same binary family, so the tag formats are identical). Surrounding
+/// whitespace is trimmed defensively. No indexing, no unwrap, no parse —
+/// arbitrary/garbage input cannot panic.
+pub fn compare_versions(proxy: &str, console: Option<&str>) -> SkewStatus {
+    match console {
+        None => SkewStatus::Unknown,
+        Some(console) => {
+            let p = proxy.trim();
+            let c = console.trim();
+            if c.is_empty() {
+                // Treat an empty recorded version as "not recorded" rather than
+                // a skew, to avoid a false alarm if some path ever writes `""`.
+                SkewStatus::Unknown
+            } else if p == c {
+                SkewStatus::Match
+            } else {
+                SkewStatus::Skew {
+                    proxy: p.to_string(),
+                    console: c.to_string(),
+                }
+            }
+        }
+    }
+}
 
 /// Shutdown signal implementation for Ctrl+C with resource cleanup and timeout
 struct CtrlCShutdownSignal {
@@ -207,7 +251,43 @@ impl ProxyCommand {
             );
 
             match config_service.get_settings().await {
-                Ok(settings) => Ok::<Option<String>, anyhow::Error>(Some(settings.preview_domain)),
+                Ok(settings) => {
+                    // ADR-017 Phase 3: version-skew detection. The console records
+                    // its binary version on startup; warn if this proxy's binary
+                    // differs (during a rolling upgrade the proxy may read tables a
+                    // newer console has already migrated — schema-skew risk).
+                    // Best-effort: this only logs and never aborts startup.
+                    let proxy_version = crate::commands::upgrade::current_version_tag();
+                    match compare_versions(&proxy_version, settings.console_version.as_deref()) {
+                        SkewStatus::Match => {
+                            info!(
+                                proxy_version = %proxy_version,
+                                "Version check: proxy and console both on {}",
+                                proxy_version
+                            );
+                        }
+                        SkewStatus::Skew { proxy, console } => {
+                            warn!(
+                                proxy_version = %proxy,
+                                console_version = %console,
+                                "VERSION SKEW: this proxy ({}) differs from the console ({}). \
+                                 During a rolling upgrade the proxy may read tables a newer \
+                                 console has already migrated — schema-skew risk. Upgrade the \
+                                 proxy to match the console.",
+                                proxy, console
+                            );
+                        }
+                        SkewStatus::Unknown => {
+                            debug!(
+                                proxy_version = %proxy_version,
+                                "Version check: console version not recorded yet; \
+                                 skipping skew detection (proxy on {})",
+                                proxy_version
+                            );
+                        }
+                    }
+                    Ok::<Option<String>, anyhow::Error>(Some(settings.preview_domain))
+                }
                 Err(e) => {
                     warn!("Failed to fetch preview_domain from settings: {}, using default 'localhost'", e);
                     Ok(Some("localhost".to_string()))
@@ -239,6 +319,82 @@ impl ProxyCommand {
             self.database_url.clone(),
             queue.clone(),
         ));
+
+        // ── On-demand / scale-to-zero (ADR-017 Phase 2) ──
+        //
+        // In the split topology the proxy process — NOT the console — owns the
+        // OnDemandManager: it watches request activity on the hot path, sleeps
+        // idle containers, and wakes them on the first request. Containers run on
+        // the proxy's host, so it talks to the local Docker socket directly.
+        //
+        // Best-effort: if Docker is unavailable, on-demand is disabled and the
+        // proxy still serves everything else. The manager and the sleeping
+        // callback MUST be wired before `start_listening()` below, so the
+        // listener's initial load populates sleeping domains and on-demand
+        // configs on the very first pass (mirroring `temps serve`).
+        //
+        // Cross-process wake correctness: `do_wake` publishes ForceRouteReload on
+        // this process's queue AND fires raw PG `NOTIFY route_table_changes`. In
+        // split mode the deploy/wake state lives in the DB; this proxy's own
+        // RouteTableListener (started below) observes the NOTIFY, reloads the
+        // table, and the sleeping callback calls `notify_route_reloaded()`. The
+        // wake caller's `wait_for_route_reload` then unblocks — and the bounded
+        // re-resolve loop is the correctness guarantee if the signal is missed.
+        let on_demand_manager: Option<Arc<OnDemandManager>> = {
+            let docker = rt.block_on(async {
+                let docker = bollard::Docker::connect_with_defaults()
+                    .map_err(|e| anyhow::anyhow!("Docker connect failed: {}", e))?;
+                docker
+                    .ping()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Docker ping failed: {}", e))?;
+                Ok::<_, anyhow::Error>(docker)
+            });
+            match docker {
+                Ok(docker) => {
+                    let docker_runtime = temps_deployer::docker::DockerRuntime::new(
+                        Arc::new(docker),
+                        true,
+                        "temps".to_string(),
+                    );
+                    let adapter = crate::commands::serve::proxy::ContainerLifecycleAdapter::new(
+                        Arc::new(docker_runtime) as Arc<dyn temps_deployer::ContainerDeployer>,
+                    );
+                    Some(Arc::new(OnDemandManager::new(
+                        db.clone(),
+                        Arc::new(adapter) as Arc<dyn ContainerLifecycle>,
+                        queue.clone(),
+                        // Standalone proxy on the control-plane host: locally
+                        // deployed containers carry node_id=NULL (treated as
+                        // local); remote-worker containers are skipped. Same
+                        // semantics as `temps serve`. See issue #126.
+                        None,
+                    )))
+                }
+                Err(e) => {
+                    warn!(
+                        "Docker not available — on-demand scale-to-zero wake is disabled \
+                         for this proxy: {}",
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
+        // Register the sleeping-domain callback on the route table BEFORE the
+        // listener's initial load, so sleeping domains + on-demand configs are
+        // populated on the first pass and `notify_route_reloaded()` fires after
+        // every subsequent reload (this is what `wait_for_route_reload` waits on
+        // after a wake). Mirrors the wiring in `temps serve`.
+        if let Some(ref on_demand_manager) = on_demand_manager {
+            register_on_demand_sleeping_callback(&route_table, Arc::clone(on_demand_manager));
+
+            // Background idle sweep: stops idle containers via the local Docker
+            // socket. Only this process runs it in split mode — the console does
+            // not instantiate an OnDemandManager.
+            on_demand_manager.start_sweep_task(Duration::from_secs(60));
+        }
 
         // Start route table listener
         info!("Starting route table listener...");
@@ -276,6 +432,39 @@ impl ProxyCommand {
         // start() calls tokio::spawn, so it must run inside the runtime context.
         rt.block_on(async { route_reload_subscriber.start() });
 
+        // Wire the admin gate from boot-time config (env vars take precedence,
+        // else the `settings` DB row). This 404s requests to admin/management
+        // routes that fall outside the allowlist before they ever reach the
+        // console listener — the same network-layer enforcement `temps serve`
+        // gives the in-process proxy. We only need the resolved handle here, not
+        // the full `AdminGateService` (which exists to back the console's
+        // persist API). `new` fails CLOSED on a DB error, so a broken settings
+        // row refuses to boot rather than opening the gate.
+        //
+        // NOTE: this is boot-time config only. Live admin-gate edits made
+        // through the console's API swap the console's in-process handle but do
+        // NOT yet propagate to this separate proxy process — operators must
+        // restart `temps proxy` to pick up a changed allowlist. Cross-process
+        // admin-gate refresh is tracked as ADR-017 Phase 3.
+        let admin_gate_handle = match rt.block_on(
+            crate::commands::serve::admin_gate_service::AdminGateService::new(
+                db.clone(),
+                &config.admin_allowed_ips,
+                &config.admin_allowed_hosts,
+                config.admin_trust_forwarded_for,
+            ),
+        ) {
+            Ok((_service, handle)) => Some(handle),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to initialize admin gate: {}. Refusing to start the proxy with \
+                     an unresolved gate. Fix the `settings` row or set TEMPS_ADMIN_ALLOWED_IPS / \
+                     TEMPS_ADMIN_ALLOWED_HOSTS.",
+                    e
+                ));
+            }
+        };
+
         let shutdown_signal = Box::new(CtrlCShutdownSignal::new(
             Duration::from_secs(30),
             db.clone(),
@@ -290,8 +479,8 @@ impl ProxyCommand {
             route_table,
             shutdown_signal,
             config.clone(),
-            None, // on-demand not available in standalone proxy mode
-            None, // admin gate not wired in standalone proxy mode
+            on_demand_manager, // wired in split mode (ADR-017 Phase 2); None if Docker unavailable
+            admin_gate_handle,
         ) {
             Ok(_) => {
                 info!("Proxy server exited");
@@ -302,5 +491,217 @@ impl ProxyCommand {
                 Err(anyhow::anyhow!("Failed to start proxy server: {}", e))
             }
         }
+    }
+}
+
+/// Build the on-demand sleeping-domain callback for the standalone proxy's
+/// [`OnDemandManager`].
+///
+/// On every route-table load the callback rebuilds the manager's sleeping-domain
+/// index and on-demand config set from the freshly loaded routes, then fires
+/// `notify_route_reloaded()` to release any request parked in the wake path
+/// (`wait_for_route_reload`). This is the split-mode equivalent of the wiring in
+/// `temps serve`. Split out from registration so the closure can be unit-tested
+/// directly, without standing up a Pingora server or firing it through a real
+/// route-table load.
+fn build_on_demand_sleeping_callback(
+    manager: Arc<OnDemandManager>,
+) -> temps_routes::route_table::OnSleepingCallback {
+    Arc::new(move |entries, on_demand_configs| {
+        manager.clear_sleeping_domains();
+        for entry in entries {
+            manager.register_sleeping_domain(
+                entry.domain.clone(),
+                temps_proxy::on_demand::SleepingEnvironmentInfo {
+                    environment_id: entry.environment_id,
+                    project_id: entry.project_id,
+                    deployment_id: entry.deployment_id,
+                    wake_timeout_seconds: entry.wake_timeout_seconds,
+                },
+            );
+        }
+        for config in on_demand_configs {
+            manager.register_on_demand_environment(
+                config.environment_id,
+                config.idle_timeout_seconds,
+                config.wake_timeout_seconds,
+            );
+        }
+        manager.notify_route_reloaded();
+    })
+}
+
+/// Install the on-demand sleeping-domain callback on `route_table`. Must be
+/// registered BEFORE the route-table listener's first load so the initial load
+/// populates on-demand state.
+fn register_on_demand_sleeping_callback(
+    route_table: &Arc<temps_proxy::CachedPeerTable>,
+    manager: Arc<OnDemandManager>,
+) {
+    route_table.set_on_sleeping_callback(build_on_demand_sleeping_callback(manager));
+}
+
+#[cfg(test)]
+mod on_demand_callback_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use temps_proxy::on_demand::OnDemandError;
+    use temps_routes::route_table::{OnDemandConfigEntry, SleepingEnvironmentEntry};
+
+    /// A `ContainerLifecycle` that does nothing — these tests exercise the
+    /// callback's bookkeeping (registering sleeping domains + configs), not
+    /// container I/O, so the lifecycle is never actually called.
+    struct NoopLifecycle;
+
+    #[async_trait]
+    impl ContainerLifecycle for NoopLifecycle {
+        async fn start_container(&self, _id: &str) -> Result<(), OnDemandError> {
+            Ok(())
+        }
+        async fn stop_container(&self, _id: &str) -> Result<(), OnDemandError> {
+            Ok(())
+        }
+        async fn is_container_healthy(&self, _id: &str) -> Result<bool, OnDemandError> {
+            Ok(true)
+        }
+    }
+
+    fn test_manager() -> Arc<OnDemandManager> {
+        let db = Arc::new(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let (queue, _rx): (Arc<dyn temps_core::JobQueue>, _) =
+            temps_queue::BroadcastQueueService::create_job_queue_arc_with_receiver(16);
+        Arc::new(OnDemandManager::new(
+            db,
+            Arc::new(NoopLifecycle) as Arc<dyn ContainerLifecycle>,
+            queue,
+            None,
+        ))
+    }
+
+    fn sleeping_entry(domain: &str, env_id: i32) -> SleepingEnvironmentEntry {
+        SleepingEnvironmentEntry {
+            domain: domain.to_string(),
+            environment_id: env_id,
+            project_id: 7,
+            deployment_id: 100 + env_id,
+            wake_timeout_seconds: 45,
+        }
+    }
+
+    #[test]
+    fn callback_registers_sleeping_domains_for_wake_lookup() {
+        // This is the heart of split-mode wake-on-request: after a route load,
+        // the proxy must be able to map an incoming hostname to a sleeping
+        // environment so the request hot path can wake it.
+        let manager = test_manager();
+        let callback = build_on_demand_sleeping_callback(manager.clone());
+
+        callback(
+            vec![sleeping_entry("app.example.com", 1)],
+            vec![OnDemandConfigEntry {
+                environment_id: 1,
+                idle_timeout_seconds: 300,
+                wake_timeout_seconds: 45,
+            }],
+        );
+
+        let found = manager
+            .get_sleeping_environment("app.example.com")
+            .expect("registered sleeping domain must be resolvable");
+        assert_eq!(found.environment_id, 1);
+        assert_eq!(found.project_id, 7);
+        assert_eq!(found.deployment_id, 101);
+        assert_eq!(found.wake_timeout_seconds, 45);
+
+        // A domain that was never registered must not resolve.
+        assert!(manager
+            .get_sleeping_environment("unknown.example.com")
+            .is_none());
+    }
+
+    #[test]
+    fn callback_clears_stale_sleeping_domains_on_reload() {
+        // Each load rebuilds the index from scratch: an environment that woke up
+        // (and so is absent from the next load's sleeping set) must no longer be
+        // resolvable as sleeping, or the proxy would try to wake an already-awake
+        // env on the next request.
+        let manager = test_manager();
+        let callback = build_on_demand_sleeping_callback(manager.clone());
+
+        // First load: two sleeping envs.
+        callback(
+            vec![
+                sleeping_entry("a.example.com", 1),
+                sleeping_entry("b.example.com", 2),
+            ],
+            vec![],
+        );
+        assert!(manager.get_sleeping_environment("a.example.com").is_some());
+        assert!(manager.get_sleeping_environment("b.example.com").is_some());
+
+        // Second load: only `b` is still sleeping (`a` woke up). `a` must be gone.
+        callback(vec![sleeping_entry("b.example.com", 2)], vec![]);
+        assert!(
+            manager.get_sleeping_environment("a.example.com").is_none(),
+            "a domain absent from the latest load must be cleared"
+        );
+        assert!(manager.get_sleeping_environment("b.example.com").is_some());
+    }
+}
+
+#[cfg(test)]
+mod skew_tests {
+    use super::{compare_versions, SkewStatus};
+
+    #[test]
+    fn test_compare_versions_match() {
+        assert_eq!(
+            compare_versions("v0.1.0", Some("v0.1.0")),
+            SkewStatus::Match
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_skew() {
+        assert_eq!(
+            compare_versions("v0.1.0", Some("v0.2.0")),
+            SkewStatus::Skew {
+                proxy: "v0.1.0".into(),
+                console: "v0.2.0".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_absent_is_unknown() {
+        assert_eq!(compare_versions("v0.1.0", None), SkewStatus::Unknown);
+    }
+
+    #[test]
+    fn test_compare_versions_empty_console_is_unknown() {
+        assert_eq!(compare_versions("v0.1.0", Some("")), SkewStatus::Unknown);
+        assert_eq!(compare_versions("v0.1.0", Some("   ")), SkewStatus::Unknown);
+    }
+
+    #[test]
+    fn test_compare_versions_trims_whitespace_match() {
+        assert_eq!(
+            compare_versions("v0.1.0", Some(" v0.1.0 ")),
+            SkewStatus::Match
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_garbage_does_not_panic() {
+        // Total: arbitrary bytes must not panic, must classify as Skew/Match.
+        assert_eq!(
+            compare_versions("????", Some("v0.1.0")),
+            SkewStatus::Skew {
+                proxy: "????".into(),
+                console: "v0.1.0".into()
+            }
+        );
+        assert_eq!(compare_versions("", Some("")), SkewStatus::Unknown);
     }
 }

@@ -550,18 +550,20 @@ impl EnvironmentService {
         // Update deployment config with new resource settings
         let mut deployment_config = environment.deployment_config.clone().unwrap_or_default();
 
-        // Update only the fields that are provided
-        if settings.cpu_request.is_some() {
-            deployment_config.cpu_request = settings.cpu_request;
+        // Update only the fields that are provided. These four use double-Option
+        // semantics: `Some(inner)` means "apply" (inner `None` clears the column →
+        // "no limit", inner `Some(n)` sets it); outer `None` means "leave unchanged".
+        if let Some(cpu_request) = settings.cpu_request {
+            deployment_config.cpu_request = cpu_request;
         }
-        if settings.cpu_limit.is_some() {
-            deployment_config.cpu_limit = settings.cpu_limit;
+        if let Some(cpu_limit) = settings.cpu_limit {
+            deployment_config.cpu_limit = cpu_limit;
         }
-        if settings.memory_request.is_some() {
-            deployment_config.memory_request = settings.memory_request;
+        if let Some(memory_request) = settings.memory_request {
+            deployment_config.memory_request = memory_request;
         }
-        if settings.memory_limit.is_some() {
-            deployment_config.memory_limit = settings.memory_limit;
+        if let Some(memory_limit) = settings.memory_limit {
+            deployment_config.memory_limit = memory_limit;
         }
         if settings.exposed_port.is_some() {
             deployment_config.exposed_port = settings.exposed_port;
@@ -647,6 +649,13 @@ impl EnvironmentService {
         active_model.branch = Set(settings.branch);
         if let Some(protected) = settings.protected {
             active_model.protected = Set(protected);
+        }
+        // attack_mode is a tri-state Option<Option<bool>> on the entity (not in
+        // deployment_config). `Some(inner)` applies the change: inner `None`
+        // clears the override (NULL → inherit project), inner `Some(b)` sets it.
+        // Outer `None` leaves the column unchanged.
+        if let Some(attack_mode) = settings.attack_mode {
+            active_model.attack_mode = Set(attack_mode);
         }
         active_model.updated_at = Set(chrono::Utc::now());
 
@@ -1130,6 +1139,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            attack_mode: None,
             last_activity_at: None,
         };
 
@@ -1174,6 +1184,7 @@ mod tests {
                     target_labels: None,
                     anti_affinity: None,
                     protected: None,
+                    attack_mode: None,
                     on_demand: None,
                     idle_timeout_seconds: None,
                     wake_timeout_seconds: None,
@@ -1213,6 +1224,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping,
+            attack_mode: None,
             last_activity_at: None,
         }
     }

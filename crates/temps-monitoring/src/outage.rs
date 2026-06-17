@@ -1122,6 +1122,7 @@ mod tests {
             is_preview: false,
             protected: false,
             sleeping: false,
+            attack_mode: None,
             last_activity_at: None,
         }
     }

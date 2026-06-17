@@ -2727,8 +2727,13 @@ impl ProxyHttp for LoadBalancer {
             let is_captcha_endpoint = ctx.path.starts_with("/api/_temps/captcha")
                 || ctx.path.starts_with("/api/__temps/temps_captcha_wasm");
 
-            // Check if attack mode is enabled (project-wide setting)
-            if !is_captcha_endpoint && project_ctx.project.attack_mode {
+            // Check if attack mode is enabled. The environment-level override
+            // (Option<bool>, NULL = inherit) falls back to the project-wide setting.
+            let effective_attack_mode = project_ctx
+                .environment
+                .attack_mode
+                .unwrap_or(project_ctx.project.attack_mode);
+            if !is_captcha_endpoint && effective_attack_mode {
                 // Attack mode REQUIRES HTTPS for JA4 fingerprinting
                 // Reject HTTP connections to prevent bot bypass
                 debug!(
