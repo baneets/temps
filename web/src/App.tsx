@@ -23,6 +23,7 @@ import { ProblemDetails } from './api/client'
 import { client } from './api/client/client.gen'
 import { Header } from './components/dashboard/Header'
 import AppSidebar from './components/dashboard/Sidebar'
+import { DiskSpaceAlert } from './components/alerts/DiskSpaceAlert'
 import { ProtectedLayout } from './components/layout/ProtectedLayout'
 import { SettingsLayout } from './components/settings/SettingsLayout'
 import { SidebarInset, SidebarProvider } from './components/ui/sidebar'
@@ -117,6 +118,9 @@ const AddDomain = lazy(() =>
 const DomainDetail = lazy(() =>
   import('./pages/DomainDetail').then((m) => ({ default: m.DomainDetail }))
 )
+const Certificates = lazy(() =>
+  import('./pages/Certificates').then((m) => ({ default: m.Certificates }))
+)
 const Backups = lazy(() =>
   import('./pages/Backups').then((m) => ({ default: m.Backups }))
 )
@@ -172,11 +176,6 @@ const EmailDetail = lazy(() =>
 const EmailDomainDetail = lazy(() =>
   import('./pages/EmailDomainDetail').then((m) => ({
     default: m.EmailDomainDetail,
-  }))
-)
-const ExternalConnectivitySetup = lazy(() =>
-  import('./pages/ExternalConnectivitySetup').then((m) => ({
-    default: m.ExternalConnectivitySetup,
   }))
 )
 const AuditLogs = lazy(() =>
@@ -355,6 +354,10 @@ const FullAppRoutes = () => {
           <AppSidebar />
         </ErrorBoundary>
         <SidebarInset>
+          {/* App-wide disk-space banner — sits above the header inside the
+              content column (to the right of the fixed sidebar, so it's never
+              clipped by it), full content width, on every page. */}
+          <DiskSpaceAlert />
           {/* Wrap header with independent error boundary */}
           <ErrorBoundary
             fallback={(error, _errorInfo, resetError) => (
@@ -451,6 +454,7 @@ const FullAppRoutes = () => {
                 <Route path="/domains" element={<Domains />} />
                 <Route path="/domains/add" element={<AddDomain />} />
                 <Route path="/domains/:id" element={<DomainDetail />} />
+                <Route path="/certificates" element={<Certificates />} />
                 <Route path="/storage" element={<Storage />} />
                 <Route path="/storage/create" element={<CreateService />} />
                 <Route path="/storage/import" element={<ImportService />} />
@@ -510,7 +514,6 @@ const FullAppRoutes = () => {
                 <Route path="/projects/:slug/*" element={<ProjectDetail />} />
                 {/* Utility */}
                 <Route path="/ip/:ip" element={<IpGeolocationDetail />} />
-                <Route path="/setup/connectivity" element={<ExternalConnectivitySetup />} />
                 {/* External plugin routes */}
                 <Route path="/plugins/:pluginName/*" element={<PluginPage />} />
                 <Route path="*" element={<NotFound />} />

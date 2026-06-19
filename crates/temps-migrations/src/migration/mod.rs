@@ -118,6 +118,9 @@ mod m20260603_000001_create_otel_trace_summaries;
 mod m20260609_000001_create_deployment_container_logs;
 mod m20260611_000001_change_log_deploy_id_to_integer;
 mod m20260615_000001_add_environment_attack_mode;
+mod m20260618_000001_create_on_demand_cert_attempts;
+mod m20260618_000002_add_domains_on_demand_backoff;
+mod m20260619_000001_add_settings_change_trigger;
 
 pub struct Migrator;
 
@@ -239,6 +242,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260609_000001_create_deployment_container_logs::Migration),
             Box::new(m20260611_000001_change_log_deploy_id_to_integer::Migration),
             Box::new(m20260615_000001_add_environment_attack_mode::Migration),
+            Box::new(m20260618_000001_create_on_demand_cert_attempts::Migration),
+            Box::new(m20260618_000002_add_domains_on_demand_backoff::Migration),
+            Box::new(m20260619_000001_add_settings_change_trigger::Migration),
         ]
     }
 }

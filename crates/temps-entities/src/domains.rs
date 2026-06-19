@@ -4,6 +4,20 @@ use sea_orm::{ActiveValue::Set, ConnectionTrait, DbErr};
 use serde::{Deserialize, Serialize};
 use temps_core::DBDateTime;
 
+/// Domain status: certificate present and serving normally.
+pub const STATUS_ACTIVE: &str = "active";
+
+/// Domain status: a valid certificate is still present and MUST keep being served,
+/// but the most recent renewal attempt failed. This is a degraded-but-serving state
+/// so operators can be alerted before the existing certificate actually expires.
+pub const STATUS_ACTIVE_RENEWAL_FAILED: &str = "active_renewal_failed";
+
+/// The set of domain statuses for which a stored certificate should be served by the
+/// proxy / synced to edge nodes. Any query that loads certificates for serving MUST
+/// filter on this set (not a bare `= "active"`), otherwise a domain with a valid cert
+/// whose renewal failed would silently stop serving HTTPS.
+pub const CERT_SERVING_STATUSES: [&str; 2] = [STATUS_ACTIVE, STATUS_ACTIVE_RENEWAL_FAILED];
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
 #[sea_orm(table_name = "domains")]
 pub struct Model {
@@ -23,6 +37,11 @@ pub struct Model {
     pub last_error_type: Option<String>,
     pub is_wildcard: bool,
     pub verification_method: String,
+    /// On-demand TLS negative cache (ADR-018 §4 Layer 2). When a hostname's
+    /// on-demand issuance fails, this is set to `now + exponential_delay`; the
+    /// proxy's `certificate_callback` refuses to re-enqueue a job for the same
+    /// hostname until this timestamp elapses. `None` means "no active backoff".
+    pub on_demand_backoff_until: Option<DBDateTime>,
     pub created_at: DBDateTime,
     pub updated_at: DBDateTime,
 }
