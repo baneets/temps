@@ -8,12 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.35] - 2026-06-19
+
+### Added
 - **`active_renewal_failed` domain status.** A domain whose certificate is still
   valid but whose last renewal attempt failed now enters a distinct
   degraded-but-serving state instead of being silently disabled. The proxy keeps
   serving the existing certificate (the cert-serving queries match a new
   `CERT_SERVING_STATUSES` set), and the console/CLI surface a "renewal failed"
   warning so operators can fix the renewal before the certificate expires.
+- **Monitoring is on by default for new services.** Creating an external service
+  now seeds the engine's default alert rules (idempotent, all engines) and, for
+  OTLP-push engines (rustfs/s3), provisions and applies the OTLP ingest key at
+  creation. All monitoring setup is best-effort and never fails service creation.
 
 ### Changed
 -
@@ -37,6 +53,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in one schema made the guard skip the `ALTER` in another, and the follow-up
   `CREATE INDEX` then failed with `column "service_id" does not exist`. The
   guards now filter on `table_schema = current_schema()`.
+- **Uptime monitors no longer report a false outage on local installs.** When
+  `external_url` is unset, the monitor target URL is now built against the proxy
+  HTTP listener port instead of defaulting to `https`/:443 (which was
+  unreachable and surfaced as a "Major Outage").
+- **Deploy cancellations and 4xx health-check noise are treated correctly.** A
+  cancelled deployment is no longer recorded as a failure, and 4xx responses
+  during health probing are no longer misclassified as outages (#136).
+
+### Security
+- **On-demand HTTP-01 TLS issuance hardening (ADR-018).** The custom ACME-client
+  path was hardened per security review as part of the on-demand certificate
+  issuance feature.
 
 
 ## [0.1.0-beta.34] - 2026-06-17
