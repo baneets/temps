@@ -212,6 +212,21 @@ struct OnDemandZoneInputs {
     external_url: Option<String>,
 }
 
+/// Derive the console host (`console.<zone>`) for the gate's console exemption.
+///
+/// On a sslip.io install the console is reachable at `console.<zone>` (the
+/// deploy-script convention) but is served as a fall-through, so it has no
+/// `CachedPeerTable` route. The gate exempts exactly this host from the
+/// cert-eligible-route check (it is still subject to the in-zone check), so
+/// `quick` mode gets console HTTPS on demand. Returns `None` for an empty zone.
+fn derive_console_host(zone: &str) -> Option<String> {
+    let zone = zone.trim().trim_end_matches('.').to_ascii_lowercase();
+    if zone.is_empty() {
+        return None;
+    }
+    Some(format!("console.{zone}"))
+}
+
 /// Build the [`OnDemandCertManager`] for a proxy process when on-demand TLS is
 /// enabled, or `None` when the feature is off / cannot be safely enabled.
 ///
@@ -289,6 +304,15 @@ pub async fn build_on_demand_cert_manager(
         configured_email: email.clone(),
     });
 
+    // Derive the console host so the gate exempts it from the cert-eligible
+    // route check. On a sslip.io install the console is served at
+    // `console.<zone>` (the deploy-script convention; the proxy itself serves
+    // the console as a fall-through for any unmatched host, so it has no route
+    // table entry). The console is in-zone, stable, and single — exactly the
+    // shape on-demand TLS should cover — so `quick` mode gets console HTTPS
+    // without the eager HTTP-01 step the old `testing` mode performed.
+    let console_host = derive_console_host(&zone);
+
     let manager = OnDemandCertManager::new(
         OnDemandCertConfig {
             zone: zone.clone(),
@@ -297,6 +321,7 @@ pub async fn build_on_demand_cert_manager(
             email: email.unwrap_or_default(),
             max_concurrent: cfg.max_concurrent.max(1),
             hourly_cap: cfg.hourly_cap.max(1),
+            console_host,
         },
         route_table,
         provisioner,
@@ -428,6 +453,28 @@ mod tests {
             external_url: Some("https://paas.example.com".to_string()),
         });
         assert_eq!(zone, None);
+    }
+
+    #[test]
+    fn console_host_derived_from_zone() {
+        assert_eq!(
+            derive_console_host("1.2.3.4.sslip.io").as_deref(),
+            Some("console.1.2.3.4.sslip.io")
+        );
+    }
+
+    #[test]
+    fn console_host_trims_and_lowercases_zone() {
+        assert_eq!(
+            derive_console_host("  5.6.7.8.SSLIP.IO. ").as_deref(),
+            Some("console.5.6.7.8.sslip.io")
+        );
+    }
+
+    #[test]
+    fn console_host_none_for_empty_zone() {
+        assert_eq!(derive_console_host("   "), None);
+        assert_eq!(derive_console_host(""), None);
     }
 
     #[test]
