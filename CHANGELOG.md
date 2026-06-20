@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -
 
 
+## [0.1.0-beta.36] - 2026-06-20
+
+### Fixed
+- **Traces page no longer crashes on traces with an empty service name.** A
+  trace whose root span never set `service.name` arrives with an empty
+  `service_name`, which flowed into the Service filter dropdown as a Radix
+  `<SelectItem value="">` and threw ("must have a value prop that is not an
+  empty string"), taking down the whole Traces page via the error boundary.
+  Empty/missing service names are now filtered out of the dropdown, and the
+  trace table shows `(unnamed)`/`unknown` fallbacks instead of blank cells.
+
+
 ## [0.1.0-beta.35] - 2026-06-19
 
 ### Added
