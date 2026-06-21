@@ -183,6 +183,14 @@ pub struct SetupCommand {
     #[arg(long, default_value = "false", env = "LETSENCRYPT_STAGING")]
     pub letsencrypt_staging: bool,
 
+    /// Contact email for Let's Encrypt / ACME certificate issuance. Stored as
+    /// `letsencrypt.email` and used as the ACME account contact for all cert
+    /// provisioning (manual, HTTP-01, and on-demand). There is no fallback: if
+    /// this is unset, certificate issuance has no contact and will not proceed,
+    /// so installers that enable TLS must supply a real address.
+    #[arg(long, env = "LETSENCRYPT_EMAIL")]
+    pub letsencrypt_email: Option<String>,
+
     /// DNS propagation wait time in seconds (default: 60)
     #[arg(long, default_value = "60")]
     pub dns_propagation_wait: u32,
@@ -1179,6 +1187,7 @@ async fn update_app_settings(
     db: &sea_orm::DatabaseConnection,
     preview_domain: &str,
     external_url: Option<&str>,
+    letsencrypt_email: Option<&str>,
 ) -> anyhow::Result<()> {
     use chrono::Utc;
 
@@ -1196,6 +1205,18 @@ async fn update_app_settings(
     // Update external_url if provided
     if let Some(url) = external_url {
         app_settings.external_url = Some(url.to_string());
+    }
+
+    // Set the Let's Encrypt / ACME contact email when provided. This is the
+    // single source of truth for the ACME account contact — `get_acme_email`
+    // returns exactly this value with no fallback, so a real address here is
+    // what makes certificate issuance work. An empty string is ignored so a
+    // re-run without the flag does not wipe a previously-configured address.
+    if let Some(email) = letsencrypt_email {
+        let email = email.trim();
+        if !email.is_empty() {
+            app_settings.letsencrypt.email = Some(email.to_string());
+        }
     }
 
     // ADR-018 §6: auto-enable on-demand HTTP-01 TLS for sslip.io installs.
@@ -1814,6 +1835,7 @@ impl SetupCommand {
                 db.as_ref(),
                 &preview_domain,
                 self.external_url.as_deref(),
+                self.letsencrypt_email.as_deref(),
             ))?;
             print_success(&format!(
                 "Preview domain set to: {}",
@@ -1939,6 +1961,7 @@ impl SetupCommand {
                 db.as_ref(),
                 &preview_domain,
                 self.external_url.as_deref(),
+                self.letsencrypt_email.as_deref(),
             ))?;
             print_success(&format!(
                 "Preview domain set to: {}",
@@ -2154,6 +2177,7 @@ impl SetupCommand {
                 db.as_ref(),
                 &preview_domain,
                 self.external_url.as_deref(),
+                self.letsencrypt_email.as_deref(),
             ))?;
             print_success(&format!(
                 "Preview domain set to: {}",
@@ -2195,6 +2219,7 @@ impl SetupCommand {
                 db.as_ref(),
                 &preview_domain,
                 self.external_url.as_deref(),
+                self.letsencrypt_email.as_deref(),
             ))?;
             print_success(&format!(
                 "Preview domain set to: {}",
@@ -2641,6 +2666,7 @@ impl SetupCommand {
             db.as_ref(),
             &preview_domain,
             self.external_url.as_deref(),
+            self.letsencrypt_email.as_deref(),
         ))?;
         print_success(&format!(
             "Preview domain set to: {}",

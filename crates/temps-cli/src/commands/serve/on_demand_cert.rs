@@ -46,40 +46,27 @@ const STATE_SEED_LOOKBACK_HOURS: i64 = 24;
 /// `ContainerLifecycleAdapter` pattern for scale-to-zero).
 struct DomainServiceProvisioner {
     domain_service: Arc<DomainService>,
-    db: Arc<DbConnection>,
     /// ACME contact email resolved at startup from `letsencrypt.email` settings
     /// (the manager re-passes it per call; resolving once at boot avoids a
-    /// settings round-trip on every issuance). Empty falls back to the first
-    /// user's email inside [`Self::resolve_email`].
+    /// settings round-trip on every issuance). There is no fallback: if
+    /// `letsencrypt.email` is unset, [`Self::resolve_email`] returns empty and
+    /// issuance fails cleanly with "no ACME contact email configured" rather
+    /// than substituting a system/placeholder address.
     configured_email: Option<String>,
 }
 
 impl DomainServiceProvisioner {
-    /// Resolve the ACME account email: the configured `letsencrypt.email`, else
-    /// the first user's email, else a last-resort fallback. Mirrors
-    /// `TlsService::get_acme_email` so on-demand uses the same contact as manual
-    /// provisioning.
+    /// Resolve the ACME account email. The configured `letsencrypt.email` is the
+    /// single source of truth — there is NO fallback to the first user's email
+    /// or a placeholder, because those produced invalid contacts (e.g. the
+    /// `system@localhost` system user). Returns empty when unset; the caller
+    /// (`provision_on_demand`) treats empty as a clean, logged failure.
     async fn resolve_email(&self) -> String {
-        if let Some(email) = self
-            .configured_email
+        self.configured_email
             .as_ref()
-            .map(|e| e.trim())
+            .map(|e| e.trim().to_string())
             .filter(|e| !e.is_empty())
-        {
-            return email.to_string();
-        }
-
-        use sea_orm::QueryOrder;
-        use temps_entities::users;
-        if let Ok(Some(user)) = users::Entity::find()
-            .order_by_asc(users::Column::Id)
-            .one(self.db.as_ref())
-            .await
-        {
-            return user.email;
-        }
-
-        "system@temps.dev".to_string()
+            .unwrap_or_default()
     }
 }
 
@@ -282,6 +269,18 @@ pub async fn build_on_demand_cert_manager(
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty());
 
+    // Warn loudly at boot if on-demand TLS is enabled but has no ACME contact:
+    // every issuance will fail cleanly ("no ACME contact email configured"), so
+    // the console/app HTTPS will never come up. There is no fallback by design.
+    if email.is_none() {
+        warn!(
+            "on-demand TLS is enabled but no Let's Encrypt contact email is set \
+             (settings.letsencrypt.email is empty). Certificate issuance cannot \
+             proceed — set a contact email (e.g. re-run `temps setup \
+             --letsencrypt-email you@example.com`) to enable HTTPS."
+        );
+    }
+
     // Build the DomainService that drives the ACME flow. Reuses the same
     // repository + LetsEncryptProvider construction as the domains plugin so
     // on-demand issuance is byte-for-byte the same code path as manual
@@ -300,7 +299,6 @@ pub async fn build_on_demand_cert_manager(
 
     let provisioner: Arc<dyn OnDemandCertProvisioner> = Arc::new(DomainServiceProvisioner {
         domain_service,
-        db: db.clone(),
         configured_email: email.clone(),
     });
 
