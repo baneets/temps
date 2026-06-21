@@ -2,7 +2,7 @@
 //!
 //! Executes deployment jobs as workflows using the WorkflowExecutor
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use std::sync::Arc;
 use temps_core::{
     Job, JobQueue, WorkflowBuilder, WorkflowCancellationProvider, WorkflowError, WorkflowExecutor,
@@ -1932,12 +1932,30 @@ impl WorkflowExecutionService {
     ) -> Result<Option<String>, WorkflowExecutionError> {
         use temps_entities::deployment_containers;
 
-        // Find ALL previous deployments in this environment (excluding the current one)
-        // that have active (non-deleted) containers
+        // Find previous deployments in this environment (excluding the current one).
+        //
+        // Scope this to active states and cap the result, newest-first. This is a
+        // safety net that runs in addition to MarkDeploymentCompleteJob's own
+        // teardown (which also flips torn-down deployments to "stopped"), so the
+        // set of candidates here shrinks to truly-active deployments instead of
+        // re-scanning the whole environment history on every deploy. Without
+        // these bounds this `.all()` grows unbounded with deployment count and
+        // tears down containers sequentially — minutes of work on busy
+        // environments. "failed"/"stopped" are excluded to preserve history and
+        // avoid re-processing already-stopped deployments.
+        const MAX_TEARDOWN_DEPLOYMENTS: u64 = 25;
         let previous_deployments = deployments::Entity::find()
             .filter(deployments::Column::ProjectId.eq(project_id))
             .filter(deployments::Column::EnvironmentId.eq(environment_id))
             .filter(deployments::Column::Id.ne(current_deployment_id)) // Exclude current deployment
+            .filter(deployments::Column::State.is_in(vec![
+                "pending",
+                "running",
+                "built",
+                "completed",
+            ]))
+            .order_by_desc(deployments::Column::CreatedAt)
+            .limit(MAX_TEARDOWN_DEPLOYMENTS)
             .all(self.db.as_ref())
             .await?;
 
