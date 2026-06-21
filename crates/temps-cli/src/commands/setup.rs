@@ -1219,18 +1219,19 @@ async fn update_app_settings(
         }
     }
 
-    // ADR-018 §6: auto-enable on-demand HTTP-01 TLS for sslip.io installs.
-    // QuickStart names every host `<app>.<ip>.sslip.io`, which can only get
-    // HTTPS via per-host HTTP-01 issued lazily on first request. Turn the
-    // feature on (with the sslip.io zone as the allowlist) so the console and
-    // app aliases get certs automatically — but skip the loopback case
-    // (`127.0.0.1.sslip.io`, local mode), where Let's Encrypt cannot reach the
-    // box for the challenge. The proxy applies its own authoritative loopback
-    // guard at startup regardless; this just avoids advertising a feature that
-    // can never fire in local mode.
-    if is_sslip_zone(preview_domain) && !is_loopback_zone(preview_domain) {
+    // ADR-018 §6: auto-enable on-demand HTTP-01 TLS for any publicly-reachable
+    // install. Every app/console host under the base domain
+    // (`<app>.<preview_domain>`) then gets HTTPS via per-host HTTP-01 issued
+    // lazily on first request, with the base domain as the allowlist zone. This
+    // is not specific to sslip.io — it applies equally to a real wildcard domain
+    // (e.g. `apps.example.com`). The only case we skip is loopback / local mode
+    // (`127.0.0.1.sslip.io`, `localhost`), where Let's Encrypt cannot reach the
+    // box for the challenge so issuance could never succeed. The proxy applies
+    // its own authoritative loopback guard at startup regardless; this just
+    // avoids advertising a feature that can never fire in local mode.
+    if !preview_domain.trim().is_empty() && !is_loopback_zone(preview_domain) {
         app_settings.on_demand_tls.enabled = true;
-        app_settings.on_demand_tls.zone = Some(preview_domain.to_ascii_lowercase());
+        app_settings.on_demand_tls.zone = Some(preview_domain.trim().to_ascii_lowercase());
     }
 
     // Mark setup as complete so the web onboarding wizard knows to skip
@@ -1267,18 +1268,11 @@ fn extract_preview_domain(wildcard_domain: &str) -> String {
     wildcard_domain.trim_start_matches("*.").to_string()
 }
 
-/// True if `zone` is a sslip.io base domain (e.g. `1.2.3.4.sslip.io`). Used to
-/// gate ADR-018 §6 on-demand-TLS auto-enablement to sslip.io installs.
-fn is_sslip_zone(zone: &str) -> bool {
-    zone.trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
-        .ends_with("sslip.io")
-}
-
-/// True if `zone` is a loopback sslip.io zone (`127.0.0.1.sslip.io`,
-/// `localhost`, …) — local mode, where Let's Encrypt cannot reach the box for
-/// the HTTP-01 challenge, so on-demand TLS would never fire.
+/// True if `zone` is a loopback zone (`127.0.0.1.sslip.io`, `localhost`, …) —
+/// local mode, where Let's Encrypt cannot reach the box for the HTTP-01
+/// challenge, so on-demand TLS would never fire. This is the only condition
+/// that gates ADR-018 §6 on-demand-TLS auto-enablement; any other (non-empty,
+/// non-loopback) base domain qualifies, regardless of whether it is sslip.io.
 fn is_loopback_zone(zone: &str) -> bool {
     let z = zone.trim().trim_end_matches('.').to_ascii_lowercase();
     z == "localhost"
@@ -2828,16 +2822,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_sslip_zone() {
-        assert!(is_sslip_zone("1.2.3.4.sslip.io"));
-        assert!(is_sslip_zone("127.0.0.1.sslip.io"));
-        assert!(is_sslip_zone("1.2.3.4.SSLIP.IO."));
-        assert!(!is_sslip_zone("example.com"));
-        assert!(!is_sslip_zone("apps.mycompany.com"));
-        assert!(!is_sslip_zone(""));
-    }
-
-    #[test]
     fn test_is_loopback_zone() {
         assert!(is_loopback_zone("127.0.0.1.sslip.io"));
         assert!(is_loopback_zone("localhost"));
@@ -2849,12 +2833,16 @@ mod tests {
 
     #[test]
     fn test_on_demand_tls_auto_enable_decision() {
-        // The exact condition used in update_app_settings: public sslip.io → on;
-        // loopback sslip.io and custom domains → off.
-        let should_enable = |zone: &str| is_sslip_zone(zone) && !is_loopback_zone(zone);
-        assert!(should_enable("1.2.3.4.sslip.io"));
-        assert!(!should_enable("127.0.0.1.sslip.io")); // local mode
-        assert!(!should_enable("apps.mycompany.com")); // custom domain (advanced)
+        // The exact condition used in update_app_settings, decoupled from
+        // sslip.io: any non-empty, non-loopback base domain enables on-demand
+        // TLS — loopback (local mode) is the only thing that disables it.
+        let should_enable = |zone: &str| !zone.trim().is_empty() && !is_loopback_zone(zone);
+        assert!(should_enable("1.2.3.4.sslip.io")); // sslip.io quick install
+        assert!(should_enable("apps.mycompany.com")); // custom wildcard domain
+        assert!(!should_enable("127.0.0.1.sslip.io")); // local mode (loopback)
+        assert!(!should_enable("localhost")); // local mode
+        assert!(!should_enable("")); // no domain
+        assert!(!should_enable("   ")); // whitespace-only
     }
 
     #[test]

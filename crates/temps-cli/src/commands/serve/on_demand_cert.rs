@@ -199,13 +199,20 @@ struct OnDemandZoneInputs {
     external_url: Option<String>,
 }
 
-/// Derive the console host (`console.<zone>`) for the gate's console exemption.
+/// Derive the conventional console host (`console.<zone>`) for the gate's
+/// console exemption.
 ///
-/// On a sslip.io install the console is reachable at `console.<zone>` (the
-/// deploy-script convention) but is served as a fall-through, so it has no
+/// The installer's quick/sslip.io flow serves the console at `console.<zone>`
+/// (e.g. `console.1.2.3.4.sslip.io`) as a fall-through, so it has no
 /// `CachedPeerTable` route. The gate exempts exactly this host from the
-/// cert-eligible-route check (it is still subject to the in-zone check), so
-/// `quick` mode gets console HTTPS on demand. Returns `None` for an empty zone.
+/// cert-eligible-route check (it is still subject to the in-zone check) so the
+/// console gets HTTPS on demand. Returns `None` for an empty zone.
+///
+/// Note: this only covers the `console.<zone>` convention. A custom-domain
+/// (advanced) install serves the console at the bare base domain and ships a
+/// wildcard cert that already covers it, so the console there is served from
+/// that cert and never reaches the on-demand path — the `console.<zone>`
+/// exemption is simply unused in that case (harmless).
 fn derive_console_host(zone: &str) -> Option<String> {
     let zone = zone.trim().trim_end_matches('.').to_ascii_lowercase();
     if zone.is_empty() {
