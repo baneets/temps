@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.38] - 2026-06-23
+
+### Added
 - **On-demand HTTP-01 TLS now covers the console host.** `temps serve` derives
   `console.<zone>` and passes it to the proxy's `OnDemandCertConfig.console_host`,
   exempting exactly the console host from the cert-eligible-route check (it is
