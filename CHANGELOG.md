@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`@temps-sdk/cli`, #154).
 
 ### Changed
+- **Rollback falls back to rebuilding from source for git projects when the
+  stored image is gone.** Rollback reuses the target deployment's Docker image
+  when it's still in the local cache (the common case — rolling back a recent
+  deploy), which is near-instant and byte-identical to what you're rolling back
+  to. Previously that was the *only* path, so it failed once the nightly cleanup
+  pruned the image (`image no longer exists locally` for anything older than
+  ~7 days) and couldn't reconstruct static deployments. Now, for git-sourced
+  projects, rollback rebuilds from source at the target deployment's commit
+  whenever the image is unavailable (pruned, or a static preset with no runnable
+  image) — going through the same build + health-check pipeline as a normal
+  deploy. Non-git projects (docker_image / static_files / manual without a git
+  ref) keep the image-reuse path unchanged (#155).
 - **CLI: the default project is scoped per instance.** `defaultProject` now
   lives on the active CLI context instead of one global key, so a project
   created on one Temps server no longer leaks as the default on another (which
