@@ -69,13 +69,28 @@ pub struct ProjectTemplate {
     /// URL to template image/icon
     #[serde(default)]
     pub image_url: Option<String>,
-    /// Git repository reference (supports any git provider)
+    /// Git repository reference (supports any git provider). Always present as
+    /// the source-of-truth / build fallback, even for image-based templates.
     pub git: GitRef,
     /// Framework/preset to use (e.g., "nextjs", "fastapi", "dockerfile")
     pub preset: String,
     /// Preset-specific configuration
     #[serde(default)]
     pub preset_config: Option<serde_json::Value>,
+    /// Prebuilt Docker image reference (e.g. "ghcr.io/org/app:latest"). When set,
+    /// the one-click deploy pulls and runs this image directly (source_type
+    /// docker_image) instead of building from `git` — instant, no BuildKit. When
+    /// absent, the template builds from source.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Container port the prebuilt image listens on (used for routing when
+    /// deploying from `image`). Falls back to the image's EXPOSE / 3000 default.
+    #[serde(default)]
+    pub exposed_port: Option<i32>,
+    /// HTTP health-check path probed after the container starts (image deploys
+    /// can't read `.temps.yaml`). Must start with '/'. Defaults to "/".
+    #[serde(default)]
+    pub health_check_path: Option<String>,
     /// Tags/categories for filtering
     #[serde(default)]
     pub tags: Vec<String>,
@@ -652,6 +667,9 @@ templates:
                 },
                 preset: "nextjs".to_string(),
                 preset_config: None,
+                image: None,
+                exposed_port: None,
+                health_check_path: None,
                 tags: vec!["test".to_string()],
                 features: vec!["Feature 1".to_string()],
                 services: vec!["postgres".to_string()],
@@ -701,6 +719,40 @@ templates:
         // Test list_templates_by_tag
         let python_templates = service.list_templates_by_tag("python").await;
         assert_eq!(python_templates.len(), 1);
+    }
+
+    #[test]
+    fn test_bundled_templates_parse_and_validate() {
+        // The bundled templates.yaml is embedded at compile time and loaded on
+        // every startup. Guard against YAML breakage and invalid template
+        // definitions (bad git URLs, unknown services, etc.).
+        let config = TemplatesConfig::from_yaml(BUNDLED_TEMPLATES)
+            .expect("bundled templates.yaml must parse");
+        assert!(
+            !config.templates.is_empty(),
+            "bundled templates should not be empty"
+        );
+
+        let errors = TemplateService::validate_config(&config);
+        assert!(
+            errors.is_empty(),
+            "bundled templates have validation errors: {:?}",
+            errors
+        );
+
+        // The Observability Starter is the one-click activation demo surfaced in
+        // the empty projects state — it must stay featured and bring a database.
+        let starter = config
+            .get_by_slug("observability-starter")
+            .expect("observability-starter template must exist");
+        assert!(
+            starter.is_featured,
+            "observability-starter must be featured"
+        );
+        assert!(
+            starter.services.iter().any(|s| s == "postgres"),
+            "observability-starter must depend on postgres"
+        );
     }
 
     #[test]
