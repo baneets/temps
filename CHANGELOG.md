@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.39] - 2026-06-25
+
+### Added
 - **One-click demo deploy from templates (no Git account).** A brand-new user
   can deploy a fully-instrumented demo app — analytics, error tracking,
   distributed tracing, and a Postgres database — in one click without first
