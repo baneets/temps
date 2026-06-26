@@ -5,7 +5,9 @@
 
 import type { OtelMetricAlertRuleResponse } from '@/api/client'
 import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
 import { aggregationLabel } from './metric-format'
+import { STATUS_META, type AlertStatusLevel } from './alert-status'
 
 /** Comparator tokens the backend accepts. */
 export const COMPARATORS: { value: string; label: string; symbol: string }[] = [
@@ -96,6 +98,47 @@ export function alertSummary(rule: OtelMetricAlertRuleResponse): string {
     return `${agg} ${rule.metric_name} · anomaly ±${cfg.deviations}σ · ${rule.severity}`
   }
   return `${agg} ${rule.metric_name} · ${cfg.kind} · ${rule.severity}`
+}
+
+/**
+ * A small colored status dot (Datadog's status language). The dot is decorative
+ * — callers must pair it with text/badge so meaning isn't conveyed by hue alone.
+ * `pulse` adds a quiet ping for live `alert` states.
+ */
+export function StatusDot({
+  level,
+  pulse = false,
+  className,
+  title,
+}: {
+  level: AlertStatusLevel
+  pulse?: boolean
+  className?: string
+  title?: string
+}) {
+  const meta = STATUS_META[level]
+  return (
+    <span
+      className={cn('relative inline-flex size-2 shrink-0', className)}
+      title={title}
+    >
+      {pulse && level === 'alert' && (
+        <span
+          className={cn(
+            'absolute inline-flex size-full animate-ping rounded-full opacity-60',
+            meta.dotClass,
+          )}
+        />
+      )}
+      <span
+        className={cn(
+          'relative inline-flex size-2 rounded-full',
+          meta.dotClass,
+        )}
+        aria-hidden
+      />
+    </span>
+  )
 }
 
 /** Firing-state badge derived from `rule.last_state` (ok|firing|unknown). */

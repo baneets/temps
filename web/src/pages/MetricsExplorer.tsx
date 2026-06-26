@@ -24,7 +24,13 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ThresholdLineChart } from '@/components/charts/threshold-line-chart'
-import { comparatorSymbol } from '@/components/metrics/alert-format'
+import { comparatorSymbol, StatusDot } from '@/components/metrics/alert-format'
+import {
+  STATUS_META,
+  statusRank,
+  useAlertStatus,
+  type AlertStatusLevel,
+} from '@/components/metrics/alert-status'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
@@ -652,6 +658,18 @@ function MetricsOverview({
   isLoadingNames: boolean
   totalCount: number
 }) {
+  // One alert fetch for the whole grid (cached). Float metrics with a firing
+  // rule to the top so the 24-cap can't hide what's actually broken.
+  const alerts = useAlertStatus(project.id)
+  const sorted = useMemo(() => {
+    // alert/warn/nodata/ok rank 0–3; metrics with no rule rank last (4).
+    const rank = (n: string) => {
+      const s = alerts.statusFor(n, aggregation)
+      return s ? statusRank(s) : 4
+    }
+    return [...names].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+  }, [names, alerts, aggregation])
+
   if (isLoadingNames) {
     return (
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -678,7 +696,7 @@ function MetricsOverview({
     )
   }
 
-  const shown = names.slice(0, OVERVIEW_LIMIT)
+  const shown = sorted.slice(0, OVERVIEW_LIMIT)
   return (
     <div className="flex flex-col gap-3">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -691,6 +709,7 @@ function MetricsOverview({
             toIso={toIso}
             bucketInterval={bucketInterval}
             aggregation={aggregation}
+            status={alerts.statusFor(n, aggregation)}
             onSelect={onSelect}
           />
         ))}
@@ -712,6 +731,7 @@ function MetricCard({
   toIso,
   bucketInterval,
   aggregation,
+  status,
   onSelect,
 }: {
   project: ProjectResponse
@@ -720,8 +740,12 @@ function MetricCard({
   toIso: string
   bucketInterval: string
   aggregation: AggKind
+  status: AlertStatusLevel | null
   onSelect: (name: string) => void
 }) {
+  // Tone the line only for active problems; OK/no-data/unwatched stay neutral.
+  const lineTone =
+    status === 'alert' ? 'poor' : status === 'warn' ? 'warn' : 'primary'
   const isPercentile = aggregation.startsWith('p')
   const q = useQuery({
     ...queryMetricsOptions({
@@ -757,8 +781,20 @@ function MetricCard({
       className="group flex flex-col gap-2 rounded-lg border border-border bg-card p-3 text-left transition hover:border-primary/40 hover:shadow-sm"
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-mono text-xs font-medium" title={metricName}>
-          {metricName}
+        <span className="flex min-w-0 items-center gap-1.5">
+          {status && (
+            <StatusDot
+              level={status}
+              pulse
+              title={`Alert rule: ${STATUS_META[status].label}`}
+            />
+          )}
+          <span
+            className="truncate font-mono text-xs font-medium"
+            title={metricName}
+          >
+            {metricName}
+          </span>
         </span>
         {isHistogram && (
           <Badge variant="outline" className="shrink-0 text-[10px]">
@@ -776,7 +812,7 @@ function MetricCard({
         <ThresholdLineChart
           data={data}
           xKey="label"
-          series={{ dataKey: 'value', label: metricName, tone: 'primary' }}
+          series={{ dataKey: 'value', label: metricName, tone: lineTone }}
           height={110}
           tooltipValueFormatter={(v) => formatMetricValue(v)}
           yTickFormatter={(v) => formatMetricValue(v)}

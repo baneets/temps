@@ -179,19 +179,19 @@ export function AnomalyBacktest({
                 dataKey="band"
                 stackId="band"
                 stroke="none"
-                fill="hsl(var(--primary))"
+                fill="var(--chart-1)"
                 fillOpacity={0.12}
                 isAnimationActive={false}
               />
               <Line
                 dataKey="value"
-                stroke="hsl(var(--primary))"
+                stroke="var(--chart-1)"
                 strokeWidth={1.5}
                 dot={false}
                 isAnimationActive={false}
               />
               {/* Breach markers. */}
-              <Scatter dataKey="breach" fill="hsl(var(--destructive))" />
+              <Scatter dataKey="breach" fill="var(--destructive)" />
               <Tooltip
                 contentStyle={{ fontSize: 11 }}
                 labelFormatter={(l) => formatBucketLabel(String(l))}

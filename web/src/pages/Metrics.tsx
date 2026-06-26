@@ -4,6 +4,8 @@ import { Bell, LayoutDashboard, LineChart } from 'lucide-react'
 import MetricsExplorer from './MetricsExplorer'
 import DashboardsRouter from './DashboardsRouter'
 import AlertsRouter from './AlertsRouter'
+import { MetricsHealthHeader } from '@/components/metrics/MetricsHealthHeader'
+import { useAlertStatus } from '@/components/metrics/alert-status'
 
 interface MetricsProps {
   project: ProjectResponse
@@ -21,7 +23,8 @@ interface MetricsProps {
 export default function Metrics({ project }: MetricsProps) {
   return (
     <div className="flex w-full flex-col gap-4">
-      <MetricsTabs />
+      <MetricsHealthHeader project={project} />
+      <MetricsTabs project={project} />
       <Routes>
         <Route index element={<MetricsExplorer project={project} />} />
         <Route
@@ -35,7 +38,7 @@ export default function Metrics({ project }: MetricsProps) {
 }
 
 /** Route-backed segmented control switching between Explore and Dashboards. */
-function MetricsTabs() {
+function MetricsTabs({ project }: { project: ProjectResponse }) {
   const { pathname } = useLocation()
   // The hub is mounted at `…/metrics/*`; derive that base so the tab links are
   // absolute (relative links would resolve against the current sub-route).
@@ -44,24 +47,30 @@ function MetricsTabs() {
   const onDashboards = pathname.startsWith(`${base}/dashboards`)
   const onAlerts = pathname.startsWith(`${base}/alerts`)
 
+  // Cached by react-query (same key as the header) — no extra fetch.
+  const { firing } = useAlertStatus(project.id)
+
   const tabs = [
     {
       to: base,
       label: 'Explore',
       icon: LineChart,
       active: !onDashboards && !onAlerts,
+      firing: 0,
     },
     {
       to: `${base}/dashboards`,
       label: 'Dashboards',
       icon: LayoutDashboard,
       active: onDashboards,
+      firing: 0,
     },
     {
       to: `${base}/alerts`,
       label: 'Alerts',
       icon: Bell,
       active: onAlerts,
+      firing: firing.length,
     },
   ]
 
@@ -80,6 +89,11 @@ function MetricsTabs() {
         >
           <t.icon className="size-4" />
           {t.label}
+          {t.firing > 0 && (
+            <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold tabular-nums text-destructive-foreground">
+              {t.firing}
+            </span>
+          )}
         </Link>
       ))}
     </div>

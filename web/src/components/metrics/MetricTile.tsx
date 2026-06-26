@@ -12,6 +12,8 @@ import {
   histogramQuantile,
   percentileFromAgg,
 } from './metric-format'
+import { StatusDot } from './alert-format'
+import { STATUS_META, useAlertStatus } from './alert-status'
 
 interface MetricTileProps {
   project: ProjectResponse
@@ -52,6 +54,12 @@ export function MetricTile({
   height = 160,
 }: MetricTileProps) {
   const isPercentile = aggregation.startsWith('p')
+
+  // Datadog-style: a status dot + a toned line when a rule on this exact
+  // (metric, aggregation) is firing. Cached `listAlerts` — no extra fetch.
+  const status = useAlertStatus(project.id).statusFor(metricName, aggregation)
+  const lineTone =
+    status === 'alert' ? 'poor' : status === 'warn' ? 'warn' : 'primary'
 
   const q = useQuery({
     ...queryMetricsOptions({
@@ -95,11 +103,20 @@ export function MetricTile({
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3">
       <div className="flex items-center justify-between gap-2">
-        <span
-          className="truncate font-mono text-xs font-medium"
-          title={metricName}
-        >
-          {displayTitle}
+        <span className="flex min-w-0 items-center gap-1.5">
+          {status && (
+            <StatusDot
+              level={status}
+              pulse
+              title={`Alert rule: ${STATUS_META[status].label}`}
+            />
+          )}
+          <span
+            className="truncate font-mono text-xs font-medium"
+            title={metricName}
+          >
+            {displayTitle}
+          </span>
         </span>
         <div className="flex shrink-0 items-center gap-1">
           {isHistogram && (
@@ -136,7 +153,7 @@ export function MetricTile({
           series={{
             dataKey: 'value',
             label: aggregationLabel(aggregation),
-            tone: 'primary',
+            tone: lineTone,
           }}
           height={height}
           tooltipValueFormatter={(v) => formatMetricValue(v)}

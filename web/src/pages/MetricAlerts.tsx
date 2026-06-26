@@ -42,7 +42,12 @@ import {
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { AlertStateBadge, alertSummary } from '@/components/metrics/alert-format'
+import {
+  AlertStateBadge,
+  alertSummary,
+  StatusDot,
+} from '@/components/metrics/alert-format'
+import { ruleStatus, statusRank } from '@/components/metrics/alert-status'
 
 interface MetricAlertsProps {
   project: ProjectResponse
@@ -73,7 +78,12 @@ export default function MetricAlerts({ project }: MetricAlertsProps) {
     },
   })
 
-  const alerts = alertsQuery.data?.data ?? []
+  // Worst-first: firing-critical → firing-warning → unknown → ok, then by name.
+  const alerts = [...(alertsQuery.data?.data ?? [])].sort(
+    (a, b) =>
+      statusRank(ruleStatus(a)) - statusRank(ruleStatus(b)) ||
+      a.name.localeCompare(b.name),
+  )
 
   const goToNew = () => navigate('new')
 
@@ -188,6 +198,12 @@ function AlertRow({
 }) {
   return (
     <div className="group flex items-center gap-3 rounded-lg px-2 py-2.5 transition hover:bg-muted/50">
+      <StatusDot
+        level={ruleStatus(rule)}
+        pulse
+        className="ml-1"
+        title={`Status: ${rule.last_state}`}
+      />
       <button
         type="button"
         onClick={onEdit}
