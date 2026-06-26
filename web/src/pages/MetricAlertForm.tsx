@@ -1,4 +1,5 @@
 import { ProjectResponse } from '@/api/client'
+import type { Comparator } from '@/api/client'
 // REGEN: bun run openapi-ts — these builders/types come from the new
 // /otel/alerts endpoints (operationIds get_alert / create_alert / update_alert).
 // They are absent from the committed SDK; imported here so the form is
@@ -139,12 +140,20 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
   const defaultValues = useMemo<AlertFormData>(() => {
     const existing = existingQuery.data
     if (existing) {
+      // The form edits a static threshold; pull comparator/threshold out of the
+      // typed detector union (only `static` is editable here for now).
+      const cfg = existing.detection_config
+      const isStatic = cfg.kind === 'static'
       return {
         name: existing.name,
         metric_name: existing.metric_name,
         aggregation: coerce(AGGREGATION_VALUES, existing.aggregation, 'avg'),
-        comparator: coerce(COMPARATOR_VALUES, existing.comparator, 'gt'),
-        threshold: existing.threshold,
+        comparator: coerce(
+          COMPARATOR_VALUES,
+          isStatic ? cfg.comparator : 'gt',
+          'gt',
+        ),
+        threshold: isStatic ? cfg.threshold : 0,
         window_secs: existing.window_secs,
         for_duration_secs: existing.for_duration_secs,
         severity: coerce(SEVERITY_VALUES, existing.severity, 'warning'),
@@ -190,6 +199,15 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
   const isMutating = createMutation.isPending || updateMutation.isPending
 
   const onSubmit = async (data: AlertFormData) => {
+    // The form authors a static threshold detector; wrap the flat comparator +
+    // threshold into the typed `detection_config` discriminated union. The Zod
+    // enum guarantees `comparator` is one of the Comparator literals, so the
+    // narrowing cast is sound.
+    const detection_config = {
+      kind: 'static' as const,
+      comparator: data.comparator as Comparator,
+      threshold: data.threshold,
+    }
     if (isEditing) {
       await updateMutation.mutateAsync({
         path: { id },
@@ -198,8 +216,7 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
           name: data.name,
           metric_name: data.metric_name,
           aggregation: data.aggregation,
-          comparator: data.comparator,
-          threshold: data.threshold,
+          detection_config,
           window_secs: data.window_secs,
           for_duration_secs: data.for_duration_secs,
           severity: data.severity,
@@ -213,8 +230,7 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
           name: data.name,
           metric_name: data.metric_name,
           aggregation: data.aggregation,
-          comparator: data.comparator,
-          threshold: data.threshold,
+          detection_config,
           window_secs: data.window_secs,
           for_duration_secs: data.for_duration_secs,
           severity: data.severity,

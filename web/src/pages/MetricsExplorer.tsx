@@ -286,11 +286,18 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
     if (!metricName) return []
     return (alertsQuery.data?.data ?? [])
       .filter((r) => r.enabled && r.metric_name === metricName)
-      .map((r) => ({
-        value: r.threshold,
-        tone: r.severity === 'critical' ? 'poor' : 'warn',
-        label: `${comparatorSymbol(r.comparator)} ${r.threshold}`,
-      }))
+      .flatMap((r) => {
+        // Only static rules have a single horizontal threshold to overlay.
+        const cfg = r.detection_config
+        if (cfg.kind !== 'static') return []
+        return [
+          {
+            value: cfg.threshold,
+            tone: r.severity === 'critical' ? 'poor' : 'warn',
+            label: `${comparatorSymbol(cfg.comparator)} ${cfg.threshold}`,
+          } satisfies ThresholdBand,
+        ]
+      })
   }, [alertsQuery.data, metricName])
 
   const buckets = metricsQuery.data?.data ?? []

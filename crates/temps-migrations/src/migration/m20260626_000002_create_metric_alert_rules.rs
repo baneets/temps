@@ -1,8 +1,9 @@
 //! Migration to create the `metric_alert_rules` table.
 //!
 //! Backs the first-class, metric-centric alert rules feature. Each row defines a
-//! signal (project + metric + aggregation + threshold) the background evaluator
-//! checks on an interval. This is config/metadata — Postgres, never ClickHouse.
+//! signal (project + metric + aggregation) plus a polymorphic, versionable
+//! detector (`detection_config`, jsonb) the background evaluator checks on an
+//! interval. This is config/metadata — Postgres, never ClickHouse.
 //!
 //! Two indexes serve the access patterns: `(project_id)` for the per-project list
 //! view, and `(project_id, enabled)` for the evaluator's enabled-rules scan.
@@ -43,14 +44,22 @@ impl MigrationTrait for Migration {
                             .text()
                             .not_null(),
                     )
+                    // Coarse detector discriminator (static|anomaly|forecast|
+                    // outlier|auto_watch). A plain string, so new kinds need no
+                    // ALTER TYPE.
                     .col(
-                        ColumnDef::new(MetricAlertRules::Comparator)
+                        ColumnDef::new(MetricAlertRules::DetectionKind)
                             .text()
-                            .not_null(),
+                            .not_null()
+                            .default("static"),
                     )
+                    // Typed-in-Rust detector definition stored as jsonb. The
+                    // comparator/threshold of a static rule live here (kind=static);
+                    // anomaly/forecast/outlier params land here too — a new detector
+                    // family is code-only, never a migration.
                     .col(
-                        ColumnDef::new(MetricAlertRules::Threshold)
-                            .double()
+                        ColumnDef::new(MetricAlertRules::DetectionConfig)
+                            .json_binary()
                             .not_null(),
                     )
                     .col(
@@ -128,8 +137,8 @@ enum MetricAlertRules {
     Name,
     MetricName,
     Aggregation,
-    Comparator,
-    Threshold,
+    DetectionKind,
+    DetectionConfig,
     WindowSecs,
     ForDurationSecs,
     Severity,

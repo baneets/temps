@@ -221,6 +221,18 @@ impl OtelConfig {
             metric_alert_handler::UpdateMetricAlertRequest,
             metric_alert_handler::OtelMetricAlertRuleResponse,
             metric_alert_handler::OtelMetricAlertsResponse,
+            crate::detectors::DetectionConfig,
+            crate::detectors::StaticParams,
+            crate::detectors::AnomalyParams,
+            crate::detectors::ForecastParams,
+            crate::detectors::OutlierParams,
+            crate::detectors::AutoWatchParams,
+            crate::detectors::Comparator,
+            crate::detectors::Direction,
+            crate::detectors::Seasonality,
+            crate::detectors::AnomalyAlgorithm,
+            crate::detectors::ForecastAlgorithm,
+            crate::detectors::OutlierAlgorithm,
         )
     ),
     info(

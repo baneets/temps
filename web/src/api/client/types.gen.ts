@@ -750,6 +750,43 @@ export type AnalyticsSessionEventsResponse = {
     total_events: number;
 };
 
+/**
+ * Anomaly baseline algorithm. Adding one (e.g. a new robust variant) is a
+ * code-only enum addition — no migration, since it lives inside the blob.
+ */
+export type AnomalyAlgorithm = 'robust' | 'basic' | 'agile' | 'ewma';
+
+/**
+ * Seasonal anomaly-band detector parameters (stub — not yet evaluated).
+ */
+export type AnomalyParams = {
+    /**
+     * Baseline model. `robust` is the default (seasonal, stable, flags level
+     * shifts); `ewma`/`agile` adopt level shifts; `basic` is non-seasonal.
+     */
+    algorithm?: AnomalyAlgorithm;
+    /**
+     * How far back to build the baseline. `None` = an evaluator default.
+     */
+    baseline_lookback_days?: number | null;
+    /**
+     * Band width in robust standard deviations (Datadog's `bounds`).
+     */
+    deviations?: number;
+    /**
+     * Which side(s) of the band a deviation must be on to count.
+     */
+    direction?: Direction;
+    /**
+     * Fraction (0..=1) of points in the window that must be anomalous to fire.
+     */
+    pct_anomalous?: number;
+    /**
+     * Seasonality model for the baseline.
+     */
+    seasonality?: Seasonality;
+};
+
 export type ApiKeyListResponse = {
     api_keys: Array<ApiKeyResponse>;
     total: number;
@@ -1019,6 +1056,16 @@ export type AuthTokenResponse = {
     access_token: string;
     expires_at: number;
     refresh_token: string;
+};
+
+/**
+ * Auto-watch (Watchdog-style) detector parameters (stub — not evaluated).
+ */
+export type AutoWatchParams = {
+    /**
+     * The engine self-tunes the band; the user supplies only the direction.
+     */
+    direction?: Direction;
 };
 
 export type AutofixerRunResponse = {
@@ -1851,6 +1898,13 @@ export type CommitInfo = {
 export type CommitListResponse = {
     commits: Array<CommitInfo>;
 };
+
+/**
+ * Comparator for static/forecast threshold detectors. Serializes to the
+ * keyword forms `gt|gte|lt|lte` (NOT the SQL operators used by
+ * `temps-monitoring::compare`).
+ */
+export type Comparator = 'gt' | 'gte' | 'lt' | 'lte';
 
 export type ConnectionListQuery = {
     direction?: string | null;
@@ -2703,9 +2757,10 @@ export type CreateMetricAlertRequest = {
      */
     aggregation: string;
     /**
-     * One of `gt|gte|lt|lte`.
+     * The detector: a discriminated union keyed by `kind`. Today only
+     * `{ "kind": "static", "comparator": "gt", "threshold": 500 }` is evaluable.
      */
-    comparator: string;
+    detection_config: DetectionConfig;
     enabled: boolean;
     for_duration_secs: number;
     metric_name: string;
@@ -2715,7 +2770,6 @@ export type CreateMetricAlertRequest = {
      * One of `info|warning|critical`.
      */
     severity: string;
-    threshold: number;
     window_secs: number;
 };
 
@@ -3853,6 +3907,27 @@ export type DeploymentStateResponse = {
  */
 export type DeploymentStrategy = 'replace' | 'blue-green' | 'rolling';
 
+/**
+ * The typed detector definition stored (as jsonb) in
+ * `metric_alert_rules.detection_config`.
+ *
+ * Today only [`DetectionConfig::Static`] is evaluable; the other variants are
+ * schema-present (so the SDK/UI and storage are already future-shaped) but
+ * rejected by [`DetectionConfig::validate`] until their evaluator lands. Each is
+ * then enabled code-only, with no schema migration.
+ */
+export type DetectionConfig = (StaticParams & {
+    kind: 'static';
+}) | (AnomalyParams & {
+    kind: 'anomaly';
+}) | (ForecastParams & {
+    kind: 'forecast';
+}) | (OutlierParams & {
+    kind: 'outlier';
+}) | (AutoWatchParams & {
+    kind: 'auto_watch';
+});
+
 export type DeviceCount = {
     count: number;
     device_type: string;
@@ -3871,6 +3946,11 @@ export type DigestSections = {
     performance?: boolean;
     projects?: boolean;
 };
+
+/**
+ * Which side(s) of an anomaly band count as a deviation.
+ */
+export type Direction = 'both' | 'above' | 'below';
 
 /**
  * Response after disabling Blob service
@@ -5852,6 +5932,28 @@ export type FieldResponse = {
      * Whether the field is nullable
      */
     nullable: boolean;
+};
+
+/**
+ * Forecast model family.
+ */
+export type ForecastAlgorithm = 'linear' | 'seasonal';
+
+/**
+ * Forecast detector parameters (stub — not yet evaluated).
+ */
+export type ForecastParams = {
+    algorithm?: ForecastAlgorithm;
+    /**
+     * Comparator + threshold the *forecast* is checked against.
+     */
+    comparator: Comparator;
+    deviations?: number;
+    /**
+     * How far ahead to project before checking the breach condition.
+     */
+    forecast_horizon_secs: number;
+    threshold: number;
 };
 
 export type FullError = {
@@ -8895,8 +8997,15 @@ export type OtelDashboardsResponse = {
 
 export type OtelMetricAlertRuleResponse = {
     aggregation: string;
-    comparator: string;
     created_at: string;
+    /**
+     * The typed detector definition (discriminated union keyed by `kind`).
+     */
+    detection_config: DetectionConfig;
+    /**
+     * Coarse detector discriminator: `static|anomaly|forecast|outlier|auto_watch`.
+     */
+    detection_kind: string;
     enabled: boolean;
     for_duration_secs: number;
     id: number;
@@ -8910,7 +9019,6 @@ export type OtelMetricAlertRuleResponse = {
     name: string;
     project_id: number;
     severity: string;
-    threshold: number;
     updated_at: string;
     window_secs: number;
 };
@@ -8927,6 +9035,26 @@ export type OtelMetricNamesResponse = {
 export type OtelMetricsResponse = {
     count: number;
     data: Array<MetricBucket>;
+};
+
+/**
+ * Outlier detection algorithm.
+ */
+export type OutlierAlgorithm = 'dbscan' | 'scaled_dbscan' | 'mad' | 'scaled_mad';
+
+/**
+ * Outlier (cross-series population) detector parameters (stub — not evaluated).
+ */
+export type OutlierParams = {
+    algorithm?: OutlierAlgorithm;
+    /**
+     * Label key defining the peer population compared across series (e.g. `host`).
+     */
+    peer_group_key: string;
+    /**
+     * Sensitivity; higher tolerates larger spread before flagging.
+     */
+    tolerance?: number;
 };
 
 /**
@@ -12036,6 +12164,11 @@ export type SearchLogsResponse = {
  */
 export type SearchMode = 'index' | 'archive';
 
+/**
+ * Seasonality model for an anomaly baseline.
+ */
+export type Seasonality = 'none' | 'hourly' | 'daily' | 'weekly';
+
 export type SecretResponse = {
     created_at: string;
     description?: string | null;
@@ -13486,6 +13619,20 @@ export type StaticBundleResponse = {
 };
 
 /**
+ * Static threshold detector: compare the aggregated `value` against `threshold`.
+ */
+export type StaticParams = {
+    /**
+     * How `value` is compared against `threshold`.
+     */
+    comparator: Comparator;
+    /**
+     * The threshold the aggregated value is compared against.
+     */
+    threshold: number;
+};
+
+/**
  * Configuration for static site presets (Vite, Next.js, Docusaurus, etc.)
  * These presets build static sites that are served via a web server
  */
@@ -14657,13 +14804,12 @@ export type UpdateMcpRequest = {
 
 export type UpdateMetricAlertRequest = {
     aggregation?: string | null;
-    comparator?: string | null;
+    detection_config?: null | DetectionConfig;
     enabled?: boolean | null;
     for_duration_secs?: number | null;
     metric_name?: string | null;
     name?: string | null;
     severity?: string | null;
-    threshold?: number | null;
     window_secs?: number | null;
 };
 

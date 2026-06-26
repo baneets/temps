@@ -3,6 +3,7 @@
 // Keeps the list rows, the form header, and any future surfaces rendering the
 // firing-state badge + one-line rule summary identically.
 
+import type { OtelMetricAlertRuleResponse } from '@/api/client'
 import { Badge } from '@/components/ui/badge'
 import { aggregationLabel } from './metric-format'
 
@@ -27,16 +28,18 @@ export function comparatorSymbol(comparator: string): string {
 /**
  * Compact one-line description of a rule for the list row, e.g.
  * `avg http.server.duration > 500 · warning`.
+ *
+ * Reads the detector from the typed `detection_config` discriminated union.
+ * Today only `static` rules exist; the fallback covers future kinds
+ * (anomaly/forecast/outlier/auto_watch) without breaking the row.
  */
-export function alertSummary(rule: {
-  metric_name: string
-  aggregation: string
-  comparator: string
-  threshold: number
-  severity: string
-}): string {
+export function alertSummary(rule: OtelMetricAlertRuleResponse): string {
   const agg = aggregationLabel(rule.aggregation)
-  return `${agg} ${rule.metric_name} ${comparatorSymbol(rule.comparator)} ${rule.threshold} · ${rule.severity}`
+  const cfg = rule.detection_config
+  if (cfg.kind === 'static') {
+    return `${agg} ${rule.metric_name} ${comparatorSymbol(cfg.comparator)} ${cfg.threshold} · ${rule.severity}`
+  }
+  return `${agg} ${rule.metric_name} · ${cfg.kind} · ${rule.severity}`
 }
 
 /** Firing-state badge derived from `rule.last_state` (ok|firing|unknown). */

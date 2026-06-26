@@ -29,6 +29,7 @@
 //! ```
 
 pub mod anomaly;
+pub mod detectors;
 pub mod error;
 pub mod handlers;
 pub mod ingest;

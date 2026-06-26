@@ -20,6 +20,7 @@ use sea_orm::{
 
 use temps_entities::metric_alert_rules::{ActiveModel, Column, Entity, Model};
 
+use crate::detectors::DetectionConfig;
 use crate::error::OtelError;
 
 /// The allowlisted aggregations a rule may request. Mirrors the keyword/quantile
@@ -28,30 +29,25 @@ pub const ALLOWED_AGGREGATIONS: &[&str] = &[
     "avg", "sum", "min", "max", "count", "rate", "p50", "p90", "p95", "p99",
 ];
 
-/// The allowlisted comparators. NOTE: these are the keyword forms `gt/gte/lt/lte`,
-/// NOT the SQL-operator strings (`>`,`>=`,`<`,`<=`) used by `temps-monitoring`.
-pub const ALLOWED_COMPARATORS: &[&str] = &["gt", "gte", "lt", "lte"];
-
 /// The allowlisted severities, mapped to `AlarmSeverity` by the evaluator.
 pub const ALLOWED_SEVERITIES: &[&str] = &["info", "warning", "critical"];
 
 const MAX_NAME_LEN: usize = 200;
 const MAX_METRIC_NAME_LEN: usize = 256;
 
-/// Validate the full set of rule fields against the allowlists and sane bounds.
+/// Validate the cross-cutting rule fields against the allowlists and sane bounds,
+/// then delegate detector-specific validation to the typed [`DetectionConfig`].
 ///
 /// Returns [`OtelError::Validation`] on the first invalid field so the caller
 /// surfaces a 400 rather than persisting an un-evaluable rule.
-#[allow(clippy::too_many_arguments)]
 fn validate_rule(
     name: &str,
     metric_name: &str,
     aggregation: &str,
-    comparator: &str,
     severity: &str,
-    threshold: f64,
     window_secs: i32,
     for_duration_secs: i32,
+    detection_config: &DetectionConfig,
 ) -> Result<(), OtelError> {
     let trimmed_name = name.trim();
     if trimmed_name.is_empty() {
@@ -85,16 +81,6 @@ fn validate_rule(
             ),
         });
     }
-    let cmp = comparator.trim().to_ascii_lowercase();
-    if !ALLOWED_COMPARATORS.contains(&cmp.as_str()) {
-        return Err(OtelError::Validation {
-            message: format!(
-                "Invalid comparator '{}' (allowed: {})",
-                comparator,
-                ALLOWED_COMPARATORS.join(", ")
-            ),
-        });
-    }
     let sev = severity.trim().to_ascii_lowercase();
     if !ALLOWED_SEVERITIES.contains(&sev.as_str()) {
         return Err(OtelError::Validation {
@@ -103,11 +89,6 @@ fn validate_rule(
                 severity,
                 ALLOWED_SEVERITIES.join(", ")
             ),
-        });
-    }
-    if !threshold.is_finite() {
-        return Err(OtelError::Validation {
-            message: "threshold must be a finite number".to_string(),
         });
     }
     if window_secs <= 0 {
@@ -120,6 +101,9 @@ fn validate_rule(
             message: "for_duration_secs must be greater than 0".to_string(),
         });
     }
+    // Detector-specific invariants (threshold finiteness for static rules; the
+    // not-yet-supported guard for anomaly/forecast/outlier/auto_watch).
+    detection_config.validate()?;
     Ok(())
 }
 
@@ -162,8 +146,7 @@ impl MetricAlertService {
         name: String,
         metric_name: String,
         aggregation: String,
-        comparator: String,
-        threshold: f64,
+        detection_config: DetectionConfig,
         window_secs: i32,
         for_duration_secs: i32,
         severity: String,
@@ -173,11 +156,10 @@ impl MetricAlertService {
             &name,
             &metric_name,
             &aggregation,
-            &comparator,
             &severity,
-            threshold,
             window_secs,
             for_duration_secs,
+            &detection_config,
         )?;
 
         let model = ActiveModel {
@@ -185,8 +167,8 @@ impl MetricAlertService {
             name: Set(name.trim().to_string()),
             metric_name: Set(metric_name.trim().to_string()),
             aggregation: Set(aggregation.trim().to_ascii_lowercase()),
-            comparator: Set(comparator.trim().to_ascii_lowercase()),
-            threshold: Set(threshold),
+            detection_kind: Set(detection_config.kind_str().to_string()),
+            detection_config: Set(detection_config.to_value()?),
             window_secs: Set(window_secs),
             for_duration_secs: Set(for_duration_secs),
             severity: Set(severity.trim().to_ascii_lowercase()),
@@ -221,8 +203,7 @@ impl MetricAlertService {
         name: Option<String>,
         metric_name: Option<String>,
         aggregation: Option<String>,
-        comparator: Option<String>,
-        threshold: Option<f64>,
+        detection_config: Option<DetectionConfig>,
         window_secs: Option<i32>,
         for_duration_secs: Option<i32>,
         severity: Option<String>,
@@ -232,7 +213,8 @@ impl MetricAlertService {
         let existing = self.get(project_id, id).await?;
 
         // Validate the merged effective field set so partial updates can't leave
-        // the row in an un-evaluable state.
+        // the row in an un-evaluable state. A detector is replaced wholesale: the
+        // supplied config, or the existing one decoded from the stored blob.
         let eff_name = name.clone().unwrap_or_else(|| existing.name.clone());
         let eff_metric = metric_name
             .clone()
@@ -240,24 +222,23 @@ impl MetricAlertService {
         let eff_agg = aggregation
             .clone()
             .unwrap_or_else(|| existing.aggregation.clone());
-        let eff_cmp = comparator
-            .clone()
-            .unwrap_or_else(|| existing.comparator.clone());
         let eff_sev = severity
             .clone()
             .unwrap_or_else(|| existing.severity.clone());
-        let eff_threshold = threshold.unwrap_or(existing.threshold);
         let eff_window = window_secs.unwrap_or(existing.window_secs);
         let eff_for = for_duration_secs.unwrap_or(existing.for_duration_secs);
+        let eff_config = match &detection_config {
+            Some(c) => c.clone(),
+            None => DetectionConfig::from_value(&existing.detection_config)?,
+        };
         validate_rule(
             &eff_name,
             &eff_metric,
             &eff_agg,
-            &eff_cmp,
             &eff_sev,
-            eff_threshold,
             eff_window,
             eff_for,
+            &eff_config,
         )?;
 
         let mut active: ActiveModel = existing.into();
@@ -270,11 +251,9 @@ impl MetricAlertService {
         if let Some(a) = aggregation {
             active.aggregation = Set(a.trim().to_ascii_lowercase());
         }
-        if let Some(c) = comparator {
-            active.comparator = Set(c.trim().to_ascii_lowercase());
-        }
-        if let Some(t) = threshold {
-            active.threshold = Set(t);
+        if let Some(c) = detection_config {
+            active.detection_kind = Set(c.kind_str().to_string());
+            active.detection_config = Set(c.to_value()?);
         }
         if let Some(w) = window_secs {
             active.window_secs = Set(w);
@@ -343,9 +322,18 @@ impl MetricAlertService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detectors::{Comparator, StaticParams};
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, Value};
     use std::collections::BTreeMap;
     use temps_core::DBDateTime;
+
+    /// A valid static detector config for test rules.
+    fn static_cfg() -> DetectionConfig {
+        DetectionConfig::Static(StaticParams {
+            comparator: Comparator::Gt,
+            threshold: 500.0,
+        })
+    }
 
     /// Build a MockRow representing a `COUNT(*) AS num_items` result for the
     /// sea-orm paginator. `num_items()` reads `try_get::<i64>("", "num_items")`.
@@ -363,8 +351,10 @@ mod tests {
             name: "High latency".to_string(),
             metric_name: "http.server.duration".to_string(),
             aggregation: "p95".to_string(),
-            comparator: "gt".to_string(),
-            threshold: 500.0,
+            detection_kind: "static".to_string(),
+            detection_config: serde_json::json!({
+                "kind": "static", "comparator": "gt", "threshold": 500.0
+            }),
             window_secs: 300,
             for_duration_secs: 120,
             severity: "warning".to_string(),
@@ -390,8 +380,7 @@ mod tests {
                 "High latency".to_string(),
                 "http.server.duration".to_string(),
                 "p95".to_string(),
-                "gt".to_string(),
-                500.0,
+                static_cfg(),
                 300,
                 120,
                 "warning".to_string(),
@@ -403,7 +392,7 @@ mod tests {
         let model = result.unwrap();
         assert_eq!(model.id, 1);
         assert_eq!(model.project_id, 7);
-        assert_eq!(model.comparator, "gt");
+        assert_eq!(model.detection_kind, "static");
     }
 
     #[tokio::test]
@@ -417,8 +406,7 @@ mod tests {
                 "   ".to_string(),
                 "http.server.duration".to_string(),
                 "p95".to_string(),
-                "gt".to_string(),
-                500.0,
+                static_cfg(),
                 300,
                 120,
                 "warning".to_string(),
@@ -439,8 +427,7 @@ mod tests {
                 "Rule".to_string(),
                 "http.server.duration".to_string(),
                 "median".to_string(),
-                "gt".to_string(),
-                500.0,
+                static_cfg(),
                 300,
                 120,
                 "warning".to_string(),
@@ -451,18 +438,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_bad_comparator_validation() {
+    async fn test_create_anomaly_kind_rejected_until_supported() {
+        // Anomaly (and other non-static) detectors are typed/schema-present but
+        // not yet evaluable, so creation is rejected with a Validation error.
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         let service = MetricAlertService::new(Arc::new(db));
 
+        let anomaly = DetectionConfig::from_value(&serde_json::json!({ "kind": "anomaly" }))
+            .expect("anomaly config parses");
         let result = service
             .create(
                 7,
                 "Rule".to_string(),
                 "http.server.duration".to_string(),
                 "p95".to_string(),
-                ">".to_string(), // SQL operator form is NOT allowed here
-                500.0,
+                anomaly,
                 300,
                 120,
                 "warning".to_string(),
@@ -483,8 +473,7 @@ mod tests {
                 "Rule".to_string(),
                 "http.server.duration".to_string(),
                 "p95".to_string(),
-                "gt".to_string(),
-                500.0,
+                static_cfg(),
                 0,
                 120,
                 "warning".to_string(),
@@ -520,7 +509,6 @@ mod tests {
                 7,
                 999,
                 Some("New Name".to_string()),
-                None,
                 None,
                 None,
                 None,

@@ -10,9 +10,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tracing::{error, warn};
 use utoipa::ToSchema;
 
+use crate::detectors::DetectionConfig;
 use crate::handlers::audit::{
     OtelMetricAlertCreatedAudit, OtelMetricAlertDeletedAudit, OtelMetricAlertUpdatedAudit,
 };
@@ -38,9 +39,9 @@ pub struct CreateMetricAlertRequest {
     pub metric_name: String,
     /// One of `avg|sum|min|max|count|rate|p50|p90|p95|p99`.
     pub aggregation: String,
-    /// One of `gt|gte|lt|lte`.
-    pub comparator: String,
-    pub threshold: f64,
+    /// The detector: a discriminated union keyed by `kind`. Today only
+    /// `{ "kind": "static", "comparator": "gt", "threshold": 500 }` is evaluable.
+    pub detection_config: DetectionConfig,
     pub window_secs: i32,
     pub for_duration_secs: i32,
     /// One of `info|warning|critical`.
@@ -53,8 +54,8 @@ pub struct UpdateMetricAlertRequest {
     pub name: Option<String>,
     pub metric_name: Option<String>,
     pub aggregation: Option<String>,
-    pub comparator: Option<String>,
-    pub threshold: Option<f64>,
+    /// Replaces the detector wholesale when present (absent = leave unchanged).
+    pub detection_config: Option<DetectionConfig>,
     pub window_secs: Option<i32>,
     pub for_duration_secs: Option<i32>,
     pub severity: Option<String>,
@@ -78,8 +79,10 @@ pub struct OtelMetricAlertRuleResponse {
     pub name: String,
     pub metric_name: String,
     pub aggregation: String,
-    pub comparator: String,
-    pub threshold: f64,
+    /// Coarse detector discriminator: `static|anomaly|forecast|outlier|auto_watch`.
+    pub detection_kind: String,
+    /// The typed detector definition (discriminated union keyed by `kind`).
+    pub detection_config: DetectionConfig,
     pub window_secs: i32,
     pub for_duration_secs: i32,
     pub severity: String,
@@ -97,14 +100,26 @@ pub struct OtelMetricAlertRuleResponse {
 
 impl From<Model> for OtelMetricAlertRuleResponse {
     fn from(model: Model) -> Self {
+        // The stored blob is always valid (every write round-trips through the
+        // typed enum); a decode failure means DB corruption — log and fall back
+        // to a default static config so the API stays typed and serving.
+        let detection_config =
+            DetectionConfig::from_value(&model.detection_config).unwrap_or_else(|e| {
+                warn!(
+                    rule_id = model.id,
+                    error = %e,
+                    "metric_alert_rules.detection_config failed to decode; using default"
+                );
+                DetectionConfig::default_static()
+            });
         Self {
             id: model.id,
             project_id: model.project_id,
             name: model.name,
             metric_name: model.metric_name,
             aggregation: model.aggregation,
-            comparator: model.comparator,
-            threshold: model.threshold,
+            detection_kind: model.detection_kind,
+            detection_config,
             window_secs: model.window_secs,
             for_duration_secs: model.for_duration_secs,
             severity: model.severity,
@@ -193,8 +208,7 @@ pub async fn create_alert(
             request.name,
             request.metric_name,
             request.aggregation,
-            request.comparator,
-            request.threshold,
+            request.detection_config,
             request.window_secs,
             request.for_duration_secs,
             request.severity,
@@ -290,8 +304,7 @@ pub async fn update_alert(
             request.name,
             request.metric_name,
             request.aggregation,
-            request.comparator,
-            request.threshold,
+            request.detection_config,
             request.window_secs,
             request.for_duration_secs,
             request.severity,

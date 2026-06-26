@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use temps_monitoring::{AlarmService, AlarmSeverity, AlarmType, FireAlarmRequest};
 
+use crate::detectors::DetectionConfig;
 use crate::services::metric_alert_service::MetricAlertService;
 use crate::services::OtelService;
 use crate::types::{MetricAggregation, MetricBucket, MetricQuery};
@@ -35,22 +36,6 @@ use temps_entities::metric_alert_rules::Model as AlertRule;
 
 /// How often the evaluator scans enabled rules.
 const EVAL_INTERVAL_SECS: u64 = 30;
-
-/// Whether the value breaches the threshold under the given comparator.
-///
-/// The comparator strings are the keyword forms `gt/gte/lt/lte` (NOT the SQL
-/// operator strings used by `temps-monitoring::compare`). Unknown comparators are
-/// treated as non-breaching (fail-closed) — the service validator rejects them at
-/// write time, so this only guards against corrupt rows.
-fn compare(value: f64, threshold: f64, comparator: &str) -> bool {
-    match comparator {
-        "gt" => value > threshold,
-        "gte" => value >= threshold,
-        "lt" => value < threshold,
-        "lte" => value <= threshold,
-        _ => false,
-    }
-}
 
 /// The state transition the evaluator should apply for a single rule this cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,7 +229,31 @@ impl MetricAlertEvaluator {
         // per-point means, not the true distribution (same reason the explorer
         // recomputes percentiles client-side).
         let value = value_for_rule(latest, aggregation);
-        let breaching = compare(value, rule.threshold, &rule.comparator);
+
+        // Decode the typed detector. A corrupt blob fails this rule's cycle (the
+        // outer loop logs and continues) rather than evaluating it incorrectly.
+        let config = DetectionConfig::from_value(&rule.detection_config)?;
+        let breaching = match &config {
+            DetectionConfig::Static(p) => p.comparator.breaches(value, p.threshold),
+            // Non-static detectors are typed/schema-present but not yet evaluable
+            // (creation is rejected by the service). Defensive guard for any rule
+            // that predates support: preserve state and skip without firing.
+            other => {
+                debug!(
+                    rule_id = rule.id,
+                    kind = other.kind_str(),
+                    "Skipping rule: detector kind not yet evaluable"
+                );
+                if let Err(e) = self
+                    .alert_service
+                    .persist_evaluation(rule.id, &rule.last_state, rule.last_value, now)
+                    .await
+                {
+                    warn!(rule_id = rule.id, error = %e, "Failed to persist skipped evaluation");
+                }
+                return Ok(());
+            }
+        };
 
         // Track breach duration (in-memory, approximated like temps-monitoring).
         let breach_elapsed_secs = if breaching {
@@ -266,7 +275,7 @@ impl MetricAlertEvaluator {
             AlertTransition::StayOk | AlertTransition::StartBreach => "ok",
             AlertTransition::StayFiring => "firing",
             AlertTransition::FireNow => {
-                self.fire(&rule, value).await;
+                self.fire(&rule, value, &config).await;
                 "firing"
             }
             AlertTransition::Resolve => {
@@ -287,7 +296,13 @@ impl MetricAlertEvaluator {
     }
 
     /// Fire an alarm via the reused alarm system and remember the alarm id.
-    async fn fire(&self, rule: &AlertRule, value: f64) {
+    async fn fire(&self, rule: &AlertRule, value: f64, config: &DetectionConfig) {
+        // The condition string + threshold come from the typed detector. Only
+        // static rules fire today; the fallback keeps the match exhaustive.
+        let (comparator, threshold) = match config {
+            DetectionConfig::Static(p) => (p.comparator.symbol(), p.threshold),
+            _ => ("?", f64::NAN),
+        };
         let request = FireAlarmRequest {
             project_id: rule.project_id,
             environment_id: None,
@@ -299,15 +314,16 @@ impl MetricAlertEvaluator {
             title: format!("Metric threshold breached: {}", rule.name),
             message: format!(
                 "{} {} is {:.3} (threshold {} {:.3})",
-                rule.metric_name, rule.aggregation, value, rule.comparator, rule.threshold
+                rule.metric_name, rule.aggregation, value, comparator, threshold
             ),
             metadata: Some(json!({
                 "rule_id": rule.id,
                 "metric_name": rule.metric_name,
                 "aggregation": rule.aggregation,
                 "value": value,
-                "threshold": rule.threshold,
-                "comparator": rule.comparator,
+                "threshold": threshold,
+                "comparator": comparator,
+                "detection_kind": config.kind_str(),
                 "window_secs": rule.window_secs,
                 "for_duration_secs": rule.for_duration_secs,
                 "source": "otel_metric_alert",
@@ -361,19 +377,6 @@ impl MetricAlertEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_compare_all_comparators() {
-        assert!(compare(600.0, 500.0, "gt"));
-        assert!(!compare(500.0, 500.0, "gt"));
-        assert!(compare(500.0, 500.0, "gte"));
-        assert!(compare(400.0, 500.0, "lt"));
-        assert!(!compare(500.0, 500.0, "lt"));
-        assert!(compare(500.0, 500.0, "lte"));
-        // SQL-operator form is not a valid keyword comparator -> fail-closed.
-        assert!(!compare(600.0, 500.0, ">"));
-        assert!(!compare(600.0, 500.0, "unknown"));
-    }
 
     #[test]
     fn test_transition_ok_to_firing_requires_for_duration() {
