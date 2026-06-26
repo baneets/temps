@@ -11,7 +11,7 @@ import {
 } from '@/api/client/@tanstack/react-query.gen'
 import type {
   ThresholdBand,
-  ThresholdBandArea,
+  ThresholdBandSeries,
   ThresholdMarker,
 } from '@/components/charts/threshold-line-chart'
 import { Badge } from '@/components/ui/badge'
@@ -326,8 +326,12 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
   )
   const bandPreview = useMutation({ ...previewAlertMutation() })
   const { mutate: previewBand, reset: resetBand } = bandPreview
+  // Backtest with the DISPLAYED aggregation (not the rule's), so the band always
+  // tracks the line on screen and shows even when you're viewing a different
+  // aggregation than the rule alerts on — it's the same detector params, just
+  // applied to the series you're looking at.
   const bandKey = anomalyRule
-    ? `${anomalyRule.id}|${anomalyRule.aggregation}|${anomalyRule.window_secs}|${fromIso}|${toIso}|${JSON.stringify(anomalyRule.detection_config)}`
+    ? `${anomalyRule.id}|${aggregation}|${anomalyRule.window_secs}|${fromIso}|${toIso}|${JSON.stringify(anomalyRule.detection_config)}`
     : ''
   useEffect(() => {
     if (!anomalyRule) {
@@ -338,7 +342,7 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
       body: {
         project_id: project.id,
         metric_name: metricName,
-        aggregation: anomalyRule.aggregation,
+        aggregation,
         window_secs: anomalyRule.window_secs,
         detection_config: anomalyRule.detection_config,
         start_time: fromIso,
@@ -349,29 +353,24 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bandKey])
 
-  const bands = useMemo<ThresholdBandArea[]>(() => {
-    const pts = bandPreview.data?.points ?? []
-    // Only overlay when the chart's aggregation matches the rule's — otherwise
-    // the band (e.g. on the rule's p95) sits on a different scale than the line.
+  // Datadog-style anomaly overlay: a time-varying expected-range band with the
+  // breaching points marked. Present only when an anomaly rule covers this
+  // metric and the backtest had enough history. The per-bucket values are merged
+  // into the chart data below (chartDataWithBand).
+  const bandSeries = useMemo<ThresholdBandSeries | undefined>(() => {
     if (
       !anomalyRule ||
-      anomalyRule.aggregation !== aggregation ||
-      pts.length === 0 ||
-      !bandPreview.data?.sufficient
+      !bandPreview.data?.sufficient ||
+      (bandPreview.data?.points?.length ?? 0) === 0
     )
-      return []
-    // The band varies per seasonal bucket; shade a representative (median) band.
-    const median = (xs: number[]) =>
-      [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]
-    return [
-      {
-        lower: median(pts.map((p) => p.lower)),
-        upper: median(pts.map((p) => p.upper)),
-        tone: anomalyRule.severity === 'critical' ? 'poor' : 'warn',
-        label: 'anomaly band',
-      },
-    ]
-  }, [bandPreview.data, anomalyRule, aggregation])
+      return undefined
+    return {
+      lowerKey: 'bandLower',
+      spanKey: 'bandSpan',
+      breachKey: 'bandBreach',
+      tone: anomalyRule.severity === 'critical' ? 'poor' : 'warn',
+    }
+  }, [anomalyRule, bandPreview.data])
 
   const buckets = metricsQuery.data?.data ?? []
 
@@ -404,6 +403,35 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
       }),
     [buckets, isPercentile, aggregation],
   )
+
+  // Merge the anomaly band onto each chart bucket. The backtest buckets by the
+  // rule's window, which may not line up 1:1 with the chart's interval, so align
+  // each chart point to the NEAREST band point by timestamp. `bandBreach` carries
+  // the value only where the point left the band, so the chart can mark it.
+  const chartDataWithBand = useMemo(() => {
+    const pts = bandPreview.data?.points ?? []
+    if (!bandSeries || pts.length === 0) return chartData
+    const bandTs = pts.map((p) => new Date(p.bucket).getTime())
+    return chartData.map((d) => {
+      const t = new Date(d.bucket).getTime()
+      let best = 0
+      let bestDiff = Infinity
+      for (let i = 0; i < bandTs.length; i++) {
+        const diff = Math.abs(bandTs[i] - t)
+        if (diff < bestDiff) {
+          bestDiff = diff
+          best = i
+        }
+      }
+      const p = pts[best]
+      return {
+        ...d,
+        bandLower: p.lower,
+        bandSpan: Math.max(0, p.upper - p.lower),
+        bandBreach: p.breaching ? d.value : null,
+      }
+    })
+  }, [chartData, bandPreview.data, bandSeries])
 
   // ── Deploy markers ──
   // Overlay deploy events that fall inside the visible window as vertical lines,
@@ -653,9 +681,9 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
                   ? metricsQuery.error.message
                   : 'Failed to load metric series.'
               }
-              chartData={chartData}
+              chartData={chartDataWithBand}
               thresholds={thresholds}
-              bands={bands}
+              bandSeries={bandSeries}
               markers={deployMarkers}
             />
           </div>
@@ -983,7 +1011,7 @@ function MetricChart({
   errorMessage,
   chartData,
   thresholds,
-  bands,
+  bandSeries,
   markers,
 }: {
   metricName: string
@@ -993,7 +1021,7 @@ function MetricChart({
   errorMessage: string
   chartData: ChartPoint[]
   thresholds?: ThresholdBand[]
-  bands?: ThresholdBandArea[]
+  bandSeries?: ThresholdBandSeries
   markers?: ThresholdMarker[]
 }) {
   if (!metricName) {
@@ -1051,7 +1079,7 @@ function MetricChart({
         xKey="label"
         series={{ dataKey: 'value', label: aggLabel, tone: 'primary' }}
         thresholds={thresholds}
-        bands={bands}
+        bandSeries={bandSeries}
         markers={markers}
         height={320}
         tooltipValueFormatter={(v) => formatMetricValue(v)}

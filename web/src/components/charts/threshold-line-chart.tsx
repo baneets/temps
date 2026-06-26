@@ -1,8 +1,9 @@
 import { ReactNode } from 'react'
 import {
+  Area,
   CartesianGrid,
+  ComposedChart,
   Line,
-  LineChart,
   ReferenceArea,
   ReferenceLine,
   XAxis,
@@ -53,6 +54,20 @@ export type ThresholdMarker = {
   title?: string
 }
 
+/**
+ * A time-varying "expected range" band (e.g. an anomaly rule's seasonal band),
+ * read from per-point data keys. `lowerKey` is the band floor and `spanKey` the
+ * band height (upper − lower), so the chart shades [lower, lower + span]
+ * (recharts draws a band as a transparent base area + a filled span on top).
+ * `breachKey`, when set, marks the points that left the band — the anomaly.
+ */
+export type ThresholdBandSeries = {
+  lowerKey: string
+  spanKey: string
+  breachKey?: string
+  tone: MetricTone
+}
+
 interface ThresholdLineChartProps {
   data: any[]
   xKey: string
@@ -63,6 +78,8 @@ interface ThresholdLineChartProps {
   bands?: ThresholdBandArea[]
   /** Vertical event markers (e.g. deployments) at categorical x values. */
   markers?: ThresholdMarker[]
+  /** Time-varying expected-range band drawn behind the line (anomaly band). */
+  bandSeries?: ThresholdBandSeries
   /** Height of the chart in px. Defaults to 300. */
   height?: number
   /** Format the Y-axis ticks (e.g. "2.5s"). */
@@ -108,6 +125,7 @@ export function ThresholdLineChart({
   thresholds = [],
   bands = [],
   markers = [],
+  bandSeries,
   height = 300,
   yTickFormatter,
   tooltipValueFormatter,
@@ -170,8 +188,22 @@ export function ThresholdLineChart({
   // Keep shaded band edges inside the visible Y range too.
   const bandMax = bands.reduce((m, b) => Math.max(m, b.upper), thresholdMax)
   const bandMin = bands.reduce((m, b) => Math.min(m, b.lower), dataMin)
-  const yMax = bandMax * 1.1
-  const yMin = Math.min(0, bandMin)
+  // A time-varying band (anomaly) can dip below / rise above the line — widen
+  // the domain to its envelope so the whole band stays on-chart.
+  let envMax = bandMax
+  let envMin = bandMin
+  if (bandSeries) {
+    for (const p of data) {
+      const lo = p?.[bandSeries.lowerKey]
+      const sp = p?.[bandSeries.spanKey]
+      if (typeof lo === 'number' && typeof sp === 'number') {
+        envMin = Math.min(envMin, lo)
+        envMax = Math.max(envMax, lo + sp)
+      }
+    }
+  }
+  const yMax = envMax * 1.1
+  const yMin = Math.min(0, envMin)
 
   return (
     <ChartContainer
@@ -179,7 +211,7 @@ export function ThresholdLineChart({
       className={cn('aspect-auto w-full', className)}
       style={{ height }}
     >
-      <LineChart
+      <ComposedChart
         data={data}
         margin={{ top: 12, right: 24, left: 8, bottom: 0 }}
       >
@@ -189,6 +221,42 @@ export function ThresholdLineChart({
           className="stroke-border"
           strokeOpacity={0.6}
         />
+        {/* Anomaly "expected range" band: a transparent base at `lower`, with the
+            filled span (upper − lower) stacked on top — drawn first so it sits
+            behind the line. Kept as two sibling <Area>s (NOT wrapped in a
+            fragment — recharts only detects cartesian children at the top level).
+            Tooltip excludes both via tooltipType="none". */}
+        {bandSeries && (
+          <Area
+            key="anomaly-band-base"
+            type="monotone"
+            dataKey={bandSeries.lowerKey}
+            stackId="anomaly-band"
+            stroke="none"
+            fill="none"
+            connectNulls
+            isAnimationActive={false}
+            activeDot={false}
+            tooltipType="none"
+            legendType="none"
+          />
+        )}
+        {bandSeries && (
+          <Area
+            key="anomaly-band-span"
+            type="monotone"
+            dataKey={bandSeries.spanKey}
+            stackId="anomaly-band"
+            stroke="none"
+            fill={THRESHOLD_STROKE[bandSeries.tone]}
+            fillOpacity={0.12}
+            connectNulls
+            isAnimationActive={false}
+            activeDot={false}
+            tooltipType="none"
+            legendType="none"
+          />
+        )}
         <XAxis
           dataKey={xKey}
           tickLine={false}
@@ -299,7 +367,39 @@ export function ThresholdLineChart({
           connectNulls
           isAnimationActive={false}
         />
-      </LineChart>
+        {/* Breach markers: dots at the points that left the band — the anomaly
+            itself. A stroke-less Line over the VALUE series with a custom dot
+            that renders only where `breachKey` is set (recharts' Scatter plots
+            null points at the top, so it can't be used to mark a sparse subset). */}
+        {bandSeries?.breachKey && (
+          <Line
+            dataKey={series.dataKey}
+            stroke="none"
+            legendType="none"
+            tooltipType="none"
+            isAnimationActive={false}
+            activeDot={false}
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            dot={(props: any) => {
+              const breaching =
+                props?.payload?.[bandSeries.breachKey as string] != null
+              return breaching ? (
+                <circle
+                  key={`breach-${props.index}`}
+                  cx={props.cx}
+                  cy={props.cy}
+                  r={3.5}
+                  fill="var(--destructive)"
+                  stroke="var(--background)"
+                  strokeWidth={1}
+                />
+              ) : (
+                <g key={`breach-empty-${props.index}`} />
+              )
+            }}
+          />
+        )}
+      </ComposedChart>
     </ChartContainer>
   )
 }
