@@ -1,4 +1,4 @@
-import { EnvironmentResponse, ProjectResponse } from '@/api/client'
+import { EnvironmentResponse, HistogramSummary, ProjectResponse } from '@/api/client'
 import {
   getEnvironmentsOptions,
   listMetricNamesOptions,
@@ -21,6 +21,8 @@ import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
+  ArrowLeft,
+  BarChart3,
   Gauge,
   LineChart as LineChartIcon,
   Plus,
@@ -232,7 +234,17 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
   }, [allNames, nameSearch])
 
   // ── Time-bucketed series ──
+  // Both bounds are memoized on `timeRange` so they stay STABLE across renders.
+  // Using `new Date()` inline would change the query key every render and spin
+  // React Query into an infinite refetch loop.
   const fromDate = useMemo(() => timeRangeToFrom(timeRange), [timeRange])
+  const toDate = useMemo(
+    () => new Date(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [timeRange],
+  )
+  const fromIso = fromDate.toISOString()
+  const toIso = toDate.toISOString()
   const selectedEnv = environments?.find((e) => e.id === environmentId) ?? null
 
   const metricsQuery = useQuery({
@@ -242,25 +254,14 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
         metric_name: metricName || undefined,
         service_name: serviceName || undefined,
         environment: selectedEnv?.name || undefined,
-        start_time: fromDate.toISOString(),
-        end_time: new Date().toISOString(),
+        start_time: fromIso,
+        end_time: toIso,
         bucket_interval: RANGE_BUCKET[timeRange],
+        // The AggKind strings (avg/sum/min/max/count/rate/pNN) map directly to
+        // the backend's `MetricAggregation::parse`.
+        aggregation,
+        label_filters: serializeLabelFilters(labelFilters) || undefined,
         limit: 1000,
-        // ── REGEN TODO (Phase C query surface) ──
-        // The following params exist on the backend handler
-        // (`MetricQueryParams` in query_handler.rs) but are NOT yet on the
-        // generated `QueryMetricsData` type in this worktree. Un-comment
-        // after `bun run openapi-ts` regenerates the SDK against a running
-        // Phase C server:
-        //
-        //   metric_type: undefined,        // 'gauge' | 'sum' | 'histogram' | ...
-        //   aggregation,                   // AggKind string ('avg' | 'p95' | 'rate' | ...)
-        //   label_filters: serializeLabelFilters(labelFilters) || undefined,
-        //   group_by: undefined,           // comma-separated label keys → per-series buckets
-        //
-        // and the response narrows from `MetricsResponse`/`MetricBucket` to
-        // the richer `OtelMetricsResponse`/`OtelMetricBucket`
-        // (value / quantiles / histogram_summary / series_key).
       },
     }),
     // Only fetch once a concrete metric is chosen — querying every metric at
@@ -270,28 +271,45 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
 
   const buckets = metricsQuery.data?.data ?? []
 
-  // Map the generated `MetricBucket` rows into the recharts point shape.
-  //
-  // REGEN NOTE: with the current (pre-Phase-C) SDK the only series available is
-  // `avg_value`. After regen, `OtelMetricBucket.value` carries the requested
-  // aggregation (avg/sum/p95/rate/…) and `series_key` enables multi-series
-  // rendering. Until then we always plot the average and the aggregation
-  // selector is advisory.
+  // Map the `MetricBucket` rows into the chart point shape. `value` carries the
+  // requested aggregation; for histogram metrics the percentile aggregations are
+  // recomputed client-side from the per-bucket `histogram_summary` layout, since
+  // the server's scalar quantile runs over the synthetic mean rather than the
+  // true distribution.
+  const isPercentile = aggregation.startsWith('p')
   const chartData = useMemo(
     () =>
-      buckets.map((b) => ({
-        bucket: b.bucket,
-        // `value` is the regen-ready aggregation field; the current SDK only
-        // ships avg_value, so fall back to it. `(b as { value?: number })`
-        // keeps TS happy before regen widens the type.
-        value: (b as { value?: number }).value ?? b.avg_value,
-        avg_value: b.avg_value,
-        min_value: b.min_value,
-        max_value: b.max_value,
-        count: b.count,
-      })),
-    [buckets],
+      buckets.map((b) => {
+        const hs = b.histogram_summary
+        const value =
+          isPercentile && hs && hs.bounds.length > 0
+            ? histogramQuantile(
+                hs.bounds,
+                hs.bucket_counts,
+                percentileFromAgg(aggregation),
+              )
+            : (b.value ?? b.avg_value)
+        return {
+          bucket: b.bucket,
+          value,
+          avg_value: b.avg_value,
+          min_value: b.min_value,
+          max_value: b.max_value,
+          count: b.count,
+        }
+      }),
+    [buckets, isPercentile, aggregation],
   )
+
+  // Most recent histogram snapshot in range (for the distribution panel). Using
+  // the latest bucket avoids re-summing cumulative snapshots across time.
+  const latestHist = useMemo(() => {
+    for (let i = buckets.length - 1; i >= 0; i--) {
+      const hs = buckets[i].histogram_summary
+      if (hs && hs.bounds.length > 0) return hs
+    }
+    return null
+  }, [buckets])
 
   const aggLabel =
     AGGREGATIONS.find((a) => a.value === aggregation)?.label ?? 'Average'
@@ -462,22 +480,219 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
         <LabelFilterBuilder value={labelFilters} onChange={setLabelFilters} />
       </div>
 
-      {/* Chart / states */}
+      {metricName ? (
+        <>
+          {/* Selected-metric detail view */}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setMetricName('')}
+            className="-mb-1 gap-1.5 self-start px-2 text-xs text-muted-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            All metrics
+          </Button>
+          <div className="rounded-lg border border-border bg-card p-4">
+            <MetricChart
+              metricName={metricName}
+              aggLabel={aggLabel}
+              isPending={metricsQuery.isPending && metricName.length > 0}
+              isError={metricsQuery.isError}
+              errorMessage={
+                metricsQuery.error instanceof Error
+                  ? metricsQuery.error.message
+                  : 'Failed to load metric series.'
+              }
+              chartData={chartData}
+            />
+          </div>
+          {latestHist && (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <HistogramDistribution hist={latestHist} />
+            </div>
+          )}
+        </>
+      ) : (
+        // Default view: an overview of ALL metrics, each a mini chart. Click to
+        // drill into the detailed explorer above.
+        <MetricsOverview
+          project={project}
+          names={filteredNames}
+          fromIso={fromIso}
+          toIso={toIso}
+          bucketInterval={RANGE_BUCKET[timeRange]}
+          aggregation={aggregation}
+          onSelect={setMetricName}
+          isLoadingNames={namesQuery.isPending}
+          totalCount={allNames.length}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── All-metrics overview ──────────────────────────────────────────────────────
+
+const OVERVIEW_LIMIT = 24
+
+function MetricsOverview({
+  project,
+  names,
+  fromIso,
+  toIso,
+  bucketInterval,
+  aggregation,
+  onSelect,
+  isLoadingNames,
+  totalCount,
+}: {
+  project: ProjectResponse
+  names: string[]
+  fromIso: string
+  toIso: string
+  bucketInterval: string
+  aggregation: AggKind
+  onSelect: (name: string) => void
+  isLoadingNames: boolean
+  totalCount: number
+}) {
+  if (isLoadingNames) {
+    return (
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <Skeleton key={i} className="h-[190px] w-full rounded-lg" />
+        ))}
+      </div>
+    )
+  }
+
+  if (names.length === 0) {
+    return (
       <div className="rounded-lg border border-border bg-card p-4">
-        <MetricChart
-          metricName={metricName}
-          aggLabel={aggLabel}
-          isPending={metricsQuery.isPending && metricName.length > 0}
-          isError={metricsQuery.isError}
-          errorMessage={
-            metricsQuery.error instanceof Error
-              ? metricsQuery.error.message
-              : 'Failed to load metric series.'
+        <EmptyState
+          icon={LineChartIcon}
+          title={totalCount === 0 ? 'No metrics ingested yet' : 'No metrics match'}
+          description={
+            totalCount === 0
+              ? 'Point an OpenTelemetry exporter at this project to start seeing metrics here.'
+              : 'No metrics match your search. Clear the filter to see them all.'
           }
-          chartData={chartData}
         />
       </div>
+    )
+  }
+
+  const shown = names.slice(0, OVERVIEW_LIMIT)
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {shown.map((n) => (
+          <MetricCard
+            key={n}
+            project={project}
+            metricName={n}
+            fromIso={fromIso}
+            toIso={toIso}
+            bucketInterval={bucketInterval}
+            aggregation={aggregation}
+            onSelect={onSelect}
+          />
+        ))}
+      </div>
+      {names.length > shown.length && (
+        <p className="text-center text-xs text-muted-foreground">
+          Showing {shown.length} of {names.length} metrics — use the search in the
+          Metric selector to find the rest.
+        </p>
+      )}
     </div>
+  )
+}
+
+function MetricCard({
+  project,
+  metricName,
+  fromIso,
+  toIso,
+  bucketInterval,
+  aggregation,
+  onSelect,
+}: {
+  project: ProjectResponse
+  metricName: string
+  fromIso: string
+  toIso: string
+  bucketInterval: string
+  aggregation: AggKind
+  onSelect: (name: string) => void
+}) {
+  const isPercentile = aggregation.startsWith('p')
+  const q = useQuery({
+    ...queryMetricsOptions({
+      query: {
+        project_id: project.id,
+        metric_name: metricName,
+        start_time: fromIso,
+        end_time: toIso,
+        bucket_interval: bucketInterval,
+        aggregation,
+        limit: 500,
+      },
+    }),
+    enabled: !!project.id,
+  })
+
+  const buckets = q.data?.data ?? []
+  const isHistogram = buckets.some((b) => b.histogram_summary)
+  const data = buckets.map((b) => {
+    const hs = b.histogram_summary
+    const value =
+      isPercentile && hs && hs.bounds.length > 0
+        ? histogramQuantile(hs.bounds, hs.bucket_counts, percentileFromAgg(aggregation))
+        : (b.value ?? b.avg_value)
+    return { label: formatBucketLabel(b.bucket), value }
+  })
+  const latest = data.length ? data[data.length - 1].value : null
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(metricName)}
+      className="group flex flex-col gap-2 rounded-lg border border-border bg-card p-3 text-left transition hover:border-primary/40 hover:shadow-sm"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-mono text-xs font-medium" title={metricName}>
+          {metricName}
+        </span>
+        {isHistogram && (
+          <Badge variant="outline" className="shrink-0 text-[10px]">
+            histogram
+          </Badge>
+        )}
+      </div>
+      {q.isPending ? (
+        <Skeleton className="h-[110px] w-full" />
+      ) : data.length === 0 ? (
+        <div className="flex h-[110px] items-center justify-center text-xs text-muted-foreground">
+          No data in range
+        </div>
+      ) : (
+        <ThresholdLineChart
+          data={data}
+          xKey="label"
+          series={{ dataKey: 'value', label: metricName, tone: 'primary' }}
+          height={110}
+          tooltipValueFormatter={(v) => formatMetricValue(v)}
+          yTickFormatter={(v) => formatMetricValue(v)}
+        />
+      )}
+      <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <span className="uppercase tracking-wide text-[10px]">latest</span>
+        <span className="font-mono tabular-nums">
+          {latest != null ? formatMetricValue(latest) : '—'}
+        </span>
+      </div>
+    </button>
   )
 }
 
@@ -548,9 +763,9 @@ function LabelFilterBuilder({
             </div>
           ))}
           <p className="text-[11px] text-muted-foreground">
-            Label filters are applied server-side once the SDK is regenerated
-            against the Phase C backend (the <span className="font-mono">label_filters</span>{' '}
-            query param). They are URL-persisted now so the view stays shareable.
+            Label filters narrow the series to data points carrying the given
+            attribute values, server-side. They are URL-persisted so the view
+            stays shareable.
           </p>
         </div>
       )}
@@ -659,4 +874,119 @@ function formatMetricValue(v: number): string {
   if (abs >= 1_000) return `${(v / 1_000).toFixed(2)}k`
   if (abs >= 1) return v.toFixed(2)
   return v.toPrecision(3)
+}
+
+// ── Histogram helpers ─────────────────────────────────────────────────────────
+
+function percentileFromAgg(agg: AggKind): number {
+  switch (agg) {
+    case 'p50':
+      return 0.5
+    case 'p90':
+      return 0.9
+    case 'p95':
+      return 0.95
+    case 'p99':
+      return 0.99
+    default:
+      return 0.5
+  }
+}
+
+/**
+ * Quantile from an explicit-bucket histogram via linear interpolation within the
+ * bucket that crosses the target rank. `bounds` are ascending upper bounds;
+ * `counts` has length `bounds.length + 1` (the trailing entry is the +Inf
+ * bucket). Returns 0 for an empty histogram.
+ */
+function histogramQuantile(
+  bounds: number[],
+  counts: number[],
+  q: number,
+): number {
+  const total = counts.reduce((a, c) => a + c, 0)
+  if (total === 0) return 0
+  const target = q * total
+  let cumulative = 0
+  for (let i = 0; i < counts.length; i++) {
+    const next = cumulative + counts[i]
+    if (next >= target && counts[i] > 0) {
+      const lower = i === 0 ? 0 : bounds[i - 1]
+      const upper =
+        i < bounds.length ? bounds[i] : (bounds[bounds.length - 1] ?? lower)
+      const within = (target - cumulative) / counts[i]
+      return lower + (upper - lower) * within
+    }
+    cumulative = next
+  }
+  return bounds[bounds.length - 1] ?? 0
+}
+
+// ── Histogram distribution panel ──────────────────────────────────────────────
+
+function HistogramDistribution({ hist }: { hist: HistogramSummary }) {
+  const total = hist.count
+  const maxCount = Math.max(1, ...hist.bucket_counts)
+  const mean = total > 0 ? hist.sum / total : 0
+  const stats: { label: string; value: number }[] = [
+    { label: 'Count', value: total },
+    { label: 'Mean', value: mean },
+    { label: 'p50', value: histogramQuantile(hist.bounds, hist.bucket_counts, 0.5) },
+    { label: 'p90', value: histogramQuantile(hist.bounds, hist.bucket_counts, 0.9) },
+    { label: 'p95', value: histogramQuantile(hist.bounds, hist.bucket_counts, 0.95) },
+    { label: 'p99', value: histogramQuantile(hist.bounds, hist.bucket_counts, 0.99) },
+  ]
+  // One row per bucket: label is the [lower, upper) range; the last is +Inf.
+  const rows = hist.bucket_counts.map((c, i) => {
+    const lower = i === 0 ? 0 : hist.bounds[i - 1]
+    const upper = i < hist.bounds.length ? hist.bounds[i] : Infinity
+    const range =
+      upper === Infinity
+        ? `≥ ${formatMetricValue(lower)}`
+        : `${formatMetricValue(lower)} – ${formatMetricValue(upper)}`
+    return { range, count: c }
+  })
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <BarChart3 className="size-4 text-muted-foreground" />
+        <h2 className="text-sm font-semibold">Distribution</h2>
+        <span className="text-xs text-muted-foreground">latest bucket</span>
+      </div>
+      <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+        {stats.map((s) => (
+          <div
+            key={s.label}
+            className="flex flex-col gap-0.5 rounded-md border border-border/60 bg-muted/30 p-2"
+          >
+            <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              {s.label}
+            </span>
+            <span className="font-mono text-sm font-medium">
+              {formatMetricValue(s.value)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-1">
+        {rows.map((r, i) => (
+          <div key={i} className="flex items-center gap-2 text-xs">
+            <span className="w-36 shrink-0 text-right font-mono text-muted-foreground">
+              {r.range}
+            </span>
+            <div className="relative h-4 flex-1 overflow-hidden rounded bg-muted/40">
+              <div
+                className="h-full rounded bg-primary/70"
+                style={{ width: `${(r.count / maxCount) * 100}%` }}
+              />
+            </div>
+            <span className="w-12 shrink-0 text-right font-mono tabular-nums text-muted-foreground">
+              {r.count}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }

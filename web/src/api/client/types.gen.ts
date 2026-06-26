@@ -534,6 +534,15 @@ export type AggregatedBucketsResponse = {
 export type AggregationLevel = 'events' | 'sessions' | 'visitors';
 
 /**
+ * The aggregation temporality of a Sum/Histogram/ExponentialHistogram metric.
+ *
+ * Mirrors OTel's `AggregationTemporality` proto enum: whether reported values
+ * are cumulative since the start of the series (Cumulative) or only the delta
+ * since the previous report (Delta).
+ */
+export type AggregationTemporality = 'unspecified' | 'delta' | 'cumulative';
+
+/**
  * Response wrapping the AI agent breakdown rows.
  */
 export type AiAgentBreakdownResponse = {
@@ -773,13 +782,6 @@ export type AppSettings = {
      */
     build_limits?: BuildLimitsSettings;
     /**
-     * Nightly Docker/disk cleanup behaviour — retention windows for unused
-     * deployment images and BuildKit cache, plus the schedule. Operator-tunable
-     * at runtime; the cleanup scheduler re-reads this on every run, so changes
-     * take effect without a restart.
-     */
-    cleanup?: CleanupSettings;
-    /**
      * Binary version tag (e.g. "v0.1.0") of the *console* process
      * (`temps serve`, role=all or role=console) that last started. Written
      * on console startup; read by the standalone `temps proxy` to detect
@@ -822,13 +824,6 @@ export type AppSettings = {
     monitoring?: MonitoringSettings;
     multi_node?: MultiNodeSettings;
     on_demand_tls?: OnDemandTlsSettings;
-    /**
-     * OpenTelemetry ingest (OTLP/HTTP) settings. Instance-global kill-switch
-     * for the inbound metrics/traces/logs ingest endpoints under
-     * `/api/otel/v1*`. Distinct from `monitoring`, which governs the
-     * *outbound* Prometheus scraper (a different data source).
-     */
-    otel_ingest?: OtelIngestSettings;
     preview_domain?: string;
     preview_gateway?: PreviewGatewaySettings;
     rate_limiting?: RateLimitSettings;
@@ -849,7 +844,6 @@ export type AppSettings = {
 export type AppSettingsResponse = {
     agent_sandbox: AgentSandboxSettingsMasked;
     ai_config: AiConfigSettings;
-    cleanup: CleanupSettings;
     container_logs: ContainerLogSettings;
     disk_space_alert: DiskSpaceAlertSettings;
     dns_provider: DnsProviderSettingsMasked;
@@ -870,14 +864,6 @@ export type AppSettingsResponse = {
     letsencrypt: LetsEncryptSettings;
     monitoring: MonitoringSettingsMasked;
     multi_node: MultiNodeSettingsMasked;
-    /**
-     * Whether OTLP/HTTP ingestion is currently accepted. Mirrors
-     * `otel_ingest.enabled`. Flipped via the dedicated
-     * `PATCH /settings/otel-ingest` endpoint (guarded by `otel:write`), not
-     * the generic settings PUT — but surfaced here so the UI can render the
-     * current state without a second request.
-     */
-    otel_ingest_enabled: boolean;
     preview_domain: string;
     preview_gateway: PreviewGatewaySettingsMasked;
     rate_limiting: RateLimitSettings;
@@ -1612,60 +1598,6 @@ export type ChildBackupListResponse = {
      * Zero or more child backup entries ordered by `external_service_backups.id` ASC.
      */
     children: Array<ChildBackupEntryResponse>;
-};
-
-/**
- * Nightly Docker/disk cleanup settings.
- *
- * Governs the background `DockerCleanupService` that reclaims disk on each
- * node: dangling images, superseded *tagged* deployment images, and BuildKit
- * build cache. Defaults are conservative — safe for a multi-tenant control
- * plane — and every value is operator-tunable at runtime (the scheduler
- * re-reads settings on every run, so no restart is needed).
- *
- * Image removal is always DB-driven: an image is only ever removed if its tag
- * belongs to a known deployment that is neither live nor inside the
- * per-environment rollback window. Base images and in-flight builds are never
- * touched, regardless of these values.
- */
-export type CleanupSettings = {
-    /**
-     * Maximum *unused* age (days) for BuildKit build cache. Cache not touched
-     * by a build within this window is reclaimed on the next run. Lower =
-     * reclaims disk sooner but causes more cold (slow) builds. Default 7.
-     * Typical: 1 (daily-deploy/disk-tight), 3 (weekday-active), 7 (default).
-     */
-    build_cache_max_age_days?: number;
-    /**
-     * Hard cap on total BuildKit build-cache size, in megabytes. Enforced
-     * independently of the age window, so a burst of builds cannot fill the
-     * disk before the next nightly run. `0` (default) means "no size cap —
-     * age window only". When set, the least-recently-used cache beyond this
-     * size is reclaimed regardless of age.
-     */
-    build_cache_max_size_mb?: number;
-    /**
-     * Master switch for the nightly cleanup. When `false`, no images or build
-     * cache are pruned (the static-asset/chunk cleanup still runs, as it is
-     * unrelated to Docker). Defaults to `true`.
-     */
-    enabled?: boolean;
-    /**
-     * Minimum age (days) an unreferenced deployment image must reach before it
-     * is eligible for removal. Acts as a safety floor against racing a deploy
-     * whose DB row hasn't reached a live state yet. Default 7.
-     */
-    image_max_age_days?: number;
-    /**
-     * How many of the most-recent deployments *per environment* to keep images
-     * for, so a rollback is always possible even when those deployments are no
-     * longer live. Default 3. Set 0 to keep only currently-live images.
-     */
-    keep_deployments_per_env?: number;
-    /**
-     * Hour of day (UTC, 0–23) the nightly cleanup runs. Default 2 (02:00 UTC).
-     */
-    run_hour_utc?: number;
 };
 
 export type CliDeviceApproveRequest = {
@@ -2855,10 +2787,23 @@ export type CreatePrResponse = {
 
 /**
  * Request to create a project from a template
+ *
+ * Supports two deploy modes:
+ * * **Fork mode** — when `git_provider_connection_id` is set, the template
+ * repo is cloned into a new repository under the user's Git account and the
+ * project tracks that fork (git-push deploys, automatic deploy on push).
+ * * **One-click public-repo mode** — when `git_provider_connection_id` is
+ * omitted, the project deploys directly from the template's public source
+ * repository (no fork, no Git account required). This is the activation
+ * path: a brand-new user with no Git provider connected can still deploy a
+ * demo in one click. `repository_name` / `repository_owner` are ignored in
+ * this mode, and automatic-deploy-on-push is unavailable (there is no fork
+ * to receive webhooks).
  */
 export type CreateProjectFromTemplateRequest = {
     /**
-     * Enable automatic deployment on push (defaults to true)
+     * Enable automatic deployment on push (defaults to true). Only honoured in
+     * fork mode; public-repo deploys cannot receive push webhooks.
      */
     automatic_deploy?: boolean;
     /**
@@ -6752,6 +6697,43 @@ export type HierarchyLevel = {
     name: string;
 };
 
+/**
+ * An explicit-bucket histogram aggregated over a time bucket.
+ *
+ * Carries the reduced scalars (count/sum/min/max) plus the explicit bucket
+ * layout — `bounds` (the upper bounds) and `bucket_counts` (observation counts,
+ * summed element-wise across the window; length is `bounds.len() + 1`, the last
+ * entry being the +Inf overflow bucket). With these, a caller can reconstruct
+ * any quantile (e.g. p95) via cumulative-count interpolation.
+ */
+export type HistogramSummary = {
+    /**
+     * Explicit bucket upper bounds (OTLP `explicit_bounds`), ascending.
+     */
+    bounds: Array<number>;
+    /**
+     * Per-bucket observation counts summed element-wise across the window.
+     * Length is `bounds.len() + 1` (the trailing element is the +Inf bucket).
+     */
+    bucket_counts: Array<number>;
+    /**
+     * Total observation count summed across the bucket window.
+     */
+    count: number;
+    /**
+     * Maximum observed value, when reported by the producer.
+     */
+    max?: number | null;
+    /**
+     * Minimum observed value, when reported by the producer.
+     */
+    min?: number | null;
+    /**
+     * Sum of observed values across the bucket window.
+     */
+    sum: number;
+};
+
 export type HourlyPageSessions = {
     avg_duration_seconds: number;
     event_count: number;
@@ -7914,14 +7896,60 @@ export type MessageContent = string | Array<ContentPart>;
 export type MeteredMode = 'derive_from_invoices' | 'use_subscription' | 'ignore';
 
 /**
+ * The aggregation applied when reducing raw metric points into a time bucket.
+ *
+ * Store-neutral: every storage backend (ClickHouse today, TimescaleDB later)
+ * must be able to satisfy this contract. `Quantile(q)` carries the requested
+ * quantile in `[0.0, 1.0]` (e.g. `0.95` for p95).
+ */
+export type MetricAggregation = 'avg' | 'sum' | 'min' | 'max' | 'count' | 'rate_per_sec' | {
+    /**
+     * A quantile of the scalar value in each bucket. The carried `f64` is the
+     * requested quantile in `[0.0, 1.0]`.
+     */
+    quantile: number;
+};
+
+/**
  * A time-bucketed metric aggregate for chart display.
+ *
+ * Store-neutral response contract. The legacy scalar fields
+ * (`avg_value`/`min_value`/`max_value`/`count`) are always populated for chart
+ * back-compat. The richer fields describe the explicitly-requested
+ * [`MetricAggregation`] (`value`), optional `quantiles`, an optional
+ * `histogram_summary`, and a `series_key` identifying the label-set when the
+ * query used `group_by`.
  */
 export type MetricBucket = {
     avg_value: number;
     bucket: string;
     count: number;
+    histogram_summary?: null | HistogramSummary;
     max_value: number;
     min_value: number;
+    /**
+     * Computed quantile/value pairs `(quantile, value)` when the query asked for
+     * quantile aggregation; otherwise empty.
+     */
+    quantiles?: Array<[
+        number,
+        number
+    ]>;
+    /**
+     * The label-set this bucket belongs to, as ordered `(key, value)` pairs,
+     * when the query grouped by labels. Empty/`None` = the single ungrouped
+     * aggregate stream.
+     */
+    series_key?: Array<[
+        string,
+        string
+    ]> | null;
+    /**
+     * The value of the requested [`MetricAggregation`] for this bucket. For the
+     * default `Avg` aggregation this equals `avg_value`. `#[serde(default)]` so
+     * pre-existing payloads (which only carried avg/min/max/count) still parse.
+     */
+    value?: number;
 };
 
 /**
@@ -7938,14 +7966,10 @@ export type MetricDataPoint = {
     value: number;
 };
 
-export type MetricNamesResponse = {
-    names: Array<string>;
-};
-
 /**
  * The type of an OTel metric.
  */
-export type MetricType = 'gauge' | 'sum' | 'histogram';
+export type MetricType = 'gauge' | 'sum' | 'histogram' | 'exponential_histogram' | 'summary';
 
 export type MetricsOverTimeResponse = {
     cls: Array<number | null>;
@@ -8006,11 +8030,6 @@ export type MetricsRangeQuery = {
      * Time window: `"1h"` | `"6h"` | `"24h"` | `"7d"`.
      */
     range?: string;
-};
-
-export type MetricsResponse = {
-    count: number;
-    data: Array<MetricBucket>;
 };
 
 /**
@@ -8781,31 +8800,13 @@ export type OperationResultsResponse = {
     operations: Array<OperationResultResponse>;
 };
 
-/**
- * OpenTelemetry ingest (OTLP/HTTP) settings.
- *
- * Controls the inbound OTLP receiver endpoints (`/api/otel/v1/metrics`,
- * `/traces`, `/logs`, and their path-scoped variants). This is the
- * data path where deployed applications and infrastructure services
- * *push* telemetry into Temps — it is NOT temps self-instrumentation
- * (temps does not emit its own OTLP) and NOT the Prometheus scraper
- * (see [`MonitoringSettings`], a separate pull-based source).
- */
-export type OtelIngestSettings = {
-    /**
-     * Master switch for OTLP ingest. When `false`, the ingest handlers
-     * short-circuit *before* auth/decompress/decode/store and return an
-     * empty OTLP success envelope (HTTP 200) so SDK exporters treat the
-     * batch as delivered and do not retry-storm. The background OTel
-     * analysis loops (anomaly detection, health compute) also pause while
-     * this is `false`.
-     *
-     * Defaults to `true`: OTLP ingest is a pre-existing always-on receiver,
-     * so a `settings` row written before this field existed deserializes to
-     * `enabled = true` (preserving current behaviour on upgrade — no silent
-     * telemetry loss).
-     */
-    enabled?: boolean;
+export type OtelMetricNamesResponse = {
+    names: Array<string>;
+};
+
+export type OtelMetricsResponse = {
+    count: number;
+    data: Array<MetricBucket>;
 };
 
 /**
@@ -13613,6 +13614,10 @@ export type TemplateResponse = {
      */
     env_vars: Array<EnvVarTemplateResponse>;
     /**
+     * Container port the prebuilt image listens on (image deploys only).
+     */
+    exposed_port?: number | null;
+    /**
      * Feature highlights
      */
     features: Array<string>;
@@ -13621,6 +13626,15 @@ export type TemplateResponse = {
      */
     git: GitRefResponse;
     /**
+     * HTTP health-check path probed after the container starts (image deploys).
+     */
+    health_check_path?: string | null;
+    /**
+     * Prebuilt Docker image reference. When set, the one-click deploy pulls and
+     * runs this image directly (no build); when absent it builds from `git`.
+     */
+    image?: string | null;
+    /**
      * URL to template image/icon
      */
     image_url?: string | null;
@@ -13628,19 +13642,6 @@ export type TemplateResponse = {
      * Whether the template is featured/promoted
      */
     is_featured: boolean;
-    /**
-     * Prebuilt Docker image reference. When set, the one-click deploy pulls and
-     * runs this image directly (no build); when absent it builds from `git`.
-     */
-    image?: string | null;
-    /**
-     * Container port the prebuilt image listens on (image deploys only).
-     */
-    exposed_port?: number | null;
-    /**
-     * HTTP health-check path probed after the container starts (image deploys).
-     */
-    health_check_path?: string | null;
     /**
      * Display name
      */
@@ -14548,28 +14549,6 @@ export type UpdateOidcProviderRequest = {
     scopes?: string | null;
     template?: string | null;
     trust_idp_email?: boolean | null;
-};
-
-/**
- * Request body for the OTLP ingest kill-switch.
- */
-export type UpdateOtelIngestRequest = {
-    /**
-     * Whether OTLP/HTTP ingestion (`/api/otel/v1*`) is accepted. When
-     * `false`, the ingest endpoints accept-and-discard (HTTP 200) and the
-     * OTel analysis loops pause.
-     */
-    enabled: boolean;
-};
-
-/**
- * Response for the OTLP ingest kill-switch update.
- */
-export type UpdateOtelIngestResponse = {
-    /**
-     * The effective state after the update.
-     */
-    enabled: boolean;
 };
 
 export type UpdatePreferencesRequest = {
@@ -29078,7 +29057,7 @@ export type ListMetricNamesResponses = {
     /**
      * List of metric names
      */
-    200: MetricNamesResponse;
+    200: OtelMetricNamesResponse;
 };
 
 export type ListMetricNamesResponse = ListMetricNamesResponses[keyof ListMetricNamesResponses];
@@ -29119,11 +29098,31 @@ export type QueryMetricsData = {
          * Max buckets to return (default: 1000)
          */
         limit?: number;
+        /**
+         * Filter by metric type (gauge, sum, histogram, exponential_histogram, summary)
+         */
+        metric_type?: string;
+        /**
+         * Per-bucket aggregation: avg (default), sum, min, max, count, rate, p50/p95/p99, quantile:0.95
+         */
+        aggregation?: string;
+        /**
+         * Comma-separated key=value data-point label filters (keys must match [a-zA-Z0-9_.:-])
+         */
+        label_filters?: string;
+        /**
+         * Comma-separated label keys to group series by
+         */
+        group_by?: string;
     };
     url: '/otel/metrics';
 };
 
 export type QueryMetricsErrors = {
+    /**
+     * Invalid label key
+     */
+    400: ProblemDetails;
     /**
      * Unauthorized
      */
@@ -29144,7 +29143,7 @@ export type QueryMetricsResponses = {
     /**
      * Metrics data
      */
-    200: MetricsResponse;
+    200: OtelMetricsResponse;
 };
 
 export type QueryMetricsResponse = QueryMetricsResponses[keyof QueryMetricsResponses];
@@ -39792,37 +39791,6 @@ export type UpdateGlobalMcpResponses = {
 };
 
 export type UpdateGlobalMcpResponse = UpdateGlobalMcpResponses[keyof UpdateGlobalMcpResponses];
-
-export type UpdateOtelIngestData = {
-    body: UpdateOtelIngestRequest;
-    path?: never;
-    query?: never;
-    url: '/settings/otel-ingest';
-};
-
-export type UpdateOtelIngestErrors = {
-    /**
-     * Unauthorized
-     */
-    401: unknown;
-    /**
-     * Insufficient permissions (requires otel:write)
-     */
-    403: unknown;
-    /**
-     * Internal server error
-     */
-    500: unknown;
-};
-
-export type UpdateOtelIngestResponses = {
-    /**
-     * OTLP ingest toggle updated
-     */
-    200: UpdateOtelIngestResponse;
-};
-
-export type UpdateOtelIngestResponse2 = UpdateOtelIngestResponses[keyof UpdateOtelIngestResponses];
 
 export type RefreshRouteTableData = {
     body?: never;
