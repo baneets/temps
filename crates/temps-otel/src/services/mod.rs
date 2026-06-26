@@ -1,5 +1,6 @@
 //! Core OTel services.
 
+pub mod anomaly_preview;
 pub mod dashboard_service;
 pub mod health_service;
 pub mod metric_alert_evaluator;

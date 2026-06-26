@@ -29,8 +29,8 @@ use tracing::{debug, error, info, warn};
 use temps_monitoring::{AlarmService, AlarmSeverity, AlarmType, FireAlarmRequest};
 
 use crate::detectors::{
-    anomaly_breaches, robust_band, season_cell, AnomalyParams, DetectionConfig, StaticParams,
-    MIN_BAND_SCALE,
+    AnomalyParams, BandModel, DetectionConfig, StaticParams, DEFAULT_LOOKBACK_DAYS, MIN_BAND_SCALE,
+    MIN_BASELINE_SAMPLES,
 };
 use crate::services::metric_alert_service::MetricAlertService;
 use crate::services::OtelService;
@@ -44,14 +44,6 @@ const EVAL_INTERVAL_SECS: u64 = 30;
 /// storage. The band moves slowly, so the hot 30s tick scores the current value
 /// against the cached baseline instead of re-querying the full lookback window.
 const BASELINE_REFRESH_SECS: u64 = 3600;
-
-/// Default anomaly baseline lookback when a rule doesn't set one.
-const DEFAULT_LOOKBACK_DAYS: i32 = 14;
-
-/// Minimum baseline samples required to compute a trustworthy band. Below this —
-/// even after the seasonal→global fallback — the rule preserves state rather
-/// than firing off a thin baseline (cold-start safety).
-const MIN_BASELINE_SAMPLES: usize = 8;
 
 /// The state transition the evaluator should apply for a single rule this cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +94,7 @@ pub fn evaluate_transition(
 /// from the explicit bucket layout (`histogram_summary`) — the server's scalar
 /// `value` for a percentile is the quantile of the synthetic per-point means,
 /// not the true distribution. All other cases use the server-computed `value`.
-fn value_for_rule(latest: &MetricBucket, aggregation: MetricAggregation) -> f64 {
+pub(crate) fn value_for_rule(latest: &MetricBucket, aggregation: MetricAggregation) -> f64 {
     if let MetricAggregation::Quantile(q) = aggregation {
         if let Some(hs) = &latest.histogram_summary {
             if !hs.bounds.is_empty() {
@@ -453,53 +445,44 @@ impl MetricAlertEvaluator {
         p: &AnomalyParams,
         now: DateTime<Utc>,
     ) -> Result<Option<AnomalyEval>, crate::error::OtelError> {
-        let baseline = self.baseline_values(rule, p, now).await?;
-        let cell = season_cell(scored_ts, p.seasonality);
-
-        // Same seasonal cell as the scored point, and strictly before it (so the
-        // current — possibly anomalous — window can't contaminate its own band).
-        let mut samples: Vec<f64> = baseline
-            .iter()
-            .filter(|(ts, _)| *ts < scored_ts && season_cell(*ts, p.seasonality) == cell)
-            .map(|(_, v)| *v)
+        // Baseline strictly before the scored bucket so the current (possibly
+        // anomalous) window can't contaminate its own band.
+        let baseline: Vec<(DateTime<Utc>, f64)> = self
+            .baseline_values(rule, p, now)
+            .await?
+            .into_iter()
+            .filter(|(ts, _)| *ts < scored_ts)
             .collect();
 
-        // Cold-start fallback: too few seasonal samples → use the global band.
-        if samples.len() < MIN_BASELINE_SAMPLES {
-            samples = baseline
-                .iter()
-                .filter(|(ts, _)| *ts < scored_ts)
-                .map(|(_, v)| *v)
-                .collect();
-        }
-        if samples.len() < MIN_BASELINE_SAMPLES {
+        // The SAME BandModel the preview uses, so production and preview agree.
+        let band = BandModel::from_baseline(&baseline, p.seasonality, MIN_BASELINE_SAMPLES);
+        if band.samples < MIN_BASELINE_SAMPLES {
             debug!(
                 rule_id = rule.id,
-                samples = samples.len(),
+                samples = band.samples,
                 "Anomaly: insufficient baseline, preserving state"
             );
             return Ok(None);
         }
-
-        let Some((center, scale)) = robust_band(&samples) else {
-            return Ok(None);
-        };
-        if scale < MIN_BAND_SCALE {
-            // A flat baseline gives no meaningful band; preserve rather than fire
-            // on every wobble (the reviewer's divide-by-zero / always-firing case).
-            debug!(
-                rule_id = rule.id,
-                "Anomaly: degenerate (flat) baseline, preserving state"
-            );
-            return Ok(None);
+        match band.breaches(scored_ts, value, p.deviations, p.direction) {
+            Some(breaching) => {
+                let (center, scale) = band.band_for(scored_ts).unwrap_or((value, 0.0));
+                Ok(Some(AnomalyEval {
+                    breaching,
+                    center,
+                    scale,
+                }))
+            }
+            None => {
+                // Flat baseline → no meaningful band; preserve rather than fire on
+                // every wobble (the divide-by-zero / always-firing case).
+                debug!(
+                    rule_id = rule.id,
+                    "Anomaly: degenerate (flat) baseline, preserving state"
+                );
+                Ok(None)
+            }
         }
-
-        let breaching = anomaly_breaches(value, center, scale, p.deviations, p.direction);
-        Ok(Some(AnomalyEval {
-            breaching,
-            center,
-            scale,
-        }))
     }
 
     /// Fetch (and cache) the per-rule baseline values over its lookback window.

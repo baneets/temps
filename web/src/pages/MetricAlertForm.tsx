@@ -45,6 +45,7 @@ import { SearchableSelect } from '@/components/ui/searchable-select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { AGGREGATIONS } from '@/components/metrics/metric-format'
+import { AnomalyBacktest } from '@/components/metrics/AnomalyBacktest'
 import {
   AlertStateBadge,
   ANOMALY_ALGORITHMS,
@@ -662,6 +663,23 @@ function AlertFormBody({ project, isEditing, id, existing }: AlertFormBodyProps)
                       />
                     </div>
                   </details>
+
+                  {/* "Would this have fired?" — only meaningful with a metric. */}
+                  {watchedMetric && (
+                    <AnomalyBacktest
+                      projectId={project.id}
+                      metricName={watchedMetric}
+                      aggregation={form.watch('aggregation')}
+                      windowSecs={form.watch('window_secs')}
+                      detectionConfig={{
+                        kind: 'anomaly',
+                        algorithm: form.watch('algorithm') as AnomalyAlgorithm,
+                        deviations: form.watch('deviations'),
+                        direction: form.watch('direction') as Direction,
+                        seasonality: form.watch('seasonality') as Seasonality,
+                      }}
+                    />
+                  )}
                 </>
               ) : (
                 /* Static: comparator + threshold */

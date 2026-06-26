@@ -100,6 +100,12 @@ pub fn configure_routes() -> Router<OtelAppState> {
             "/otel/alerts",
             get(metric_alert_handler::list_alerts).post(metric_alert_handler::create_alert),
         )
+        // Anomaly backtest/preview. Static segment registered before `{id}` so it
+        // isn't captured as a rule id (matchit prefers static, but be explicit).
+        .route(
+            "/otel/alerts/preview",
+            post(metric_alert_handler::preview_alert),
+        )
         .route(
             "/otel/alerts/{id}",
             get(metric_alert_handler::get_alert)

@@ -19,6 +19,8 @@
 //! alongside `serde(tag)` in utoipa 5.x). utoipa + hey-api render this as a
 //! usable `(StaticParams & { kind: 'static' }) | …` TS discriminated union.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -36,6 +38,13 @@ fn default_pct_anomalous() -> f64 {
 /// can't produce an infinite z-score. A scale below this is treated as
 /// degenerate by the evaluator (insufficient baseline → preserve state).
 pub const MIN_BAND_SCALE: f64 = 1e-9;
+
+/// Minimum baseline samples for a trustworthy band. Below this the band is not
+/// used (preserve state). Shared by the evaluator and the preview endpoint.
+pub const MIN_BASELINE_SAMPLES: usize = 8;
+
+/// Default anomaly baseline lookback (days) when a rule doesn't set one.
+pub const DEFAULT_LOOKBACK_DAYS: i32 = 14;
 
 /// The robust band center + scale for an anomaly detector, from baseline values:
 /// `(median, MAD · 1.4826)`. The 1.4826 factor makes MAD a consistent estimator
@@ -82,6 +91,80 @@ pub fn anomaly_breaches(
         Direction::Both => z.abs() > deviations,
         Direction::Above => z > deviations,
         Direction::Below => -z > deviations,
+    }
+}
+
+/// A precomputed anomaly band: per-seasonal-cell robust `(center, scale)` bands
+/// plus a global fallback, built once from baseline values and then queried per
+/// timestamp. Shared by the evaluator (scores the current point) and the preview
+/// endpoint (scores a whole range) so they can never diverge.
+pub struct BandModel {
+    seasonality: Seasonality,
+    /// cell id -> (center, scale), only for cells with enough samples.
+    cells: HashMap<i64, (f64, f64)>,
+    /// Global band over all baseline values, used when a cell is too thin.
+    global: Option<(f64, f64)>,
+    /// Total baseline samples (for the insufficiency check).
+    pub samples: usize,
+}
+
+impl BandModel {
+    /// Build from `(timestamp, value)` baseline pairs. A seasonal cell gets its
+    /// own band only when it has `>= min_cell_samples`; otherwise that cell falls
+    /// back to the global band (cold-start behaviour).
+    pub fn from_baseline(
+        values: &[(DateTime<Utc>, f64)],
+        seasonality: Seasonality,
+        min_cell_samples: usize,
+    ) -> Self {
+        let mut by_cell: HashMap<i64, Vec<f64>> = HashMap::new();
+        for (ts, v) in values {
+            by_cell
+                .entry(season_cell(*ts, seasonality))
+                .or_default()
+                .push(*v);
+        }
+        let mut cells = HashMap::new();
+        for (cell, vals) in &by_cell {
+            if vals.len() >= min_cell_samples {
+                if let Some(band) = robust_band(vals) {
+                    cells.insert(*cell, band);
+                }
+            }
+        }
+        let all: Vec<f64> = values.iter().map(|(_, v)| *v).collect();
+        BandModel {
+            seasonality,
+            cells,
+            global: robust_band(&all),
+            samples: values.len(),
+        }
+    }
+
+    /// The `(center, scale)` band that applies at `ts` — its seasonal cell's band
+    /// if that cell was dense enough, else the global band.
+    pub fn band_for(&self, ts: DateTime<Utc>) -> Option<(f64, f64)> {
+        let cell = season_cell(ts, self.seasonality);
+        self.cells.get(&cell).copied().or(self.global)
+    }
+
+    /// Whether `value` at `ts` breaches the band. `None` when there is no usable
+    /// band (no baseline, or a degenerate/flat scale) — the caller then preserves
+    /// state rather than firing.
+    pub fn breaches(
+        &self,
+        ts: DateTime<Utc>,
+        value: f64,
+        deviations: f64,
+        direction: Direction,
+    ) -> Option<bool> {
+        let (center, scale) = self.band_for(ts)?;
+        if scale < MIN_BAND_SCALE {
+            return None;
+        }
+        Some(anomaly_breaches(
+            value, center, scale, deviations, direction,
+        ))
     }
 }
 
@@ -522,6 +605,42 @@ mod tests {
         assert_eq!(season_cell(t, Seasonality::Daily), 14); // hour-of-day
                                                             // Tuesday = num_days_from_monday 1 → 1*24 + 14 = 38.
         assert_eq!(season_cell(t, Seasonality::Weekly), 38);
+    }
+
+    #[test]
+    fn test_band_model() {
+        use chrono::TimeZone;
+        // Non-seasonal: one global band over all values.
+        let vals: Vec<(DateTime<Utc>, f64)> = (0..12)
+            .map(|i| {
+                (
+                    Utc.with_ymd_and_hms(2026, 6, 1, i, 0, 0).unwrap(),
+                    100.0 + (i as f64 % 7.0 - 3.0) * 5.0,
+                )
+            })
+            .collect();
+        let band = BandModel::from_baseline(&vals, Seasonality::None, 8);
+        assert_eq!(band.samples, 12);
+        let any_ts = Utc.with_ymd_and_hms(2026, 6, 2, 5, 0, 0).unwrap();
+        let (center, scale) = band.band_for(any_ts).expect("global band");
+        assert!((center - 100.0).abs() < 10.0);
+        assert!(scale > 0.0);
+        // A value far outside the band breaches; one near the center does not.
+        assert_eq!(
+            band.breaches(any_ts, 100_000.0, 3.0, Direction::Both),
+            Some(true)
+        );
+        assert_eq!(
+            band.breaches(any_ts, center, 3.0, Direction::Both),
+            Some(false)
+        );
+
+        // A flat baseline → degenerate band → breaches returns None (preserve).
+        let flat: Vec<(DateTime<Utc>, f64)> = (0..10)
+            .map(|i| (Utc.with_ymd_and_hms(2026, 6, 1, i, 0, 0).unwrap(), 42.0))
+            .collect();
+        let flat_band = BandModel::from_baseline(&flat, Seasonality::None, 8);
+        assert_eq!(flat_band.breaches(any_ts, 99.0, 3.0, Direction::Both), None);
     }
 
     #[test]

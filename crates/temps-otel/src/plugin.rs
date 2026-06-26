@@ -173,6 +173,7 @@ impl OtelConfig {
         metric_alert_handler::get_alert,
         metric_alert_handler::update_alert,
         metric_alert_handler::delete_alert,
+        metric_alert_handler::preview_alert,
     ),
     components(
         schemas(
@@ -221,6 +222,9 @@ impl OtelConfig {
             metric_alert_handler::UpdateMetricAlertRequest,
             metric_alert_handler::OtelMetricAlertRuleResponse,
             metric_alert_handler::OtelMetricAlertsResponse,
+            metric_alert_handler::AnomalyPreviewRequest,
+            metric_alert_handler::AnomalyPreviewResponse,
+            metric_alert_handler::AnomalyPreviewPointResponse,
             crate::detectors::DetectionConfig,
             crate::detectors::StaticParams,
             crate::detectors::AnomalyParams,

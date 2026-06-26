@@ -14,9 +14,11 @@ use tracing::{error, warn};
 use utoipa::ToSchema;
 
 use crate::detectors::DetectionConfig;
+use crate::error::OtelError;
 use crate::handlers::audit::{
     OtelMetricAlertCreatedAudit, OtelMetricAlertDeletedAudit, OtelMetricAlertUpdatedAudit,
 };
+use crate::services::anomaly_preview::compute_anomaly_preview;
 use crate::OtelAppState;
 use temps_auth::{permission_guard, RequireAuth};
 use temps_core::problemdetails::Problem;
@@ -137,6 +139,54 @@ impl From<Model> for OtelMetricAlertRuleResponse {
 pub struct OtelMetricAlertsResponse {
     pub data: Vec<OtelMetricAlertRuleResponse>,
     pub total: u64,
+}
+
+// ── Anomaly preview / backtest ──────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AnomalyPreviewRequest {
+    pub project_id: i32,
+    pub metric_name: String,
+    /// One of `avg|sum|min|max|count|rate|p50|p90|p95|p99`.
+    pub aggregation: String,
+    pub window_secs: i32,
+    /// Must be an `anomaly` detector — the band to backtest.
+    pub detection_config: DetectionConfig,
+    /// RFC 3339; defaults to 7 days before `end_time`.
+    #[schema(example = "2025-10-12T12:15:47Z")]
+    pub start_time: Option<String>,
+    /// RFC 3339; defaults to now.
+    #[schema(example = "2025-10-12T12:15:47Z")]
+    pub end_time: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AnomalyPreviewPointResponse {
+    #[schema(example = "2025-10-12T12:15:47Z")]
+    pub bucket: String,
+    pub value: f64,
+    /// Lower edge of the expected band at this point.
+    pub lower: f64,
+    /// Upper edge of the expected band at this point.
+    pub upper: f64,
+    pub breaching: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AnomalyPreviewResponse {
+    pub points: Vec<AnomalyPreviewPointResponse>,
+    /// How many points in the range would have fired.
+    pub breach_count: i64,
+    /// Baseline sample count (drives the `sufficient` flag).
+    pub baseline_samples: i64,
+    /// Whether the baseline had enough history for a trustworthy band.
+    pub sufficient: bool,
+}
+
+fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────
@@ -374,4 +424,87 @@ pub async fn delete_alert(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Backtest an anomaly detector over a time range without saving a rule.
+///
+/// Replays the metric against the same band the evaluator would use, returning
+/// the per-bucket band + which points would have fired. Powers the form's
+/// "would this have fired?" preview and the explorer band overlay. Read-only.
+#[utoipa::path(
+    tag = "OTel",
+    post,
+    path = "/otel/alerts/preview",
+    request_body = AnomalyPreviewRequest,
+    responses(
+        (status = 200, description = "Per-bucket band + breach points", body = AnomalyPreviewResponse),
+        (status = 400, description = "Not an anomaly detector / bad input", body = ProblemDetails),
+        (status = 401, description = "Unauthorized", body = ProblemDetails),
+        (status = 403, description = "Insufficient permissions", body = ProblemDetails),
+        (status = 500, description = "Internal server error", body = ProblemDetails),
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn preview_alert(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<OtelAppState>,
+    Json(req): Json<AnomalyPreviewRequest>,
+) -> Result<impl IntoResponse, Problem> {
+    permission_guard!(auth, OtelRead);
+
+    // Preview only makes sense for a band-based (anomaly) detector.
+    let params = match &req.detection_config {
+        DetectionConfig::Anomaly(p) => p.clone(),
+        other => {
+            return Err(OtelError::Validation {
+                message: format!(
+                    "preview is only available for anomaly detectors, not '{}'",
+                    other.kind_str()
+                ),
+            }
+            .into());
+        }
+    };
+
+    let end = req
+        .end_time
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or_else(chrono::Utc::now);
+    let start = req
+        .start_time
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or_else(|| end - chrono::Duration::days(7));
+
+    let preview = compute_anomaly_preview(
+        &state.otel_service,
+        req.project_id,
+        &req.metric_name,
+        &req.aggregation,
+        req.window_secs,
+        &params,
+        start,
+        end,
+    )
+    .await?;
+
+    let points = preview
+        .points
+        .into_iter()
+        .map(|p| AnomalyPreviewPointResponse {
+            bucket: p.bucket.to_rfc3339(),
+            value: p.value,
+            lower: p.lower,
+            upper: p.upper,
+            breaching: p.breaching,
+        })
+        .collect();
+
+    Ok(Json(AnomalyPreviewResponse {
+        points,
+        breach_count: preview.breach_count,
+        baseline_samples: preview.baseline_samples,
+        sufficient: preview.sufficient,
+    }))
 }

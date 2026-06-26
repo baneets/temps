@@ -787,6 +787,58 @@ export type AnomalyParams = {
     seasonality?: Seasonality;
 };
 
+export type AnomalyPreviewPointResponse = {
+    breaching: boolean;
+    bucket: string;
+    /**
+     * Lower edge of the expected band at this point.
+     */
+    lower: number;
+    /**
+     * Upper edge of the expected band at this point.
+     */
+    upper: number;
+    value: number;
+};
+
+export type AnomalyPreviewRequest = {
+    /**
+     * One of `avg|sum|min|max|count|rate|p50|p90|p95|p99`.
+     */
+    aggregation: string;
+    /**
+     * Must be an `anomaly` detector — the band to backtest.
+     */
+    detection_config: DetectionConfig;
+    /**
+     * RFC 3339; defaults to now.
+     */
+    end_time?: string | null;
+    metric_name: string;
+    project_id: number;
+    /**
+     * RFC 3339; defaults to 7 days before `end_time`.
+     */
+    start_time?: string | null;
+    window_secs: number;
+};
+
+export type AnomalyPreviewResponse = {
+    /**
+     * Baseline sample count (drives the `sufficient` flag).
+     */
+    baseline_samples: number;
+    /**
+     * How many points in the range would have fired.
+     */
+    breach_count: number;
+    points: Array<AnomalyPreviewPointResponse>;
+    /**
+     * Whether the baseline had enough history for a trustworthy band.
+     */
+    sufficient: boolean;
+};
+
 export type ApiKeyListResponse = {
     api_keys: Array<ApiKeyResponse>;
     total: number;
@@ -29117,6 +29169,43 @@ export type CreateAlertResponses = {
 };
 
 export type CreateAlertResponse = CreateAlertResponses[keyof CreateAlertResponses];
+
+export type PreviewAlertData = {
+    body: AnomalyPreviewRequest;
+    path?: never;
+    query?: never;
+    url: '/otel/alerts/preview';
+};
+
+export type PreviewAlertErrors = {
+    /**
+     * Not an anomaly detector / bad input
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type PreviewAlertError = PreviewAlertErrors[keyof PreviewAlertErrors];
+
+export type PreviewAlertResponses = {
+    /**
+     * Per-bucket band + breach points
+     */
+    200: AnomalyPreviewResponse;
+};
+
+export type PreviewAlertResponse = PreviewAlertResponses[keyof PreviewAlertResponses];
 
 export type DeleteAlertData = {
     body?: never;
