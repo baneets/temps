@@ -88,7 +88,7 @@ export default function Dashboards({ project }: DashboardsProps) {
   const goToNew = () => navigate('new')
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+    <div className="flex w-full flex-col gap-4">
       {/* Header */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-1">

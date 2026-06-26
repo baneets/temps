@@ -225,7 +225,7 @@ export default function DashboardBuilder({ project }: DashboardBuilderProps) {
 
   if (isEditing && existingQuery.isPending) {
     return (
-      <div className="mx-auto max-w-3xl space-y-6">
+      <div className="w-full space-y-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-9" />
           <Skeleton className="h-8 w-48" />
@@ -236,7 +236,7 @@ export default function DashboardBuilder({ project }: DashboardBuilderProps) {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
+    <div className="w-full space-y-6">
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
           <ArrowLeft className="size-4" />

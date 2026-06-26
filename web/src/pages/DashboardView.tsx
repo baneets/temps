@@ -64,7 +64,7 @@ export default function DashboardView({ project }: DashboardViewProps) {
   const sections = dashboard?.layout?.sections ?? []
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+    <div className="flex w-full flex-col gap-4">
       {/* Header */}
       <div className="flex flex-col gap-2">
         <Button
