@@ -13,6 +13,7 @@ import {
   createAlertMutation,
   getAlertOptions,
   listMetricNamesOptions,
+  queryMetricsOptions,
   updateAlertMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
@@ -46,15 +47,18 @@ import { AGGREGATIONS } from '@/components/metrics/metric-format'
 import {
   AlertStateBadge,
   ANOMALY_ALGORITHMS,
+  ANOMALY_MIN_HISTORY_DAYS,
   COMPARATORS,
   DETECTION_KINDS,
   DIRECTIONS,
+  presetForDeviations,
   SEASONALITIES,
+  SENSITIVITY_PRESETS,
   SEVERITIES,
 } from '@/components/metrics/alert-format'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CheckCircle2 } from 'lucide-react'
 import { useMemo } from 'react'
 import { useForm } from 'react-hook-form'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -220,6 +224,41 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
   // Drives which detector fields are shown. Hidden fields keep their values in
   // form state (RHF does not unregister), so `onSubmit` reads the right ones.
   const detectionKind = form.watch('detection_kind')
+  const watchedMetric = form.watch('metric_name')
+  const isAnomaly = detectionKind === 'anomaly'
+
+  // History/eligibility for anomaly rules: a metric needs enough past data for a
+  // trustworthy baseline, otherwise the rule sits at "unknown" and never alerts.
+  // Bounds are memoised once so the query key is stable (no refetch loop).
+  const historyRange = useMemo(() => {
+    const now = Date.now()
+    return {
+      start: new Date(now - 90 * 86_400_000).toISOString(),
+      end: new Date(now).toISOString(),
+    }
+  }, [])
+  const historyQuery = useQuery({
+    ...queryMetricsOptions({
+      query: {
+        project_id: project.id,
+        metric_name: watchedMetric,
+        aggregation: 'count',
+        bucket_interval: '1d',
+        start_time: historyRange.start,
+        end_time: historyRange.end,
+      },
+    }),
+    enabled: isAnomaly && !!watchedMetric,
+  })
+  const historyDays = useMemo(() => {
+    const buckets = historyQuery.data?.data ?? []
+    if (!buckets.length) return 0
+    const earliest = Math.min(
+      ...buckets.map((b) => new Date(b.bucket).getTime()),
+    )
+    return Math.max(0, Math.round((Date.now() - earliest) / 86_400_000))
+  }, [historyQuery.data])
+  const enoughHistory = historyDays >= ANOMALY_MIN_HISTORY_DAYS
 
   const createMutation = useMutation({
     ...createAlertMutation(),
@@ -446,67 +485,93 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
 
               {detectionKind === 'anomaly' ? (
                 <>
-                  {/* Anomaly: algorithm + sensitivity */}
+                  {/* History / eligibility — anomaly rules are silently inert
+                      until the metric has enough past data to baseline. */}
+                  {watchedMetric &&
+                    !historyQuery.isPending &&
+                    (enoughHistory ? (
+                      <div className="flex items-start gap-2 rounded-md border border-border/60 bg-muted/30 p-3 text-xs text-muted-foreground">
+                        <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
+                        <span>
+                          ~{historyDays} days of history available — enough to
+                          baseline this metric.
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+                        <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                        <span>
+                          Only ~{historyDays} day{historyDays === 1 ? '' : 's'}{' '}
+                          of history for this metric. Anomaly detection needs
+                          about {ANOMALY_MIN_HISTORY_DAYS} days to learn a
+                          baseline — until then this rule stays{' '}
+                          <strong>“unknown”</strong> and won&apos;t alert. You
+                          can still save it; it starts working as history
+                          accrues.
+                        </span>
+                      </div>
+                    ))}
+
+                  {/* Primary anomaly controls: sensitivity + direction. */}
                   <div className="grid gap-4 sm:grid-cols-2">
-                    <FormField
-                      control={form.control}
-                      name="algorithm"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Algorithm</FormLabel>
-                          <Select
-                            onValueChange={field.onChange}
-                            value={field.value}
-                          >
-                            <FormControl>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              {ANOMALY_ALGORITHMS.map((a) => (
-                                <SelectItem key={a.value} value={a.value}>
-                                  {a.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
                     <FormField
                       control={form.control}
                       name="deviations"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Sensitivity (σ)</FormLabel>
-                          <FormControl>
-                            <Input
-                              type="number"
-                              step="0.1"
-                              min={0}
-                              {...field}
-                              onChange={(e) =>
-                                field.onChange(
-                                  e.target.value === ''
-                                    ? undefined
-                                    : e.target.valueAsNumber,
+                      render={({ field }) => {
+                        const preset = presetForDeviations(field.value)
+                        return (
+                          <FormItem>
+                            <FormLabel>Sensitivity</FormLabel>
+                            <Select
+                              value={preset}
+                              onValueChange={(v) => {
+                                const p = SENSITIVITY_PRESETS.find(
+                                  (x) => x.value === v,
                                 )
-                              }
-                            />
-                          </FormControl>
-                          <FormDescription>
-                            Band width in standard deviations. Lower = more
-                            sensitive (more alerts); 3 is a good default.
-                          </FormDescription>
-                          <FormMessage />
-                        </FormItem>
-                      )}
+                                // 'custom' keeps the value + reveals the σ input.
+                                if (p) field.onChange(p.deviations)
+                              }}
+                            >
+                              <FormControl>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                {SENSITIVITY_PRESETS.map((p) => (
+                                  <SelectItem key={p.value} value={p.value}>
+                                    {p.label}
+                                  </SelectItem>
+                                ))}
+                                <SelectItem value="custom">Custom…</SelectItem>
+                              </SelectContent>
+                            </Select>
+                            {preset === 'custom' && (
+                              <FormControl>
+                                <Input
+                                  type="number"
+                                  step="0.1"
+                                  min={0}
+                                  value={field.value}
+                                  onChange={(e) =>
+                                    field.onChange(
+                                      e.target.value === ''
+                                        ? undefined
+                                        : e.target.valueAsNumber,
+                                    )
+                                  }
+                                />
+                              </FormControl>
+                            )}
+                            <FormDescription>
+                              How far from normal counts as an anomaly. Higher =
+                              more alerts.
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )
+                      }}
                     />
-                  </div>
-                  {/* Anomaly: direction + seasonality */}
-                  <div className="grid gap-4 sm:grid-cols-2">
                     <FormField
                       control={form.control}
                       name="direction"
@@ -534,38 +599,74 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
                         </FormItem>
                       )}
                     />
-                    <FormField
-                      control={form.control}
-                      name="seasonality"
-                      render={({ field }) => (
-                        <FormItem>
-                          <FormLabel>Seasonality</FormLabel>
-                          <Select
-                            onValueChange={field.onChange}
-                            value={field.value}
-                          >
-                            <FormControl>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              {SEASONALITIES.map((s) => (
-                                <SelectItem key={s.value} value={s.value}>
-                                  {s.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <FormDescription>
-                            Compare like-for-like times (e.g. weekly = same
-                            weekday &amp; hour). Needs enough history.
-                          </FormDescription>
-                          <FormMessage />
-                        </FormItem>
-                      )}
-                    />
                   </div>
+
+                  {/* Advanced: algorithm + seasonality (sensible defaults). */}
+                  <details className="rounded-md border border-border/60 px-3 py-2 [&_summary]:cursor-pointer">
+                    <summary className="text-sm font-medium text-muted-foreground">
+                      Advanced
+                    </summary>
+                    <div className="mt-3 grid gap-4 sm:grid-cols-2">
+                      <FormField
+                        control={form.control}
+                        name="algorithm"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Algorithm</FormLabel>
+                            <Select
+                              onValueChange={field.onChange}
+                              value={field.value}
+                            >
+                              <FormControl>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                {ANOMALY_ALGORITHMS.map((a) => (
+                                  <SelectItem key={a.value} value={a.value}>
+                                    {a.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={form.control}
+                        name="seasonality"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Seasonality</FormLabel>
+                            <Select
+                              onValueChange={field.onChange}
+                              value={field.value}
+                            >
+                              <FormControl>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                {SEASONALITIES.map((s) => (
+                                  <SelectItem key={s.value} value={s.value}>
+                                    {s.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <FormDescription>
+                              Compare like-for-like times (e.g. weekly = same
+                              weekday &amp; hour). Needs more history.
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+                  </details>
                 </>
               ) : (
                 /* Static: comparator + threshold */

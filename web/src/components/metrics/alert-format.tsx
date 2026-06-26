@@ -47,6 +47,32 @@ export const SEASONALITIES: { value: string; label: string }[] = [
   { value: 'weekly', label: 'Weekly' },
 ]
 
+/**
+ * Friendly sensitivity presets that map to the raw `deviations` (σ) the backend
+ * expects. Lower σ = a tighter band = more alerts, so "High sensitivity" is the
+ * lowest σ. The raw number stays available under "Custom".
+ */
+export const SENSITIVITY_PRESETS: {
+  value: string
+  label: string
+  deviations: number
+}[] = [
+  { value: 'high', label: 'High — more alerts (2σ)', deviations: 2 },
+  { value: 'medium', label: 'Medium — balanced (3σ)', deviations: 3 },
+  { value: 'low', label: 'Low — fewer alerts (4σ)', deviations: 4 },
+]
+
+/** The preset key matching a σ value, or `'custom'` if it's not a preset. */
+export function presetForDeviations(deviations: number): string {
+  return (
+    SENSITIVITY_PRESETS.find((p) => p.deviations === deviations)?.value ??
+    'custom'
+  )
+}
+
+/** Roughly how many days of history an anomaly baseline wants before it alerts. */
+export const ANOMALY_MIN_HISTORY_DAYS = 14
+
 export function comparatorSymbol(comparator: string): string {
   return COMPARATORS.find((c) => c.value === comparator)?.symbol ?? comparator
 }
@@ -89,7 +115,11 @@ export function AlertStateBadge({ state }: { state: string }) {
     )
   }
   return (
-    <Badge variant="secondary" className="shrink-0">
+    <Badge
+      variant="secondary"
+      className="shrink-0"
+      title="Not evaluated yet. Anomaly rules stay 'unknown' until the metric has enough history to build a baseline."
+    >
       Unknown
     </Badge>
   )
