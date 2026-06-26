@@ -8,13 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
--
+- **OpenTelemetry metrics.** A full OTLP metrics pipeline backed by ClickHouse,
+  with a Metrics explorer, saved dashboards, and first-class metric alert rules.
+  Alerts support **anomaly detection** (a robust, seasonal median/MAD baseline)
+  alongside static thresholds, with sensitivity presets and a **backtest
+  preview** ("would have fired N times") while you author the rule. Charts
+  overlay **deploy markers** ("did a deploy cause this?") and a firing metric
+  links straight across to its traces and errors in the same window
+  ("what changed"). Datadog-style firing status — triaged dots, severity sort,
+  and a needs-attention header — surfaces on the metrics overview, the
+  dashboards list, and the dashboard view (#158).
 
 ### Changed
--
+- **Project navigation grouped into OpenTelemetry + Monitoring.** The OTel
+  signals (Observe, Traces, AI Traces, Metrics, Error Tracking) are now grouped
+  under an **OpenTelemetry** section; operational tools (Uptime, Request Logs,
+  AI Crawlers) under **Monitoring** (#158).
+- **Project header stays on one line.** A long project name in the breadcrumb
+  switcher (and long crumbs on deep paths) now truncates with an ellipsis
+  instead of wrapping the header onto two lines (#158).
+
+### Removed
+- **Legacy project "Metrics" (resource monitoring) page.** Superseded by the
+  OpenTelemetry Metrics surface; its sidebar entry, route, and page component
+  were removed (#158).
 
 ### Fixed
--
+- **Disabled alert rules no longer report as "firing".** A rule disabled while
+  firing kept a frozen `firing` state (the evaluator only scans enabled rules);
+  the status model now treats a disabled monitor as not-firing everywhere, so
+  dashboards and the alerts list don't flash a false red alarm (#158).
 
 
 ## [0.1.0-beta.39] - 2026-06-25
