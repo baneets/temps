@@ -587,16 +587,23 @@ struct ChMetricBucketRow {
     count: u64,
     /// The value of the requested aggregation for this bucket.
     agg_value: f64,
-    /// Aggregated explicit-histogram fields (zero/empty for non-histogram
-    /// metrics). `hist_bucket_counts` is summed element-wise across the window.
-    hist_count: u64,
-    hist_sum: f64,
-    hist_min: Option<f64>,
-    hist_max: Option<f64>,
-    hist_bounds: Vec<f64>,
-    hist_bucket_counts: Vec<u64>,
     /// Grouped label values, in `group_by` order (empty when ungrouped).
     series_values: Vec<String>,
+}
+
+/// Row of the temporality-aware histogram sub-aggregation (one per
+/// bucket × grouped-series). Matched back to [`ChMetricBucketRow`] by
+/// `(bucket_ms, series_values)`.
+#[derive(::clickhouse::Row, Deserialize, Debug)]
+struct ChHistogramRow {
+    bucket_ms: i64,
+    series_values: Vec<String>,
+    hcount: u64,
+    hsum: f64,
+    hmin: Option<f64>,
+    hmax: Option<f64>,
+    hbounds: Vec<f64>,
+    hbuckets: Vec<u64>,
 }
 
 /// Row returned by `list_metric_names` — a single distinct name.
@@ -2080,6 +2087,18 @@ impl OtelStorage for ClickHouseOtelStorage {
         } else {
             ", series_values".to_string()
         };
+        // The grouped-label array WITHOUT the `AS series_values` alias, for reuse
+        // inside the histogram sub-aggregation's projection.
+        let group_array = if query.group_by.is_empty() {
+            "[]".to_string()
+        } else {
+            let parts: Vec<String> = query
+                .group_by
+                .iter()
+                .map(|_| "attributes[?]".to_string())
+                .collect();
+            format!("[{}]", parts.join(", "))
+        };
 
         // Build WHERE with `?` placeholders; bind in the same order below.
         let mut where_clauses = vec!["project_id = ?".to_string()];
@@ -2116,12 +2135,6 @@ impl OtelStorage for ClickHouseOtelStorage {
                  max(assumeNotNull(value)) AS max_value, \
                  count() AS count, \
                  {agg_expr} AS agg_value, \
-                 sum(ifNull(histogram_count, 0)) AS hist_count, \
-                 sum(ifNull(histogram_sum, 0)) AS hist_sum, \
-                 min(histogram_min) AS hist_min, \
-                 max(histogram_max) AS hist_max, \
-                 anyIf(histogram_bounds, notEmpty(histogram_bounds)) AS hist_bounds, \
-                 sumForEachIf(histogram_bucket_counts, notEmpty(histogram_bucket_counts)) AS hist_bucket_counts, \
                  {group_select} \
              FROM metrics \
              WHERE {where_sql} \
@@ -2166,10 +2179,97 @@ impl OtelStorage for ClickHouseOtelStorage {
             .await
             .map_err(|e| ch_query_err("query_metrics", e))?;
 
+        // Histogram summary, computed separately so cumulative re-exports are NOT
+        // double-counted. The inner query collapses each series (cumulative ->
+        // latest snapshot via argMax/max; delta or unspecified -> sum across the
+        // window); the outer sums those per-series results up to the requested
+        // grouping granularity. Matched back to the scalar rows by
+        // (bucket_ms, series_values).
+        let hist_sql = format!(
+            "SELECT bucket_ms, series_values, \
+                 sum(s_count) AS hcount, sum(s_sum) AS hsum, \
+                 min(s_min) AS hmin, max(s_max) AS hmax, \
+                 anyIf(s_bounds, notEmpty(s_bounds)) AS hbounds, \
+                 sumForEach(s_buckets) AS hbuckets \
+             FROM ( \
+                 SELECT \
+                     toInt64(toUnixTimestamp(toStartOfInterval(timestamp, {interval_sql}))) * 1000 AS bucket_ms, \
+                     any({group_array}) AS series_values, \
+                     attributes_hash AS ah, \
+                     if(any(temporality) = 'cumulative', max(ifNull(histogram_count, 0)), sum(ifNull(histogram_count, 0))) AS s_count, \
+                     if(any(temporality) = 'cumulative', max(ifNull(histogram_sum, 0)), sum(ifNull(histogram_sum, 0))) AS s_sum, \
+                     min(histogram_min) AS s_min, \
+                     max(histogram_max) AS s_max, \
+                     any(histogram_bounds) AS s_bounds, \
+                     if(any(temporality) = 'cumulative', argMax(histogram_bucket_counts, timestamp), sumForEach(histogram_bucket_counts)) AS s_buckets \
+                 FROM metrics \
+                 WHERE {where_sql} AND notEmpty(histogram_bucket_counts) \
+                 GROUP BY bucket_ms, ah \
+             ) \
+             GROUP BY bucket_ms, series_values \
+             ORDER BY bucket_ms ASC \
+             LIMIT ?"
+        );
+        let mut hq = self.ch.query(&hist_sql);
+        for key in &query.group_by {
+            hq = hq.bind(key.clone());
+        }
+        hq = hq.bind(query.project_id);
+        if let Some(ref name) = query.metric_name {
+            hq = hq.bind(name.clone());
+        }
+        if let Some(mt) = query.metric_type {
+            hq = hq.bind(mt.to_string());
+        }
+        if let Some(ref svc) = query.service_name {
+            hq = hq.bind(svc.clone());
+        }
+        if let Some(ref env) = query.environment {
+            hq = hq.bind(env.clone());
+        }
+        for (k, v) in &query.label_filters {
+            hq = hq.bind(k.clone());
+            hq = hq.bind(v.clone());
+        }
+        if let Some(start) = query.start_time {
+            hq = hq.bind(start.timestamp_millis());
+        }
+        if let Some(end) = query.end_time {
+            hq = hq.bind(end.timestamp_millis());
+        }
+        hq = hq.bind(limit);
+        let hist_rows = hq
+            .fetch_all::<ChHistogramRow>()
+            .await
+            .map_err(|e| ch_query_err("query_metrics histogram", e))?;
+        let mut hist_map: std::collections::HashMap<(i64, Vec<String>), HistogramSummary> =
+            std::collections::HashMap::new();
+        for h in hist_rows {
+            if h.hbounds.is_empty() {
+                continue;
+            }
+            hist_map.insert(
+                (h.bucket_ms, h.series_values.clone()),
+                HistogramSummary {
+                    count: h.hcount,
+                    sum: h.hsum,
+                    min: h.hmin,
+                    max: h.hmax,
+                    bounds: h.hbounds,
+                    bucket_counts: h.hbuckets,
+                },
+            );
+        }
+
         let group_keys = query.group_by.clone();
         Ok(rows
             .into_iter()
             .map(|r| {
+                // Look up the temporality-correct histogram summary (None for
+                // gauge/sum metrics, which produce no histogram rows).
+                let histogram_summary = hist_map
+                    .get(&(r.bucket_ms, r.series_values.clone()))
+                    .cloned();
                 let series_key = if group_keys.is_empty() {
                     None
                 } else {
@@ -2195,21 +2295,7 @@ impl OtelStorage for ClickHouseOtelStorage {
                         Some(qq) => vec![(qq, r.agg_value)],
                         None => Vec::new(),
                     },
-                    // Populated only when this bucket actually contains explicit
-                    // histogram data (bounds present); gauge/sum metrics leave the
-                    // histogram columns empty and so report None.
-                    histogram_summary: if r.hist_bounds.is_empty() {
-                        None
-                    } else {
-                        Some(HistogramSummary {
-                            count: r.hist_count,
-                            sum: r.hist_sum,
-                            min: r.hist_min,
-                            max: r.hist_max,
-                            bounds: r.hist_bounds,
-                            bucket_counts: r.hist_bucket_counts,
-                        })
-                    },
+                    histogram_summary,
                     series_key,
                 }
             })

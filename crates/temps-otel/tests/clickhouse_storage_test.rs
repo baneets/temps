@@ -562,3 +562,105 @@ async fn query_metrics_histogram_summary_aggregates_buckets() {
     assert_eq!(hs.min, Some(1.0));
     assert_eq!(hs.max, Some(240.0));
 }
+
+#[tokio::test]
+async fn query_metrics_cumulative_histogram_uses_latest_not_sum() {
+    let Some((storage, _container)) = setup().await else {
+        return; // Docker unavailable — skip gracefully.
+    };
+
+    let base = Utc::now();
+    let mk = |method: &str, count: u64, buckets: Vec<u64>, ts: chrono::DateTime<Utc>| {
+        let mut p = MetricPoint::skeleton(
+            5005,
+            Some(9),
+            ResourceInfo {
+                service_name: "api".into(),
+                service_version: Some("1.0.0".into()),
+                deployment_environment: Some("production".into()),
+                attributes: BTreeMap::new(),
+            },
+            "http.server.duration".into(),
+            MetricType::Histogram,
+            "ms".into(),
+            ts,
+            {
+                let mut m = BTreeMap::new();
+                m.insert("http.method".into(), method.to_string());
+                m
+            },
+        );
+        p.temporality = Some(AggregationTemporality::Cumulative);
+        p.histogram_count = Some(count);
+        p.histogram_sum = Some(count as f64 * 10.0);
+        p.histogram_min = Some(1.0);
+        p.histogram_max = Some(99.0);
+        p.histogram_bounds = Some(vec![10.0, 100.0]); // 3 buckets incl +Inf
+        p.histogram_bucket_counts = Some(buckets);
+        p.value = Some(10.0);
+        p
+    };
+
+    // CUMULATIVE histograms re-exported within one window (counts are running
+    // totals). GET grows 10 -> 20 -> 30 across three exports; POST grows 25 -> 50
+    // across two. A correct read must take each series' LATEST snapshot — never
+    // sum the re-exports — then sum across the two series.
+    let stored = storage
+        .store_metrics(vec![
+            mk("GET", 10, vec![4, 4, 2], base),
+            mk(
+                "GET",
+                20,
+                vec![8, 8, 4],
+                base + chrono::Duration::milliseconds(1),
+            ),
+            mk(
+                "GET",
+                30,
+                vec![12, 12, 6],
+                base + chrono::Duration::milliseconds(2),
+            ),
+            mk(
+                "POST",
+                25,
+                vec![10, 10, 5],
+                base + chrono::Duration::milliseconds(1),
+            ),
+            mk(
+                "POST",
+                50,
+                vec![20, 20, 10],
+                base + chrono::Duration::milliseconds(3),
+            ),
+        ])
+        .await
+        .expect("store");
+    assert_eq!(stored, 5);
+
+    let buckets = storage
+        .query_metrics(MetricQuery {
+            project_id: 5005,
+            metric_name: Some("http.server.duration".into()),
+            bucket_interval: Some("1 hour".into()),
+            aggregation: MetricAggregation::Avg,
+            ..Default::default()
+        })
+        .await
+        .expect("histogram query");
+    assert_eq!(buckets.len(), 1);
+    let hs = buckets[0]
+        .histogram_summary
+        .as_ref()
+        .expect("histogram_summary populated");
+    // GET latest count 30 + POST latest count 50 = 80 (NOT 10+20+30+25+50=135).
+    assert_eq!(
+        hs.count, 80,
+        "cumulative re-exports must collapse to per-series latest, then sum series"
+    );
+    // GET latest [12,12,6] + POST latest [20,20,10] = [32,32,16].
+    assert_eq!(
+        hs.bucket_counts,
+        vec![32, 32, 16],
+        "per-series latest buckets summed across series"
+    );
+}
