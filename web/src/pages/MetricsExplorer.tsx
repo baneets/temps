@@ -3,7 +3,12 @@ import {
   getEnvironmentsOptions,
   listMetricNamesOptions,
   queryMetricsOptions,
+  // REGEN: bun run openapi-ts — generated from the new /otel/alerts endpoint
+  // (operationId list_alerts). Absent from the committed SDK until regen; used
+  // only to overlay a rule's threshold as a reference line on the explore chart.
+  listAlertsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import type { ThresholdBand } from '@/components/charts/threshold-line-chart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -17,6 +22,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ThresholdLineChart } from '@/components/charts/threshold-line-chart'
+import { comparatorSymbol } from '@/components/metrics/alert-format'
 import { usePageTitle } from '@/hooks/usePageTitle'
 import { useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
@@ -269,6 +275,24 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
     enabled: !!project.id && metricName.length > 0,
   })
 
+  // ── Alert thresholds for the charted metric ──
+  // Overlay any alert rule defined on the selected metric as a horizontal
+  // reference line, so the explorer visually shows where a rule would fire.
+  const alertsQuery = useQuery({
+    ...listAlertsOptions({ query: { project_id: project.id } }),
+    enabled: !!project.id && metricName.length > 0,
+  })
+  const thresholds = useMemo<ThresholdBand[]>(() => {
+    if (!metricName) return []
+    return (alertsQuery.data?.data ?? [])
+      .filter((r) => r.enabled && r.metric_name === metricName)
+      .map((r) => ({
+        value: r.threshold,
+        tone: r.severity === 'critical' ? 'poor' : 'warn',
+        label: `${comparatorSymbol(r.comparator)} ${r.threshold}`,
+      }))
+  }, [alertsQuery.data, metricName])
+
   const buckets = metricsQuery.data?.data ?? []
 
   // Map the `MetricBucket` rows into the chart point shape. `value` carries the
@@ -504,6 +528,7 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
                   : 'Failed to load metric series.'
               }
               chartData={chartData}
+              thresholds={thresholds}
             />
           </div>
           {latestHist && (
@@ -791,6 +816,7 @@ function MetricChart({
   isError,
   errorMessage,
   chartData,
+  thresholds,
 }: {
   metricName: string
   aggLabel: string
@@ -798,6 +824,7 @@ function MetricChart({
   isError: boolean
   errorMessage: string
   chartData: ChartPoint[]
+  thresholds?: ThresholdBand[]
 }) {
   if (!metricName) {
     return (
@@ -853,6 +880,7 @@ function MetricChart({
         data={xData}
         xKey="label"
         series={{ dataKey: 'value', label: aggLabel, tone: 'primary' }}
+        thresholds={thresholds}
         height={320}
         tooltipValueFormatter={(v) => formatMetricValue(v)}
         yTickFormatter={(v) => formatMetricValue(v)}

@@ -3,6 +3,7 @@
 pub mod audit;
 pub mod dashboard_handler;
 pub mod ingest_handler;
+pub mod metric_alert_handler;
 pub mod query_handler;
 
 use axum::routing::{get, post};
@@ -93,5 +94,16 @@ pub fn configure_routes() -> Router<OtelAppState> {
             get(dashboard_handler::get_dashboard)
                 .patch(dashboard_handler::update_dashboard)
                 .delete(dashboard_handler::delete_dashboard),
+        )
+        // Metric alert rules (first-class metric-centric alerting)
+        .route(
+            "/otel/alerts",
+            get(metric_alert_handler::list_alerts).post(metric_alert_handler::create_alert),
+        )
+        .route(
+            "/otel/alerts/{id}",
+            get(metric_alert_handler::get_alert)
+                .patch(metric_alert_handler::update_alert)
+                .delete(metric_alert_handler::delete_alert),
         )
 }

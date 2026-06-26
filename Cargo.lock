@@ -12194,6 +12194,7 @@ dependencies = [
  "temps-entities",
  "temps-metrics",
  "temps-migrations",
+ "temps-monitoring",
  "testcontainers",
  "thiserror 2.0.18",
  "tokio",

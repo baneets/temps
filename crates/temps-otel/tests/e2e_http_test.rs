@@ -137,11 +137,13 @@ async fn setup_e2e() -> Option<(
     let dashboard_service = Arc::new(temps_otel::services::MetricDashboardService::new(
         db.clone(),
     ));
+    let metric_alert_service = Arc::new(temps_otel::services::MetricAlertService::new(db.clone()));
     let app_state = OtelAppState {
         otel_service,
         metrics_store: None,
         metrics_write_tx: None,
         dashboard_service,
+        metric_alert_service,
         audit_service: Arc::new(NoOpAuditLogger),
     };
 

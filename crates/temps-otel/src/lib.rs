@@ -74,6 +74,9 @@ pub struct OtelAppState {
     /// Service backing per-project saved metric dashboard CRUD (Postgres-backed
     /// config/metadata, distinct from the ClickHouse/Timescale `OtelStorage`).
     pub dashboard_service: std::sync::Arc<crate::services::MetricDashboardService>,
-    /// Audit logger for dashboard write operations (best-effort, non-fatal).
+    /// Service backing first-class metric alert rule CRUD (Postgres-backed
+    /// config/metadata; evaluated by the background `MetricAlertEvaluator`).
+    pub metric_alert_service: std::sync::Arc<crate::services::MetricAlertService>,
+    /// Audit logger for dashboard/alert write operations (best-effort, non-fatal).
     pub audit_service: std::sync::Arc<dyn temps_core::AuditLogger>,
 }

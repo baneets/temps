@@ -2697,6 +2697,28 @@ export type CreateMcpRequest = {
     slug: string;
 };
 
+export type CreateMetricAlertRequest = {
+    /**
+     * One of `avg|sum|min|max|count|rate|p50|p90|p95|p99`.
+     */
+    aggregation: string;
+    /**
+     * One of `gt|gte|lt|lte`.
+     */
+    comparator: string;
+    enabled: boolean;
+    for_duration_secs: number;
+    metric_name: string;
+    name: string;
+    project_id: number;
+    /**
+     * One of `info|warning|critical`.
+     */
+    severity: string;
+    threshold: number;
+    window_secs: number;
+};
+
 export type CreateMonitorRequest = {
     check_interval_seconds?: number | null;
     check_path?: string | null;
@@ -8871,6 +8893,33 @@ export type OtelDashboardsResponse = {
     total: number;
 };
 
+export type OtelMetricAlertRuleResponse = {
+    aggregation: string;
+    comparator: string;
+    created_at: string;
+    enabled: boolean;
+    for_duration_secs: number;
+    id: number;
+    last_evaluated_at?: string | null;
+    /**
+     * One of `ok|firing|unknown`.
+     */
+    last_state: string;
+    last_value?: number | null;
+    metric_name: string;
+    name: string;
+    project_id: number;
+    severity: string;
+    threshold: number;
+    updated_at: string;
+    window_secs: number;
+};
+
+export type OtelMetricAlertsResponse = {
+    data: Array<OtelMetricAlertRuleResponse>;
+    total: number;
+};
+
 export type OtelMetricNamesResponse = {
     names: Array<string>;
 };
@@ -14604,6 +14653,18 @@ export type UpdateMcpRequest = {
     };
     description?: string | null;
     name?: string | null;
+};
+
+export type UpdateMetricAlertRequest = {
+    aggregation?: string | null;
+    comparator?: string | null;
+    enabled?: boolean | null;
+    for_duration_secs?: number | null;
+    metric_name?: string | null;
+    name?: string | null;
+    severity?: string | null;
+    threshold?: number | null;
+    window_secs?: number | null;
 };
 
 export type UpdateNotificationEmailProviderRequest = {
@@ -28827,6 +28888,234 @@ export type ListOrdersResponses = {
 };
 
 export type ListOrdersResponse2 = ListOrdersResponses[keyof ListOrdersResponses];
+
+export type ListAlertsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Page number (default: 1)
+         */
+        page?: number;
+        /**
+         * Page size (default: 20, max: 100)
+         */
+        page_size?: number;
+    };
+    url: '/otel/alerts';
+};
+
+export type ListAlertsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListAlertsError = ListAlertsErrors[keyof ListAlertsErrors];
+
+export type ListAlertsResponses = {
+    /**
+     * Alert rules for the project
+     */
+    200: OtelMetricAlertsResponse;
+};
+
+export type ListAlertsResponse = ListAlertsResponses[keyof ListAlertsResponses];
+
+export type CreateAlertData = {
+    body: CreateMetricAlertRequest;
+    path?: never;
+    query?: never;
+    url: '/otel/alerts';
+};
+
+export type CreateAlertErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CreateAlertError = CreateAlertErrors[keyof CreateAlertErrors];
+
+export type CreateAlertResponses = {
+    /**
+     * Alert rule created
+     */
+    201: OtelMetricAlertRuleResponse;
+};
+
+export type CreateAlertResponse = CreateAlertResponses[keyof CreateAlertResponses];
+
+export type DeleteAlertData = {
+    body?: never;
+    path: {
+        /**
+         * Alert rule ID
+         */
+        id: number;
+    };
+    query: {
+        /**
+         * Owning project ID (scopes the delete)
+         */
+        project_id: number;
+    };
+    url: '/otel/alerts/{id}';
+};
+
+export type DeleteAlertErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Alert rule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type DeleteAlertError = DeleteAlertErrors[keyof DeleteAlertErrors];
+
+export type DeleteAlertResponses = {
+    /**
+     * Alert rule deleted
+     */
+    204: void;
+};
+
+export type DeleteAlertResponse = DeleteAlertResponses[keyof DeleteAlertResponses];
+
+export type GetAlertData = {
+    body?: never;
+    path: {
+        /**
+         * Alert rule ID
+         */
+        id: number;
+    };
+    query: {
+        /**
+         * Owning project ID (scopes the lookup)
+         */
+        project_id: number;
+    };
+    url: '/otel/alerts/{id}';
+};
+
+export type GetAlertErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Alert rule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetAlertError = GetAlertErrors[keyof GetAlertErrors];
+
+export type GetAlertResponses = {
+    /**
+     * Alert rule
+     */
+    200: OtelMetricAlertRuleResponse;
+};
+
+export type GetAlertResponse = GetAlertResponses[keyof GetAlertResponses];
+
+export type UpdateAlertData = {
+    body: UpdateMetricAlertRequest;
+    path: {
+        /**
+         * Alert rule ID
+         */
+        id: number;
+    };
+    query: {
+        /**
+         * Owning project ID (scopes the update)
+         */
+        project_id: number;
+    };
+    url: '/otel/alerts/{id}';
+};
+
+export type UpdateAlertErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Alert rule not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type UpdateAlertError = UpdateAlertErrors[keyof UpdateAlertErrors];
+
+export type UpdateAlertResponses = {
+    /**
+     * Alert rule updated
+     */
+    200: OtelMetricAlertRuleResponse;
+};
+
+export type UpdateAlertResponse = UpdateAlertResponses[keyof UpdateAlertResponses];
 
 export type ListDashboardsData = {
     body?: never;

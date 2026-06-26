@@ -70,6 +70,12 @@ impl From<OtelError> for Problem {
                     .with_title("Dashboard Not Found")
                     .with_detail(error.to_string())
             }
+            OtelError::MetricAlertNotFound { .. } => {
+                warn!(error = %error, "OTel metric alert rule not found");
+                problemdetails::new(StatusCode::NOT_FOUND)
+                    .with_title("Metric Alert Rule Not Found")
+                    .with_detail(error.to_string())
+            }
             OtelError::Storage { .. }
             | OtelError::Database(_)
             | OtelError::S3 { .. }

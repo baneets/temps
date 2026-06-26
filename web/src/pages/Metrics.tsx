@@ -1,8 +1,9 @@
 import { Routes, Route, Link, useLocation } from 'react-router-dom'
 import { ProjectResponse } from '@/api/client'
-import { LayoutDashboard, LineChart } from 'lucide-react'
+import { Bell, LayoutDashboard, LineChart } from 'lucide-react'
 import MetricsExplorer from './MetricsExplorer'
 import DashboardsRouter from './DashboardsRouter'
+import AlertsRouter from './AlertsRouter'
 
 interface MetricsProps {
   project: ProjectResponse
@@ -27,6 +28,7 @@ export default function Metrics({ project }: MetricsProps) {
           path="dashboards/*"
           element={<DashboardsRouter project={project} />}
         />
+        <Route path="alerts/*" element={<AlertsRouter project={project} />} />
       </Routes>
     </div>
   )
@@ -40,14 +42,26 @@ function MetricsTabs() {
   const i = pathname.indexOf('/metrics')
   const base = i === -1 ? pathname : pathname.slice(0, i + '/metrics'.length)
   const onDashboards = pathname.startsWith(`${base}/dashboards`)
+  const onAlerts = pathname.startsWith(`${base}/alerts`)
 
   const tabs = [
-    { to: base, label: 'Explore', icon: LineChart, active: !onDashboards },
+    {
+      to: base,
+      label: 'Explore',
+      icon: LineChart,
+      active: !onDashboards && !onAlerts,
+    },
     {
       to: `${base}/dashboards`,
       label: 'Dashboards',
       icon: LayoutDashboard,
       active: onDashboards,
+    },
+    {
+      to: `${base}/alerts`,
+      label: 'Alerts',
+      icon: Bell,
+      active: onAlerts,
     },
   ]
 

@@ -51,6 +51,9 @@ pub enum OtelError {
     #[error("Metric dashboard {dashboard_id} not found")]
     DashboardNotFound { dashboard_id: i32 },
 
+    #[error("Metric alert rule {rule_id} not found")]
+    MetricAlertNotFound { rule_id: i32 },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
