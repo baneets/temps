@@ -28,6 +28,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ThresholdLineChart } from '@/components/charts/threshold-line-chart'
 import { comparatorSymbol, StatusDot } from '@/components/metrics/alert-format'
+import { MetricCorrelations } from '@/components/metrics/MetricCorrelations'
 import {
   STATUS_META,
   statusRank,
@@ -658,6 +659,14 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
               markers={deployMarkers}
             />
           </div>
+          <MetricCorrelations
+            project={project}
+            metricName={metricName}
+            aggregation={aggregation}
+            timeRange={timeRange}
+            environmentId={environmentId}
+            deployCount={deployMarkers.length}
+          />
           {latestHist && (
             <div className="rounded-lg border border-border bg-card p-4">
               <HistogramDistribution hist={latestHist} />
