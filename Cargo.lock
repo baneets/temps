@@ -12166,6 +12166,7 @@ dependencies = [
 name = "temps-otel"
 version = "0.1.0-beta.39"
 dependencies = [
+ "anyhow",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",

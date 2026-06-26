@@ -48,6 +48,9 @@ pub enum OtelError {
     #[error("Validation error: {message}")]
     Validation { message: String },
 
+    #[error("Metric dashboard {dashboard_id} not found")]
+    DashboardNotFound { dashboard_id: i32 },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

@@ -1,5 +1,7 @@
 //! HTTP handlers for OTLP ingest and query endpoints.
 
+pub mod audit;
+pub mod dashboard_handler;
 pub mod ingest_handler;
 pub mod query_handler;
 
@@ -80,5 +82,16 @@ pub fn configure_routes() -> Router<OtelAppState> {
         .route(
             "/otel/genai/traces/{project_id}/{trace_id}",
             get(query_handler::get_genai_trace),
+        )
+        // Metric dashboards (per-project saved dashboard CRUD)
+        .route(
+            "/otel/dashboards",
+            get(dashboard_handler::list_dashboards).post(dashboard_handler::create_dashboard),
+        )
+        .route(
+            "/otel/dashboards/{id}",
+            get(dashboard_handler::get_dashboard)
+                .patch(dashboard_handler::update_dashboard)
+                .delete(dashboard_handler::delete_dashboard),
         )
 }

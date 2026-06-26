@@ -64,6 +64,12 @@ impl From<OtelError> for Problem {
                     .with_title("Project Not Found")
                     .with_detail(error.to_string())
             }
+            OtelError::DashboardNotFound { .. } => {
+                warn!(error = %error, "OTel dashboard not found");
+                problemdetails::new(StatusCode::NOT_FOUND)
+                    .with_title("Dashboard Not Found")
+                    .with_detail(error.to_string())
+            }
             OtelError::Storage { .. }
             | OtelError::Database(_)
             | OtelError::S3 { .. }

@@ -122,6 +122,9 @@ pub mod status_monitors;
 // Metrics alert rules
 pub mod monitoring_alert_rules;
 
+// Metric dashboards (saved per-project dashboard layouts)
+pub mod metric_dashboards;
+
 // Webhook entities
 pub mod webhook_deliveries;
 pub mod webhooks;

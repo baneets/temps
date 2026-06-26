@@ -14,6 +14,7 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::anomaly::detector::{AnomalyDetector, AnomalyDetectorConfig};
 use crate::handlers;
+use crate::handlers::dashboard_handler;
 use crate::handlers::ingest_handler;
 use crate::handlers::query_handler;
 use crate::ingest::auth::OtelAuthService;
@@ -161,6 +162,11 @@ impl OtelConfig {
         query_handler::get_pipeline_stats,
         query_handler::query_genai_traces,
         query_handler::get_genai_trace,
+        dashboard_handler::list_dashboards,
+        dashboard_handler::create_dashboard,
+        dashboard_handler::get_dashboard,
+        dashboard_handler::update_dashboard,
+        dashboard_handler::delete_dashboard,
     ),
     components(
         schemas(
@@ -198,6 +204,13 @@ impl OtelConfig {
             crate::types::GenAiTraceSummary,
             crate::types::GenAiSpanDetail,
             crate::types::GenAiEvent,
+            dashboard_handler::CreateDashboardRequest,
+            dashboard_handler::UpdateDashboardRequest,
+            dashboard_handler::OtelDashboardResponse,
+            dashboard_handler::OtelDashboardsResponse,
+            crate::services::dashboard_service::DashboardLayout,
+            crate::services::dashboard_service::DashboardSection,
+            crate::services::dashboard_service::DashboardTile,
         )
     ),
     info(
@@ -381,11 +394,19 @@ impl TempsPlugin for OtelPlugin {
             let (metrics_write_tx, mut metrics_write_rx) =
                 tokio::sync::mpsc::channel::<Vec<temps_metrics::MetricPoint>>(512);
 
+            // Metric dashboards: Postgres-backed config/metadata service plus
+            // the global audit logger for dashboard write operations.
+            let dashboard_service =
+                Arc::new(crate::services::MetricDashboardService::new(db.clone()));
+            let audit_service = context.require_service::<dyn temps_core::AuditLogger>();
+
             // Create app state for handlers
             let app_state = OtelAppState {
                 otel_service: otel_service.clone(),
                 metrics_store: Some(metrics_store.clone()),
                 metrics_write_tx: Some(metrics_write_tx),
+                dashboard_service: dashboard_service.clone(),
+                audit_service: audit_service.clone(),
             };
             context.register_service(Arc::new(app_state.clone()));
 

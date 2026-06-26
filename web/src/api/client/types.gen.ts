@@ -2504,6 +2504,12 @@ export type CreateDsnRequest = {
     name?: string | null;
 };
 
+export type CreateDashboardRequest = {
+    layout: DashboardLayout;
+    name: string;
+    project_id: number;
+};
+
 /**
  * Request to create a new DNS provider
  */
@@ -3175,6 +3181,16 @@ export type CustomerMovementResponse = {
 };
 
 /**
+ * The typed layout persisted (as JSONB) in `metric_dashboards.layout`.
+ */
+export type DashboardLayout = {
+    /**
+     * Ordered sections that make up the dashboard.
+     */
+    sections: Array<DashboardSection>;
+};
+
+/**
  * Query parameters for batch dashboard analytics
  */
 export type DashboardProjectsAnalyticsQuery = {
@@ -3202,6 +3218,47 @@ export type DashboardProjectsAnalyticsResponse = {
     projects: {
         [key: string]: ProjectDashboardAnalytics;
     };
+};
+
+/**
+ * A titled group of tiles within a dashboard.
+ */
+export type DashboardSection = {
+    /**
+     * Stable client-generated section id.
+     */
+    id: string;
+    /**
+     * Tiles rendered within this section.
+     */
+    tiles: Array<DashboardTile>;
+    /**
+     * Section heading.
+     */
+    title: string;
+};
+
+/**
+ * A single metric tile within a dashboard section.
+ */
+export type DashboardTile = {
+    /**
+     * Aggregation applied per bucket: one of
+     * `avg|sum|min|max|count|rate|p50|p90|p95|p99`.
+     */
+    aggregation: string;
+    /**
+     * Stable client-generated tile id (used as a React key / for reordering).
+     */
+    id: string;
+    /**
+     * The metric name to chart (e.g. `http.server.duration`).
+     */
+    metric_name: string;
+    /**
+     * Optional display title; falls back to the metric name in the UI.
+     */
+    title?: string | null;
 };
 
 /**
@@ -8800,6 +8857,20 @@ export type OperationResultsResponse = {
     operations: Array<OperationResultResponse>;
 };
 
+export type OtelDashboardResponse = {
+    created_at: string;
+    id: number;
+    layout: DashboardLayout;
+    name: string;
+    project_id: number;
+    updated_at: string;
+};
+
+export type OtelDashboardsResponse = {
+    data: Array<OtelDashboardResponse>;
+    total: number;
+};
+
 export type OtelMetricNamesResponse = {
     names: Array<string>;
 };
@@ -14253,6 +14324,11 @@ export type UpdateCustomDomainRequest = {
      */
     service_name?: string | null;
     status_code?: number | null;
+};
+
+export type UpdateDashboardRequest = {
+    layout?: null | DashboardLayout;
+    name?: string | null;
 };
 
 export type UpdateDeploymentConfigRequest = {
@@ -28751,6 +28827,234 @@ export type ListOrdersResponses = {
 };
 
 export type ListOrdersResponse2 = ListOrdersResponses[keyof ListOrdersResponses];
+
+export type ListDashboardsData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Page number (default: 1)
+         */
+        page?: number;
+        /**
+         * Page size (default: 20, max: 100)
+         */
+        page_size?: number;
+    };
+    url: '/otel/dashboards';
+};
+
+export type ListDashboardsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListDashboardsError = ListDashboardsErrors[keyof ListDashboardsErrors];
+
+export type ListDashboardsResponses = {
+    /**
+     * Dashboards for the project
+     */
+    200: OtelDashboardsResponse;
+};
+
+export type ListDashboardsResponse = ListDashboardsResponses[keyof ListDashboardsResponses];
+
+export type CreateDashboardData = {
+    body: CreateDashboardRequest;
+    path?: never;
+    query?: never;
+    url: '/otel/dashboards';
+};
+
+export type CreateDashboardErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type CreateDashboardError = CreateDashboardErrors[keyof CreateDashboardErrors];
+
+export type CreateDashboardResponses = {
+    /**
+     * Dashboard created
+     */
+    201: OtelDashboardResponse;
+};
+
+export type CreateDashboardResponse = CreateDashboardResponses[keyof CreateDashboardResponses];
+
+export type DeleteDashboardData = {
+    body?: never;
+    path: {
+        /**
+         * Dashboard ID
+         */
+        id: number;
+    };
+    query: {
+        /**
+         * Owning project ID (scopes the delete)
+         */
+        project_id: number;
+    };
+    url: '/otel/dashboards/{id}';
+};
+
+export type DeleteDashboardErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Dashboard not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type DeleteDashboardError = DeleteDashboardErrors[keyof DeleteDashboardErrors];
+
+export type DeleteDashboardResponses = {
+    /**
+     * Dashboard deleted
+     */
+    204: void;
+};
+
+export type DeleteDashboardResponse = DeleteDashboardResponses[keyof DeleteDashboardResponses];
+
+export type GetDashboardData = {
+    body?: never;
+    path: {
+        /**
+         * Dashboard ID
+         */
+        id: number;
+    };
+    query: {
+        /**
+         * Owning project ID (scopes the lookup)
+         */
+        project_id: number;
+    };
+    url: '/otel/dashboards/{id}';
+};
+
+export type GetDashboardErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Dashboard not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type GetDashboardError = GetDashboardErrors[keyof GetDashboardErrors];
+
+export type GetDashboardResponses = {
+    /**
+     * Dashboard
+     */
+    200: OtelDashboardResponse;
+};
+
+export type GetDashboardResponse = GetDashboardResponses[keyof GetDashboardResponses];
+
+export type UpdateDashboardData = {
+    body: UpdateDashboardRequest;
+    path: {
+        /**
+         * Dashboard ID
+         */
+        id: number;
+    };
+    query: {
+        /**
+         * Owning project ID (scopes the update)
+         */
+        project_id: number;
+    };
+    url: '/otel/dashboards/{id}';
+};
+
+export type UpdateDashboardErrors = {
+    /**
+     * Validation error
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Dashboard not found
+     */
+    404: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type UpdateDashboardError = UpdateDashboardErrors[keyof UpdateDashboardErrors];
+
+export type UpdateDashboardResponses = {
+    /**
+     * Dashboard updated
+     */
+    200: OtelDashboardResponse;
+};
+
+export type UpdateDashboardResponse = UpdateDashboardResponses[keyof UpdateDashboardResponses];
 
 export type QueryGenaiTracesData = {
     body?: never;
