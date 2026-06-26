@@ -17,8 +17,10 @@
 //! The inner `TimescaleDbStorage` is a sea-orm `MockDatabase`: the metric
 //! methods under test read/write only ClickHouse and never touch Postgres.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use chrono::Utc;
 use prost::Message;
 use sea_orm::{DatabaseBackend, MockDatabase};
 
@@ -27,7 +29,9 @@ use temps_otel::proto;
 use temps_otel::storage::clickhouse::{ClickHouseOtelConfig, ClickHouseOtelStorage};
 use temps_otel::storage::timescaledb::TimescaleDbStorage;
 use temps_otel::storage::OtelStorage;
-use temps_otel::types::{MetricAggregation, MetricQuery};
+use temps_otel::types::{
+    Exemplar, MetricAggregation, MetricPoint, MetricQuery, MetricType, ResourceInfo,
+};
 
 /// A raw row read straight back out of the `metrics` table, used to prove the
 /// structured columns (temporality / is_monotonic / histogram arrays /
@@ -373,5 +377,102 @@ async fn otlp_decode_to_store_preserves_full_fidelity() {
         hist.attributes,
         vec![("http.method".to_string(), "GET".to_string())],
         "histogram data-point labels must survive decode->store"
+    );
+}
+
+/// Raw read-back of the nested `Array(Tuple(...))` columns. These exercise the
+/// trickiest RowBinary codepaths — a single field-order or type-width mismatch in
+/// a nested tuple silently corrupts data — and were previously only unit-tested,
+/// never inserted into a live ClickHouse.
+#[derive(::clickhouse::Row, serde::Deserialize, Debug)]
+struct RawStructuredRow {
+    metric_name: String,
+    exp_scale: Option<i32>,
+    exp_zero_count: Option<u64>,
+    exp_positive_offset: Option<i32>,
+    exp_positive_counts: Vec<u64>,
+    exp_negative_counts: Vec<u64>,
+    summary_quantiles: Vec<(f64, f64)>,
+    // Tuple(trace_id, span_id, value, DateTime64 -> raw i64 ms).
+    exemplars: Vec<(String, String, f64, i64)>,
+}
+
+#[tokio::test]
+async fn store_and_readback_exp_histogram_summary_exemplars() {
+    let Some((storage, read_client, _container)) = setup().await else {
+        return; // Docker unavailable — skip gracefully. Roundtrip NOT executed.
+    };
+
+    const PROJECT_ID: i32 = 888;
+
+    // One point carrying every nested-structure column at once (storage does not
+    // enforce cross-field metric-type consistency; this maximises wire coverage).
+    let mut p = MetricPoint::skeleton(
+        PROJECT_ID,
+        Some(7),
+        ResourceInfo {
+            service_name: "svc".into(),
+            service_version: None,
+            deployment_environment: None,
+            attributes: BTreeMap::new(),
+        },
+        "request.duration.exp".into(),
+        MetricType::ExponentialHistogram,
+        "ms".into(),
+        Utc::now(),
+        BTreeMap::new(),
+    );
+    p.exp_scale = Some(3);
+    p.exp_zero_count = Some(5);
+    p.exp_zero_threshold = Some(0.001);
+    p.exp_positive_offset = Some(-2);
+    p.exp_positive_counts = Some(vec![1, 4, 9, 2]);
+    p.exp_negative_offset = Some(0);
+    p.exp_negative_counts = Some(vec![0, 1]);
+    p.summary_quantiles = Some(vec![(0.5, 12.0), (0.9, 48.0), (0.99, 99.0)]);
+    p.exemplars = vec![Exemplar {
+        timestamp: Utc::now(),
+        value: 42.0,
+        trace_id: Some("abc123".into()),
+        span_id: Some("def456".into()),
+        attributes: BTreeMap::new(),
+    }];
+    p.value = Some(7.0);
+
+    assert_eq!(
+        storage.store_metrics(vec![p]).await.expect("store_metrics"),
+        1
+    );
+
+    let rows: Vec<RawStructuredRow> = read_client
+        .query(
+            "SELECT metric_name, exp_scale, exp_zero_count, exp_positive_offset, \
+             exp_positive_counts, exp_negative_counts, summary_quantiles, exemplars \
+             FROM metrics FINAL WHERE project_id = ? ORDER BY metric_name",
+        )
+        .bind(PROJECT_ID)
+        .fetch_all::<RawStructuredRow>()
+        .await
+        .expect("raw read-back of nested structured columns must succeed");
+
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(r.metric_name, "request.duration.exp");
+    assert_eq!(r.exp_scale, Some(3));
+    assert_eq!(r.exp_zero_count, Some(5));
+    assert_eq!(r.exp_positive_offset, Some(-2));
+    assert_eq!(r.exp_positive_counts, vec![1, 4, 9, 2]);
+    assert_eq!(r.exp_negative_counts, vec![0, 1]);
+    assert_eq!(
+        r.summary_quantiles,
+        vec![(0.5, 12.0), (0.9, 48.0), (0.99, 99.0)],
+        "Array(Tuple(Float64,Float64)) summary quantiles must survive"
+    );
+    assert_eq!(r.exemplars.len(), 1, "exemplar must survive to the store");
+    assert_eq!(r.exemplars[0].0, "abc123", "exemplar trace_id");
+    assert_eq!(r.exemplars[0].1, "def456", "exemplar span_id");
+    assert!(
+        (r.exemplars[0].2 - 42.0).abs() < f64::EPSILON,
+        "exemplar value"
     );
 }
