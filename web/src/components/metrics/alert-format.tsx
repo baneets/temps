@@ -21,6 +21,32 @@ export const SEVERITIES: { value: string; label: string }[] = [
   { value: 'critical', label: 'Critical' },
 ]
 
+/** Detector kinds the form can author. Only static + anomaly are evaluable. */
+export const DETECTION_KINDS: { value: 'static' | 'anomaly'; label: string }[] =
+  [
+    { value: 'static', label: 'Static threshold' },
+    { value: 'anomaly', label: 'Anomaly (auto baseline)' },
+  ]
+
+/** Anomaly baseline algorithms accepted today (agile/ewma are rejected v1). */
+export const ANOMALY_ALGORITHMS: { value: string; label: string }[] = [
+  { value: 'robust', label: 'Robust (seasonal, stable)' },
+  { value: 'basic', label: 'Basic (non-seasonal)' },
+]
+
+export const DIRECTIONS: { value: string; label: string }[] = [
+  { value: 'both', label: 'Above or below' },
+  { value: 'above', label: 'Above only' },
+  { value: 'below', label: 'Below only' },
+]
+
+export const SEASONALITIES: { value: string; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'hourly', label: 'Hourly' },
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly' },
+]
+
 export function comparatorSymbol(comparator: string): string {
   return COMPARATORS.find((c) => c.value === comparator)?.symbol ?? comparator
 }
@@ -38,6 +64,10 @@ export function alertSummary(rule: OtelMetricAlertRuleResponse): string {
   const cfg = rule.detection_config
   if (cfg.kind === 'static') {
     return `${agg} ${rule.metric_name} ${comparatorSymbol(cfg.comparator)} ${cfg.threshold} · ${rule.severity}`
+  }
+  if (cfg.kind === 'anomaly') {
+    // e.g. `avg http.server.duration · anomaly ±3σ · warning`
+    return `${agg} ${rule.metric_name} · anomaly ±${cfg.deviations}σ · ${rule.severity}`
   }
   return `${agg} ${rule.metric_name} · ${cfg.kind} · ${rule.severity}`
 }

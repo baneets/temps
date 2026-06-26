@@ -17,18 +17,21 @@
 //! `last_state`/`last_value`/`last_evaluated_at` are persisted so the UI badge
 //! survives restarts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use temps_monitoring::{AlarmService, AlarmSeverity, AlarmType, FireAlarmRequest};
 
-use crate::detectors::DetectionConfig;
+use crate::detectors::{
+    anomaly_breaches, robust_band, season_cell, AnomalyParams, DetectionConfig, StaticParams,
+    MIN_BAND_SCALE,
+};
 use crate::services::metric_alert_service::MetricAlertService;
 use crate::services::OtelService;
 use crate::types::{MetricAggregation, MetricBucket, MetricQuery};
@@ -36,6 +39,19 @@ use temps_entities::metric_alert_rules::Model as AlertRule;
 
 /// How often the evaluator scans enabled rules.
 const EVAL_INTERVAL_SECS: u64 = 30;
+
+/// How long a per-rule anomaly baseline is cached before refetching from
+/// storage. The band moves slowly, so the hot 30s tick scores the current value
+/// against the cached baseline instead of re-querying the full lookback window.
+const BASELINE_REFRESH_SECS: u64 = 3600;
+
+/// Default anomaly baseline lookback when a rule doesn't set one.
+const DEFAULT_LOOKBACK_DAYS: i32 = 14;
+
+/// Minimum baseline samples required to compute a trustworthy band. Below this —
+/// even after the seasonal→global fallback — the rule preserves state rather
+/// than firing off a thin baseline (cold-start safety).
+const MIN_BASELINE_SAMPLES: usize = 8;
 
 /// The state transition the evaluator should apply for a single rule this cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +149,90 @@ fn map_severity(severity: &str) -> AlarmSeverity {
     }
 }
 
+/// A per-rule anomaly baseline cached across evaluator ticks. `values` are
+/// `(bucket_timestamp, aggregated_value)` over the rule's lookback window,
+/// fetched through the same aggregation path as the scored point.
+struct CachedBaseline {
+    fetched_at: Instant,
+    values: Vec<(DateTime<Utc>, f64)>,
+}
+
+/// The result of evaluating an anomaly rule against its baseline band.
+struct AnomalyEval {
+    breaching: bool,
+    center: f64,
+    scale: f64,
+}
+
+/// What to put on a fired alarm — built by the detector branch so `fire` stays
+/// detector-agnostic.
+struct FireDetails {
+    title: String,
+    message: String,
+    metadata: serde_json::Value,
+}
+
+impl FireDetails {
+    fn static_breach(rule: &AlertRule, value: f64, p: &StaticParams) -> Self {
+        FireDetails {
+            title: format!("Metric threshold breached: {}", rule.name),
+            message: format!(
+                "{} {} is {:.3} (threshold {} {:.3})",
+                rule.metric_name,
+                rule.aggregation,
+                value,
+                p.comparator.symbol(),
+                p.threshold
+            ),
+            metadata: json!({
+                "rule_id": rule.id,
+                "metric_name": rule.metric_name,
+                "aggregation": rule.aggregation,
+                "value": value,
+                "threshold": p.threshold,
+                "comparator": p.comparator.symbol(),
+                "detection_kind": "static",
+                "window_secs": rule.window_secs,
+                "for_duration_secs": rule.for_duration_secs,
+                "source": "otel_metric_alert",
+            }),
+        }
+    }
+
+    fn anomaly_breach(rule: &AlertRule, value: f64, p: &AnomalyParams, ev: &AnomalyEval) -> Self {
+        let z = (value - ev.center) / ev.scale.max(MIN_BAND_SCALE);
+        FireDetails {
+            title: format!("Metric anomaly: {}", rule.name),
+            message: format!(
+                "{} {} is {:.3} — {:.1}σ from the baseline {:.3} ± {:.3} (band ±{}σ)",
+                rule.metric_name,
+                rule.aggregation,
+                value,
+                z.abs(),
+                ev.center,
+                ev.scale,
+                p.deviations
+            ),
+            metadata: json!({
+                "rule_id": rule.id,
+                "metric_name": rule.metric_name,
+                "aggregation": rule.aggregation,
+                "value": value,
+                "baseline_center": ev.center,
+                "baseline_scale": ev.scale,
+                "z_score": z,
+                "deviations": p.deviations,
+                "algorithm": format!("{:?}", p.algorithm).to_lowercase(),
+                "seasonality": format!("{:?}", p.seasonality).to_lowercase(),
+                "detection_kind": "anomaly",
+                "window_secs": rule.window_secs,
+                "for_duration_secs": rule.for_duration_secs,
+                "source": "otel_metric_anomaly",
+            }),
+        }
+    }
+}
+
 /// Background task that evaluates enabled metric alert rules and fires/resolves
 /// notifications via the reused alarm system.
 pub struct MetricAlertEvaluator {
@@ -143,6 +243,8 @@ pub struct MetricAlertEvaluator {
     breach_start: Arc<RwLock<HashMap<i32, Instant>>>,
     /// rule_id -> alarm_id, for resolving the matching alarm on recovery.
     firing: Arc<RwLock<HashMap<i32, i32>>>,
+    /// rule_id -> cached anomaly baseline (refreshed every `BASELINE_REFRESH_SECS`).
+    baseline_cache: Arc<RwLock<HashMap<i32, CachedBaseline>>>,
 }
 
 impl MetricAlertEvaluator {
@@ -157,6 +259,7 @@ impl MetricAlertEvaluator {
             alarm_service,
             breach_start: Arc::new(RwLock::new(HashMap::new())),
             firing: Arc::new(RwLock::new(HashMap::new())),
+            baseline_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -177,6 +280,19 @@ impl MetricAlertEvaluator {
     async fn run_cycle(&self) -> Result<(), crate::error::OtelError> {
         let rules = self.alert_service.list_enabled().await?;
         debug!(rule_count = rules.len(), "Evaluating metric alert rules");
+
+        // Prune transient per-rule state for rules that are no longer enabled,
+        // so deleted/disabled rules don't leak breach timers or baseline caches.
+        let live: HashSet<i32> = rules.iter().map(|r| r.id).collect();
+        self.breach_start
+            .write()
+            .await
+            .retain(|id, _| live.contains(id));
+        self.baseline_cache
+            .write()
+            .await
+            .retain(|id, _| live.contains(id));
+
         for rule in rules {
             let rule_id = rule.id;
             // A single rule's failure must never abort the loop.
@@ -233,9 +349,35 @@ impl MetricAlertEvaluator {
         // Decode the typed detector. A corrupt blob fails this rule's cycle (the
         // outer loop logs and continues) rather than evaluating it incorrectly.
         let config = DetectionConfig::from_value(&rule.detection_config)?;
-        let breaching = match &config {
-            DetectionConfig::Static(p) => p.comparator.breaches(value, p.threshold),
-            // Non-static detectors are typed/schema-present but not yet evaluable
+        let (breaching, fire_details) = match &config {
+            DetectionConfig::Static(p) => (
+                p.comparator.breaches(value, p.threshold),
+                FireDetails::static_breach(&rule, value, p),
+            ),
+            DetectionConfig::Anomaly(p) => {
+                match self
+                    .anomaly_eval(&rule, latest.bucket, value, p, now)
+                    .await?
+                {
+                    Some(ev) => {
+                        let details = FireDetails::anomaly_breach(&rule, value, p, &ev);
+                        (ev.breaching, details)
+                    }
+                    // Insufficient/degenerate baseline: preserve state, neither
+                    // fire nor resolve (no spurious alerts on thin history).
+                    None => {
+                        if let Err(e) = self
+                            .alert_service
+                            .persist_evaluation(rule.id, &rule.last_state, rule.last_value, now)
+                            .await
+                        {
+                            warn!(rule_id = rule.id, error = %e, "Failed to persist insufficient-baseline evaluation");
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            // Other detectors are typed/schema-present but not yet evaluable
             // (creation is rejected by the service). Defensive guard for any rule
             // that predates support: preserve state and skip without firing.
             other => {
@@ -275,7 +417,7 @@ impl MetricAlertEvaluator {
             AlertTransition::StayOk | AlertTransition::StartBreach => "ok",
             AlertTransition::StayFiring => "firing",
             AlertTransition::FireNow => {
-                self.fire(&rule, value, &config).await;
+                self.fire(&rule, fire_details).await;
                 "firing"
             }
             AlertTransition::Resolve => {
@@ -295,14 +437,125 @@ impl MetricAlertEvaluator {
         Ok(())
     }
 
-    /// Fire an alarm via the reused alarm system and remember the alarm id.
-    async fn fire(&self, rule: &AlertRule, value: f64, config: &DetectionConfig) {
-        // The condition string + threshold come from the typed detector. Only
-        // static rules fire today; the fallback keeps the match exhaustive.
-        let (comparator, threshold) = match config {
-            DetectionConfig::Static(p) => (p.comparator.symbol(), p.threshold),
-            _ => ("?", f64::NAN),
+    /// Evaluate an anomaly rule's current `value` against a baseline band.
+    ///
+    /// Returns `Ok(None)` when the baseline is insufficient or degenerate
+    /// (too few samples even after the seasonal→global fallback, or a flat band)
+    /// — the caller then preserves state rather than firing. The band is the
+    /// robust median+MAD of the lookback buckets in the scored point's seasonal
+    /// cell, computed through the SAME aggregation as the scored point so counter
+    /// rates and histogram percentiles compare like-for-like.
+    async fn anomaly_eval(
+        &self,
+        rule: &AlertRule,
+        scored_ts: DateTime<Utc>,
+        value: f64,
+        p: &AnomalyParams,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AnomalyEval>, crate::error::OtelError> {
+        let baseline = self.baseline_values(rule, p, now).await?;
+        let cell = season_cell(scored_ts, p.seasonality);
+
+        // Same seasonal cell as the scored point, and strictly before it (so the
+        // current — possibly anomalous — window can't contaminate its own band).
+        let mut samples: Vec<f64> = baseline
+            .iter()
+            .filter(|(ts, _)| *ts < scored_ts && season_cell(*ts, p.seasonality) == cell)
+            .map(|(_, v)| *v)
+            .collect();
+
+        // Cold-start fallback: too few seasonal samples → use the global band.
+        if samples.len() < MIN_BASELINE_SAMPLES {
+            samples = baseline
+                .iter()
+                .filter(|(ts, _)| *ts < scored_ts)
+                .map(|(_, v)| *v)
+                .collect();
+        }
+        if samples.len() < MIN_BASELINE_SAMPLES {
+            debug!(
+                rule_id = rule.id,
+                samples = samples.len(),
+                "Anomaly: insufficient baseline, preserving state"
+            );
+            return Ok(None);
+        }
+
+        let Some((center, scale)) = robust_band(&samples) else {
+            return Ok(None);
         };
+        if scale < MIN_BAND_SCALE {
+            // A flat baseline gives no meaningful band; preserve rather than fire
+            // on every wobble (the reviewer's divide-by-zero / always-firing case).
+            debug!(
+                rule_id = rule.id,
+                "Anomaly: degenerate (flat) baseline, preserving state"
+            );
+            return Ok(None);
+        }
+
+        let breaching = anomaly_breaches(value, center, scale, p.deviations, p.direction);
+        Ok(Some(AnomalyEval {
+            breaching,
+            center,
+            scale,
+        }))
+    }
+
+    /// Fetch (and cache) the per-rule baseline values over its lookback window.
+    ///
+    /// Cached for `BASELINE_REFRESH_SECS` so the hot tick scores against the
+    /// cached buckets instead of re-querying weeks of data. Values are mapped
+    /// through `value_for_rule` so each baseline bucket is the same quantity as
+    /// the scored point (rate for counters, percentile for histograms).
+    async fn baseline_values(
+        &self,
+        rule: &AlertRule,
+        p: &AnomalyParams,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<(DateTime<Utc>, f64)>, crate::error::OtelError> {
+        {
+            let cache = self.baseline_cache.read().await;
+            if let Some(c) = cache.get(&rule.id) {
+                if c.fetched_at.elapsed().as_secs() < BASELINE_REFRESH_SECS {
+                    return Ok(c.values.clone());
+                }
+            }
+        }
+
+        let lookback_days = p
+            .baseline_lookback_days
+            .unwrap_or(DEFAULT_LOOKBACK_DAYS)
+            .clamp(1, 90);
+        let aggregation = MetricAggregation::parse(&rule.aggregation);
+        let query = MetricQuery {
+            project_id: rule.project_id,
+            metric_name: Some(rule.metric_name.clone()),
+            start_time: Some(now - chrono::Duration::days(lookback_days as i64)),
+            end_time: Some(now),
+            bucket_interval: Some(format!("{}s", rule.window_secs.max(1))),
+            limit: None,
+            aggregation,
+            ..Default::default()
+        };
+        let buckets = self.otel_service.query_metrics(query).await?;
+        let values: Vec<(DateTime<Utc>, f64)> = buckets
+            .iter()
+            .map(|b| (b.bucket, value_for_rule(b, aggregation)))
+            .collect();
+
+        self.baseline_cache.write().await.insert(
+            rule.id,
+            CachedBaseline {
+                fetched_at: Instant::now(),
+                values: values.clone(),
+            },
+        );
+        Ok(values)
+    }
+
+    /// Fire an alarm via the reused alarm system and remember the alarm id.
+    async fn fire(&self, rule: &AlertRule, details: FireDetails) {
         let request = FireAlarmRequest {
             project_id: rule.project_id,
             environment_id: None,
@@ -311,23 +564,9 @@ impl MetricAlertEvaluator {
             service_id: None,
             alarm_type: AlarmType::DeploymentMetricThreshold,
             severity: map_severity(&rule.severity),
-            title: format!("Metric threshold breached: {}", rule.name),
-            message: format!(
-                "{} {} is {:.3} (threshold {} {:.3})",
-                rule.metric_name, rule.aggregation, value, comparator, threshold
-            ),
-            metadata: Some(json!({
-                "rule_id": rule.id,
-                "metric_name": rule.metric_name,
-                "aggregation": rule.aggregation,
-                "value": value,
-                "threshold": threshold,
-                "comparator": comparator,
-                "detection_kind": config.kind_str(),
-                "window_secs": rule.window_secs,
-                "for_duration_secs": rule.for_duration_secs,
-                "source": "otel_metric_alert",
-            })),
+            title: details.title,
+            message: details.message,
+            metadata: Some(details.metadata),
         };
         match self.alarm_service.fire_alarm(request).await {
             Ok(Some(alarm_id)) => {

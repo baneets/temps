@@ -1,5 +1,10 @@
 import { ProjectResponse } from '@/api/client'
-import type { Comparator } from '@/api/client'
+import type {
+  AnomalyAlgorithm,
+  Comparator,
+  Direction,
+  Seasonality,
+} from '@/api/client'
 // REGEN: bun run openapi-ts — these builders/types come from the new
 // /otel/alerts endpoints (operationIds get_alert / create_alert / update_alert).
 // They are absent from the committed SDK; imported here so the form is
@@ -40,7 +45,11 @@ import { Switch } from '@/components/ui/switch'
 import { AGGREGATIONS } from '@/components/metrics/metric-format'
 import {
   AlertStateBadge,
+  ANOMALY_ALGORITHMS,
   COMPARATORS,
+  DETECTION_KINDS,
+  DIRECTIONS,
+  SEASONALITIES,
   SEVERITIES,
 } from '@/components/metrics/alert-format'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -65,13 +74,32 @@ const COMPARATOR_VALUES = COMPARATORS.map((c) => c.value) as [
   ...string[],
 ]
 const SEVERITY_VALUES = SEVERITIES.map((s) => s.value) as [string, ...string[]]
+const ALGORITHM_VALUES = ANOMALY_ALGORITHMS.map((a) => a.value) as [
+  string,
+  ...string[],
+]
+const DIRECTION_VALUES = DIRECTIONS.map((d) => d.value) as [string, ...string[]]
+const SEASONALITY_VALUES = SEASONALITIES.map((s) => s.value) as [
+  string,
+  ...string[],
+]
 
+// Flat schema: comparator/threshold (static) and the anomaly knobs always carry
+// form values (with defaults); `onSubmit` builds the right `detection_config`
+// variant from `detection_kind`, and the backend validates the final config.
 const alertSchema = z.object({
   name: z.string().min(1, 'Name is required').max(200, 'Name is too long'),
   metric_name: z.string().min(1, 'Pick a metric'),
   aggregation: z.enum(AGGREGATION_VALUES),
+  detection_kind: z.enum(['static', 'anomaly']),
   comparator: z.enum(COMPARATOR_VALUES),
   threshold: z.number({ message: 'Threshold must be a number' }),
+  algorithm: z.enum(ALGORITHM_VALUES),
+  deviations: z
+    .number({ message: 'Sensitivity must be a number' })
+    .positive('Sensitivity must be greater than 0'),
+  direction: z.enum(DIRECTION_VALUES),
+  seasonality: z.enum(SEASONALITY_VALUES),
   window_secs: z
     .number({ message: 'Window must be a number' })
     .int()
@@ -102,8 +130,13 @@ function emptyDefaults(): AlertFormData {
     name: '',
     metric_name: '',
     aggregation: 'avg',
+    detection_kind: 'static',
     comparator: 'gt',
     threshold: 0,
+    algorithm: 'robust',
+    deviations: 3,
+    direction: 'both',
+    seasonality: 'none',
     window_secs: 300,
     // Must be > 0 (backend + Zod reject 0); default to one eval interval.
     for_duration_secs: 60,
@@ -140,20 +173,37 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
   const defaultValues = useMemo<AlertFormData>(() => {
     const existing = existingQuery.data
     if (existing) {
-      // The form edits a static threshold; pull comparator/threshold out of the
-      // typed detector union (only `static` is editable here for now).
+      // Unpack the typed detector union into the flat form fields.
       const cfg = existing.detection_config
       const isStatic = cfg.kind === 'static'
+      const isAnomaly = cfg.kind === 'anomaly'
       return {
         name: existing.name,
         metric_name: existing.metric_name,
         aggregation: coerce(AGGREGATION_VALUES, existing.aggregation, 'avg'),
+        detection_kind: isAnomaly ? 'anomaly' : 'static',
         comparator: coerce(
           COMPARATOR_VALUES,
           isStatic ? cfg.comparator : 'gt',
           'gt',
         ),
         threshold: isStatic ? cfg.threshold : 0,
+        algorithm: coerce(
+          ALGORITHM_VALUES,
+          isAnomaly ? (cfg.algorithm ?? 'robust') : 'robust',
+          'robust',
+        ),
+        deviations: isAnomaly ? (cfg.deviations ?? 3) : 3,
+        direction: coerce(
+          DIRECTION_VALUES,
+          isAnomaly ? (cfg.direction ?? 'both') : 'both',
+          'both',
+        ),
+        seasonality: coerce(
+          SEASONALITY_VALUES,
+          isAnomaly ? (cfg.seasonality ?? 'none') : 'none',
+          'none',
+        ),
         window_secs: existing.window_secs,
         for_duration_secs: existing.for_duration_secs,
         severity: coerce(SEVERITY_VALUES, existing.severity, 'warning'),
@@ -167,6 +217,9 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
     resolver: zodResolver(alertSchema),
     values: defaultValues,
   })
+  // Drives which detector fields are shown. Hidden fields keep their values in
+  // form state (RHF does not unregister), so `onSubmit` reads the right ones.
+  const detectionKind = form.watch('detection_kind')
 
   const createMutation = useMutation({
     ...createAlertMutation(),
@@ -199,15 +252,23 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
   const isMutating = createMutation.isPending || updateMutation.isPending
 
   const onSubmit = async (data: AlertFormData) => {
-    // The form authors a static threshold detector; wrap the flat comparator +
-    // threshold into the typed `detection_config` discriminated union. The Zod
-    // enum guarantees `comparator` is one of the Comparator literals, so the
-    // narrowing cast is sound.
-    const detection_config = {
-      kind: 'static' as const,
-      comparator: data.comparator as Comparator,
-      threshold: data.threshold,
-    }
+    // Build the typed `detection_config` variant the user chose. The Zod enums
+    // guarantee the string fields are valid literals, so the narrowing casts are
+    // sound, and the backend re-validates the final config.
+    const detection_config =
+      data.detection_kind === 'anomaly'
+        ? {
+            kind: 'anomaly' as const,
+            algorithm: data.algorithm as AnomalyAlgorithm,
+            deviations: data.deviations,
+            direction: data.direction as Direction,
+            seasonality: data.seasonality as Seasonality,
+          }
+        : {
+            kind: 'static' as const,
+            comparator: data.comparator as Comparator,
+            threshold: data.threshold,
+          }
     if (isEditing) {
       await updateMutation.mutateAsync({
         path: { id },
@@ -353,57 +414,215 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
                 />
               </div>
 
-              {/* Condition: comparator + threshold */}
-              <div className="grid gap-4 sm:grid-cols-2">
-                <FormField
-                  control={form.control}
-                  name="comparator"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Comparator</FormLabel>
-                      <Select onValueChange={field.onChange} value={field.value}>
-                        <FormControl>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          {COMPARATORS.map((c) => (
-                            <SelectItem key={c.value} value={c.value}>
-                              {c.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-                <FormField
-                  control={form.control}
-                  name="threshold"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Threshold</FormLabel>
+              {/* Detector type */}
+              <FormField
+                control={form.control}
+                name="detection_kind"
+                render={({ field }) => (
+                  <FormItem className="sm:max-w-[280px]">
+                    <FormLabel>Detection</FormLabel>
+                    <Select onValueChange={field.onChange} value={field.value}>
                       <FormControl>
-                        <Input
-                          type="number"
-                          step="any"
-                          {...field}
-                          onChange={(e) =>
-                            field.onChange(
-                              e.target.value === ''
-                                ? undefined
-                                : e.target.valueAsNumber,
-                            )
-                          }
-                        />
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
                       </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              </div>
+                      <SelectContent>
+                        {DETECTION_KINDS.map((d) => (
+                          <SelectItem key={d.value} value={d.value}>
+                            {d.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormDescription>
+                      {detectionKind === 'anomaly'
+                        ? 'Learns a baseline band from history and fires when the metric deviates from it — no fixed number to pick.'
+                        : 'Fires when the aggregated value crosses a fixed threshold.'}
+                    </FormDescription>
+                  </FormItem>
+                )}
+              />
+
+              {detectionKind === 'anomaly' ? (
+                <>
+                  {/* Anomaly: algorithm + sensitivity */}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FormField
+                      control={form.control}
+                      name="algorithm"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Algorithm</FormLabel>
+                          <Select
+                            onValueChange={field.onChange}
+                            value={field.value}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {ANOMALY_ALGORITHMS.map((a) => (
+                                <SelectItem key={a.value} value={a.value}>
+                                  {a.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="deviations"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Sensitivity (σ)</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number"
+                              step="0.1"
+                              min={0}
+                              {...field}
+                              onChange={(e) =>
+                                field.onChange(
+                                  e.target.value === ''
+                                    ? undefined
+                                    : e.target.valueAsNumber,
+                                )
+                              }
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            Band width in standard deviations. Lower = more
+                            sensitive (more alerts); 3 is a good default.
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                  {/* Anomaly: direction + seasonality */}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FormField
+                      control={form.control}
+                      name="direction"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Direction</FormLabel>
+                          <Select
+                            onValueChange={field.onChange}
+                            value={field.value}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {DIRECTIONS.map((d) => (
+                                <SelectItem key={d.value} value={d.value}>
+                                  {d.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name="seasonality"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Seasonality</FormLabel>
+                          <Select
+                            onValueChange={field.onChange}
+                            value={field.value}
+                          >
+                            <FormControl>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                            </FormControl>
+                            <SelectContent>
+                              {SEASONALITIES.map((s) => (
+                                <SelectItem key={s.value} value={s.value}>
+                                  {s.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <FormDescription>
+                            Compare like-for-like times (e.g. weekly = same
+                            weekday &amp; hour). Needs enough history.
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                </>
+              ) : (
+                /* Static: comparator + threshold */
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <FormField
+                    control={form.control}
+                    name="comparator"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Comparator</FormLabel>
+                        <Select
+                          onValueChange={field.onChange}
+                          value={field.value}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            {COMPARATORS.map((c) => (
+                              <SelectItem key={c.value} value={c.value}>
+                                {c.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="threshold"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Threshold</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="number"
+                            step="any"
+                            {...field}
+                            onChange={(e) =>
+                              field.onChange(
+                                e.target.value === ''
+                                  ? undefined
+                                  : e.target.valueAsNumber,
+                              )
+                            }
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+              )}
 
               {/* Timing: window + for-duration */}
               <div className="grid gap-4 sm:grid-cols-2">

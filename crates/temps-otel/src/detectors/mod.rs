@@ -19,6 +19,7 @@
 //! alongside `serde(tag)` in utoipa 5.x). utoipa + hey-api render this as a
 //! usable `(StaticParams & { kind: 'static' }) | …` TS discriminated union.
 
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -29,6 +30,75 @@ fn default_deviations() -> f64 {
 }
 fn default_pct_anomalous() -> f64 {
     1.0
+}
+
+/// Floor applied to a band's scale before dividing, so a (near-)flat baseline
+/// can't produce an infinite z-score. A scale below this is treated as
+/// degenerate by the evaluator (insufficient baseline → preserve state).
+pub const MIN_BAND_SCALE: f64 = 1e-9;
+
+/// The robust band center + scale for an anomaly detector, from baseline values:
+/// `(median, MAD · 1.4826)`. The 1.4826 factor makes MAD a consistent estimator
+/// of the standard deviation for normal data, so `deviations` keeps the same
+/// "sigmas" meaning as Datadog's `bounds`. Returns `None` for an empty baseline.
+pub fn robust_band(values: &[f64]) -> Option<(f64, f64)> {
+    if values.is_empty() {
+        return None;
+    }
+    let center = median(values);
+    let deviations: Vec<f64> = values.iter().map(|v| (v - center).abs()).collect();
+    let mad = median(&deviations);
+    Some((center, mad * 1.4826))
+}
+
+/// Median of `values` (ignoring non-finite entries). Returns 0.0 if empty.
+fn median(values: &[f64]) -> f64 {
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+/// Whether `value` deviates from the band `(center, scale)` by more than
+/// `deviations` scaled units, honouring `direction`. `scale` is floored by
+/// [`MIN_BAND_SCALE`] so a flat band can't divide by zero (the evaluator treats
+/// a degenerate scale as insufficient before calling this — this is defence).
+pub fn anomaly_breaches(
+    value: f64,
+    center: f64,
+    scale: f64,
+    deviations: f64,
+    direction: Direction,
+) -> bool {
+    let z = (value - center) / scale.max(MIN_BAND_SCALE);
+    match direction {
+        Direction::Both => z.abs() > deviations,
+        Direction::Above => z > deviations,
+        Direction::Below => -z > deviations,
+    }
+}
+
+/// A comparable "seasonal cell" id for `ts` under `seasonality`. Baseline buckets
+/// are filtered to those sharing the scored bucket's cell, so e.g. a Tuesday-2pm
+/// value is compared only against historical Tuesday-2pm values.
+pub fn season_cell(ts: DateTime<Utc>, seasonality: Seasonality) -> i64 {
+    match seasonality {
+        // One global cell — the band spans the whole lookback.
+        Seasonality::None => 0,
+        // Pattern repeats each hour: cell = minute-of-hour.
+        Seasonality::Hourly => ts.minute() as i64,
+        // Pattern repeats each day: cell = hour-of-day.
+        Seasonality::Daily => ts.hour() as i64,
+        // Pattern repeats each week: cell = (weekday, hour-of-day).
+        Seasonality::Weekly => ts.weekday().num_days_from_monday() as i64 * 24 + ts.hour() as i64,
+    }
 }
 
 /// The typed detector definition stored (as jsonb) in
@@ -245,10 +315,11 @@ impl DetectionConfig {
         })
     }
 
-    /// Validate the detector's invariants. Currently only `static` rules are
-    /// evaluable; the other (typed, schema-present) kinds are rejected at
-    /// create/update time until their evaluator lands — enabling each later is
-    /// code-only, never a migration.
+    /// Validate the detector's invariants. `static` and `anomaly` (robust/basic
+    /// band) are evaluable; `forecast`/`outlier`/`auto_watch` (and the
+    /// agile/ewma anomaly algorithms) are typed, schema-present stubs rejected
+    /// here until their evaluator lands — enabling each later is code-only,
+    /// never a migration.
     pub fn validate(&self) -> Result<(), OtelError> {
         match self {
             DetectionConfig::Static(p) => {
@@ -258,6 +329,38 @@ impl DetectionConfig {
                     });
                 }
                 Ok(())
+            }
+            DetectionConfig::Anomaly(p) => {
+                if !p.deviations.is_finite() || p.deviations <= 0.0 {
+                    return Err(OtelError::Validation {
+                        message: "anomaly deviations must be a finite number > 0".to_string(),
+                    });
+                }
+                if !(p.pct_anomalous > 0.0 && p.pct_anomalous <= 1.0) {
+                    return Err(OtelError::Validation {
+                        message: "anomaly pct_anomalous must be in (0, 1]".to_string(),
+                    });
+                }
+                if let Some(days) = p.baseline_lookback_days {
+                    if !(1..=90).contains(&days) {
+                        return Err(OtelError::Validation {
+                            message: "anomaly baseline_lookback_days must be between 1 and 90"
+                                .to_string(),
+                        });
+                    }
+                }
+                match p.algorithm {
+                    // v1 implements a robust seasonal MAD band; `basic` is the
+                    // same math with `seasonality=none`.
+                    AnomalyAlgorithm::Robust | AnomalyAlgorithm::Basic => Ok(()),
+                    AnomalyAlgorithm::Agile | AnomalyAlgorithm::Ewma => {
+                        Err(OtelError::Validation {
+                            message: "anomaly algorithm 'agile'/'ewma' is not yet supported \
+                                      (use 'robust' or 'basic')"
+                                .to_string(),
+                        })
+                    }
+                }
             }
             other => Err(OtelError::Validation {
                 message: format!("detector kind '{}' is not yet supported", other.kind_str()),
@@ -325,16 +428,100 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_rejects_unsupported_kinds() {
-        // The non-static kinds are typed (schema-present) but not yet evaluable.
+    fn test_validate_anomaly_ok_and_rejections() {
+        // Default anomaly (robust) is now evaluable.
         let anomaly =
             DetectionConfig::from_value(&serde_json::json!({ "kind": "anomaly" })).unwrap();
+        assert!(anomaly.validate().is_ok());
+
+        // agile/ewma algorithms are typed but not yet implemented → rejected.
+        let ewma = DetectionConfig::from_value(
+            &serde_json::json!({ "kind": "anomaly", "algorithm": "ewma" }),
+        )
+        .unwrap();
+        assert!(matches!(ewma.validate(), Err(OtelError::Validation { .. })));
+
+        // Bad hyperparameters are rejected.
+        let bad_dev = DetectionConfig::from_value(
+            &serde_json::json!({ "kind": "anomaly", "deviations": 0.0 }),
+        )
+        .unwrap();
         assert!(matches!(
-            anomaly.validate(),
+            bad_dev.validate(),
             Err(OtelError::Validation { .. })
         ));
+        let bad_pct = DetectionConfig::from_value(
+            &serde_json::json!({ "kind": "anomaly", "pct_anomalous": 1.5 }),
+        )
+        .unwrap();
+        assert!(matches!(
+            bad_pct.validate(),
+            Err(OtelError::Validation { .. })
+        ));
+        let bad_lookback = DetectionConfig::from_value(
+            &serde_json::json!({ "kind": "anomaly", "baseline_lookback_days": 9999 }),
+        )
+        .unwrap();
+        assert!(matches!(
+            bad_lookback.validate(),
+            Err(OtelError::Validation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_other_kinds_still_rejected() {
+        // forecast/outlier/auto_watch remain typed-but-unsupported stubs.
         let auto = DetectionConfig::AutoWatch(AutoWatchParams::default());
         assert!(matches!(auto.validate(), Err(OtelError::Validation { .. })));
+        let outlier = DetectionConfig::from_value(
+            &serde_json::json!({ "kind": "outlier", "peer_group_key": "host" }),
+        )
+        .unwrap();
+        assert!(matches!(
+            outlier.validate(),
+            Err(OtelError::Validation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_robust_band() {
+        // Symmetric data: median 30, abs-devs [20,10,0,10,20] → MAD 10 → scale 14.826.
+        let (center, scale) = robust_band(&[10.0, 20.0, 30.0, 40.0, 50.0]).unwrap();
+        assert!((center - 30.0).abs() < 1e-9);
+        assert!((scale - 14.826).abs() < 1e-3);
+        // A flat baseline has zero scale (the evaluator treats this as degenerate).
+        let (c, s) = robust_band(&[5.0, 5.0, 5.0]).unwrap();
+        assert_eq!(c, 5.0);
+        assert_eq!(s, 0.0);
+        assert!(robust_band(&[]).is_none());
+    }
+
+    #[test]
+    fn test_anomaly_breaches_direction() {
+        // center 100, scale 10, deviations 3 → band [70, 130].
+        assert!(anomaly_breaches(140.0, 100.0, 10.0, 3.0, Direction::Both));
+        assert!(anomaly_breaches(50.0, 100.0, 10.0, 3.0, Direction::Both));
+        assert!(!anomaly_breaches(120.0, 100.0, 10.0, 3.0, Direction::Both));
+        // Above only catches high excursions.
+        assert!(anomaly_breaches(140.0, 100.0, 10.0, 3.0, Direction::Above));
+        assert!(!anomaly_breaches(50.0, 100.0, 10.0, 3.0, Direction::Above));
+        // Below only catches low excursions.
+        assert!(anomaly_breaches(50.0, 100.0, 10.0, 3.0, Direction::Below));
+        assert!(!anomaly_breaches(140.0, 100.0, 10.0, 3.0, Direction::Below));
+        // A flat band (scale 0) is floored, not a divide-by-zero panic.
+        assert!(anomaly_breaches(5.0001, 5.0, 0.0, 3.0, Direction::Both));
+    }
+
+    #[test]
+    fn test_season_cell() {
+        use chrono::TimeZone;
+        // 2026-06-23 is a Tuesday, 14:35 UTC.
+        let t = Utc.with_ymd_and_hms(2026, 6, 23, 14, 35, 0).unwrap();
+        assert_eq!(season_cell(t, Seasonality::None), 0);
+        assert_eq!(season_cell(t, Seasonality::Hourly), 35); // minute-of-hour
+        assert_eq!(season_cell(t, Seasonality::Daily), 14); // hour-of-day
+                                                            // Tuesday = num_days_from_monday 1 → 1*24 + 14 = 38.
+        assert_eq!(season_cell(t, Seasonality::Weekly), 38);
     }
 
     #[test]

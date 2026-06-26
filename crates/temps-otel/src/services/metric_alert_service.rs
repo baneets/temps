@@ -438,21 +438,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_anomaly_kind_rejected_until_supported() {
-        // Anomaly (and other non-static) detectors are typed/schema-present but
-        // not yet evaluable, so creation is rejected with a Validation error.
+    async fn test_create_unsupported_kind_rejected() {
+        // Forecast/outlier/auto_watch detectors are typed/schema-present but not
+        // yet evaluable, so creation is rejected with a Validation error.
+        // (Anomaly IS now supported — see the detectors module tests.)
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
         let service = MetricAlertService::new(Arc::new(db));
 
-        let anomaly = DetectionConfig::from_value(&serde_json::json!({ "kind": "anomaly" }))
-            .expect("anomaly config parses");
+        let forecast = DetectionConfig::from_value(&serde_json::json!({
+            "kind": "forecast", "forecast_horizon_secs": 3600, "comparator": "gt", "threshold": 1.0
+        }))
+        .expect("forecast config parses");
         let result = service
             .create(
                 7,
                 "Rule".to_string(),
                 "http.server.duration".to_string(),
                 "p95".to_string(),
-                anomaly,
+                forecast,
                 300,
                 120,
                 "warning".to_string(),

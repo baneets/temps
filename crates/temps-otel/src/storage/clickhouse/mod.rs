@@ -782,27 +782,46 @@ pub(crate) fn escape_like_pattern(pattern: &str) -> String {
 pub(crate) fn translate_bucket_interval(interval: &str) -> String {
     const DEFAULT: &str = "INTERVAL 1 HOUR";
     let trimmed = interval.trim();
+    // Accept two shapes:
+    //   - space-separated "<count> <unit>" (e.g. "5 minutes", "1 hour"), and
+    //   - compact "<count><unit>" (e.g. "300s", "5m", "1h") which the evaluator
+    //     and SDK emit via `format!("{}s", secs)`. Without the compact form,
+    //     "300s" failed to parse and silently fell back to 1-hour buckets —
+    //     coarsening every windowed query (static + anomaly baseline).
     let mut parts = trimmed.split_whitespace();
-    let (Some(count_str), Some(unit_raw)) = (parts.next(), parts.next()) else {
-        return DEFAULT.to_string();
+    let (count_str, unit_raw): (String, String) = match (parts.next(), parts.next()) {
+        (Some(count), Some(unit)) => {
+            // Reject anything with extra tokens (e.g. "1 hour; DROP").
+            if parts.next().is_some() {
+                return DEFAULT.to_string();
+            }
+            (count.to_string(), unit.to_string())
+        }
+        (Some(single), None) => {
+            // Compact form: split leading ASCII digits from the trailing unit.
+            let split = single
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(single.len());
+            if split == 0 || split == single.len() {
+                return DEFAULT.to_string();
+            }
+            (single[..split].to_string(), single[split..].to_string())
+        }
+        _ => return DEFAULT.to_string(),
     };
-    // Reject anything with extra tokens (e.g. "1 hour; DROP").
-    if parts.next().is_some() {
-        return DEFAULT.to_string();
-    }
     let Ok(count) = count_str.parse::<u32>() else {
         return DEFAULT.to_string();
     };
     if count == 0 || count > 100_000 {
         return DEFAULT.to_string();
     }
-    // Normalise the unit (accept singular and plural) to a fixed keyword.
+    // Normalise the unit (singular/plural and single-letter) to a fixed keyword.
     let unit = match unit_raw.to_ascii_lowercase().as_str() {
-        "second" | "seconds" | "sec" | "secs" => "SECOND",
-        "minute" | "minutes" | "min" | "mins" => "MINUTE",
-        "hour" | "hours" | "hr" | "hrs" => "HOUR",
-        "day" | "days" => "DAY",
-        "week" | "weeks" => "WEEK",
+        "second" | "seconds" | "sec" | "secs" | "s" => "SECOND",
+        "minute" | "minutes" | "min" | "mins" | "m" => "MINUTE",
+        "hour" | "hours" | "hr" | "hrs" | "h" => "HOUR",
+        "day" | "days" | "d" => "DAY",
+        "week" | "weeks" | "w" => "WEEK",
         _ => return DEFAULT.to_string(),
     };
     format!("INTERVAL {count} {unit}")
@@ -3324,6 +3343,16 @@ mod tests {
         assert_eq!(translate_bucket_interval("2 weeks"), "INTERVAL 2 WEEK");
         // Singular + abbreviations.
         assert_eq!(translate_bucket_interval("15 min"), "INTERVAL 15 MINUTE");
+        // Compact (no-space) form, as emitted by `format!("{}s", secs)`.
+        assert_eq!(translate_bucket_interval("300s"), "INTERVAL 300 SECOND");
+        assert_eq!(translate_bucket_interval("5m"), "INTERVAL 5 MINUTE");
+        assert_eq!(translate_bucket_interval("1h"), "INTERVAL 1 HOUR");
+        assert_eq!(translate_bucket_interval("2d"), "INTERVAL 2 DAY");
+        assert_eq!(translate_bucket_interval("1w"), "INTERVAL 1 WEEK");
+        // Compact garbage still falls back to the safe default.
+        assert_eq!(translate_bucket_interval("300"), "INTERVAL 1 HOUR");
+        assert_eq!(translate_bucket_interval("abc"), "INTERVAL 1 HOUR");
+        assert_eq!(translate_bucket_interval("5x"), "INTERVAL 1 HOUR");
     }
 
     #[test]
