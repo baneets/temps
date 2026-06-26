@@ -42,6 +42,16 @@ import {
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
+import { StatusDot } from '@/components/metrics/alert-format'
+import {
+  rollupStatus,
+  useAlertStatus,
+  type StatusRollup,
+} from '@/components/metrics/alert-status'
+import {
+  dashboardTiles,
+  FiringCount,
+} from '@/components/metrics/dashboard-status'
 
 interface DashboardsProps {
   project: ProjectResponse
@@ -84,6 +94,11 @@ export default function Dashboards({ project }: DashboardsProps) {
   })
 
   const dashboards = dashboardsQuery.data?.data ?? []
+
+  // Datadog-style: derive each dashboard's status from the metrics its tiles
+  // plot vs. the project's firing alert rules. One cached listAlerts fetch — the
+  // same the per-tile dots use — so the row badge can't disagree with the tiles.
+  const statusModel = useAlertStatus(project.id)
 
   const goToNew = () => navigate('new')
 
@@ -140,6 +155,10 @@ export default function Dashboards({ project }: DashboardsProps) {
             <DashboardRow
               key={d.id}
               dashboard={d}
+              rollup={rollupStatus(
+                dashboardTiles(d.layout?.sections),
+                statusModel.rulesFor,
+              )}
               onOpen={() => navigate(String(d.id))}
               onEdit={() => navigate(`${d.id}/edit`)}
               onDelete={() => setPendingDelete(d)}
@@ -190,15 +209,18 @@ export default function Dashboards({ project }: DashboardsProps) {
 
 function DashboardRow({
   dashboard,
+  rollup,
   onOpen,
   onEdit,
   onDelete,
 }: {
   dashboard: OtelDashboardResponse
+  rollup: StatusRollup
   onOpen: () => void
   onEdit: () => void
   onDelete: () => void
 }) {
+  const firing = rollup.firing > 0 && rollup.level !== null
   return (
     <div className="group flex items-center gap-3 rounded-lg px-2 py-2.5 transition hover:bg-muted/50">
       <button
@@ -206,13 +228,28 @@ function DashboardRow({
         onClick={onOpen}
         className="flex min-w-0 flex-1 items-center gap-3 text-left"
       >
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <div className="relative flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
           <LayoutDashboard className="size-4" />
+          {firing && rollup.level && (
+            <span className="absolute -right-0.5 -top-0.5">
+              <StatusDot
+                level={rollup.level}
+                pulse
+                title={`${rollup.firing} firing`}
+              />
+            </span>
+          )}
         </div>
         <div className="flex min-w-0 flex-col">
           <span className="truncate text-sm font-medium">{dashboard.name}</span>
-          <span className="truncate text-xs text-muted-foreground">
+          <span className="flex items-center gap-1.5 truncate text-xs text-muted-foreground">
             {dashboardSummary(dashboard)}
+            {firing && (
+              <>
+                <span aria-hidden>·</span>
+                <FiringCount rollup={rollup} />
+              </>
+            )}
           </span>
         </div>
       </button>

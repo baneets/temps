@@ -6,6 +6,15 @@ import { ProjectResponse } from '@/api/client'
 import { getDashboardOptions } from '@/api/client/@tanstack/react-query.gen'
 import { MetricTile } from '@/components/metrics/MetricTile'
 import {
+  rollupStatus,
+  useAlertStatus,
+} from '@/components/metrics/alert-status'
+import {
+  dashboardTiles,
+  DashboardStatusBadge,
+  FiringCount,
+} from '@/components/metrics/dashboard-status'
+import {
   RANGE_BUCKET,
   TIME_RANGES,
   type TimeRange,
@@ -63,6 +72,13 @@ export default function DashboardView({ project }: DashboardViewProps) {
 
   const sections = dashboard?.layout?.sections ?? []
 
+  // Datadog-style firing status for this dashboard, derived from the same
+  // cached alert-rule fetch the tiles use (no extra round-trip). Rolled up at
+  // the dashboard level for the header summary and per section for the section
+  // headers, so "what's on fire" reads at a glance without scanning every tile.
+  const statusModel = useAlertStatus(project.id)
+  const rollup = rollupStatus(dashboardTiles(sections), statusModel.rulesFor)
+
   return (
     <div className="flex w-full flex-col gap-4">
       {/* Header */}
@@ -77,15 +93,16 @@ export default function DashboardView({ project }: DashboardViewProps) {
           All dashboards
         </Button>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <LayoutDashboard className="size-5 text-muted-foreground" />
-            <h1 className="text-lg font-semibold tracking-tight">
+          <div className="flex min-w-0 items-center gap-2">
+            <LayoutDashboard className="size-5 shrink-0 text-muted-foreground" />
+            <h1 className="truncate text-lg font-semibold tracking-tight">
               {dashboardQuery.isPending ? (
                 <Skeleton className="h-6 w-40" />
               ) : (
                 (dashboard?.name ?? 'Dashboard')
               )}
             </h1>
+            {!dashboardQuery.isPending && <DashboardStatusBadge rollup={rollup} />}
           </div>
           <div className="flex items-center gap-2 self-start">
             <Select
@@ -156,10 +173,16 @@ export default function DashboardView({ project }: DashboardViewProps) {
         </div>
       ) : (
         <div className="flex flex-col gap-6">
-          {sections.map((section) => (
+          {sections.map((section) => {
+            const sectionRollup = rollupStatus(
+              dashboardTiles([section]),
+              statusModel.rulesFor,
+            )
+            return (
             <section key={section.id} className="flex flex-col gap-3">
-              <h2 className="text-sm font-semibold tracking-tight">
+              <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">
                 {section.title || 'Untitled section'}
+                <FiringCount rollup={sectionRollup} className="text-xs" />
               </h2>
               {(section.tiles?.length ?? 0) === 0 ? (
                 <p className="text-xs text-muted-foreground">
@@ -182,7 +205,8 @@ export default function DashboardView({ project }: DashboardViewProps) {
                 </div>
               )}
             </section>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>
