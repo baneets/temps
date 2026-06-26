@@ -1,20 +1,73 @@
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Link, useLocation } from 'react-router-dom'
 import { ProjectResponse } from '@/api/client'
+import { LayoutDashboard, LineChart } from 'lucide-react'
 import MetricsExplorer from './MetricsExplorer'
+import DashboardsRouter from './DashboardsRouter'
 
 interface MetricsProps {
   project: ProjectResponse
 }
 
 /**
- * Metrics section router. Mirrors `Traces.tsx`: an index explorer and room to
- * grow a `:metricName` detail drill-down later. Mounted at `metrics/*` under
- * the project (see ProjectDetail routes).
+ * Unified Metrics surface. One nav entry holds two modes:
+ *   - Explore (index): the all-metrics overview + per-metric drill-in.
+ *   - Dashboards (`dashboards/*`): saved, curated dashboards.
+ *
+ * Explore stays at the `metrics` index (preserving existing links), and the
+ * dashboards section is nested *unchanged* under `metrics/dashboards/*` so the
+ * dashboard pages' relative navigation keeps working.
  */
 export default function Metrics({ project }: MetricsProps) {
   return (
-    <Routes>
-      <Route index element={<MetricsExplorer project={project} />} />
-    </Routes>
+    <div className="flex w-full flex-col gap-4">
+      <MetricsTabs />
+      <Routes>
+        <Route index element={<MetricsExplorer project={project} />} />
+        <Route
+          path="dashboards/*"
+          element={<DashboardsRouter project={project} />}
+        />
+      </Routes>
+    </div>
+  )
+}
+
+/** Route-backed segmented control switching between Explore and Dashboards. */
+function MetricsTabs() {
+  const { pathname } = useLocation()
+  // The hub is mounted at `…/metrics/*`; derive that base so the tab links are
+  // absolute (relative links would resolve against the current sub-route).
+  const i = pathname.indexOf('/metrics')
+  const base = i === -1 ? pathname : pathname.slice(0, i + '/metrics'.length)
+  const onDashboards = pathname.startsWith(`${base}/dashboards`)
+
+  const tabs = [
+    { to: base, label: 'Explore', icon: LineChart, active: !onDashboards },
+    {
+      to: `${base}/dashboards`,
+      label: 'Dashboards',
+      icon: LayoutDashboard,
+      active: onDashboards,
+    },
+  ]
+
+  return (
+    <div className="inline-flex items-center gap-1 self-start rounded-lg border border-border bg-muted/40 p-1">
+      {tabs.map((t) => (
+        <Link
+          key={t.label}
+          to={t.to}
+          className={[
+            'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
+            t.active
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground',
+          ].join(' ')}
+        >
+          <t.icon className="size-4" />
+          {t.label}
+        </Link>
+      ))}
+    </div>
   )
 }
