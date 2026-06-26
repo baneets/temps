@@ -3,12 +3,14 @@ import {
   getEnvironmentsOptions,
   listMetricNamesOptions,
   queryMetricsOptions,
-  // REGEN: bun run openapi-ts — generated from the new /otel/alerts endpoint
-  // (operationId list_alerts). Absent from the committed SDK until regen; used
-  // only to overlay a rule's threshold as a reference line on the explore chart.
   listAlertsOptions,
+  // Backtests an anomaly rule's band over the visible range to shade it.
+  previewAlertMutation,
 } from '@/api/client/@tanstack/react-query.gen'
-import type { ThresholdBand } from '@/components/charts/threshold-line-chart'
+import type {
+  ThresholdBand,
+  ThresholdBandArea,
+} from '@/components/charts/threshold-line-chart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,7 +26,7 @@ import { EmptyState } from '@/components/ui/empty-state'
 import { ThresholdLineChart } from '@/components/charts/threshold-line-chart'
 import { comparatorSymbol } from '@/components/metrics/alert-format'
 import { usePageTitle } from '@/hooks/usePageTitle'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import {
   ArrowLeft,
@@ -37,7 +39,7 @@ import {
   Tag,
   X,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 interface MetricsExplorerProps {
@@ -300,6 +302,67 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
       })
   }, [alertsQuery.data, metricName])
 
+  // Anomaly band overlay: for an enabled anomaly rule on this metric, backtest
+  // its band over the visible range and shade the expected region.
+  const anomalyRule = useMemo(
+    () =>
+      (alertsQuery.data?.data ?? []).find(
+        (r) =>
+          r.enabled &&
+          r.metric_name === metricName &&
+          r.detection_config.kind === 'anomaly',
+      ) ?? null,
+    [alertsQuery.data, metricName],
+  )
+  const bandPreview = useMutation({ ...previewAlertMutation() })
+  const { mutate: previewBand, reset: resetBand } = bandPreview
+  const bandKey = anomalyRule
+    ? `${anomalyRule.id}|${anomalyRule.aggregation}|${anomalyRule.window_secs}|${fromIso}|${toIso}|${JSON.stringify(anomalyRule.detection_config)}`
+    : ''
+  useEffect(() => {
+    if (!anomalyRule) {
+      resetBand()
+      return
+    }
+    previewBand({
+      body: {
+        project_id: project.id,
+        metric_name: metricName,
+        aggregation: anomalyRule.aggregation,
+        window_secs: anomalyRule.window_secs,
+        detection_config: anomalyRule.detection_config,
+        start_time: fromIso,
+        end_time: toIso,
+      },
+    })
+    // bandKey captures every input; mutate/reset are stable refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bandKey])
+
+  const bands = useMemo<ThresholdBandArea[]>(() => {
+    const pts = bandPreview.data?.points ?? []
+    // Only overlay when the chart's aggregation matches the rule's — otherwise
+    // the band (e.g. on the rule's p95) sits on a different scale than the line.
+    if (
+      !anomalyRule ||
+      anomalyRule.aggregation !== aggregation ||
+      pts.length === 0 ||
+      !bandPreview.data?.sufficient
+    )
+      return []
+    // The band varies per seasonal bucket; shade a representative (median) band.
+    const median = (xs: number[]) =>
+      [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]
+    return [
+      {
+        lower: median(pts.map((p) => p.lower)),
+        upper: median(pts.map((p) => p.upper)),
+        tone: anomalyRule.severity === 'critical' ? 'poor' : 'warn',
+        label: 'anomaly band',
+      },
+    ]
+  }, [bandPreview.data, anomalyRule, aggregation])
+
   const buckets = metricsQuery.data?.data ?? []
 
   // Map the `MetricBucket` rows into the chart point shape. `value` carries the
@@ -536,6 +599,7 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
               }
               chartData={chartData}
               thresholds={thresholds}
+              bands={bands}
             />
           </div>
           {latestHist && (
@@ -824,6 +888,7 @@ function MetricChart({
   errorMessage,
   chartData,
   thresholds,
+  bands,
 }: {
   metricName: string
   aggLabel: string
@@ -832,6 +897,7 @@ function MetricChart({
   errorMessage: string
   chartData: ChartPoint[]
   thresholds?: ThresholdBand[]
+  bands?: ThresholdBandArea[]
 }) {
   if (!metricName) {
     return (
@@ -888,6 +954,7 @@ function MetricChart({
         xKey="label"
         series={{ dataKey: 'value', label: aggLabel, tone: 'primary' }}
         thresholds={thresholds}
+        bands={bands}
         height={320}
         tooltipValueFormatter={(v) => formatMetricValue(v)}
         yTickFormatter={(v) => formatMetricValue(v)}

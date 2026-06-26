@@ -3,6 +3,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   XAxis,
   YAxis,
@@ -34,12 +35,22 @@ export type ThresholdBand = {
   label?: string
 }
 
+/** A shaded horizontal band (e.g. an anomaly rule's expected `[lower, upper]`). */
+export type ThresholdBandArea = {
+  lower: number
+  upper: number
+  tone: MetricTone
+  label?: string
+}
+
 interface ThresholdLineChartProps {
   data: any[]
   xKey: string
   series: ThresholdLineSeries
   /** Horizontal reference lines drawn across the chart for pass/fail bands. */
   thresholds?: ThresholdBand[]
+  /** Shaded horizontal bands (e.g. an anomaly rule's expected range). */
+  bands?: ThresholdBandArea[]
   /** Height of the chart in px. Defaults to 300. */
   height?: number
   /** Format the Y-axis ticks (e.g. "2.5s"). */
@@ -83,6 +94,7 @@ export function ThresholdLineChart({
   xKey,
   series,
   thresholds = [],
+  bands = [],
   height = 300,
   yTickFormatter,
   tooltipValueFormatter,
@@ -142,8 +154,11 @@ export function ThresholdLineChart({
     (m, t) => Math.max(m, t.value),
     dataMax,
   )
-  const yMax = thresholdMax * 1.1
-  const yMin = Math.min(0, dataMin)
+  // Keep shaded band edges inside the visible Y range too.
+  const bandMax = bands.reduce((m, b) => Math.max(m, b.upper), thresholdMax)
+  const bandMin = bands.reduce((m, b) => Math.min(m, b.lower), dataMin)
+  const yMax = bandMax * 1.1
+  const yMin = Math.min(0, bandMin)
 
   return (
     <ChartContainer
@@ -203,6 +218,26 @@ export function ThresholdLineChart({
             />
           }
         />
+        {bands.map((b, idx) => (
+          <ReferenceArea
+            key={`band-${idx}`}
+            y1={b.lower}
+            y2={b.upper}
+            fill={THRESHOLD_STROKE[b.tone]}
+            fillOpacity={0.1}
+            stroke="none"
+            label={
+              b.label
+                ? {
+                    value: b.label,
+                    position: 'insideTopRight',
+                    fill: THRESHOLD_STROKE[b.tone],
+                    fontSize: 10,
+                  }
+                : undefined
+            }
+          />
+        ))}
         {thresholds.map((t, idx) => (
           <ReferenceLine
             key={`${t.tone}-${idx}`}
