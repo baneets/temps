@@ -3,6 +3,7 @@ import type {
   AnomalyAlgorithm,
   Comparator,
   Direction,
+  OtelMetricAlertRuleResponse,
   Seasonality,
 } from '@/api/client'
 // REGEN: bun run openapi-ts — these builders/types come from the new
@@ -149,17 +150,24 @@ function emptyDefaults(): AlertFormData {
   }
 }
 
-export default function MetricAlertForm({ project }: MetricAlertFormProps) {
+interface AlertFormBodyProps {
+  project: ProjectResponse
+  isEditing: boolean
+  id: number
+  /** The rule being edited, already loaded by the parent (null when creating). */
+  existing: OtelMetricAlertRuleResponse | null
+}
+
+/**
+ * The actual form. Mounted only once `existing` is resolved (the parent gates on
+ * loading and remounts via `key`), so `useForm` initializes with the correct
+ * values from the start. This is deliberate: initializing with placeholder
+ * values and then resetting via the `values` prop drops Radix `Select` values
+ * whose value changes during the reset (e.g. aggregation, detection kind).
+ */
+function AlertFormBody({ project, isEditing, id, existing }: AlertFormBodyProps) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const { alertId } = useParams()
-  const isEditing = !!alertId
-  const id = Number(alertId)
-
-  const existingQuery = useQuery({
-    ...getAlertOptions({ path: { id }, query: { project_id: project.id } }),
-    enabled: isEditing && Number.isFinite(id),
-  })
 
   const namesQuery = useQuery({
     ...listMetricNamesOptions({ path: { project_id: project.id } }),
@@ -175,7 +183,6 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
   )
 
   const defaultValues = useMemo<AlertFormData>(() => {
-    const existing = existingQuery.data
     if (existing) {
       // Unpack the typed detector union into the flat form fields.
       const cfg = existing.detection_config
@@ -215,11 +222,13 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
       }
     }
     return emptyDefaults()
-  }, [existingQuery.data])
+  }, [existing])
 
+  // `defaultValues` (mount-once), not `values`: this body is remounted via `key`
+  // when the edited rule loads, so the form never resets a Select post-mount.
   const form = useForm<AlertFormData>({
     resolver: zodResolver(alertSchema),
-    values: defaultValues,
+    defaultValues,
   })
   // Drives which detector fields are shown. Hidden fields keep their values in
   // form state (RHF does not unregister), so `onSubmit` reads the right ones.
@@ -340,18 +349,6 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
     }
   }
 
-  if (isEditing && existingQuery.isPending) {
-    return (
-      <div className="w-full space-y-6">
-        <div className="flex items-center gap-4">
-          <Skeleton className="size-9" />
-          <Skeleton className="h-8 w-48" />
-        </div>
-        <Skeleton className="h-[500px] w-full" />
-      </div>
-    )
-  }
-
   return (
     <div className="w-full space-y-6">
       <div className="flex items-center gap-4">
@@ -363,9 +360,7 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
             <h1 className="text-lg font-semibold">
               {isEditing ? 'Edit alert' : 'New alert'}
             </h1>
-            {isEditing && existingQuery.data && (
-              <AlertStateBadge state={existingQuery.data.last_state} />
-            )}
+            {existing && <AlertStateBadge state={existing.last_state} />}
           </div>
           <p className="text-sm text-muted-foreground">
             {isEditing
@@ -855,5 +850,43 @@ export default function MetricAlertForm({ project }: MetricAlertFormProps) {
         </form>
       </Form>
     </div>
+  )
+}
+
+/**
+ * Loads the edited rule (if any), then mounts {@link AlertFormBody} with a `key`
+ * so the form is constructed once with the resolved values — never initialized
+ * empty and reset, which would drop changed Radix `Select` values.
+ */
+export default function MetricAlertForm({ project }: MetricAlertFormProps) {
+  const { alertId } = useParams()
+  const isEditing = !!alertId
+  const id = Number(alertId)
+
+  const existingQuery = useQuery({
+    ...getAlertOptions({ path: { id }, query: { project_id: project.id } }),
+    enabled: isEditing && Number.isFinite(id),
+  })
+
+  if (isEditing && existingQuery.isPending) {
+    return (
+      <div className="w-full space-y-6">
+        <div className="flex items-center gap-4">
+          <Skeleton className="size-9" />
+          <Skeleton className="h-8 w-48" />
+        </div>
+        <Skeleton className="h-[500px] w-full" />
+      </div>
+    )
+  }
+
+  return (
+    <AlertFormBody
+      key={isEditing ? `edit-${id}` : 'new'}
+      project={project}
+      isEditing={isEditing}
+      id={id}
+      existing={existingQuery.data ?? null}
+    />
   )
 }
