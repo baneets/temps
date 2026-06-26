@@ -6,10 +6,13 @@ import {
   listAlertsOptions,
   // Backtests an anomaly rule's band over the visible range to shade it.
   previewAlertMutation,
+  // Deploy events overlaid as vertical markers — "did a deploy cause this?"
+  getProjectDeploymentsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
 import type {
   ThresholdBand,
   ThresholdBandArea,
+  ThresholdMarker,
 } from '@/components/charts/threshold-line-chart'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -401,6 +404,52 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
     [buckets, isPercentile, aggregation],
   )
 
+  // ── Deploy markers ──
+  // Overlay deploy events that fall inside the visible window as vertical lines,
+  // snapped to the nearest chart bucket. "Did a deploy cause this?" is the first
+  // triage question, and Temps owns the deploy pipeline.
+  const deploysQuery = useQuery({
+    ...getProjectDeploymentsOptions({
+      path: { id: project.id },
+      query: {
+        per_page: 50,
+        ...(environmentId != null ? { environment_id: environmentId } : {}),
+      },
+    }),
+    enabled: !!project.id && metricName.length > 0,
+  })
+  const deployMarkers = useMemo<ThresholdMarker[]>(() => {
+    const deploys = deploysQuery.data?.deployments ?? []
+    if (chartData.length === 0 || deploys.length === 0) return []
+    const fromMs = fromDate.getTime()
+    const toMs = toDate.getTime()
+    // Timestamps come back in seconds; normalise to ms.
+    const toMs10 = (n: number) => (n < 1e12 ? n * 1000 : n)
+    const bucketMs = chartData.map((p) => new Date(p.bucket).getTime())
+    const markers: ThresholdMarker[] = []
+    for (const d of deploys) {
+      const at = d.finished_at ?? d.started_at ?? d.created_at
+      const ts = toMs10(at)
+      if (ts < fromMs || ts > toMs) continue
+      // Snap to the nearest bucket (the categorical x axis can't take a raw ts).
+      let best = 0
+      let bestDiff = Infinity
+      for (let i = 0; i < bucketMs.length; i++) {
+        const diff = Math.abs(bucketMs[i] - ts)
+        if (diff < bestDiff) {
+          bestDiff = diff
+          best = i
+        }
+      }
+      markers.push({
+        x: formatBucketLabel(chartData[best].bucket),
+        label: d.commit_hash ? d.commit_hash.slice(0, 7) : 'deploy',
+        title: d.commit_message ?? undefined,
+      })
+    }
+    return markers
+  }, [deploysQuery.data, chartData, fromDate, toDate])
+
   // Most recent histogram snapshot in range (for the distribution panel). Using
   // the latest bucket avoids re-summing cumulative snapshots across time.
   const latestHist = useMemo(() => {
@@ -606,6 +655,7 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
               chartData={chartData}
               thresholds={thresholds}
               bands={bands}
+              markers={deployMarkers}
             />
           </div>
           {latestHist && (
@@ -925,6 +975,7 @@ function MetricChart({
   chartData,
   thresholds,
   bands,
+  markers,
 }: {
   metricName: string
   aggLabel: string
@@ -934,6 +985,7 @@ function MetricChart({
   chartData: ChartPoint[]
   thresholds?: ThresholdBand[]
   bands?: ThresholdBandArea[]
+  markers?: ThresholdMarker[]
 }) {
   if (!metricName) {
     return (
@@ -991,6 +1043,7 @@ function MetricChart({
         series={{ dataKey: 'value', label: aggLabel, tone: 'primary' }}
         thresholds={thresholds}
         bands={bands}
+        markers={markers}
         height={320}
         tooltipValueFormatter={(v) => formatMetricValue(v)}
         yTickFormatter={(v) => formatMetricValue(v)}

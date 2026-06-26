@@ -43,6 +43,16 @@ export type ThresholdBandArea = {
   label?: string
 }
 
+/** A vertical event marker (e.g. a deployment) at a categorical x value. */
+export type ThresholdMarker = {
+  /** Must match a data point's `xKey` value (the categorical x axis). */
+  x: string
+  /** Short label drawn at the top of the line (e.g. a commit hash). */
+  label?: string
+  /** Tooltip text (e.g. the commit message + time). */
+  title?: string
+}
+
 interface ThresholdLineChartProps {
   data: any[]
   xKey: string
@@ -51,6 +61,8 @@ interface ThresholdLineChartProps {
   thresholds?: ThresholdBand[]
   /** Shaded horizontal bands (e.g. an anomaly rule's expected range). */
   bands?: ThresholdBandArea[]
+  /** Vertical event markers (e.g. deployments) at categorical x values. */
+  markers?: ThresholdMarker[]
   /** Height of the chart in px. Defaults to 300. */
   height?: number
   /** Format the Y-axis ticks (e.g. "2.5s"). */
@@ -95,6 +107,7 @@ export function ThresholdLineChart({
   series,
   thresholds = [],
   bands = [],
+  markers = [],
   height = 300,
   yTickFormatter,
   tooltipValueFormatter,
@@ -252,6 +265,25 @@ export function ThresholdLineChart({
                     position: 'right',
                     fill: THRESHOLD_STROKE[t.tone],
                     fontSize: 10,
+                  }
+                : undefined
+            }
+          />
+        ))}
+        {markers.map((m, idx) => (
+          <ReferenceLine
+            key={`marker-${idx}`}
+            x={m.x}
+            stroke="var(--chart-5)"
+            strokeDasharray="3 3"
+            strokeOpacity={0.85}
+            label={
+              m.label
+                ? {
+                    value: m.label,
+                    position: 'insideTopRight',
+                    fill: 'var(--chart-5)',
+                    fontSize: 9,
                   }
                 : undefined
             }
