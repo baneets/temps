@@ -164,8 +164,8 @@ impl OtelConfig {
     ),
     components(
         schemas(
-            query_handler::MetricsResponse,
-            query_handler::MetricNamesResponse,
+            query_handler::OtelMetricsResponse,
+            query_handler::OtelMetricNamesResponse,
             query_handler::TracesResponse,
             query_handler::TraceSummariesResponse,
             crate::types::TraceSummary,
@@ -175,6 +175,9 @@ impl OtelConfig {
             query_handler::QuotaResponse,
             query_handler::PipelineStatsResponse,
             crate::types::MetricBucket,
+            crate::types::HistogramSummary,
+            crate::types::MetricAggregation,
+            crate::types::AggregationTemporality,
             crate::types::SpanRecord,
             crate::types::SpanEvent,
             crate::types::SpanKind,

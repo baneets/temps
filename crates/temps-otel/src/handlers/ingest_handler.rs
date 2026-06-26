@@ -1134,23 +1134,18 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn make_otlp_point(metric_type: MetricType, value: f64) -> OtlpMetricPoint {
-        OtlpMetricPoint {
-            project_id: 1,
-            deployment_id: Some(42),
-            resource: ResourceInfo::default(),
-            metric_name: "test.metric".to_string(),
+        let mut p = OtlpMetricPoint::skeleton(
+            1,
+            Some(42),
+            ResourceInfo::default(),
+            "test.metric".to_string(),
             metric_type,
-            unit: "count".to_string(),
-            timestamp: chrono::Utc::now(),
-            value: Some(value),
-            histogram_count: None,
-            histogram_sum: None,
-            histogram_min: None,
-            histogram_max: None,
-            histogram_bounds: None,
-            histogram_bucket_counts: None,
-            attributes: BTreeMap::new(),
-        }
+            "count".to_string(),
+            chrono::Utc::now(),
+            BTreeMap::new(),
+        );
+        p.value = Some(value);
+        p
     }
 
     /// CORRECTNESS(metrics-correctness-B): OTLP Sum must be stored as Gauge,

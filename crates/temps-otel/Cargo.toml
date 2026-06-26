@@ -78,3 +78,8 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 tower = { workspace = true }
 http-body-util = { workspace = true }
 temps-migrations = { path = "../temps-migrations" }
+# Real-ClickHouse integration tests (clickhouse_storage_test.rs). Pinned to the
+# workspace version to avoid the transitive-tree conflict resolved at 0.27.2.
+# `http_wait_plain` enables the HTTP /ping readiness wait — the clickhouse-server
+# image never logs "Ready for connections" to stdout/stderr, only to its log file.
+testcontainers = { workspace = true, features = ["http_wait_plain"] }

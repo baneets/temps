@@ -43,6 +43,7 @@ import Observe from './Observe'
 import RequestLogs from './RequestLogs'
 import ProjectAiCrawlers from './ProjectAiCrawlers'
 import Traces from './Traces'
+import Metrics from './Metrics'
 import { ProjectAgentActivity } from './AiGateway'
 import { AutofixerPage } from '@/components/autofixer/AutofixerPage'
 import { AutofixRedirect } from '@/components/autofixer/AutofixRedirect'
@@ -416,6 +417,10 @@ export function ProjectDetail() {
               <Route
                 path="traces/*"
                 element={<Traces project={project} />}
+              />
+              <Route
+                path="metrics/*"
+                element={<Metrics project={project} />}
               />
               <Route
                 path="ai-gateway"
