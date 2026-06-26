@@ -1183,7 +1183,12 @@ impl OtelStorage for ClickHouseOtelStorage {
             binds.push(Bv::Str(tid.clone()));
         }
         if let Some(ref svc) = query.service_name {
-            where_parts.push("service_name = ?".to_owned());
+            // Qualify with the table: the trace-summary SELECTs alias
+            // `argMax(service_name) AS service_name`, which shadows the raw
+            // column, so an unqualified `service_name` in WHERE binds to the
+            // aggregate (ClickHouse Code 184 ILLEGAL_AGGREGATION). The count
+            // mirrors qualify too so the filter SQL stays byte-identical.
+            where_parts.push("spans.service_name = ?".to_owned());
             binds.push(Bv::Str(svc.clone()));
         }
         if let Some(min_dur) = query.min_duration_ms {
@@ -1344,7 +1349,12 @@ impl OtelStorage for ClickHouseOtelStorage {
             binds.push(Bv::Str(tid.clone()));
         }
         if let Some(ref svc) = query.service_name {
-            where_parts.push("service_name = ?".to_owned());
+            // Qualify with the table: the trace-summary SELECTs alias
+            // `argMax(service_name) AS service_name`, which shadows the raw
+            // column, so an unqualified `service_name` in WHERE binds to the
+            // aggregate (ClickHouse Code 184 ILLEGAL_AGGREGATION). The count
+            // mirrors qualify too so the filter SQL stays byte-identical.
+            where_parts.push("spans.service_name = ?".to_owned());
             binds.push(Bv::Str(svc.clone()));
         }
         if let Some(min_dur) = query.min_duration_ms {
@@ -1555,7 +1565,12 @@ impl OtelStorage for ClickHouseOtelStorage {
         let mut binds: Vec<Bv> = vec![Bv::I32(query.project_id)];
 
         if let Some(ref svc) = query.service_name {
-            where_parts.push("service_name = ?".to_owned());
+            // Qualify with the table: the trace-summary SELECTs alias
+            // `argMax(service_name) AS service_name`, which shadows the raw
+            // column, so an unqualified `service_name` in WHERE binds to the
+            // aggregate (ClickHouse Code 184 ILLEGAL_AGGREGATION). The count
+            // mirrors qualify too so the filter SQL stays byte-identical.
+            where_parts.push("spans.service_name = ?".to_owned());
             binds.push(Bv::Str(svc.clone()));
         }
         if let Some(start) = query.start_time {
@@ -1805,7 +1820,12 @@ impl OtelStorage for ClickHouseOtelStorage {
         let mut binds: Vec<Bv> = vec![Bv::I32(query.project_id)];
 
         if let Some(ref svc) = query.service_name {
-            where_parts.push("service_name = ?".to_owned());
+            // Qualify with the table: the trace-summary SELECTs alias
+            // `argMax(service_name) AS service_name`, which shadows the raw
+            // column, so an unqualified `service_name` in WHERE binds to the
+            // aggregate (ClickHouse Code 184 ILLEGAL_AGGREGATION). The count
+            // mirrors qualify too so the filter SQL stays byte-identical.
+            where_parts.push("spans.service_name = ?".to_owned());
             binds.push(Bv::Str(svc.clone()));
         }
         if let Some(start) = query.start_time {
