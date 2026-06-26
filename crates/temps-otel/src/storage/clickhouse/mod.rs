@@ -52,9 +52,9 @@ use crate::error::OtelError;
 use crate::storage::timescaledb::TimescaleDbStorage;
 use crate::storage::{BaselinePoint, DeployEvent, MinuteAggregate, OtelStorage, StorageResult};
 use crate::types::{
-    GenAiEvent, GenAiSpanDetail, GenAiTraceSummary, HealthSummary, Insight, InsightStatus,
-    LogQuery, LogRecord, MetricAggregation, MetricBucket, MetricPoint, MetricQuery, SpanEvent,
-    SpanKind, SpanRecord, SpanStatusCode, StorageQuota, TraceQuery, TraceSummary,
+    GenAiEvent, GenAiSpanDetail, GenAiTraceSummary, HealthSummary, HistogramSummary, Insight,
+    InsightStatus, LogQuery, LogRecord, MetricAggregation, MetricBucket, MetricPoint, MetricQuery,
+    SpanEvent, SpanKind, SpanRecord, SpanStatusCode, StorageQuota, TraceQuery, TraceSummary,
 };
 
 // ── Client configuration ────────────────────────────────────────────────────
@@ -587,6 +587,14 @@ struct ChMetricBucketRow {
     count: u64,
     /// The value of the requested aggregation for this bucket.
     agg_value: f64,
+    /// Aggregated explicit-histogram fields (zero/empty for non-histogram
+    /// metrics). `hist_bucket_counts` is summed element-wise across the window.
+    hist_count: u64,
+    hist_sum: f64,
+    hist_min: Option<f64>,
+    hist_max: Option<f64>,
+    hist_bounds: Vec<f64>,
+    hist_bucket_counts: Vec<u64>,
     /// Grouped label values, in `group_by` order (empty when ungrouped).
     series_values: Vec<String>,
 }
@@ -2035,9 +2043,17 @@ impl OtelStorage for ClickHouseOtelStorage {
             MetricAggregation::Count => "toFloat64(count())".to_string(),
             MetricAggregation::RatePerSec => {
                 let secs = interval_seconds(&interval_sql).max(1);
-                // Cumulative counters are stored raw (not re-deltaed); within a
-                // bucket the increase is (max - min). Guard against zero width.
-                format!("(max(assumeNotNull(value)) - min(assumeNotNull(value))) / {secs}.0")
+                // Temporality-aware per-second rate. DELTA series already carry
+                // per-interval increments, so the bucket rate is sum/window.
+                // CUMULATIVE counters are stored raw (monotonic running total),
+                // so the within-bucket increase is (max - min). `any(temporality)`
+                // reads the metric's (uniform) temporality; the window divisor is
+                // guarded against zero by secs.max(1) above.
+                format!(
+                    "if(any(temporality) = 'delta', \
+                        sum(assumeNotNull(value)), \
+                        max(assumeNotNull(value)) - min(assumeNotNull(value))) / {secs}.0"
+                )
             }
             MetricAggregation::Quantile(q) => {
                 let qc = q.clamp(0.0, 1.0);
@@ -2100,6 +2116,12 @@ impl OtelStorage for ClickHouseOtelStorage {
                  max(assumeNotNull(value)) AS max_value, \
                  count() AS count, \
                  {agg_expr} AS agg_value, \
+                 sum(ifNull(histogram_count, 0)) AS hist_count, \
+                 sum(ifNull(histogram_sum, 0)) AS hist_sum, \
+                 min(histogram_min) AS hist_min, \
+                 max(histogram_max) AS hist_max, \
+                 anyIf(histogram_bounds, notEmpty(histogram_bounds)) AS hist_bounds, \
+                 sumForEachIf(histogram_bucket_counts, notEmpty(histogram_bucket_counts)) AS hist_bucket_counts, \
                  {group_select} \
              FROM metrics \
              WHERE {where_sql} \
@@ -2173,7 +2195,21 @@ impl OtelStorage for ClickHouseOtelStorage {
                         Some(qq) => vec![(qq, r.agg_value)],
                         None => Vec::new(),
                     },
-                    histogram_summary: None,
+                    // Populated only when this bucket actually contains explicit
+                    // histogram data (bounds present); gauge/sum metrics leave the
+                    // histogram columns empty and so report None.
+                    histogram_summary: if r.hist_bounds.is_empty() {
+                        None
+                    } else {
+                        Some(HistogramSummary {
+                            count: r.hist_count,
+                            sum: r.hist_sum,
+                            min: r.hist_min,
+                            max: r.hist_max,
+                            bounds: r.hist_bounds,
+                            bucket_counts: r.hist_bucket_counts,
+                        })
+                    },
                     series_key,
                 }
             })

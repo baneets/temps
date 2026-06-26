@@ -25,7 +25,9 @@ use sea_orm::{DatabaseBackend, MockDatabase};
 use temps_otel::storage::clickhouse::{ClickHouseOtelConfig, ClickHouseOtelStorage};
 use temps_otel::storage::timescaledb::TimescaleDbStorage;
 use temps_otel::storage::OtelStorage;
-use temps_otel::types::{MetricAggregation, MetricPoint, MetricQuery, MetricType, ResourceInfo};
+use temps_otel::types::{
+    AggregationTemporality, MetricAggregation, MetricPoint, MetricQuery, MetricType, ResourceInfo,
+};
 
 /// Container handle + a connected `ClickHouseOtelStorage`. Returns `None` when
 /// Docker is unavailable so the test can skip without failing CI.
@@ -386,4 +388,177 @@ async fn store_metrics_drops_disallowed_name() {
         .await
         .expect("list_metric_names should succeed");
     assert!(names.is_empty(), "nothing should have been written");
+}
+
+/// A Sum (counter) point with an explicit temporality + scalar value.
+fn counter_point(
+    project_id: i32,
+    metric_name: &str,
+    temporality: AggregationTemporality,
+    value: f64,
+    ts: chrono::DateTime<Utc>,
+) -> MetricPoint {
+    let mut p = MetricPoint::skeleton(
+        project_id,
+        Some(9),
+        ResourceInfo {
+            service_name: "api".into(),
+            service_version: Some("1.0.0".into()),
+            deployment_environment: Some("production".into()),
+            attributes: BTreeMap::new(),
+        },
+        metric_name.into(),
+        MetricType::Sum,
+        "1".into(),
+        ts,
+        BTreeMap::new(),
+    );
+    p.value = Some(value);
+    p.temporality = Some(temporality);
+    p.is_monotonic = Some(true);
+    p
+}
+
+#[tokio::test]
+async fn query_metrics_rate_respects_temporality() {
+    let Some((storage, _container)) = setup().await else {
+        return; // Docker unavailable — skip gracefully.
+    };
+
+    let base = Utc::now();
+    // Cumulative counter: raw running total 100 -> 130 within one hour; the
+    // per-second rate is the within-bucket increase (130 - 100) / 3600.
+    // Delta counter: per-interval increments 10 and 20; the rate is the SUM
+    // (10 + 20) / 3600 — NOT max-min (which would be 10/3600). This is the
+    // discriminating case that proves temporality is honoured.
+    let points = vec![
+        counter_point(
+            3003,
+            "cumulative.req",
+            AggregationTemporality::Cumulative,
+            100.0,
+            base,
+        ),
+        counter_point(
+            3003,
+            "cumulative.req",
+            AggregationTemporality::Cumulative,
+            130.0,
+            base + chrono::Duration::milliseconds(1),
+        ),
+        counter_point(3003, "delta.req", AggregationTemporality::Delta, 10.0, base),
+        counter_point(
+            3003,
+            "delta.req",
+            AggregationTemporality::Delta,
+            20.0,
+            base + chrono::Duration::milliseconds(1),
+        ),
+    ];
+    assert_eq!(storage.store_metrics(points).await.expect("store"), 4);
+
+    let secs = 3600.0;
+    let rate_query = |name: &str| MetricQuery {
+        project_id: 3003,
+        metric_name: Some(name.into()),
+        bucket_interval: Some("1 hour".into()),
+        aggregation: MetricAggregation::RatePerSec,
+        ..Default::default()
+    };
+
+    let cumulative = storage
+        .query_metrics(rate_query("cumulative.req"))
+        .await
+        .expect("cumulative rate query");
+    assert_eq!(cumulative.len(), 1);
+    assert!(
+        (cumulative[0].value - 30.0 / secs).abs() < 1e-9,
+        "cumulative rate should be (130-100)/3600, got {}",
+        cumulative[0].value
+    );
+
+    let delta = storage
+        .query_metrics(rate_query("delta.req"))
+        .await
+        .expect("delta rate query");
+    assert_eq!(delta.len(), 1);
+    assert!(
+        (delta[0].value - 30.0 / secs).abs() < 1e-9,
+        "delta rate should be (10+20)/3600 (sum, not max-min), got {}",
+        delta[0].value
+    );
+}
+
+#[tokio::test]
+async fn query_metrics_histogram_summary_aggregates_buckets() {
+    let Some((storage, _container)) = setup().await else {
+        return; // Docker unavailable — skip gracefully.
+    };
+
+    let base = Utc::now();
+    let mk = |count: u64, sum: f64, buckets: Vec<u64>, ts: chrono::DateTime<Utc>| {
+        let mut p = MetricPoint::skeleton(
+            4004,
+            Some(9),
+            ResourceInfo {
+                service_name: "api".into(),
+                service_version: Some("1.0.0".into()),
+                deployment_environment: Some("production".into()),
+                attributes: BTreeMap::new(),
+            },
+            "http.server.duration".into(),
+            MetricType::Histogram,
+            "ms".into(),
+            ts,
+            BTreeMap::new(),
+        );
+        p.histogram_count = Some(count);
+        p.histogram_sum = Some(sum);
+        p.histogram_min = Some(1.0);
+        p.histogram_max = Some(240.0);
+        p.histogram_bounds = Some(vec![10.0, 100.0, 250.0]);
+        p.histogram_bucket_counts = Some(buckets);
+        p.value = Some(sum / count as f64); // synthetic mean
+        p
+    };
+    // Two histogram points for the same series within one hour, same bounds.
+    let stored = storage
+        .store_metrics(vec![
+            mk(4, 100.0, vec![1, 1, 1, 1], base),
+            mk(
+                6,
+                200.0,
+                vec![1, 2, 3, 0],
+                base + chrono::Duration::milliseconds(1),
+            ),
+        ])
+        .await
+        .expect("store");
+    assert_eq!(stored, 2);
+
+    let buckets = storage
+        .query_metrics(MetricQuery {
+            project_id: 4004,
+            metric_name: Some("http.server.duration".into()),
+            bucket_interval: Some("1 hour".into()),
+            aggregation: MetricAggregation::Avg,
+            ..Default::default()
+        })
+        .await
+        .expect("histogram query");
+    assert_eq!(buckets.len(), 1);
+    let hs = buckets[0]
+        .histogram_summary
+        .as_ref()
+        .expect("histogram_summary must be populated for a histogram metric");
+    assert_eq!(hs.count, 10, "observation counts summed across the window");
+    assert!((hs.sum - 300.0).abs() < f64::EPSILON);
+    assert_eq!(hs.bounds, vec![10.0, 100.0, 250.0]);
+    assert_eq!(
+        hs.bucket_counts,
+        vec![2, 3, 4, 1],
+        "bucket counts summed element-wise"
+    );
+    assert_eq!(hs.min, Some(1.0));
+    assert_eq!(hs.max, Some(240.0));
 }

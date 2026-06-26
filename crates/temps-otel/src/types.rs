@@ -1082,11 +1082,13 @@ pub struct LogQuery {
     pub offset: Option<u64>,
 }
 
-/// A compact summary of an explicit-bucket histogram aggregated over a bucket.
+/// An explicit-bucket histogram aggregated over a time bucket.
 ///
-/// Carries only the cheap reduced fields (count/sum/min/max). Full quantile
-/// reconstruction from the bucket arrays is deferred; the raw bucket arrays
-/// remain available in the store for a later read-side reconstruction.
+/// Carries the reduced scalars (count/sum/min/max) plus the explicit bucket
+/// layout — `bounds` (the upper bounds) and `bucket_counts` (observation counts,
+/// summed element-wise across the window; length is `bounds.len() + 1`, the last
+/// entry being the +Inf overflow bucket). With these, a caller can reconstruct
+/// any quantile (e.g. p95) via cumulative-count interpolation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct HistogramSummary {
     /// Total observation count summed across the bucket window.
@@ -1097,6 +1099,11 @@ pub struct HistogramSummary {
     pub min: Option<f64>,
     /// Maximum observed value, when reported by the producer.
     pub max: Option<f64>,
+    /// Explicit bucket upper bounds (OTLP `explicit_bounds`), ascending.
+    pub bounds: Vec<f64>,
+    /// Per-bucket observation counts summed element-wise across the window.
+    /// Length is `bounds.len() + 1` (the trailing element is the +Inf bucket).
+    pub bucket_counts: Vec<u64>,
 }
 
 /// A time-bucketed metric aggregate for chart display.
