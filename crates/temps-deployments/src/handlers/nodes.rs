@@ -1542,6 +1542,30 @@ async fn edge_routes(
     }))
 }
 
+/// Reserved node id for the control plane itself. Real nodes are serial and
+/// start at 1, so `0` is a safe sentinel.
+const CONTROL_PLANE_NODE_ID: i32 = 0;
+
+/// Synthetic node entry for the control plane itself. The CP is always a
+/// scheduling target (`NodeAssignment::Local`), but it is not a row in the
+/// `nodes` table; containers placed there are stored with `node_id = NULL`.
+/// Surfacing it as node `0` makes those containers visible in the node list /
+/// per-node views instead of silently invisible (ADR-020 observability).
+fn control_plane_node_response() -> NodeInfoResponse {
+    NodeInfoResponse {
+        id: CONTROL_PLANE_NODE_ID,
+        name: "control-plane".to_string(),
+        address: "local".to_string(),
+        private_address: "127.0.0.1".to_string(),
+        role: "control-plane".to_string(),
+        status: "active".to_string(),
+        labels: serde_json::json!({}),
+        capacity: serde_json::json!({}),
+        last_heartbeat: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 /// List all registered nodes (admin — session auth via RequireAuth)
 #[utoipa::path(
     tag = "Nodes",
@@ -1565,8 +1589,7 @@ async fn admin_list_nodes(
         .await
         .map_err(Problem::from)?;
 
-    let total = nodes.len();
-    let node_responses: Vec<NodeInfoResponse> = nodes
+    let mut node_responses: Vec<NodeInfoResponse> = nodes
         .into_iter()
         .map(|n| NodeInfoResponse {
             id: n.id,
@@ -1582,6 +1605,11 @@ async fn admin_list_nodes(
         })
         .collect();
 
+    // Always surface the control plane itself as a node so containers it runs
+    // (the `Local` scheduling slot, stored with node_id = NULL) are visible.
+    node_responses.insert(0, control_plane_node_response());
+
+    let total = node_responses.len();
     Ok(Json(NodeListResponse {
         nodes: node_responses,
         total,
@@ -1610,6 +1638,9 @@ async fn admin_get_node(
     Path(node_id): Path<i32>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsRead);
+    if node_id == CONTROL_PLANE_NODE_ID {
+        return Ok(Json(control_plane_node_response()));
+    }
     let node = app_state
         .node_service
         .get_by_id(node_id)
@@ -1654,19 +1685,29 @@ async fn admin_list_node_containers(
     permission_guard!(auth, SettingsRead);
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-    // Verify the node exists
-    let _node = app_state
-        .node_service
-        .get_by_id(node_id)
-        .await
-        .map_err(Problem::from)?;
+    // Verify the node exists (the synthetic control-plane node, id 0, has no row).
+    if node_id != CONTROL_PLANE_NODE_ID {
+        let _node = app_state
+            .node_service
+            .get_by_id(node_id)
+            .await
+            .map_err(Problem::from)?;
+    }
+
+    // Containers for this node. The control plane's own containers (the `Local`
+    // scheduling slot) are stored with node_id = NULL.
+    let node_filter = if node_id == CONTROL_PLANE_NODE_ID {
+        temps_entities::deployment_containers::Column::NodeId.is_null()
+    } else {
+        temps_entities::deployment_containers::Column::NodeId.eq(node_id)
+    };
 
     // Query containers for this node, joining with deployments, projects, and environments
     let rows: Vec<(
         temps_entities::deployment_containers::Model,
         Option<temps_entities::deployments::Model>,
     )> = temps_entities::deployment_containers::Entity::find()
-        .filter(temps_entities::deployment_containers::Column::NodeId.eq(node_id))
+        .filter(node_filter)
         .filter(temps_entities::deployment_containers::Column::DeletedAt.is_null())
         .find_also_related(temps_entities::deployments::Entity)
         .all(app_state.db.as_ref())
