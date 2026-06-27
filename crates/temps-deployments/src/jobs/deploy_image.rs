@@ -1100,7 +1100,7 @@ impl DeployImageJob {
 
         // Use remote environment variables for remote deployments (connection strings
         // rewritten with control plane's private address), fall back to local env vars.
-        let environment_vars = if !assignment.is_local() {
+        let mut environment_vars = if !assignment.is_local() {
             if let Some(ref remote_vars) = self.config.remote_environment_variables {
                 tracing::info!(
                     "Using REMOTE environment variables for non-local assignment (has {} remote vars)",
@@ -1117,6 +1117,22 @@ impl DeployImageJob {
             tracing::info!("Using LOCAL environment variables for local assignment");
             self.config.environment_variables.clone()
         };
+
+        // Inject this replica's node identity so the workload can report which
+        // node (and replica) is serving a given request — useful for debugging
+        // multi-node scheduling and load distribution. Set on every node, local
+        // or remote.
+        let (assigned_node_name, assigned_node_id) = match assignment {
+            crate::services::NodeAssignment::Remote {
+                node_name, node_id, ..
+            } => (node_name.clone(), node_id.to_string()),
+            crate::services::NodeAssignment::Local => {
+                ("control-plane".to_string(), "0".to_string())
+            }
+        };
+        environment_vars.insert("TEMPS_NODE_NAME".to_string(), assigned_node_name);
+        environment_vars.insert("TEMPS_NODE_ID".to_string(), assigned_node_id);
+        environment_vars.insert("TEMPS_REPLICA".to_string(), (replica_index + 1).to_string());
 
         tracing::info!(
             "Deploying container with {} env vars, POSTGRES_HOST={:?}, POSTGRES_URL={:?}",
