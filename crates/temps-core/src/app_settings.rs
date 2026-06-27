@@ -409,7 +409,6 @@ pub struct DiskSpaceAlertSettings {
 /// Multi-node cluster settings
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
-#[derive(Default)]
 pub struct MultiNodeSettings {
     /// SHA-256 hash of the join token (never store plaintext)
     pub join_token_hash: Option<String>,
@@ -417,6 +416,26 @@ pub struct MultiNodeSettings {
     /// Used by remote worker nodes to reach services (databases, etc.) running on the control plane.
     /// Set via `--private-address` or `TEMPS_PRIVATE_ADDRESS`.
     pub private_address: Option<String>,
+    /// Whether the legacy single shared join token is still accepted for node
+    /// registration (ADR-020 WS-1.1). Defaults to `true` so existing clusters
+    /// keep working on upgrade; fresh installs should set it `false` and rely on
+    /// short-lived, single-use enrollment tokens instead.
+    #[serde(default = "default_legacy_shared_token_enabled")]
+    pub legacy_shared_token_enabled: bool,
+}
+
+fn default_legacy_shared_token_enabled() -> bool {
+    true
+}
+
+impl Default for MultiNodeSettings {
+    fn default() -> Self {
+        Self {
+            join_token_hash: None,
+            private_address: None,
+            legacy_shared_token_enabled: true,
+        }
+    }
 }
 
 /// Workspace preview gateway settings.

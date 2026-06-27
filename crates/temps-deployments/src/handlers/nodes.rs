@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -37,6 +37,80 @@ pub struct NodeAppState {
     pub encryption_service: Arc<temps_core::EncryptionService>,
     /// Anonymous product telemetry reporter (worker_node_joined event).
     pub telemetry: Arc<dyn temps_core::telemetry::TelemetryReporter>,
+    /// Per-IP + global rate limiter for the registration endpoint
+    /// (ADR-020 WS-1.3 / enroll-3).
+    pub rate_limiter: Arc<RegistrationRateLimiter>,
+    /// Short-lived, single-use node enrollment tokens (ADR-020 WS-1.1).
+    pub enrollment_token_service: Arc<temps_config::EnrollmentTokenService>,
+}
+
+/// Fixed-window rate limiter for the public node-registration endpoint
+/// (ADR-020 WS-1.3 / enroll-3). `/internal/nodes/register` is reachable by
+/// anyone who can route to the control plane, so we cap attempts per source IP
+/// and globally to blunt enrollment DoS and slow brute-force against the join
+/// token. In-memory and best-effort — a restart resets the windows.
+#[derive(Default)]
+pub struct RegistrationRateLimiter {
+    inner: std::sync::Mutex<RateLimitState>,
+}
+
+#[derive(Default)]
+struct RateLimitState {
+    per_ip: std::collections::HashMap<std::net::IpAddr, (std::time::Instant, u32)>,
+    global: Option<(std::time::Instant, u32)>,
+}
+
+impl RegistrationRateLimiter {
+    const WINDOW_SECS: u64 = 60;
+    const PER_IP_MAX: u32 = 10;
+    const GLOBAL_MAX: u32 = 100;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `Ok(())` if the attempt is allowed (and records it), or
+    /// `Err(retry_after_secs)` if the per-IP or global window is exhausted.
+    pub fn check(&self, ip: std::net::IpAddr) -> Result<(), u64> {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(Self::WINDOW_SECS);
+        let mut st = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Global window — copy values out so we don't hold overlapping borrows.
+        let (mut g_start, mut g_count) = st.global.unwrap_or((now, 0));
+        if now.duration_since(g_start) >= window {
+            g_start = now;
+            g_count = 0;
+        }
+        if g_count >= Self::GLOBAL_MAX {
+            return Err(
+                Self::WINDOW_SECS.saturating_sub(now.duration_since(g_start).as_secs()) + 1,
+            );
+        }
+
+        // Per-IP window.
+        let (mut i_start, mut i_count) = st.per_ip.get(&ip).copied().unwrap_or((now, 0));
+        if now.duration_since(i_start) >= window {
+            i_start = now;
+            i_count = 0;
+        }
+        if i_count >= Self::PER_IP_MAX {
+            return Err(
+                Self::WINDOW_SECS.saturating_sub(now.duration_since(i_start).as_secs()) + 1,
+            );
+        }
+
+        // Both windows have headroom — record the attempt.
+        st.global = Some((g_start, g_count + 1));
+        st.per_ip.insert(ip, (i_start, i_count + 1));
+
+        // Opportunistic prune so the map can't grow unbounded.
+        if st.per_ip.len() > 4096 {
+            st.per_ip
+                .retain(|_, (t, _)| now.duration_since(*t) < window);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -576,8 +650,30 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<String, Problem> {
 )]
 async fn register_node(
     State(app_state): State<Arc<NodeAppState>>,
+    // The router is served with `into_make_service_with_connect_info`, so the
+    // peer address is always present in production; unit tests inject it via a
+    // `MockConnectInfo` layer.
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     Json(request): Json<RegisterNodeApiRequest>,
 ) -> Result<impl IntoResponse, Problem> {
+    // Rate-limit enrollment (ADR-020 WS-1.3 / enroll-3) before doing any work:
+    // cap attempts per source IP and globally to blunt registration DoS and
+    // brute-force against the join token.
+    if let Err(retry_after) = app_state.rate_limiter.check(addr.ip()) {
+        warn!(
+            ip = %addr.ip(),
+            retry_after,
+            node = %request.name,
+            "Node registration rate-limited"
+        );
+        return Err(problemdetails::new(StatusCode::TOO_MANY_REQUESTS)
+            .with_title("Too Many Requests")
+            .with_detail(format!(
+                "Node registration rate limit exceeded; retry in {}s",
+                retry_after
+            )));
+    }
+
     // Validate join token against the stored hash in settings
     let settings = app_state.config_service.get_settings().await.map_err(|e| {
         error!("Failed to read settings for join token validation: {}", e);
@@ -586,39 +682,84 @@ async fn register_node(
             .with_detail("Failed to validate join token")
     })?;
 
-    match settings.multi_node.join_token_hash {
-        Some(ref stored_hash) => {
-            // Join token is configured — require it
-            match &request.join_token {
-                Some(provided_token) => {
-                    let provided_hash = sha256_hash(provided_token);
-                    if !constant_time_eq(provided_hash.as_bytes(), stored_hash.as_bytes()) {
-                        warn!(
-                            "Node registration rejected: invalid join token for node '{}'",
-                            request.name
-                        );
-                        return Err(problemdetails::new(StatusCode::FORBIDDEN)
-                            .with_title("Invalid Join Token")
-                            .with_detail("The provided join token is invalid"));
-                    }
-                }
-                None => {
+    // ── Enrollment authorization (ADR-020 WS-1.1) ────────────────────────────
+    // Prefer a short-lived, single-use enrollment token; fall back to the legacy
+    // single shared join token only while it is still enabled.
+    let provided_token = request.join_token.as_deref().ok_or_else(|| {
+        warn!(
+            "Node registration rejected: missing token for node '{}'",
+            request.name
+        );
+        problemdetails::new(StatusCode::FORBIDDEN)
+            .with_title("Join Token Required")
+            .with_detail("A token is required to register a node. Generate an enrollment token in Settings > Worker Nodes.")
+    })?;
+
+    match app_state
+        .enrollment_token_service
+        .validate_and_consume(provided_token)
+        .await
+    {
+        Ok(token_row) => {
+            // Enforce a node-name pin if the token was scoped to one node.
+            if let Some(ref bound) = token_row.bound_node_name {
+                if bound != request.name.trim() {
                     warn!(
-                        "Node registration rejected: missing join token for node '{}'",
-                        request.name
+                        node = %request.name,
+                        bound = %bound,
+                        "Node registration rejected: enrollment token bound to a different node name"
                     );
                     return Err(problemdetails::new(StatusCode::FORBIDDEN)
-                        .with_title("Join Token Required")
-                        .with_detail("A join token is required to register a node. Generate one in Settings > Worker Nodes."));
+                        .with_title("Enrollment Token Mismatch")
+                        .with_detail(format!(
+                            "This enrollment token is bound to node '{}'",
+                            bound
+                        )));
                 }
             }
+            info!(node = %request.name, "Node authorized via enrollment token");
         }
-        None => {
-            // No join token configured — block all registrations
-            warn!("Node registration rejected: multi-node not enabled (no join token configured) for node '{}'", request.name);
+        Err(temps_config::EnrollmentError::InvalidToken) => {
+            // Not a known enrollment token — try the legacy shared join token.
+            let legacy_ok = settings.multi_node.legacy_shared_token_enabled
+                && match settings.multi_node.join_token_hash {
+                    Some(ref stored_hash) => {
+                        let provided_hash = sha256_hash(provided_token);
+                        constant_time_eq(provided_hash.as_bytes(), stored_hash.as_bytes())
+                    }
+                    None => false,
+                };
+            if !legacy_ok {
+                warn!(
+                    "Node registration rejected: invalid or expired token for node '{}'",
+                    request.name
+                );
+                return Err(problemdetails::new(StatusCode::FORBIDDEN)
+                    .with_title("Invalid Enrollment Token")
+                    .with_detail("The provided token is invalid or expired. Generate a new enrollment token in Settings > Worker Nodes."));
+            }
+            warn!(
+                node = %request.name,
+                "Node authorized via DEPRECATED legacy shared join token — mint per-node enrollment tokens instead"
+            );
+        }
+        Err(
+            e @ (temps_config::EnrollmentError::Expired
+            | temps_config::EnrollmentError::Revoked
+            | temps_config::EnrollmentError::Exhausted),
+        ) => {
+            // It matched a real enrollment token that is no longer usable — do
+            // NOT silently fall through to the legacy shared token.
+            warn!(node = %request.name, "Node registration rejected: {}", e);
             return Err(problemdetails::new(StatusCode::FORBIDDEN)
-                .with_title("Registration Disabled")
-                .with_detail("Node registration is not enabled. Generate a join token in Settings > Worker Nodes to enable multi-node."));
+                .with_title("Enrollment Token Not Usable")
+                .with_detail(e.to_string()));
+        }
+        Err(e) => {
+            error!("Enrollment token validation error: {}", e);
+            return Err(problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                .with_title("Internal Server Error")
+                .with_detail("Failed to validate enrollment token"));
         }
     }
 
@@ -2232,20 +2373,59 @@ mod tests {
         let encryption_service = Arc::new(
             temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
         );
+        // The enrollment-token service gets its OWN mock DB that returns no
+        // matching token (-> InvalidToken), so the register tests exercise the
+        // legacy-shared-token fallback path while the main `db` keeps its own
+        // node-flow query sequence intact.
+        let test_db_for_enrollment = Arc::new(
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+                .append_query_results(vec![
+                    Vec::<temps_entities::node_enrollment_tokens::Model>::new(),
+                ])
+                .into_connection(),
+        );
         let app_state = Arc::new(NodeAppState {
             node_service,
             db,
             config_service,
             encryption_service,
             telemetry: Arc::new(temps_core::telemetry::NoopTelemetryReporter),
+            rate_limiter: Arc::new(RegistrationRateLimiter::new()),
+            enrollment_token_service: Arc::new(temps_config::EnrollmentTokenService::new(
+                test_db_for_enrollment,
+            )),
         });
-        configure_routes().with_state(app_state)
+        // The production router is served with connect info; tests use `oneshot`
+        // (no peer address), so inject a mock so the `ConnectInfo` extractor
+        // resolves.
+        let mock_peer: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
+        configure_routes()
+            .layer(axum::extract::connect_info::MockConnectInfo(mock_peer))
+            .with_state(app_state)
     }
 
     fn settings_with_join_token() -> temps_core::AppSettings {
         let mut settings = temps_core::AppSettings::default();
         settings.multi_node.join_token_hash = Some(sha256_hash("test-join-token"));
         settings
+    }
+
+    #[test]
+    fn test_registration_rate_limiter_blocks_per_ip_and_is_per_ip_scoped() {
+        let rl = RegistrationRateLimiter::new();
+        let ip1: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        // The per-IP window allows PER_IP_MAX attempts...
+        for _ in 0..RegistrationRateLimiter::PER_IP_MAX {
+            assert!(rl.check(ip1).is_ok());
+        }
+        // ...and rejects the next one with a retry-after hint.
+        let retry = rl.check(ip1).unwrap_err();
+        assert!(retry > 0 && retry <= RegistrationRateLimiter::WINDOW_SECS + 1);
+
+        // A different source IP has its own independent window.
+        let ip2: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+        assert!(rl.check(ip2).is_ok());
     }
 
     #[tokio::test]
