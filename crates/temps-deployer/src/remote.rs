@@ -515,6 +515,95 @@ mod tests {
         assert_eq!(deployer.agent_url(), "https://worker-3.internal:3100");
     }
 
+    /// Live **REAL DEPLOYMENT** over mTLS: drives the production
+    /// `RemoteNodeDeployer::deploy_container` to actually create + start a
+    /// container on the worker's Docker through the mutual-TLS channel — the
+    /// genuine end-to-end deploy path, not just a control-plane round-trip.
+    /// Gated on `TEMPS_MTLS_DEPLOY_IMAGE` (the image, which MUST already be
+    /// present in the worker's Docker, e.g. pre-pulled) plus the same
+    /// `TEMPS_MTLS_*` connection env. Run inside a cluster container.
+    #[tokio::test]
+    async fn test_mtls_real_deploy_live() {
+        let image = match std::env::var("TEMPS_MTLS_DEPLOY_IMAGE") {
+            Ok(i) => i,
+            Err(_) => {
+                eprintln!("TEMPS_MTLS_DEPLOY_IMAGE not set — skipping real mTLS deploy test");
+                return;
+            }
+        };
+        let (url, token, cert, key, ca) = match (
+            std::env::var("TEMPS_MTLS_AGENT_URL"),
+            std::env::var("TEMPS_MTLS_TOKEN"),
+            std::env::var("TEMPS_MTLS_CERT"),
+            std::env::var("TEMPS_MTLS_KEY"),
+            std::env::var("TEMPS_MTLS_CA"),
+        ) {
+            (Ok(u), Ok(t), Ok(c), Ok(k), Ok(a)) => (u, t, c, k, a),
+            _ => {
+                eprintln!("TEMPS_MTLS_* not set — skipping real mTLS deploy test");
+                return;
+            }
+        };
+        let cert_pem = std::fs::read_to_string(&cert).expect("read client cert PEM");
+        let key_pem = std::fs::read_to_string(&key).expect("read client key PEM");
+        let ca_pem = std::fs::read_to_string(&ca).expect("read cluster CA PEM");
+        let identity = format!("{}\n{}", cert_pem.trim(), key_pem.trim());
+
+        let deployer = RemoteNodeDeployer::new_mtls(
+            url.clone(),
+            token,
+            "mtls-deploy-probe".to_string(),
+            &identity,
+            &ca_pem,
+        )
+        .expect("build mTLS deployer");
+
+        // Deployed containers run with cap_drop:ALL + no-new-privileges, so the
+        // probe image must be unprivileged-friendly (no startup chown, high
+        // port). Port + command are env-configurable to fit such an image.
+        let container_port: u16 = std::env::var("TEMPS_MTLS_DEPLOY_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(80);
+        let command = std::env::var("TEMPS_MTLS_DEPLOY_CMD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.split(' ').map(|x| x.to_string()).collect::<Vec<_>>());
+
+        let name = "mtls-deploy-probe".to_string();
+        let req = DeployRequest {
+            image_name: image.clone(),
+            container_name: name.clone(),
+            environment_vars: std::collections::HashMap::new(),
+            secrets: std::collections::HashMap::new(),
+            port_mappings: vec![crate::PortMapping {
+                host_port: 18080,
+                container_port,
+                protocol: crate::Protocol::Tcp,
+            }],
+            network_name: None,
+            resource_limits: crate::ResourceLimits::default(),
+            restart_policy: crate::RestartPolicy::Never,
+            log_path: std::path::PathBuf::from("/tmp/mtls-deploy-probe.log"),
+            command,
+            log_config: None,
+            labels: std::collections::HashMap::new(),
+        };
+
+        let result = deployer
+            .deploy_container(req)
+            .await
+            .expect("deploy_container over mTLS must succeed");
+        eprintln!(
+            "✓ REAL deploy over mTLS: image={} container_id={} status={:?} host_port={}",
+            image, result.container_id, result.status, result.host_port
+        );
+        assert!(
+            !result.container_id.is_empty(),
+            "expected a real container id"
+        );
+    }
+
     /// Live end-to-end check of the control-plane reqwest+rustls **mutual TLS**
     /// client against a real agent serving mTLS (ADR-020 WS-2.1). Unlike the
     /// curl-based `verify-mtls.sh` harness (which proves the *agent* side), this
