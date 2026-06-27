@@ -1,0 +1,31 @@
+[package]
+name = "temps-ai-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Persistent, resumable AI debugging conversations attached to any entity (ADR-023)"
+keywords = ["ai", "chat", "platform"]
+categories = ["development-tools"]
+
+[dependencies]
+temps-ai = { path = "../temps-ai" }
+temps-entities = { path = "../temps-entities" }
+
+sea-orm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+async-stream = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

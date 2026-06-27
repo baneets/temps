@@ -10654,6 +10654,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "temps-ai-chat"
+version = "0.1.0-beta.39"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "futures-util",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "temps-ai",
+ "temps-entities",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "temps-ai-gateway"
 version = "0.1.0-beta.39"
 dependencies = [
