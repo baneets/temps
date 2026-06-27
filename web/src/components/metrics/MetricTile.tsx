@@ -14,6 +14,7 @@ import {
 } from './metric-format'
 import { StatusDot } from './alert-format'
 import { STATUS_META, useAlertStatus } from './alert-status'
+import { useAnomalyBand } from './use-anomaly-band'
 
 interface MetricTileProps {
   project: ProjectResponse
@@ -61,6 +62,18 @@ export function MetricTile({
   const lineTone =
     status === 'alert' ? 'poor' : status === 'warn' ? 'warn' : 'primary'
 
+  // Datadog-style anomaly overlay: the expected-range band + breach markers,
+  // identical to the explorer drill-in. Only renders when an anomaly rule covers
+  // this metric and the backtest had enough history.
+  const { bandSeries, mergeBand } = useAnomalyBand({
+    project,
+    metricName,
+    aggregation,
+    fromIso,
+    toIso,
+    enabled: metricName.length > 0,
+  })
+
   const q = useQuery({
     ...queryMetricsOptions({
       query: {
@@ -82,19 +95,21 @@ export function MetricTile({
 
   const data = useMemo(
     () =>
-      buckets.map((b) => {
-        const hs = b.histogram_summary
-        const value =
-          isPercentile && hs && hs.bounds.length > 0
-            ? histogramQuantile(
-                hs.bounds,
-                hs.bucket_counts,
-                percentileFromAgg(aggregation),
-              )
-            : (b.value ?? b.avg_value)
-        return { label: formatBucketLabel(b.bucket), value }
-      }),
-    [buckets, isPercentile, aggregation],
+      mergeBand(
+        buckets.map((b) => {
+          const hs = b.histogram_summary
+          const value =
+            isPercentile && hs && hs.bounds.length > 0
+              ? histogramQuantile(
+                  hs.bounds,
+                  hs.bucket_counts,
+                  percentileFromAgg(aggregation),
+                )
+              : (b.value ?? b.avg_value)
+          return { bucket: b.bucket, label: formatBucketLabel(b.bucket), value }
+        }),
+      ),
+    [buckets, isPercentile, aggregation, mergeBand],
   )
 
   const latest = data.length ? data[data.length - 1].value : null
@@ -155,6 +170,7 @@ export function MetricTile({
             label: aggregationLabel(aggregation),
             tone: lineTone,
           }}
+          bandSeries={bandSeries}
           height={height}
           tooltipValueFormatter={(v) => formatMetricValue(v)}
           yTickFormatter={(v) => formatMetricValue(v)}
