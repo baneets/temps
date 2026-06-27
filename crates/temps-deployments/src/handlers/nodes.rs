@@ -1259,6 +1259,24 @@ async fn edge_routes(
                 .with_detail("No node found with this token")
         })?;
 
+    // WS-3.4 (netiso-6): only an ACTIVE node may pull the route table. A
+    // draining/drained/offline node is being retired and must stop receiving
+    // fresh routes; a deleted node's row is already gone (so the token won't
+    // match at all). Without this gate, a decommissioned node's still-valid
+    // token keeps pulling the full edge route table indefinitely. Log the real
+    // reason, return an opaque 401.
+    if node.status != "active" {
+        warn!(
+            node_id = node.id,
+            node_name = %node.name,
+            status = %node.status,
+            "Edge routes: rejecting token for non-active node"
+        );
+        return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
+            .with_title("Invalid Token")
+            .with_detail("Node is not active"));
+    }
+
     info!(
         "Edge node {} ({}) requested route table",
         node.id, node.name
