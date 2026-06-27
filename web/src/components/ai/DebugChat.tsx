@@ -15,22 +15,35 @@ interface ChatMessage {
   content: string
 }
 
-interface DeploymentDebugChatProps {
+interface DebugChatProps {
   projectId: number
-  deploymentId: number
+  /** The interaction this chat is attached to, e.g. 'deployment' | 'alert'. */
+  contextType: string
+  contextId: string | number
+  title?: string
+  description?: string
+  /** Auto-asked when a new chat is started, so it opens already working. */
+  startPrompt?: string
+  triggerLabel?: string
 }
 
 /**
- * Persistent AI debugging chat for a failed deployment (ADR-023). Rendered only
- * when the project's `ai_debug_chat_enabled` toggle is on and the deployment
- * failed. The streaming reply is consumed via a manual SSE fetch (the generated
- * SDK can't stream); find/history use the same cookie-authed `/api` surface.
+ * Persistent, resumable AI debugging chat attached to any entity (ADR-023).
+ * Render only when the project's `ai_debug_chat_enabled` toggle is on. The
+ * streaming reply is consumed via a manual SSE fetch reader (the generated SDK
+ * can't stream); find/history use the same cookie-authed `/api` surface.
  */
-export function DeploymentDebugChat({
+export function DebugChat({
   projectId,
-  deploymentId,
-}: DeploymentDebugChatProps) {
+  contextType,
+  contextId,
+  title = 'Debug with AI',
+  description = 'Start an AI chat to investigate this issue.',
+  startPrompt = 'Diagnose this and suggest concrete next steps.',
+  triggerLabel = 'Debug with AI',
+}: DebugChatProps) {
   const base = `/api/projects/${projectId}/ai/conversations`
+  const ctxId = String(contextId)
   const [publicId, setPublicId] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
@@ -39,12 +52,13 @@ export function DeploymentDebugChat({
   const [error, setError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Load an existing conversation for this deployment, if one exists.
+  // Load an existing conversation for this context, if one exists.
   useEffect(() => {
     let ignore = false
-    fetch(`${base}?context_type=deployment&context_id=${deploymentId}`, {
-      credentials: 'include',
-    })
+    fetch(
+      `${base}?context_type=${encodeURIComponent(contextType)}&context_id=${encodeURIComponent(ctxId)}`,
+      { credentials: 'include' }
+    )
       .then((r) => (r.ok ? r.json() : null))
       .then(async (conv) => {
         if (ignore || !conv) return
@@ -60,7 +74,7 @@ export function DeploymentDebugChat({
     return () => {
       ignore = true
     }
-  }, [base, deploymentId])
+  }, [base, contextType, ctxId])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -149,10 +163,7 @@ export function DeploymentDebugChat({
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          context_type: 'deployment',
-          context_id: String(deploymentId),
-        }),
+        body: JSON.stringify({ context_type: contextType, context_id: ctxId }),
       })
       if (!res.ok) {
         const problem = await res.json().catch(() => ({}))
@@ -165,16 +176,13 @@ export function DeploymentDebugChat({
       const conv = await res.json()
       setPublicId(conv.public_id)
       setMessages([])
-      void send(
-        'Diagnose this deployment failure and suggest concrete fixes.',
-        conv.public_id
-      )
+      void send(startPrompt, conv.public_id)
     } catch {
       setError('Could not start the chat.')
     } finally {
       setStarting(false)
     }
-  }, [base, deploymentId, send])
+  }, [base, contextType, ctxId, startPrompt, send])
 
   const visible = messages.filter((m) => m.role !== 'system')
 
@@ -184,12 +192,9 @@ export function DeploymentDebugChat({
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <MessageSquare className="h-5 w-5" />
-            Debug with AI
+            {title}
           </CardTitle>
-          <CardDescription>
-            Start an AI chat to investigate why this deployment failed. It opens
-            with a diagnosis and you can ask follow-up questions.
-          </CardDescription>
+          <CardDescription>{description}</CardDescription>
         </CardHeader>
         <CardContent>
           <Button onClick={start} disabled={starting}>
@@ -198,7 +203,7 @@ export function DeploymentDebugChat({
             ) : (
               <MessageSquare className="h-4 w-4" />
             )}
-            <span className="ml-2">Debug with AI</span>
+            <span className="ml-2">{triggerLabel}</span>
           </Button>
           {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
         </CardContent>
@@ -211,7 +216,7 @@ export function DeploymentDebugChat({
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <MessageSquare className="h-5 w-5" />
-          Debug with AI
+          {title}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -220,9 +225,7 @@ export function DeploymentDebugChat({
           className="max-h-[28rem] space-y-3 overflow-y-auto rounded-md border p-3"
         >
           {visible.length === 0 && (
-            <p className="text-sm text-muted-foreground">
-              Analyzing the failure…
-            </p>
+            <p className="text-sm text-muted-foreground">Analyzing…</p>
           )}
           {visible.map((m, i) => (
             <div key={i} className={m.role === 'user' ? 'text-right' : ''}>

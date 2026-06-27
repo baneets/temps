@@ -44,6 +44,7 @@ import {
 import { SearchableSelect } from '@/components/ui/searchable-select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { DebugChat } from '@/components/ai/DebugChat'
 import { AGGREGATIONS } from '@/components/metrics/metric-format'
 import { AnomalyBacktest } from '@/components/metrics/AnomalyBacktest'
 import {
@@ -370,6 +371,18 @@ function AlertFormBody({ project, isEditing, id, existing }: AlertFormBodyProps)
           </p>
         </div>
       </div>
+
+      {isEditing && project.ai_debug_chat_enabled === true && (
+        <DebugChat
+          projectId={project.id}
+          contextType="alert"
+          contextId={id}
+          title="Investigate with AI"
+          triggerLabel="Investigate with AI"
+          description="Ask AI what this alert means, why it may be firing, and the prioritized steps to act on it."
+          startPrompt="Explain what this alert means, why it may be firing, and the prioritized steps to investigate and resolve it."
+        />
+      )}
 
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">

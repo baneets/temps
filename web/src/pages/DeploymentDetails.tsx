@@ -9,8 +9,8 @@ import {
   rollbackToDeploymentMutation,
   triggerProjectPipelineMutation,
 } from '@/api/client/@tanstack/react-query.gen'
+import { DebugChat } from '@/components/ai/DebugChat'
 import { DeploymentContainerLogs } from '@/components/deployments/DeploymentContainerLogs'
-import { DeploymentDebugChat } from '@/components/deployments/DeploymentDebugChat'
 import { DeploymentStages } from '@/components/deployments/DeploymentStages'
 import { RedeploymentModal } from '@/components/deployments/RedeploymentModal'
 import { Badge } from '@/components/ui/badge'
@@ -684,9 +684,12 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
         {/* AI debugging chat for failed deployments (ADR-023), opt-in per project */}
         {project.ai_debug_chat_enabled === true &&
           deployment?.status === 'failed' && (
-            <DeploymentDebugChat
+            <DebugChat
               projectId={project.id}
-              deploymentId={Number(deploymentId)}
+              contextType="deployment"
+              contextId={Number(deploymentId)}
+              description="Start an AI chat to investigate why this deployment failed. It opens with a diagnosis and you can ask follow-up questions."
+              startPrompt="Diagnose this deployment failure and suggest concrete fixes."
             />
           )}
 
