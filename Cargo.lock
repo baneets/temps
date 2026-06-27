@@ -10644,6 +10644,7 @@ name = "temps-ai"
 version = "0.1.0-beta.39"
 dependencies = [
  "async-trait",
+ "futures",
  "schemars 0.8.22",
  "serde",
  "serde_json",

@@ -155,6 +155,13 @@ mod tests {
                 model: "mock".into(),
             })
         }
+        async fn chat_stream(
+            &self,
+            _r: crate::streaming::ChatTurnRequest,
+        ) -> Result<crate::streaming::TokenStream, AiError> {
+            let text = self.0.clone();
+            Ok(Box::pin(futures::stream::once(async move { Ok(text) })))
+        }
     }
 
     #[tokio::test]

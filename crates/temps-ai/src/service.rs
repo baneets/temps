@@ -3,6 +3,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::streaming::{ChatTurnRequest, TokenStream};
+
 /// A single AI completion request. Construct with `..Default::default()` and set
 /// only what you need:
 ///
@@ -75,4 +77,9 @@ pub trait AiService: Send + Sync {
     /// Low-level completion. Prefer the [`crate::complete_text`] /
     /// [`crate::complete_typed`] helpers for everyday use.
     async fn complete(&self, request: AiRequest) -> Result<AiResponse, AiError>;
+
+    /// Multi-turn streaming completion (ADR-023): replays the supplied history
+    /// and streams the assistant reply token-by-token. The substrate for
+    /// persistent debugging conversations. Best-effort like [`Self::complete`].
+    async fn chat_stream(&self, request: ChatTurnRequest) -> Result<TokenStream, AiError>;
 }

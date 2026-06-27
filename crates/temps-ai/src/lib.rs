@@ -21,7 +21,9 @@
 pub mod diagnostics;
 pub mod schemas;
 pub mod service;
+pub mod streaming;
 pub mod typed;
 
 pub use service::{AiError, AiRequest, AiResponse, AiService};
+pub use streaming::{ChatMessage, ChatTurnRequest, TokenStream};
 pub use typed::{complete_text, complete_typed, extract_json_block};

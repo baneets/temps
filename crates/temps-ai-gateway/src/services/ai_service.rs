@@ -9,13 +9,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tracing::debug;
 
-use temps_ai::{AiError, AiRequest, AiResponse, AiService};
+use temps_ai::{AiError, AiRequest, AiResponse, AiService, ChatTurnRequest, TokenStream};
 
 use crate::services::{ByokOverride, GatewayService};
-use crate::types::{ChatCompletionRequest, ChatCompletionResponse, MessageContent};
+use crate::types::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, MessageContent,
+};
 
 /// Gateway-backed [`AiService`] (ADR-022).
 pub struct GatewayAiService {
@@ -156,6 +159,86 @@ impl AiService for GatewayAiService {
             json,
             model,
         })
+    }
+
+    async fn chat_stream(&self, request: ChatTurnRequest) -> Result<TokenStream, AiError> {
+        let model = self
+            .resolve_model(request.project_id, request.model.as_deref())
+            .await
+            .ok_or_else(|| AiError::NoModel {
+                purpose: request.purpose.clone(),
+            })?;
+
+        let messages: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
+        let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": true });
+        if let Some(mt) = request.max_tokens {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+        if let Some(t) = request.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+        let chat_req: ChatCompletionRequest =
+            serde_json::from_value(body).map_err(|e| AiError::Provider {
+                purpose: request.purpose.clone(),
+                reason: format!("malformed request: {e}"),
+            })?;
+
+        let purpose = request.purpose.clone();
+        let (byte_stream, _cred) = self
+            .gateway
+            .chat_completion_stream(&chat_req, &ByokOverride::default())
+            .await
+            .map_err(|e| AiError::Provider {
+                purpose: purpose.clone(),
+                reason: e.to_string(),
+            })?;
+
+        // Parse the gateway's OpenAI-format SSE byte stream into assistant text
+        // deltas. `data:` lines may split across byte chunks, so buffer to line
+        // boundaries; `data: [DONE]` terminates.
+        let token_stream = async_stream::stream! {
+            let mut byte_stream = byte_stream;
+            let mut buf = String::new();
+            while let Some(item) = byte_stream.next().await {
+                match item {
+                    Ok(bytes) => {
+                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                        while let Some(nl) = buf.find('\n') {
+                            let line: String = buf.drain(..=nl).collect();
+                            let line = line.trim();
+                            let Some(data) = line.strip_prefix("data:") else { continue };
+                            let data = data.trim();
+                            if data == "[DONE]" {
+                                return;
+                            }
+                            if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
+                                if let Some(content) = chunk
+                                    .choices
+                                    .first()
+                                    .and_then(|c| c.delta.content.as_ref())
+                                {
+                                    if !content.is_empty() {
+                                        yield Ok(content.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(AiError::Provider {
+                            purpose: purpose.clone(),
+                            reason: e.to_string(),
+                        });
+                        return;
+                    }
+                }
+            }
+        };
+        Ok(Box::pin(token_stream))
     }
 }
 
