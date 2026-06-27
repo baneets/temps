@@ -2460,6 +2460,23 @@ export type ContextLogsResponse = {
     target_index: number;
 };
 
+export type ConversationDetailResponse = ConversationResponse & {
+    /**
+     * Turns oldest-first. The `system` seed message is omitted (internal).
+     */
+    messages: Array<MessageResponse>;
+};
+
+export type ConversationResponse = {
+    context_id: string;
+    context_type: string;
+    created_at: string;
+    last_activity_at: string;
+    public_id: string;
+    status: string;
+    title?: string | null;
+};
+
 /**
  * A conversation summary grouping related AI invocations.
  */
@@ -2601,6 +2618,17 @@ export type CreateBackupScheduleRequest = {
      * via `POST /backups/schedules/{id}/services`. Omit to use the default.
      */
     target_all_services?: boolean | null;
+};
+
+export type CreateConversationRequest = {
+    /**
+     * The entity id (ints stringified).
+     */
+    context_id: string;
+    /**
+     * e.g. `"deployment"`.
+     */
+    context_type: string;
 };
 
 export type CreateDsnRequest = {
@@ -8115,6 +8143,12 @@ export type McpDefinitionResponse = {
 
 export type MessageContent = string | Array<ContentPart>;
 
+export type MessageResponse = {
+    content: string;
+    created_at: string;
+    role: string;
+};
+
 /**
  * How to treat metered-billing subscriptions when computing MRR.
  *
@@ -10343,6 +10377,14 @@ export type ProjectQuery = {
 
 export type ProjectResponse = {
     /**
+     * Opt-in to AI summarization of metric alert notifications (NULL/false = off).
+     */
+    ai_alert_summaries_enabled?: boolean | null;
+    /**
+     * Opt-in to AI debugging chat, e.g. on deployment failures (NULL/false = off).
+     */
+    ai_debug_chat_enabled?: boolean | null;
+    /**
      * Attack mode - when enabled, requires CAPTCHA verification for all project environments
      */
     attack_mode: boolean;
@@ -12371,6 +12413,10 @@ export type SendEmailResponseBody = {
      * Email status
      */
     status: string;
+};
+
+export type SendMessageRequest = {
+    content: string;
 };
 
 export type SentryChunkUploadResponse = {
@@ -14905,6 +14951,14 @@ export type UpdateProjectSecretRequest = {
 };
 
 export type UpdateProjectSettingsRequest = {
+    /**
+     * Opt in to AI summarization of metric alert notifications (ADR-021).
+     */
+    ai_alert_summaries_enabled?: boolean | null;
+    /**
+     * Opt in to AI debugging chat, e.g. on deployment failures (ADR-023).
+     */
+    ai_debug_chat_enabled?: boolean | null;
     /**
      * Enable/disable attack mode (CAPTCHA protection) for all project environments
      */
@@ -32133,6 +32187,117 @@ export type GetAggregatedBucketsResponses = {
 };
 
 export type GetAggregatedBucketsResponse = GetAggregatedBucketsResponses[keyof GetAggregatedBucketsResponses];
+
+export type FindConversationData = {
+    body?: never;
+    path: {
+        project_id: number;
+    };
+    query: {
+        context_type: string;
+        context_id: string;
+    };
+    url: '/projects/{project_id}/ai/conversations';
+};
+
+export type FindConversationErrors = {
+    401: unknown;
+    403: unknown;
+};
+
+export type FindConversationResponses = {
+    200: null | ConversationResponse;
+};
+
+export type FindConversationResponse = FindConversationResponses[keyof FindConversationResponses];
+
+export type CreateConversationData = {
+    body: CreateConversationRequest;
+    path: {
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations';
+};
+
+export type CreateConversationErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type CreateConversationResponses = {
+    200: ConversationResponse;
+};
+
+export type CreateConversationResponse = CreateConversationResponses[keyof CreateConversationResponses];
+
+export type GetConversationData = {
+    body?: never;
+    path: {
+        project_id: number;
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}';
+};
+
+export type GetConversationErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type GetConversationResponses = {
+    200: ConversationDetailResponse;
+};
+
+export type GetConversationResponse = GetConversationResponses[keyof GetConversationResponses];
+
+export type ArchiveConversationData = {
+    body?: never;
+    path: {
+        project_id: number;
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}/archive';
+};
+
+export type ArchiveConversationErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type ArchiveConversationResponses = {
+    204: void;
+};
+
+export type ArchiveConversationResponse = ArchiveConversationResponses[keyof ArchiveConversationResponses];
+
+export type SendMessageData = {
+    body: SendMessageRequest;
+    path: {
+        project_id: number;
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}/messages';
+};
+
+export type SendMessageErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type SendMessageResponses = {
+    /**
+     * SSE stream of assistant text deltas
+     */
+    200: unknown;
+};
 
 export type StartAnalysisData = {
     body: StartAnalysisRequest;
