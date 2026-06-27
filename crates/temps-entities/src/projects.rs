@@ -44,6 +44,9 @@ pub struct Model {
     /// this project. NULL/false = off (the deterministic Tier-1 text is used);
     /// true = enrich with the configured AI provider when one is available.
     pub ai_alert_summaries_enabled: Option<bool>,
+    /// ADR-023: opt-in AI debugging chat (e.g. on deployment failures) for this
+    /// project. NULL/false = off; true = offer the chat when AI is configured.
+    pub ai_debug_chat_enabled: Option<bool>,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: bool,
     /// When true, preview environments auto-created for branches are

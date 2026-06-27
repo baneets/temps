@@ -125,6 +125,7 @@ mod m20260621_000001_create_telemetry_milestones;
 mod m20260626_000001_create_metric_dashboards;
 mod m20260626_000002_create_metric_alert_rules;
 mod m20260627_000001_add_ai_alert_summaries;
+mod m20260627_000002_create_ai_conversations;
 
 pub struct Migrator;
 
@@ -253,6 +254,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260626_000001_create_metric_dashboards::Migration),
             Box::new(m20260626_000002_create_metric_alert_rules::Migration),
             Box::new(m20260627_000001_add_ai_alert_summaries::Migration),
+            Box::new(m20260627_000002_create_ai_conversations::Migration),
         ]
     }
 }
