@@ -40,6 +40,10 @@ pub struct Model {
     pub git_provider_connection_id: Option<i32>,
     /// Attack mode - when enabled, requires CAPTCHA verification for all visitors
     pub attack_mode: bool,
+    /// ADR-021 Tier 2: opt-in AI summarization of metric alert notifications for
+    /// this project. NULL/false = off (the deterministic Tier-1 text is used);
+    /// true = enrich with the configured AI provider when one is available.
+    pub ai_alert_summaries_enabled: Option<bool>,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: bool,
     /// When true, preview environments auto-created for branches are

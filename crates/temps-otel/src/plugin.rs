@@ -529,10 +529,15 @@ impl TempsPlugin for OtelPlugin {
                     notification_service,
                     job_queue,
                 ));
+                // ADR-022: optional general AI foundation, registered by the AI
+                // gateway plugin when present. Absent -> deterministic Tier-1 text.
+                let ai = context.get_service::<dyn temps_core::ai::AiService>();
                 let evaluator = Arc::new(crate::services::MetricAlertEvaluator::new(
                     metric_alert_service.clone(),
                     otel_service.clone(),
                     alarm_service,
+                    db.clone(),
+                    ai,
                 ));
                 tokio::spawn(async move {
                     evaluator.run().await;

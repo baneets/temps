@@ -45,6 +45,11 @@ const EVAL_INTERVAL_SECS: u64 = 30;
 /// against the cached baseline instead of re-querying the full lookback window.
 const BASELINE_REFRESH_SECS: u64 = 3600;
 
+/// Hard cap on the optional AI summary call (ADR-021 Tier 2). Bounds the extra
+/// latency added to a fire when the feature is enabled; on timeout the
+/// deterministic Tier-1 message is kept.
+const AI_SUMMARY_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// The state transition the evaluator should apply for a single rule this cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlertTransition {
@@ -315,6 +320,71 @@ fn humanize_static(
         side,
         fmt_compact(threshold),
     )
+}
+
+/// System prompt for the AI alert summary — constrain to one grounded sentence
+/// and forbid the two failure modes that would make a summary worse than the
+/// template: invented causes and invented numbers.
+const ALERT_SUMMARY_SYSTEM: &str = "You are an observability assistant writing a one-line alert summary for an \
+on-call engineer. Rewrite the given metric-alert facts as a single clear, plain-English sentence of at most \
+30 words. Convey what the metric is doing, the magnitude, and that it is outside its expected range. Do NOT \
+speculate about causes, do NOT give recommendations, and do NOT invent numbers beyond those given. Reply with \
+only the sentence.";
+
+/// Build the best-effort AI summary request (ADR-022) from the rule, the fire
+/// metadata (which already carries the computed figures), and the deterministic
+/// message. Feeds only structured facts — no raw series — and grounds the model
+/// with the deterministic sentence. Returns `None` when the essentials (a
+/// `value`) are absent.
+fn alert_summary_request(
+    rule: &AlertRule,
+    metadata: &serde_json::Value,
+    deterministic_summary: &str,
+) -> Option<temps_core::ai::AiRequest> {
+    let num = |k: &str| metadata.get(k).and_then(serde_json::Value::as_f64);
+    let value = num("value")?;
+    let mut facts = String::new();
+    facts.push_str(&format!("Metric: {}\n", rule.metric_name));
+    facts.push_str(&format!("Aggregation: {}\n", rule.aggregation));
+    facts.push_str(&format!(
+        "Detection: {}\n",
+        metadata
+            .get("detection_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("static")
+    ));
+    facts.push_str(&format!("Current value: {value:.3}\n"));
+    if let Some(c) = num("baseline_center") {
+        facts.push_str(&format!("Baseline (normal) value: {c:.3}\n"));
+        if let (Some(s), Some(d)) = (num("baseline_scale"), num("deviations")) {
+            facts.push_str(&format!(
+                "Expected range: {:.3} to {:.3}\n",
+                c - d * s,
+                c + d * s
+            ));
+        }
+    }
+    if let (Some(t), Some(cmp)) = (
+        num("threshold"),
+        metadata.get("comparator").and_then(|v| v.as_str()),
+    ) {
+        facts.push_str(&format!("Threshold: {cmp} {t:.3}\n"));
+    }
+    facts.push_str(&format!("Window seconds: {}\n", rule.window_secs));
+    facts.push_str(&format!("Severity: {}\n", rule.severity));
+    facts.push_str(&format!(
+        "Deterministic summary for reference: {deterministic_summary}"
+    ));
+
+    Some(temps_core::ai::AiRequest {
+        purpose: "alert.summary".to_string(),
+        project_id: Some(rule.project_id),
+        system: Some(ALERT_SUMMARY_SYSTEM.to_string()),
+        prompt: facts,
+        max_tokens: Some(160),
+        temperature: Some(0.2),
+        ..Default::default()
+    })
 }
 
 /// Inputs for the alert email chart.
@@ -599,6 +669,13 @@ pub struct MetricAlertEvaluator {
     firing: Arc<RwLock<HashMap<i32, i32>>>,
     /// rule_id -> cached anomaly baseline (refreshed every `BASELINE_REFRESH_SECS`).
     baseline_cache: Arc<RwLock<HashMap<i32, CachedBaseline>>>,
+    /// DB handle, used only to read the per-project AI-summary opt-in toggle.
+    db: Arc<sea_orm::DatabaseConnection>,
+    /// ADR-022: optional general AI foundation. `None` (default) keeps the
+    /// deterministic Tier-1 text; when present (and the project opts in) it is
+    /// called inside a timeout on each fire and may replace the lead sentence,
+    /// never block or fail the alert.
+    ai: Option<Arc<dyn temps_core::ai::AiService>>,
 }
 
 impl MetricAlertEvaluator {
@@ -606,6 +683,8 @@ impl MetricAlertEvaluator {
         alert_service: Arc<MetricAlertService>,
         otel_service: Arc<OtelService>,
         alarm_service: Arc<AlarmService>,
+        db: Arc<sea_orm::DatabaseConnection>,
+        ai: Option<Arc<dyn temps_core::ai::AiService>>,
     ) -> Self {
         Self {
             alert_service,
@@ -614,7 +693,22 @@ impl MetricAlertEvaluator {
             breach_start: Arc::new(RwLock::new(HashMap::new())),
             firing: Arc::new(RwLock::new(HashMap::new())),
             baseline_cache: Arc::new(RwLock::new(HashMap::new())),
+            db,
+            ai,
         }
+    }
+
+    /// Whether AI summarization is opted in for this project
+    /// (`projects.ai_alert_summaries_enabled = true`). Feature-level gate; the
+    /// foundation's `is_available` is the separate capability gate.
+    async fn ai_summaries_enabled(&self, project_id: i32) -> bool {
+        use sea_orm::EntityTrait;
+        matches!(
+            temps_entities::projects::Entity::find_by_id(project_id)
+                .one(self.db.as_ref())
+                .await,
+            Ok(Some(p)) if p.ai_alert_summaries_enabled == Some(true)
+        )
     }
 
     /// Run the evaluator loop forever. Skips the immediate first tick.
@@ -910,6 +1004,29 @@ impl MetricAlertEvaluator {
                 map.insert("_chart_svg".to_string(), serde_json::Value::String(svg));
             }
         }
+
+        // ADR-022: best-effort AI enrichment of the lead sentence via the general
+        // AI foundation. Bounded by `AI_SUMMARY_TIMEOUT`; any timeout / error /
+        // empty reply keeps the deterministic Tier-1 text. Gated on the project's
+        // opt-in toggle AND the foundation reporting AI is configured.
+        let mut message = details.message;
+        if let Some(ai) = &self.ai {
+            if self.ai_summaries_enabled(rule.project_id).await && ai.is_available().await {
+                if let Some(req) = alert_summary_request(rule, &metadata, &message) {
+                    let fut = temps_core::ai::complete_text(ai.as_ref(), req);
+                    if let Ok(Some(text)) = tokio::time::timeout(AI_SUMMARY_TIMEOUT, fut).await {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            if let serde_json::Value::Object(map) = &mut metadata {
+                                map.insert("ai_summary".to_string(), serde_json::Value::Bool(true));
+                            }
+                            message = text.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
         let request = FireAlarmRequest {
             project_id: rule.project_id,
             environment_id: None,
@@ -919,7 +1036,7 @@ impl MetricAlertEvaluator {
             alarm_type: AlarmType::DeploymentMetricThreshold,
             severity: map_severity(&rule.severity),
             title: details.title,
-            message: details.message,
+            message,
             metadata: Some(metadata),
         };
         match self.alarm_service.fire_alarm(request).await {

@@ -11149,6 +11149,7 @@ dependencies = [
  "log",
  "once_cell",
  "rand 0.8.6",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_yaml",
