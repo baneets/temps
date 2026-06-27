@@ -24,6 +24,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { DateRangePicker } from '@/components/ui/date-range-picker'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/ui/empty-state'
 import { ThresholdLineChart } from '@/components/charts/threshold-line-chart'
@@ -93,6 +94,20 @@ function timeRangeToFrom(range: TimeRange): Date {
     '30d': 30 * 24 * 60 * 60 * 1000,
   }
   return new Date(now - map[range])
+}
+
+/**
+ * Pick a ClickHouse bucket interval for an arbitrary (custom-range) span,
+ * mirroring the thresholds in `RANGE_BUCKET` so a custom 24h looks like the
+ * 24h preset. Keep the labels in the same allowlist the backend parses.
+ */
+function bucketForSpan(spanMs: number): string {
+  const hours = spanMs / 3_600_000
+  if (hours <= 2) return '1 minute'
+  if (hours <= 12) return '5 minutes'
+  if (hours <= 48) return '15 minutes'
+  if (hours <= 24 * 14) return '1 hour'
+  return '6 hours'
 }
 
 // ── Aggregation selector ─────────────────────────────────────────────────────
@@ -205,6 +220,17 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
     () => parseLabelFilters(searchParams.get('labels')),
     [searchParams],
   )
+  // Custom absolute date range — overrides the relative preset when both bounds
+  // are present and valid (`?start`/`?end`, ISO). The backend metric query takes
+  // arbitrary start/end, so this is purely a UI concern.
+  const customStartStr = searchParams.get('start')
+  const customEndStr = searchParams.get('end')
+  const isCustom = (() => {
+    if (!customStartStr || !customEndStr) return false
+    const s = new Date(customStartStr).getTime()
+    const e = new Date(customEndStr).getTime()
+    return Number.isFinite(s) && Number.isFinite(e) && s < e
+  })()
 
   const [nameSearch, setNameSearch] = useState('')
 
@@ -219,7 +245,21 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
   const setServiceName = (v: string) =>
     patchParams((p) => (v ? p.set('service', v) : p.delete('service')))
   const setTimeRange = (v: TimeRange) =>
-    patchParams((p) => (v === '24h' ? p.delete('range') : p.set('range', v)))
+    patchParams((p) => {
+      // Selecting a preset always exits custom mode.
+      p.delete('start')
+      p.delete('end')
+      if (v === '24h') p.delete('range')
+      else p.set('range', v)
+    })
+  // Apply an absolute range (from the date picker, or freezing the current
+  // window). Clears the relative preset.
+  const setCustomRange = (from: Date, to: Date) =>
+    patchParams((p) => {
+      p.set('start', from.toISOString())
+      p.set('end', to.toISOString())
+      p.delete('range')
+    })
   const setEnvironmentId = (v: number | null) =>
     patchParams((p) =>
       v == null ? p.delete('environment_id') : p.set('environment_id', String(v)),
@@ -255,14 +295,22 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
   // Both bounds are memoized on `timeRange` so they stay STABLE across renders.
   // Using `new Date()` inline would change the query key every render and spin
   // React Query into an infinite refetch loop.
-  const fromDate = useMemo(() => timeRangeToFrom(timeRange), [timeRange])
-  const toDate = useMemo(
-    () => new Date(),
+  const fromDate = useMemo(
+    () => (isCustom ? new Date(customStartStr!) : timeRangeToFrom(timeRange)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [timeRange],
+    [isCustom, customStartStr, timeRange],
+  )
+  const toDate = useMemo(
+    () => (isCustom ? new Date(customEndStr!) : new Date()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isCustom, customEndStr, timeRange],
   )
   const fromIso = fromDate.toISOString()
   const toIso = toDate.toISOString()
+  // Preset spans use their tuned bucket; a custom span derives one from its width.
+  const bucketInterval = isCustom
+    ? bucketForSpan(toDate.getTime() - fromDate.getTime())
+    : RANGE_BUCKET[timeRange]
   const selectedEnv = environments?.find((e) => e.id === environmentId) ?? null
 
   const metricsQuery = useQuery({
@@ -274,7 +322,7 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
         environment: selectedEnv?.name || undefined,
         start_time: fromIso,
         end_time: toIso,
-        bucket_interval: RANGE_BUCKET[timeRange],
+        bucket_interval: bucketInterval,
         // The AggKind strings (avg/sum/min/max/count/rate/pNN) map directly to
         // the backend's `MetricAggregation::parse`.
         aggregation,
@@ -623,21 +671,37 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
             <label className="text-xs font-medium text-muted-foreground">
               Range
             </label>
-            <Select
-              value={timeRange}
-              onValueChange={(v) => setTimeRange(v as TimeRange)}
-            >
-              <SelectTrigger className="w-full sm:w-[160px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {TIME_RANGES.map((r) => (
-                  <SelectItem key={r.value} value={r.value}>
-                    {r.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <Select
+                value={isCustom ? 'custom' : timeRange}
+                onValueChange={(v) => {
+                  // "custom" seeds the picker with the window currently on screen.
+                  if (v === 'custom') setCustomRange(fromDate, toDate)
+                  else setTimeRange(v as TimeRange)
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-[160px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TIME_RANGES.map((r) => (
+                    <SelectItem key={r.value} value={r.value}>
+                      {r.label}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="custom">Custom range…</SelectItem>
+                </SelectContent>
+              </Select>
+              {isCustom && (
+                <DateRangePicker
+                  date={{ from: fromDate, to: toDate }}
+                  onDateChange={(range) => {
+                    if (range?.from && range?.to)
+                      setCustomRange(range.from, range.to)
+                  }}
+                />
+              )}
+            </div>
           </div>
         </div>
 
@@ -709,7 +773,7 @@ export default function MetricsExplorer({ project }: MetricsExplorerProps) {
           names={filteredNames}
           fromIso={fromIso}
           toIso={toIso}
-          bucketInterval={RANGE_BUCKET[timeRange]}
+          bucketInterval={bucketInterval}
           aggregation={aggregation}
           onSelect={setMetricName}
           isLoadingNames={namesQuery.isPending}
