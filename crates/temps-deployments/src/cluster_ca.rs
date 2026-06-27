@@ -25,6 +25,8 @@ pub enum ClusterCaError {
     Pki(String),
     #[error("Encryption error: {0}")]
     Encryption(String),
+    #[error("Failed to build node HTTP client: {0}")]
+    Client(String),
 }
 
 fn decrypt_key(
@@ -112,6 +114,48 @@ pub fn cp_client_identity(ca: &ClusterCa) -> Result<String, ClusterCaError> {
         .map_err(|e| ClusterCaError::Pki(e.to_string()))?;
     // reqwest's PEM Identity wants the cert chain followed by the private key.
     Ok(format!("{}\n{}", signed.cert_pem, csr.key_pem))
+}
+
+/// Build a raw `reqwest::Client` for talking to a node's agent over HTTP(S),
+/// transparently using mutual TLS when `address` is `https://` (ADR-020
+/// WS-2.1): the control plane presents a cluster-CA-signed client identity and
+/// pins the agent's server cert to the cluster CA (built-in roots disabled).
+/// Plain `http://` nodes fall back to the shared `insecure_tls` toggle. Pass
+/// `timeout = None` for long-lived streams (e.g. log following), `Some(_)` for
+/// bounded requests.
+///
+/// This is the streaming/raw-HTTP analogue of [`build_node_deployer`] for the
+/// CP→agent paths that don't go through `RemoteNodeDeployer` (log streaming,
+/// edge-analytics ingest) so they don't silently fall back to plaintext
+/// against an mTLS-enforcing node.
+pub async fn build_node_http_client(
+    address: &str,
+    config_service: &ConfigService,
+    encryption_service: &EncryptionService,
+    timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Client, ClusterCaError> {
+    let mut builder = reqwest::Client::builder();
+    if let Some(t) = timeout {
+        builder = builder.timeout(t);
+    }
+    if address.starts_with("https://") {
+        let ca = ensure_cluster_ca(config_service, encryption_service).await?;
+        let identity_pem = cp_client_identity(&ca)?;
+        let identity = reqwest::Identity::from_pem(identity_pem.as_bytes())
+            .map_err(|e| ClusterCaError::Client(format!("invalid control-plane identity: {e}")))?;
+        let ca_cert = reqwest::Certificate::from_pem(ca.cert_pem.as_bytes())
+            .map_err(|e| ClusterCaError::Client(format!("invalid cluster CA certificate: {e}")))?;
+        builder = builder
+            .use_rustls_tls()
+            .identity(identity)
+            .add_root_certificate(ca_cert)
+            .tls_built_in_root_certs(false);
+    } else {
+        builder = builder.danger_accept_invalid_certs(temps_core::tls::insecure_tls_enabled());
+    }
+    builder
+        .build()
+        .map_err(|e| ClusterCaError::Client(e.to_string()))
 }
 
 /// Build a `ContainerDeployer` for a remote node, transparently using mutual TLS
