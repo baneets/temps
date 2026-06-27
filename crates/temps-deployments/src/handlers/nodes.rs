@@ -875,10 +875,13 @@ async fn register_node(
     allocate_overlay_cidr(app_state.db.clone(), node.id).await;
 
     // ── mTLS: sign the node's CSR with the cluster CA (ADR-020 WS-2.1) ──
-    // When the worker supplied a CSR, mint/load the per-cluster CA and return a
-    // signed per-node leaf plus the CA cert. Token-only nodes (csr_pem == None)
-    // skip this and keep using plaintext HTTP behind the bearer token.
-    let (cert_pem, ca_cert_pem) = if let Some(ref csr_pem) = request.csr_pem {
+    // Only when mTLS is enforced AND the worker supplied a CSR: mint/load the
+    // per-cluster CA and return a signed per-node leaf plus the CA cert. With
+    // require_mtls off (default) we ignore the CSR and the node keeps using
+    // plaintext HTTP behind the bearer token — zero behavior change.
+    let (cert_pem, ca_cert_pem) = if let (true, Some(csr_pem)) =
+        (settings.multi_node.require_mtls, request.csr_pem.as_ref())
+    {
         match crate::cluster_ca::ensure_cluster_ca(
             app_state.config_service.as_ref(),
             app_state.encryption_service.as_ref(),
@@ -889,6 +892,22 @@ async fn register_node(
                 match temps_core::node_pki::sign_node_csr(&ca.cert_pem, &ca.key_pem, csr_pem) {
                     Ok(signed) => {
                         info!(node_id = node.id, "Signed node CSR for mTLS");
+                        // Switch the node's stored address to https:// so the
+                        // control plane uses its mTLS client for every CP->agent
+                        // call to this now-TLS-serving node.
+                        let https_address = node.address.replacen("http://", "https://", 1);
+                        if https_address != node.address {
+                            use sea_orm::{ActiveModelTrait, Set};
+                            let mut active: temps_entities::nodes::ActiveModel =
+                                node.clone().into();
+                            active.address = Set(https_address);
+                            if let Err(e) = active.update(app_state.db.as_ref()).await {
+                                warn!(
+                                    node_id = node.id,
+                                    "Failed to switch node address to https for mTLS: {}", e
+                                );
+                            }
+                        }
                         (Some(signed.cert_pem), Some(ca.cert_pem))
                     }
                     Err(e) => {

@@ -338,11 +338,14 @@ impl DeploymentService {
             ))
         })?;
 
-        temps_deployer::remote::RemoteNodeDeployer::new(
-            node.address.clone(),
+        crate::cluster_ca::build_node_deployer(
+            &node.address,
             token,
             node.name.clone(),
+            self.config_service.as_ref(),
+            self.encryption_service.as_ref(),
         )
+        .await
         .map_err(|e| {
             DeploymentError::Other(format!(
                 "Failed to build remote deployer for node {}: {}",

@@ -60,6 +60,54 @@ impl RemoteNodeDeployer {
         })
     }
 
+    /// Construct a deployer that talks to the agent over **mutual TLS**
+    /// (ADR-020 WS-2.1): the control plane presents `client_identity_pem`
+    /// (its leaf cert + key, signed by the cluster CA) and pins the agent's
+    /// server cert to the cluster CA (`ca_cert_pem`). Built-in roots are
+    /// disabled so ONLY the cluster CA is trusted. Used for nodes whose
+    /// `agent_url` is `https://`.
+    pub fn new_mtls(
+        agent_url: String,
+        token: String,
+        node_name: String,
+        client_identity_pem: &str,
+        ca_cert_pem: &str,
+    ) -> Result<Self, DeployerError> {
+        let identity =
+            reqwest::Identity::from_pem(client_identity_pem.as_bytes()).map_err(|e| {
+                DeployerError::NetworkError(format!(
+                    "Invalid control-plane client identity for node {}: {}",
+                    node_name, e
+                ))
+            })?;
+        let ca = reqwest::Certificate::from_pem(ca_cert_pem.as_bytes()).map_err(|e| {
+            DeployerError::NetworkError(format!(
+                "Invalid cluster CA certificate for node {}: {}",
+                node_name, e
+            ))
+        })?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .use_rustls_tls()
+            .identity(identity)
+            .add_root_certificate(ca)
+            .tls_built_in_root_certs(false)
+            .build()
+            .map_err(|e| {
+                DeployerError::NetworkError(format!(
+                    "Failed to create mTLS client for node {}: {}",
+                    node_name, e
+                ))
+            })?;
+
+        Ok(Self {
+            agent_url,
+            token,
+            node_name,
+            client,
+        })
+    }
+
     /// Helper to make authenticated GET requests to the agent.
     async fn agent_get<T: for<'de> Deserialize<'de>>(
         &self,

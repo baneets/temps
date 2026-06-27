@@ -432,6 +432,14 @@ pub struct MultiNodeSettings {
     /// SECRET — never returned over HTTP (elided in the masked response).
     #[serde(default)]
     pub cluster_ca_key_encrypted: Option<String>,
+    /// Whether to enforce multi-node mTLS (ADR-020 WS-2.1). When `false`
+    /// (default), the control plane ignores join-time CSRs and nodes keep
+    /// serving plaintext HTTP — zero behavior change. When `true`, the CP signs
+    /// node CSRs, nodes serve mutual TLS, and every CP→agent call uses the
+    /// cluster client cert. Observe-then-enforce: flip this on only once all
+    /// workers have re-enrolled with certs.
+    #[serde(default)]
+    pub require_mtls: bool,
 }
 
 fn default_legacy_shared_token_enabled() -> bool {
@@ -446,6 +454,7 @@ impl Default for MultiNodeSettings {
             legacy_shared_token_enabled: true,
             cluster_ca_cert_pem: None,
             cluster_ca_key_encrypted: None,
+            require_mtls: false,
         }
     }
 }
