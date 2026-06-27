@@ -1721,19 +1721,26 @@ async fn admin_list_node_containers(
 }
 
 /// Create a `RemoteNodeDeployer` for stopping containers on a worker node.
-/// Returns `None` if the node has no encrypted token or decryption fails (best-effort).
-fn create_remote_deployer(
+/// Routes through the shared `cluster_ca::build_node_deployer` factory so an
+/// `https://` node gets mutual TLS (ADR-020 WS-2.1) rather than a plain-HTTP
+/// client the agent would reject under `require_mtls`. Returns `None` if the
+/// node has no encrypted token or decryption/build fails (best-effort).
+async fn create_remote_deployer(
     node: &temps_entities::nodes::Model,
+    config_service: &ConfigService,
     encryption_service: &temps_core::EncryptionService,
 ) -> Option<Arc<dyn ContainerDeployer>> {
     let encrypted_token = node.token_encrypted.as_ref()?;
     let decrypted_bytes = encryption_service.decrypt(encrypted_token).ok()?;
     let token = String::from_utf8(decrypted_bytes).ok()?;
-    let deployer = temps_deployer::remote::RemoteNodeDeployer::new(
-        node.address.clone(),
+    let deployer = crate::cluster_ca::build_node_deployer(
+        &node.address,
         token,
         node.name.clone(),
+        config_service,
+        encryption_service,
     )
+    .await
     .ok()?;
     Some(Arc::new(deployer))
 }
@@ -1827,8 +1834,12 @@ async fn admin_drain_node(
                 .await
                 .unwrap_or_default();
 
-            if let Some(remote_deployer) =
-                create_remote_deployer(&node, &app_state.encryption_service)
+            if let Some(remote_deployer) = create_remote_deployer(
+                &node,
+                &app_state.config_service,
+                &app_state.encryption_service,
+            )
+            .await
             {
                 for container in &containers {
                     if let Err(e) = remote_deployer

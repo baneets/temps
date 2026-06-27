@@ -335,6 +335,7 @@ impl TempsPlugin for DeploymentsPlugin {
             audit_service,
             node_service,
             encryption_service,
+            config_service: config_service.clone(),
             docker: docker_for_exec,
         });
 
