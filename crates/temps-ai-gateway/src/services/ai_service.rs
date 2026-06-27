@@ -62,8 +62,30 @@ impl GatewayAiService {
                 }
             }
         }
-        None
+
+        // Fallback: no allow-list configured (the common case — there is no UI for
+        // it). Use a sensible default model for the first active provider key, so
+        // AI works as soon as a key is added, with no separate allow-list step.
+        let key = temps_entities::ai_provider_keys::Entity::find()
+            .filter(temps_entities::ai_provider_keys::Column::IsActive.eq(true))
+            .one(self.db.as_ref())
+            .await
+            .ok()??;
+        default_model_for_provider(&key.provider)
     }
+}
+
+/// A safe, low-cost default chat model per provider, used when no allow-list
+/// names one. The prefix routes back to the provider via `route_model_to_provider`.
+fn default_model_for_provider(provider: &str) -> Option<String> {
+    let model = match provider {
+        "openai" => "gpt-4o-mini",
+        "anthropic" => "claude-3-5-haiku-latest",
+        "gemini" => "gemini-1.5-flash",
+        "xai" => "grok-2-latest",
+        _ => return None,
+    };
+    Some(model.to_string())
 }
 
 /// First model id from an `allowed_models` JSON array (`["a","b"]` -> "a").
