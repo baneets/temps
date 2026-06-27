@@ -61,8 +61,12 @@ struct NodeTlsMaterial {
 }
 
 /// Generate a per-node keypair + CSR. The private key never leaves this host.
-fn generate_node_tls_material(node_name: &str) -> Option<NodeTlsMaterial> {
-    match temps_core::node_pki::generate_node_keypair_csr(node_name) {
+/// `ip` is the address the control plane will connect to (the node's
+/// private/WG IP) and MUST be a SAN, or the CP's server-cert hostname check
+/// fails (ADR-020 WS-2.1).
+fn generate_node_tls_material(node_name: &str, ip: &str) -> Option<NodeTlsMaterial> {
+    let sans = vec![ip.to_string(), node_name.to_string()];
+    match temps_core::node_pki::generate_node_keypair_csr(node_name, &sans) {
         Ok(csr) => Some(NodeTlsMaterial {
             key_pem: csr.key_pem,
             csr_pem: csr.csr_pem,
@@ -210,8 +214,9 @@ impl JoinCommand {
         let register_url = format!("{}/api/internal/nodes/register", self.target);
 
         // Generate per-node mTLS material; send the CSR so the control plane
-        // can sign a leaf for us (ADR-020 WS-2.1).
-        let tls_material = generate_node_tls_material(node_name);
+        // can sign a leaf for us (ADR-020 WS-2.1). The leaf must be valid for
+        // the private address the CP connects to.
+        let tls_material = generate_node_tls_material(node_name, private_address.trim());
 
         let register_body = serde_json::json!({
             "name": node_name,
@@ -371,7 +376,8 @@ impl JoinCommand {
             .trim();
 
         // Generate per-node mTLS material and send the CSR (ADR-020 WS-2.1).
-        let tls_material = generate_node_tls_material(node_name);
+        // The leaf must be valid for the WG IP the CP connects to.
+        let tls_material = generate_node_tls_material(node_name, &relay_response.assigned_ip);
 
         let register_body = serde_json::json!({
             "name": node_name,

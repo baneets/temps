@@ -100,13 +100,17 @@ pub fn ca_fingerprint_sha256(cert_pem: &str) -> Result<String, PkiError> {
     Ok(hex::encode(digest))
 }
 
-/// Node side: generate a fresh keypair and a CSR with `common_name` as both the
-/// subject CN and a DNS SAN. The private key never leaves the caller.
-pub fn generate_node_keypair_csr(common_name: &str) -> Result<NodeCsr, PkiError> {
+/// Node side: generate a fresh keypair and a CSR. `common_name` is the subject
+/// CN; `sans` are the Subject Alternative Names the leaf must be valid for —
+/// rcgen auto-classifies each entry as an IP or DNS SAN. The control plane
+/// connects to a worker by its IP address, so the node's IP MUST be in `sans`
+/// or server-cert hostname verification fails (ADR-020 WS-2.1). The private key
+/// never leaves the caller.
+pub fn generate_node_keypair_csr(common_name: &str, sans: &[String]) -> Result<NodeCsr, PkiError> {
     let key = KeyPair::generate().map_err(|e| PkiError::KeyGen(e.to_string()))?;
 
-    let mut params = CertificateParams::new(vec![common_name.to_string()])
-        .map_err(|e| PkiError::CertBuild(e.to_string()))?;
+    let mut params =
+        CertificateParams::new(sans.to_vec()).map_err(|e| PkiError::CertBuild(e.to_string()))?;
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, common_name);
     params.distinguished_name = dn;
@@ -235,7 +239,11 @@ mod tests {
     fn test_node_csr_round_trip_signs_under_ca() {
         // Full enrollment round trip: CA -> node CSR -> CA signs -> leaf.
         let ca = generate_cluster_ca().unwrap();
-        let node = generate_node_keypair_csr("worker-1").unwrap();
+        let node = generate_node_keypair_csr(
+            "worker-1",
+            &["10.0.0.5".to_string(), "worker-1".to_string()],
+        )
+        .unwrap();
         assert!(node.key_pem.contains("BEGIN PRIVATE KEY"));
         assert!(node.csr_pem.contains("CERTIFICATE REQUEST"));
 

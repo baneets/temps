@@ -104,7 +104,9 @@ pub async fn ensure_cluster_ca(
 /// agent accepts it because it chains to the cluster CA. Generated on demand —
 /// cheap (one keygen + one signature) and avoids persisting another secret.
 pub fn cp_client_identity(ca: &ClusterCa) -> Result<String, ClusterCaError> {
-    let csr = temps_core::node_pki::generate_node_keypair_csr("temps-control-plane")
+    // A client cert needs no hostname SAN — the agent verifies only that it
+    // chains to the cluster CA, not its name.
+    let csr = temps_core::node_pki::generate_node_keypair_csr("temps-control-plane", &[])
         .map_err(|e| ClusterCaError::Pki(e.to_string()))?;
     let signed = temps_core::node_pki::sign_node_csr(&ca.cert_pem, &ca.key_pem, &csr.csr_pem)
         .map_err(|e| ClusterCaError::Pki(e.to_string()))?;
