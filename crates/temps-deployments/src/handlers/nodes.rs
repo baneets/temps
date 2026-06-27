@@ -61,6 +61,10 @@ pub struct RegisterNodeApiRequest {
     pub labels: Option<serde_json::Value>,
     /// X25519 public key for ECIES certificate encryption (base64-encoded, edge nodes only)
     pub edge_public_key: Option<String>,
+    /// The node's *current* token, supplied to prove possession when
+    /// re-registering (changing the identity of) a node that already exists.
+    /// Optional; only needed to rebind a still-live node. (ADR-020 WS-1.2.)
+    pub prior_token: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -678,6 +682,9 @@ async fn register_node(
         role: request.role.unwrap_or_else(|| "worker".to_string()),
         labels: request.labels.unwrap_or(serde_json::json!({})),
         edge_public_key: request.edge_public_key,
+        // Hash the proof-of-possession token (if any) so the service can
+        // constant-time compare it against the stored hash. (ADR-020 WS-1.2.)
+        prior_token_hash: request.prior_token.as_deref().map(sha256_hash),
     };
 
     let node = app_state
@@ -913,6 +920,30 @@ async fn get_s3_credentials(
         return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
             .with_title("Invalid Token")
             .with_detail(format!("Invalid authentication token for node {}", node_id)));
+    }
+
+    // Authorization (ADR-020 WS-4.1 / analyst-1): a valid node token only proves
+    // *which* node is calling — it does NOT entitle that node to every tenant's
+    // S3 credentials. Only hand back a source the node legitimately needs: one
+    // used by a backup of a service hosted on this node. Otherwise a single
+    // compromised worker could enumerate s3_source_id and exfiltrate all keys.
+    if !app_state
+        .node_service
+        .is_authorized_for_s3_source(node_id, s3_source_id)
+        .await
+        .map_err(Problem::from)?
+    {
+        warn!(
+            node_id,
+            s3_source_id,
+            "Node not authorized for S3 source (no backup of a service hosted on this node uses it)"
+        );
+        return Err(problemdetails::new(StatusCode::FORBIDDEN)
+            .with_title("Forbidden")
+            .with_detail(format!(
+                "Node {} is not authorized for S3 source {}",
+                node_id, s3_source_id
+            )));
     }
 
     // Look up the S3 source
@@ -2098,6 +2129,13 @@ impl From<NodeError> for Problem {
             NodeError::AlreadyExists { ref name } => problemdetails::new(StatusCode::CONFLICT)
                 .with_title("Node Already Exists")
                 .with_detail(format!("Node '{}' already exists", name)),
+            NodeError::IdentityConflict { ref name } => problemdetails::new(StatusCode::CONFLICT)
+                .with_title("Node Identity Conflict")
+                .with_detail(format!(
+                    "Node '{}' is currently active; re-registering a different identity requires \
+                     proof of the current token, or the node must be drained/removed first",
+                    name
+                )),
             NodeError::Validation { ref message } => problemdetails::new(StatusCode::BAD_REQUEST)
                 .with_title("Validation Error")
                 .with_detail(message.clone()),

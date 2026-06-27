@@ -11114,6 +11114,7 @@ dependencies = [
  "log",
  "once_cell",
  "rand 0.8.6",
+ "rcgen 0.13.2",
  "serde",
  "serde_json",
  "serde_yaml",

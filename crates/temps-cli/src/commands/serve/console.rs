@@ -71,7 +71,9 @@ use tracing::{debug, info};
 
 // Multi-node support
 use temps_deployments::handlers::nodes::NodeAppState;
-use temps_deployments::jobs::node_health_check::{check_node_health, failover_offline_nodes};
+use temps_deployments::jobs::node_health_check::{
+    check_drain_completion, check_node_health, failover_offline_nodes,
+};
 use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -1797,6 +1799,18 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                         )
                         .await;
                     }
+                }
+
+                // Transition fully-drained nodes from "draining" to "drained".
+                // Without this, a node whose containers have all migrated stays
+                // stuck in "draining" forever (it never auto-completes), so the
+                // operator can never safely remove it. (ADR-020 WS-5.1 / lifecycle-7)
+                let drained_ids = check_drain_completion(&health_node_service).await;
+                if !drained_ids.is_empty() {
+                    tracing::info!(
+                        "Node drain check: {} node(s) completed draining",
+                        drained_ids.len()
+                    );
                 }
             }
         });
