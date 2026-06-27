@@ -7,10 +7,15 @@
 //! deployment provider seeds from a failure diagnosis). Built on the `temps-ai`
 //! foundation; the AI is injected as `Arc<dyn AiService>`.
 
+pub mod handlers;
+pub mod plugin;
 pub mod provider;
+pub mod providers;
 pub mod service;
 
+pub use plugin::AiChatPlugin;
 pub use provider::{ConversationContextProvider, ConversationSeed};
+pub use providers::deployment::DeploymentChatProvider;
 pub use service::ConversationService;
 
 /// Errors from the conversation layer. All map cleanly to HTTP at the handler.

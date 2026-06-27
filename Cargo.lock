@@ -10659,6 +10659,7 @@ version = "0.1.0-beta.39"
 dependencies = [
  "async-stream",
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "futures",
  "futures-util",
@@ -10666,10 +10667,13 @@ dependencies = [
  "serde",
  "serde_json",
  "temps-ai",
+ "temps-auth",
+ "temps-core",
  "temps-entities",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -11067,6 +11071,7 @@ dependencies = [
  "tar",
  "temps-agent",
  "temps-agents",
+ "temps-ai-chat",
  "temps-ai-gateway",
  "temps-analytics",
  "temps-analytics-events",

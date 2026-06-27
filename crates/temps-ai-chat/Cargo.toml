@@ -13,7 +13,11 @@ categories = ["development-tools"]
 [dependencies]
 temps-ai = { path = "../temps-ai" }
 temps-entities = { path = "../temps-entities" }
+temps-core = { path = "../temps-core" }
+temps-auth = { path = "../temps-auth" }
 
+axum = { workspace = true }
+utoipa = { workspace = true }
 sea-orm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
