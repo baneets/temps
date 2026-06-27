@@ -15,6 +15,7 @@ pub mod service;
 
 pub use plugin::AiChatPlugin;
 pub use provider::{ConversationContextProvider, ConversationSeed};
+pub use providers::alert::AlertChatProvider;
 pub use providers::deployment::DeploymentChatProvider;
 pub use service::ConversationService;
 

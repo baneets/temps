@@ -1,11 +1,8 @@
 //! The deployment-failure context provider (ADR-023, consumer #1).
 //!
-//! Seeds a chat from a failed deployment: its state + reason, and each failed
-//! step's error message. `context_id` is the deployment's integer id.
-//!
-//! v1 seeds from the deployment/job rows (always present, no extra I/O); a fast
-//! follow-up enriches the system context with the failed jobs' log *tails* via
-//! `LogService::get_log_content(job.log_id)`.
+//! Seeds a chat from a failed deployment: its state + reason, each failed step's
+//! error message, and the *tail* of each failed step's log (via `LogService`).
+//! `context_id` is the deployment's integer id.
 
 use std::sync::Arc;
 
@@ -14,8 +11,26 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use temps_entities::types::JobStatus;
 use temps_entities::{deployment_jobs, deployments};
+use temps_logs::LogService;
 
 use crate::provider::{ConversationContextProvider, ConversationSeed};
+
+/// Per-step log tail budget (bytes), trimmed to a line boundary. Bounds the seed
+/// so a huge build log can't blow the model's context / token budget.
+const MAX_LOG_TAIL_BYTES: usize = 2_500;
+
+/// The last `MAX_LOG_TAIL_BYTES` of a log, trimmed to a line boundary.
+fn log_tail(content: &str) -> &str {
+    let trimmed = content.trim_end();
+    if trimmed.len() <= MAX_LOG_TAIL_BYTES {
+        return trimmed;
+    }
+    let start = trimmed.len() - MAX_LOG_TAIL_BYTES;
+    match trimmed[start..].find('\n') {
+        Some(nl) => &trimmed[start + nl + 1..],
+        None => &trimmed[start..],
+    }
+}
 
 const SYSTEM_PREAMBLE: &str = "You are a senior platform/DevOps engineer helping a developer debug a FAILED Temps \
 deployment. Use the failure context below. Identify the most likely root cause and concrete, ordered fixes, \
@@ -25,11 +40,12 @@ clarifying question only when essential. Be concise and practical.";
 /// Seeds deployment-failure debugging chats.
 pub struct DeploymentChatProvider {
     db: Arc<DatabaseConnection>,
+    log_service: Arc<LogService>,
 }
 
 impl DeploymentChatProvider {
-    pub fn new(db: Arc<DatabaseConnection>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<DatabaseConnection>, log_service: Arc<LogService>) -> Self {
+        Self { db, log_service }
     }
 }
 
@@ -84,6 +100,19 @@ impl ConversationContextProvider for DeploymentChatProvider {
                     j.job_id,
                     j.error_message.as_deref().unwrap_or("(no error message)")
                 ));
+            }
+            // Append the tail of each failed step's log — where the real
+            // diagnostic evidence lives. Best-effort: skip on read error.
+            for j in &failed {
+                if let Ok(content) = self.log_service.get_log_content(&j.log_id).await {
+                    let tail = log_tail(&content);
+                    if !tail.trim().is_empty() {
+                        ctx.push_str(&format!(
+                            "\n--- Log tail for failed step '{}' ---\n{}\n",
+                            j.job_id, tail
+                        ));
+                    }
+                }
             }
         }
 

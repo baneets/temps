@@ -15,6 +15,7 @@ temps-ai = { path = "../temps-ai" }
 temps-entities = { path = "../temps-entities" }
 temps-core = { path = "../temps-core" }
 temps-auth = { path = "../temps-auth" }
+temps-logs = { path = "../temps-logs" }
 
 axum = { workspace = true }
 utoipa = { workspace = true }

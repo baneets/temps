@@ -16,6 +16,7 @@ use utoipa::OpenApi as OpenApiTrait;
 
 use crate::handlers::{self, AiChatApiDoc, AppState};
 use crate::provider::ConversationContextProvider;
+use crate::providers::alert::AlertChatProvider;
 use crate::providers::deployment::DeploymentChatProvider;
 use crate::ConversationService;
 
@@ -45,11 +46,14 @@ impl TempsPlugin for AiChatPlugin {
         Box::pin(async move {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
             let ai = context.require_service::<dyn temps_ai::AiService>();
+            let log_service = context.require_service::<temps_logs::LogService>();
 
-            // v1: one built-in provider. Future context types register their own
-            // provider here (or via a registry once there are several).
-            let providers: Vec<Arc<dyn ConversationContextProvider>> =
-                vec![Arc::new(DeploymentChatProvider::new(db.clone()))];
+            // Built-in providers (one per context_type). Future context types add
+            // their provider here (or via a registry once there are many).
+            let providers: Vec<Arc<dyn ConversationContextProvider>> = vec![
+                Arc::new(DeploymentChatProvider::new(db.clone(), log_service)),
+                Arc::new(AlertChatProvider::new(db.clone())),
+            ];
 
             let service = Arc::new(ConversationService::new(db.clone(), ai, providers));
             context.register_service(service.clone());

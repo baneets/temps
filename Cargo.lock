@@ -10670,6 +10670,7 @@ dependencies = [
  "temps-auth",
  "temps-core",
  "temps-entities",
+ "temps-logs",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
