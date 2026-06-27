@@ -139,6 +139,11 @@ pub struct RegisterNodeApiRequest {
     /// re-registering (changing the identity of) a node that already exists.
     /// Optional; only needed to rebind a still-live node. (ADR-020 WS-1.2.)
     pub prior_token: Option<String>,
+    /// Node-generated certificate signing request (PEM) for multi-node mTLS
+    /// (ADR-020 WS-2.1). When present, the control plane signs it with the
+    /// cluster CA and returns the leaf + CA cert. Optional — token-only nodes
+    /// (legacy / edge) still register without one.
+    pub csr_pem: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -147,6 +152,14 @@ pub struct RegisterNodeResponse {
     pub name: String,
     pub status: String,
     pub message: String,
+    /// The signed per-node leaf certificate (PEM) the agent serves as its TLS
+    /// server cert. Present only when a `csr_pem` was supplied. (ADR-020 WS-2.1.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_pem: Option<String>,
+    /// The cluster CA certificate (PEM) the node pins as its trust root.
+    /// Present only when a `csr_pem` was supplied. (ADR-020 WS-2.1.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_cert_pem: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -861,6 +874,44 @@ async fn register_node(
     .await;
     allocate_overlay_cidr(app_state.db.clone(), node.id).await;
 
+    // ── mTLS: sign the node's CSR with the cluster CA (ADR-020 WS-2.1) ──
+    // When the worker supplied a CSR, mint/load the per-cluster CA and return a
+    // signed per-node leaf plus the CA cert. Token-only nodes (csr_pem == None)
+    // skip this and keep using plaintext HTTP behind the bearer token.
+    let (cert_pem, ca_cert_pem) = if let Some(ref csr_pem) = request.csr_pem {
+        match crate::cluster_ca::ensure_cluster_ca(
+            app_state.config_service.as_ref(),
+            app_state.encryption_service.as_ref(),
+        )
+        .await
+        {
+            Ok(ca) => {
+                match temps_core::node_pki::sign_node_csr(&ca.cert_pem, &ca.key_pem, csr_pem) {
+                    Ok(signed) => {
+                        info!(node_id = node.id, "Signed node CSR for mTLS");
+                        (Some(signed.cert_pem), Some(ca.cert_pem))
+                    }
+                    Err(e) => {
+                        return Err(problemdetails::new(StatusCode::BAD_REQUEST)
+                            .with_title("Invalid CSR")
+                            .with_detail(format!(
+                                "Failed to sign certificate signing request: {}",
+                                e
+                            )));
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to provision cluster CA: {}", e);
+                return Err(problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Internal Server Error")
+                    .with_detail("Failed to provision the cluster certificate authority"));
+            }
+        }
+    } else {
+        (None, None)
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(RegisterNodeResponse {
@@ -868,6 +919,8 @@ async fn register_node(
             name: node.name,
             status: node.status,
             message: "Node registered successfully. Send heartbeats to stay active.".to_string(),
+            cert_pem,
+            ca_cert_pem,
         }),
     ))
 }

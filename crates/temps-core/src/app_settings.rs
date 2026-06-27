@@ -422,6 +422,16 @@ pub struct MultiNodeSettings {
     /// short-lived, single-use enrollment tokens instead.
     #[serde(default = "default_legacy_shared_token_enabled")]
     pub legacy_shared_token_enabled: bool,
+    /// Per-cluster CA certificate (PEM) for multi-node mTLS (ADR-020 WS-2.1).
+    /// Public — distributed to nodes as the trust root and used by the control
+    /// plane as the root for verifying agent server certs. Minted lazily on the
+    /// first CSR-bearing registration.
+    #[serde(default)]
+    pub cluster_ca_cert_pem: Option<String>,
+    /// Per-cluster CA private key, AES-256-GCM ciphertext (EncryptionService).
+    /// SECRET — never returned over HTTP (elided in the masked response).
+    #[serde(default)]
+    pub cluster_ca_key_encrypted: Option<String>,
 }
 
 fn default_legacy_shared_token_enabled() -> bool {
@@ -434,6 +444,8 @@ impl Default for MultiNodeSettings {
             join_token_hash: None,
             private_address: None,
             legacy_shared_token_enabled: true,
+            cluster_ca_cert_pem: None,
+            cluster_ca_key_encrypted: None,
         }
     }
 }
