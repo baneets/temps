@@ -155,9 +155,22 @@ fn svg_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Format a UTC timestamp for an x-axis tick. `with_date` prepends the calendar
+/// day (used on the left tick) so a chart read days later is still unambiguous;
+/// otherwise just `HH:MM`. Zero-padded specifiers only, for cross-platform output.
+fn fmt_axis_time(t: DateTime<Utc>, with_date: bool) -> String {
+    if with_date {
+        t.format("%b %d %H:%M").to_string()
+    } else {
+        t.format("%H:%M").to_string()
+    }
+}
+
 /// Inputs for the alert email chart.
 struct AlertChart<'a> {
     values: &'a [f64],
+    /// Bucket timestamps (UTC) parallel to `values`; drives the x-axis time ticks.
+    times: &'a [DateTime<Utc>],
     /// Anomaly expected band (lower, upper) — shaded amber, labelled.
     band: Option<(f64, f64)>,
     /// Static threshold + whether a breach is ABOVE it: dashed line, breach side
@@ -182,7 +195,7 @@ fn render_alert_chart_svg(chart: &AlertChart) -> String {
     const ML: f64 = 46.0; // left margin (y labels)
     const MR: f64 = 12.0;
     const MT: f64 = 14.0;
-    const MB: f64 = 20.0; // bottom margin
+    const MB: f64 = 26.0; // bottom margin (room for x-axis time ticks)
     let xr = W - MR; // right edge of plot
     let yb = H - MB; // bottom edge of plot
 
@@ -300,6 +313,32 @@ fn render_alert_chart_svg(chart: &AlertChart) -> String {
             r##"<circle cx="{ex:.1}" cy="{cy:.1}" r="3" fill="#dc2626"/>"##
         ));
     }
+
+    // X-axis time ticks: start (with date), middle, and end (the eval moment,
+    // marked UTC so the window is unambiguous). The series is index-linear, so
+    // each tick is placed at — and labelled with — its actual bucket timestamp.
+    let times = chart.times;
+    if times.len() == n && n >= 2 {
+        let ty = yb + 12.0;
+        let mid = n / 2;
+        let last = n - 1;
+        let lt = svg_escape(&fmt_axis_time(times[0], true));
+        s.push_str(&format!(
+            r##"<text x="{ML}" y="{ty:.1}" text-anchor="start" font-size="9" fill="#9ca3af">{lt}</text>"##
+        ));
+        if mid != 0 && mid != last {
+            let mx = x_at(mid);
+            let mt = svg_escape(&fmt_axis_time(times[mid], false));
+            s.push_str(&format!(
+                r##"<text x="{mx:.1}" y="{ty:.1}" text-anchor="middle" font-size="9" fill="#9ca3af">{mt}</text>"##
+            ));
+        }
+        let rt = svg_escape(&format!("{} UTC", fmt_axis_time(times[last], false)));
+        s.push_str(&format!(
+            r##"<text x="{xr}" y="{ty:.1}" text-anchor="end" font-size="9" fill="#9ca3af">{rt}</text>"##
+        ));
+    }
+
     s.push_str("</svg>");
     s
 }
@@ -778,6 +817,7 @@ impl MetricAlertEvaluator {
         }
         let agg = MetricAggregation::parse(&rule.aggregation);
         let values: Vec<f64> = buckets.iter().map(|b| value_for_rule(b, agg)).collect();
+        let times: Vec<DateTime<Utc>> = buckets.iter().map(|b| b.bucket).collect();
 
         // Expected band: anomaly rules carry center/scale/deviations; static
         // rules carry a single threshold line.
@@ -824,6 +864,7 @@ impl MetricAlertEvaluator {
 
         Some(render_alert_chart_svg(&AlertChart {
             values: &values,
+            times: &times,
             band,
             threshold,
             threshold_label,
@@ -916,6 +957,28 @@ mod tests {
             map_severity("anything-else"),
             AlarmSeverity::Warning
         ));
+    }
+
+    #[test]
+    fn test_chart_svg_renders_x_axis_time_ticks() {
+        use chrono::TimeZone;
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 27, 9, 30, 0).unwrap();
+        let times: Vec<DateTime<Utc>> = (0..5).map(|i| t0 + chrono::Duration::minutes(i)).collect();
+        let values = vec![18.0, 19.0, 90.0, 92.0, 95.0];
+        let svg = render_alert_chart_svg(&AlertChart {
+            values: &values,
+            times: &times,
+            band: Some((16.0, 20.0)),
+            threshold: None,
+            threshold_label: String::new(),
+            value: 95.0,
+            value_label: "last 1m avg".to_string(),
+        });
+        // Start tick carries the date; middle tick is bare HH:MM; end tick (the
+        // eval moment) carries the UTC marker so the window can't be misread.
+        assert!(svg.contains("Jun 27 09:30"), "missing dated start tick");
+        assert!(svg.contains("09:32"), "missing middle tick");
+        assert!(svg.contains("09:34 UTC"), "missing UTC-marked end tick");
     }
 
     #[test]
