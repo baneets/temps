@@ -29,8 +29,8 @@ use tracing::{debug, error, info, warn};
 use temps_monitoring::{AlarmService, AlarmSeverity, AlarmType, FireAlarmRequest};
 
 use crate::detectors::{
-    AnomalyParams, BandModel, DetectionConfig, StaticParams, DEFAULT_LOOKBACK_DAYS, MIN_BAND_SCALE,
-    MIN_BASELINE_SAMPLES,
+    AnomalyParams, BandModel, Comparator, DetectionConfig, StaticParams, DEFAULT_LOOKBACK_DAYS,
+    MIN_BAND_SCALE, MIN_BASELINE_SAMPLES,
 };
 use crate::services::metric_alert_service::MetricAlertService;
 use crate::services::OtelService;
@@ -164,6 +164,157 @@ fn fmt_axis_time(t: DateTime<Utc>, with_date: bool) -> String {
     } else {
         t.format("%H:%M").to_string()
     }
+}
+
+// --- Plain-language notification text (ADR-021 Tier 1) -----------------------
+//
+// The alert notification leads with a humanized sentence built deterministically
+// from the figures the detector already computed. No AI, no I/O — pure functions,
+// unit-tested. The exact statistics stay in the alarm `metadata` (and the email
+// DETAILS table), so nothing is lost for the math-minded.
+
+/// Past-tense verb describing how the rule's aggregation reduced the window,
+/// e.g. `avg` -> "averaged", so the sentence reads naturally.
+fn agg_verb(aggregation: &str) -> &'static str {
+    match aggregation.to_ascii_lowercase().as_str() {
+        "avg" | "average" | "mean" => "averaged",
+        "max" | "maximum" => "peaked at",
+        "min" | "minimum" => "bottomed out at",
+        "sum" | "total" => "totaled",
+        "count" => "counted",
+        _ => "was", // percentiles / anything else
+    }
+}
+
+/// The rule window in human units, e.g. "over the last minute" / "over the last
+/// 5 minutes" / "over the last hour".
+fn window_phrase(window_secs: i64) -> String {
+    let w = window_secs.max(1);
+    let (n, unit) = if w % 3600 == 0 {
+        (w / 3600, "hour")
+    } else if w % 60 == 0 {
+        (w / 60, "minute")
+    } else {
+        (w, "second")
+    };
+    if n == 1 {
+        format!("over the last {unit}")
+    } else {
+        format!("over the last {n} {unit}s")
+    }
+}
+
+/// A multiplier label that drops a redundant decimal, e.g. 4.13 -> "4×",
+/// 4.25 -> "4.2×".
+fn times_label(ratio: f64) -> String {
+    if (ratio - ratio.round()).abs() < 0.15 {
+        format!("{:.0}×", ratio)
+    } else {
+        format!("{:.1}×", ratio)
+    }
+}
+
+/// How far past the expected band the value sits, in plain words. `ratio` is
+/// `|z| / deviations` — `> 1` means breaching; bigger means further out.
+fn outside_phrase(z_abs: f64, deviations: f64) -> &'static str {
+    let ratio = if deviations > 0.0 {
+        z_abs / deviations
+    } else {
+        z_abs
+    };
+    if ratio >= 4.0 {
+        "far outside"
+    } else if ratio >= 1.5 {
+        "well outside"
+    } else {
+        "just outside"
+    }
+}
+
+/// Magnitude relative to baseline, e.g. "about 4× the normal 18" (above) or
+/// "about 28% of the normal 18" (below). Falls back to an absolute delta when
+/// the baseline is too close to zero for a ratio to mean anything.
+fn magnitude_phrase(value: f64, center: f64, above: bool) -> String {
+    if center.abs() >= 1.0 {
+        if above {
+            format!(
+                "about {} the normal {}",
+                times_label(value / center),
+                fmt_compact(center)
+            )
+        } else {
+            let pct = (value / center * 100.0).round();
+            format!("about {:.0}% of the normal {}", pct, fmt_compact(center))
+        }
+    } else {
+        let delta = (value - center).abs();
+        let dir = if above { "above" } else { "below" };
+        format!(
+            "{} {} the usual ~{}",
+            fmt_compact(delta),
+            dir,
+            fmt_compact(center)
+        )
+    }
+}
+
+/// Plain-language summary of an anomaly breach.
+///
+/// e.g. "guestbook.activity.level is unusually high — it averaged 76 over the
+/// last minute, about 4× the normal 18. That's far outside the expected range
+/// (13–23)."
+#[allow(clippy::too_many_arguments)]
+fn humanize_anomaly(
+    metric: &str,
+    aggregation: &str,
+    value: f64,
+    center: f64,
+    scale: f64,
+    z: f64,
+    deviations: f64,
+    window_secs: i64,
+) -> String {
+    let above = value >= center;
+    let direction = if above { "high" } else { "low" };
+    let band_lo = center - deviations * scale;
+    let band_hi = center + deviations * scale;
+    format!(
+        "{} is unusually {} — it {} {} {}, {}. That's {} the expected range ({}–{}).",
+        metric,
+        direction,
+        agg_verb(aggregation),
+        fmt_compact(value),
+        window_phrase(window_secs),
+        magnitude_phrase(value, center, above),
+        outside_phrase(z.abs(), deviations),
+        fmt_compact(band_lo),
+        fmt_compact(band_hi),
+    )
+}
+
+/// Plain-language summary of a static-threshold breach.
+///
+/// e.g. "guestbook.list.requests averaged 5 over the last minute, above the 100
+/// threshold."
+fn humanize_static(
+    metric: &str,
+    aggregation: &str,
+    value: f64,
+    comparator: Comparator,
+    threshold: f64,
+    window_secs: i64,
+) -> String {
+    let above = matches!(comparator, Comparator::Gt | Comparator::Gte);
+    let side = if above { "above" } else { "below" };
+    format!(
+        "{} {} {} {}, {} the {} threshold.",
+        metric,
+        agg_verb(aggregation),
+        fmt_compact(value),
+        window_phrase(window_secs),
+        side,
+        fmt_compact(threshold),
+    )
 }
 
 /// Inputs for the alert email chart.
@@ -379,13 +530,13 @@ impl FireDetails {
     fn static_breach(rule: &AlertRule, value: f64, p: &StaticParams) -> Self {
         FireDetails {
             title: format!("Metric threshold breached: {}", rule.name),
-            message: format!(
-                "{} {} is {:.3} (threshold {} {:.3})",
-                rule.metric_name,
-                rule.aggregation,
+            message: humanize_static(
+                &rule.metric_name,
+                &rule.aggregation,
                 value,
-                p.comparator.symbol(),
-                p.threshold
+                p.comparator,
+                p.threshold,
+                i64::from(rule.window_secs),
             ),
             metadata: json!({
                 "rule_id": rule.id,
@@ -406,15 +557,15 @@ impl FireDetails {
         let z = (value - ev.center) / ev.scale.max(MIN_BAND_SCALE);
         FireDetails {
             title: format!("Metric anomaly: {}", rule.name),
-            message: format!(
-                "{} {} is {:.3} — {:.1}σ from the baseline {:.3} ± {:.3} (band ±{}σ)",
-                rule.metric_name,
-                rule.aggregation,
+            message: humanize_anomaly(
+                &rule.metric_name,
+                &rule.aggregation,
                 value,
-                z.abs(),
                 ev.center,
                 ev.scale,
-                p.deviations
+                z,
+                p.deviations,
+                i64::from(rule.window_secs),
             ),
             metadata: json!({
                 "rule_id": rule.id,
@@ -979,6 +1130,68 @@ mod tests {
         assert!(svg.contains("Jun 27 09:30"), "missing dated start tick");
         assert!(svg.contains("09:32"), "missing middle tick");
         assert!(svg.contains("09:34 UTC"), "missing UTC-marked end tick");
+    }
+
+    #[test]
+    fn test_window_phrase() {
+        assert_eq!(window_phrase(60), "over the last minute");
+        assert_eq!(window_phrase(300), "over the last 5 minutes");
+        assert_eq!(window_phrase(3600), "over the last hour");
+        assert_eq!(window_phrase(7200), "over the last 2 hours");
+        assert_eq!(window_phrase(45), "over the last 45 seconds");
+    }
+
+    #[test]
+    fn test_humanize_anomaly_high() {
+        // The screenshot case: value 76.2, baseline 18.5 ± 1.67, band ±3σ.
+        let z = (76.223 - 18.467) / 1.672_f64.max(MIN_BAND_SCALE);
+        let msg = humanize_anomaly(
+            "guestbook.activity.level",
+            "avg",
+            76.223,
+            18.467,
+            1.672,
+            z,
+            3.0,
+            60,
+        );
+        assert!(
+            msg.contains("guestbook.activity.level is unusually high"),
+            "{msg}"
+        );
+        assert!(msg.contains("averaged 76"), "{msg}");
+        assert!(msg.contains("over the last minute"), "{msg}");
+        assert!(msg.contains("about 4× the normal 18"), "{msg}");
+        assert!(msg.contains("far outside the expected range"), "{msg}");
+        // No statistician's notation in the human sentence.
+        assert!(!msg.contains('σ'), "should not leak sigma: {msg}");
+    }
+
+    #[test]
+    fn test_humanize_anomaly_low() {
+        let z = (5.0 - 18.467) / 1.672_f64.max(MIN_BAND_SCALE);
+        let msg = humanize_anomaly("svc.queue.depth", "avg", 5.0, 18.467, 1.672, z, 3.0, 300);
+        assert!(msg.contains("is unusually low"), "{msg}");
+        assert!(msg.contains("% of the normal 18"), "{msg}");
+        assert!(msg.contains("over the last 5 minutes"), "{msg}");
+    }
+
+    #[test]
+    fn test_humanize_static_above_and_below() {
+        let above = humanize_static(
+            "guestbook.list.requests",
+            "avg",
+            150.0,
+            Comparator::Gte,
+            100.0,
+            60,
+        );
+        assert!(above.contains("averaged 150"), "{above}");
+        assert!(above.contains("above the 100 threshold"), "{above}");
+
+        let below = humanize_static("cache.hit.ratio", "min", 0.4, Comparator::Lt, 0.9, 60);
+        assert!(below.contains("bottomed out at"), "{below}");
+        assert!(below.contains("below the"), "{below}");
     }
 
     #[test]
