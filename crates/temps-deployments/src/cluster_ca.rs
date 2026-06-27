@@ -116,6 +116,47 @@ pub fn cp_client_identity(ca: &ClusterCa) -> Result<String, ClusterCaError> {
     Ok(format!("{}\n{}", signed.cert_pem, csr.key_pem))
 }
 
+/// Build a rustls `ClientConfig` for mutual-TLS **WebSocket** connections to an
+/// agent (ADR-020 WS-2.1). The terminal proxy dials the agent with
+/// tokio-tungstenite rather than reqwest, so it needs a rustls config directly:
+/// it presents the CP's cluster-CA-signed client identity and trusts ONLY the
+/// cluster CA. Relies on the process-default crypto provider the CLI installs at
+/// startup (same as every other `ClientConfig::builder()` in the workspace).
+pub async fn cp_ws_client_config(
+    config_service: &ConfigService,
+    encryption_service: &EncryptionService,
+) -> Result<rustls::ClientConfig, ClusterCaError> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::io::BufReader;
+
+    let ca = ensure_cluster_ca(config_service, encryption_service).await?;
+    // Combined PEM (cert chain followed by key) — each parser ignores the
+    // other's blocks, so we feed the same buffer to both.
+    let identity_pem = cp_client_identity(&ca)?;
+
+    let cert_chain: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut BufReader::new(identity_pem.as_bytes()))
+            .collect::<Result<_, _>>()
+            .map_err(|e| ClusterCaError::Client(format!("parse CP cert chain: {e}")))?;
+    let key: PrivateKeyDer<'static> =
+        rustls_pemfile::private_key(&mut BufReader::new(identity_pem.as_bytes()))
+            .map_err(|e| ClusterCaError::Client(format!("parse CP private key: {e}")))?
+            .ok_or_else(|| ClusterCaError::Client("control-plane identity has no key".into()))?;
+
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut BufReader::new(ca.cert_pem.as_bytes())) {
+        let cert = cert.map_err(|e| ClusterCaError::Client(format!("parse cluster CA: {e}")))?;
+        roots
+            .add(cert)
+            .map_err(|e| ClusterCaError::Client(format!("add cluster CA root: {e}")))?;
+    }
+
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(cert_chain, key)
+        .map_err(|e| ClusterCaError::Client(format!("build WS client config: {e}")))
+}
+
 /// Build a raw `reqwest::Client` for talking to a node's agent over HTTP(S),
 /// transparently using mutual TLS when `address` is `https://` (ADR-020
 /// WS-2.1): the control plane presents a cluster-CA-signed client identity and

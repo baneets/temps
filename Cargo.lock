@@ -11213,6 +11213,8 @@ dependencies = [
  "octocrab",
  "rand 0.8.6",
  "reqwest",
+ "rustls",
+ "rustls-pemfile",
  "sea-orm",
  "serde",
  "serde_derive",
