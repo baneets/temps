@@ -132,6 +132,178 @@ fn histogram_quantile(bounds: &[f64], counts: &[u64], q: f64) -> f64 {
     bounds.last().copied().unwrap_or(0.0)
 }
 
+/// A number formatted compactly for chart labels (100000 -> "100.0k").
+fn fmt_compact(v: f64) -> String {
+    let a = v.abs();
+    if a >= 1e9 {
+        format!("{:.1}B", v / 1e9)
+    } else if a >= 1e6 {
+        format!("{:.1}M", v / 1e6)
+    } else if a >= 1e3 {
+        format!("{:.1}k", v / 1e3)
+    } else if a >= 10.0 {
+        format!("{:.0}", v)
+    } else {
+        format!("{:.2}", v)
+    }
+}
+
+/// Escape text for inline SVG `<text>` content.
+fn svg_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Inputs for the alert email chart.
+struct AlertChart<'a> {
+    values: &'a [f64],
+    /// Anomaly expected band (lower, upper) — shaded amber, labelled.
+    band: Option<(f64, f64)>,
+    /// Static threshold + whether a breach is ABOVE it: dashed line, breach side
+    /// lightly shaded red, with `threshold_label`.
+    threshold: Option<(f64, bool)>,
+    threshold_label: String,
+    /// The firing value — drawn as a red marker line with `value_label`.
+    value: f64,
+    value_label: String,
+}
+
+/// Render a Datadog-style inline-SVG chart for an alert email: the recent series
+/// (blue), the breach threshold / expected band shaded and labelled, the firing
+/// value marked with a red line + label, the evaluation moment marked, and y-axis
+/// labels. Light theme, self-contained (inline attributes only) so it renders in
+/// mail clients that allow inline SVG (Mailpit, Apple Mail); clients that strip
+/// it just drop the image and keep the email's text summary + detail table.
+fn render_alert_chart_svg(chart: &AlertChart) -> String {
+    let values = chart.values;
+    const W: f64 = 560.0;
+    const H: f64 = 180.0;
+    const ML: f64 = 46.0; // left margin (y labels)
+    const MR: f64 = 12.0;
+    const MT: f64 = 14.0;
+    const MB: f64 = 20.0; // bottom margin
+    let xr = W - MR; // right edge of plot
+    let yb = H - MB; // bottom edge of plot
+
+    let mut lo = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let mut hi = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if let Some((bl, bu)) = chart.band {
+        lo = lo.min(bl);
+        hi = hi.max(bu);
+    }
+    if let Some((t, _)) = chart.threshold {
+        lo = lo.min(t);
+        hi = hi.max(t);
+    }
+    lo = lo.min(chart.value);
+    hi = hi.max(chart.value);
+    if !lo.is_finite() || !hi.is_finite() {
+        return String::new();
+    }
+    if (hi - lo).abs() < f64::EPSILON {
+        hi = lo + 1.0;
+        lo -= 1.0;
+    }
+    let span = hi - lo;
+    lo -= span * 0.08;
+    hi += span * 0.08;
+
+    let pw = W - ML - MR;
+    let ph = H - MT - MB;
+    let n = values.len();
+    let x_at = |i: usize| -> f64 {
+        if n <= 1 {
+            ML
+        } else {
+            ML + pw * (i as f64) / ((n - 1) as f64)
+        }
+    };
+    let y_at = |v: f64| -> f64 { MT + ph * (1.0 - (v - lo) / (hi - lo)) };
+
+    let mut s = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="100%" style="max-width:560px;display:block;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;">"##
+    );
+
+    // Gridlines + y labels at lo / mid / hi.
+    let tx = ML - 6.0;
+    for frac in [0.0_f64, 0.5, 1.0] {
+        let v = lo + span * frac + span * 0.08 * (1.0 - 2.0 * frac);
+        let y = y_at(v);
+        let yt = y + 3.0;
+        let label = fmt_compact(v);
+        s.push_str(&format!(
+            r##"<line x1="{ML}" y1="{y:.1}" x2="{xr}" y2="{y:.1}" stroke="#f1f5f9" stroke-width="1"/><text x="{tx:.1}" y="{yt:.1}" text-anchor="end" font-size="9" fill="#9ca3af">{label}</text>"##
+        ));
+    }
+
+    // Anomaly expected band (amber) + label.
+    if let Some((bl, bu)) = chart.band {
+        let yt = y_at(bu);
+        let bh = (y_at(bl) - yt).max(0.0);
+        let lx = ML + 4.0;
+        let ly = yt + 11.0;
+        let lbl = format!("expected {}–{}", fmt_compact(bl), fmt_compact(bu));
+        s.push_str(&format!(
+            r##"<rect x="{ML}" y="{yt:.1}" width="{pw:.1}" height="{bh:.1}" fill="#f59e0b" fill-opacity="0.13"/><text x="{lx:.1}" y="{ly:.1}" font-size="9" fill="#b45309">{lbl}</text>"##
+        ));
+    }
+
+    // Static breach zone (red) + threshold dashed line + label.
+    if let Some((t, breach_above)) = chart.threshold {
+        let yt = y_at(t);
+        let zy = if breach_above { MT } else { yt };
+        let zh = if breach_above {
+            (yt - MT).max(0.0)
+        } else {
+            (yb - yt).max(0.0)
+        };
+        let lx = ML + 4.0;
+        let ly = yt - 4.0;
+        let lbl = svg_escape(&chart.threshold_label);
+        s.push_str(&format!(
+            r##"<rect x="{ML}" y="{zy:.1}" width="{pw:.1}" height="{zh:.1}" fill="#ef4444" fill-opacity="0.07"/><line x1="{ML}" y1="{yt:.1}" x2="{xr}" y2="{yt:.1}" stroke="#ef4444" stroke-width="1" stroke-dasharray="4 3"/><text x="{lx:.1}" y="{ly:.1}" font-size="9" fill="#b91c1c">{lbl}</text>"##
+        ));
+    }
+
+    // Firing-value marker line (red) + label.
+    let vy = y_at(chart.value);
+    let vly = vy - 4.0;
+    let vlbl = format!(
+        "{}: {}",
+        svg_escape(&chart.value_label),
+        fmt_compact(chart.value)
+    );
+    s.push_str(&format!(
+        r##"<line x1="{ML}" y1="{vy:.1}" x2="{xr}" y2="{vy:.1}" stroke="#dc2626" stroke-width="1" stroke-opacity="0.55"/><text x="{xr}" y="{vly:.1}" text-anchor="end" font-size="9" font-weight="600" fill="#dc2626">{vlbl}</text>"##
+    ));
+
+    // Evaluation marker (vertical, at the latest point).
+    let ex = x_at(n - 1);
+    s.push_str(&format!(
+        r##"<line x1="{ex:.1}" y1="{MT}" x2="{ex:.1}" y2="{yb}" stroke="#cbd5e1" stroke-width="1"/>"##
+    ));
+
+    // Metric line + latest point.
+    let pts: String = values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| format!("{:.1},{:.1}", x_at(i), y_at(v)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    s.push_str(&format!(
+        r##"<polyline points="{pts}" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>"##
+    ));
+    if let Some(&last) = values.last() {
+        let cy = y_at(last);
+        s.push_str(&format!(
+            r##"<circle cx="{ex:.1}" cy="{cy:.1}" r="3" fill="#dc2626"/>"##
+        ));
+    }
+    s.push_str("</svg>");
+    s
+}
+
 /// Map a rule severity string to an `AlarmSeverity`.
 fn map_severity(severity: &str) -> AlarmSeverity {
     match severity {
@@ -539,6 +711,15 @@ impl MetricAlertEvaluator {
 
     /// Fire an alarm via the reused alarm system and remember the alarm id.
     async fn fire(&self, rule: &AlertRule, details: FireDetails) {
+        // Best-effort: render a compact chart of the recent series for the email
+        // (Datadog-style). Carried as a reserved `_chart_svg` metadata key that
+        // only the email renderer reads; never blocks or fails the fire.
+        let mut metadata = details.metadata;
+        if let Some(svg) = self.chart_svg_for(rule, &metadata).await {
+            if let serde_json::Value::Object(map) = &mut metadata {
+                map.insert("_chart_svg".to_string(), serde_json::Value::String(svg));
+            }
+        }
         let request = FireAlarmRequest {
             project_id: rule.project_id,
             environment_id: None,
@@ -549,7 +730,7 @@ impl MetricAlertEvaluator {
             severity: map_severity(&rule.severity),
             title: details.title,
             message: details.message,
-            metadata: Some(details.metadata),
+            metadata: Some(metadata),
         };
         match self.alarm_service.fire_alarm(request).await {
             Ok(Some(alarm_id)) => {
@@ -567,6 +748,88 @@ impl MetricAlertEvaluator {
                 error!(rule_id = rule.id, error = %e, "Failed to fire OTel metric alert");
             }
         }
+    }
+
+    /// Render a compact chart SVG of the metric's recent series for the alert
+    /// email, reading the expected band / threshold from the fire metadata.
+    /// Returns None on any hiccup (too little data, query error) — the email
+    /// simply omits the chart.
+    async fn chart_svg_for(
+        &self,
+        rule: &AlertRule,
+        metadata: &serde_json::Value,
+    ) -> Option<String> {
+        // Show ~60 windows of context around the breach.
+        let window = rule.window_secs.max(60);
+        let now = Utc::now();
+        let query = MetricQuery {
+            project_id: rule.project_id,
+            metric_name: Some(rule.metric_name.clone()),
+            start_time: Some(now - chrono::Duration::seconds(window as i64 * 60)),
+            end_time: Some(now),
+            bucket_interval: Some(format!("{}s", window)),
+            limit: Some(120),
+            aggregation: MetricAggregation::parse(&rule.aggregation),
+            ..Default::default()
+        };
+        let buckets = self.otel_service.query_metrics(query).await.ok()?;
+        if buckets.len() < 2 {
+            return None;
+        }
+        let agg = MetricAggregation::parse(&rule.aggregation);
+        let values: Vec<f64> = buckets.iter().map(|b| value_for_rule(b, agg)).collect();
+
+        // Expected band: anomaly rules carry center/scale/deviations; static
+        // rules carry a single threshold line.
+        let band = match (
+            metadata.get("baseline_center").and_then(|v| v.as_f64()),
+            metadata.get("baseline_scale").and_then(|v| v.as_f64()),
+            metadata.get("deviations").and_then(|v| v.as_f64()),
+        ) {
+            (Some(center), Some(scale), Some(dev)) => {
+                Some((center - dev * scale, center + dev * scale))
+            }
+            _ => None,
+        };
+        let threshold = metadata.get("threshold").and_then(|v| v.as_f64()).map(|t| {
+            // ">"/"≥" → breach above the line; "<"/"≤" → breach below.
+            let breach_above = metadata
+                .get("comparator")
+                .and_then(|v| v.as_str())
+                .map(|c| c.contains('>'))
+                .unwrap_or(true);
+            (t, breach_above)
+        });
+        let threshold_label = match (
+            threshold,
+            metadata.get("comparator").and_then(|v| v.as_str()),
+        ) {
+            (Some((t, _)), Some(cmp)) => format!("{} {}", cmp, fmt_compact(t)),
+            _ => String::new(),
+        };
+        let value = metadata
+            .get("value")
+            .and_then(|v| v.as_f64())
+            .or_else(|| values.last().copied())
+            .unwrap_or(0.0);
+        let w = rule.window_secs.max(1);
+        let window_label = if w % 3600 == 0 {
+            format!("{}h", w / 3600)
+        } else if w % 60 == 0 {
+            format!("{}m", w / 60)
+        } else {
+            format!("{}s", w)
+        };
+        let value_label = format!("last {} {}", window_label, rule.aggregation);
+
+        Some(render_alert_chart_svg(&AlertChart {
+            values: &values,
+            band,
+            threshold,
+            threshold_label,
+            value,
+            value_label,
+        }))
     }
 
     /// Resolve the alarm previously fired for this rule, if any.
