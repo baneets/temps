@@ -1,19 +1,4 @@
-//! The Temps AI foundation (ADR-022).
-//!
-//! A single, governed, provider-agnostic way for any crate to ask the configured
-//! model for either free text or **typed, structured data**. The object-safe
-//! [`AiService`] trait is registered + resolved through the plugin DI as
-//! `Arc<dyn AiService>` (like [`crate::notifications::NotificationService`]); the
-//! generic [`complete_typed`]/[`complete_text`] helpers in [`typed`] add the
-//! ergonomic, schema-derived API on top.
-//!
-//! Everything here is best-effort: the trait returns [`Result`], the helpers
-//! return [`Option`], and AI must never sit on a path that can block or fail a
-//! core operation — callers wrap calls in a timeout.
-
-pub mod typed;
-
-pub use typed::{complete_text, complete_typed, extract_json_block};
+//! The object-safe [`AiService`] seam and its request/response types.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -27,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AiRequest {
     /// Short tag for logging, usage attribution, and per-purpose budgets,
-    /// e.g. `"alert.summary"` or `"deploy.risk"`.
+    /// e.g. `"alert.summary"` or `"deploy.build_diagnosis"`.
     pub purpose: String,
     /// Optional governance + usage scope (per-project budgets / allow-lists).
     pub project_id: Option<i32>,
@@ -42,8 +27,8 @@ pub struct AiRequest {
     /// Sampling temperature (provider default when `None`).
     pub temperature: Option<f32>,
     /// When set, the provider is asked to return JSON matching this JSON Schema.
-    /// Usually populated by [`complete_typed`] from a Rust type rather than by
-    /// hand.
+    /// Usually populated by [`crate::complete_typed`] from a Rust type rather than
+    /// by hand.
     pub response_schema: Option<serde_json::Value>,
 }
 
@@ -87,7 +72,7 @@ pub trait AiService: Send + Sync {
     /// caller skip prompt construction when AI is unavailable.
     async fn is_available(&self) -> bool;
 
-    /// Low-level completion. Prefer the [`complete_text`] / [`complete_typed`]
-    /// helpers for everyday use.
+    /// Low-level completion. Prefer the [`crate::complete_text`] /
+    /// [`crate::complete_typed`] helpers for everyday use.
     async fn complete(&self, request: AiRequest) -> Result<AiResponse, AiError>;
 }

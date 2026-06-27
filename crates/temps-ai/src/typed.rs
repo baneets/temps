@@ -1,4 +1,4 @@
-//! Ergonomic, schema-derived helpers over the object-safe [`AiService`](super::AiService).
+//! Ergonomic, schema-derived helpers over the object-safe [`AiService`](crate::AiService).
 //!
 //! Object-safety forbids generic methods on the trait object, so the typed API
 //! lives here as free functions: [`complete_typed`] derives a JSON Schema from a
@@ -6,7 +6,7 @@
 
 use serde::de::DeserializeOwned;
 
-use super::{AiRequest, AiService};
+use crate::service::{AiRequest, AiService};
 
 /// Plain-text completion. `None` if AI is unavailable or the call fails.
 pub async fn complete_text(ai: &dyn AiService, request: AiRequest) -> Option<String> {
@@ -110,7 +110,7 @@ fn balanced_span(s: &str, open: char, close: char) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::{AiError, AiResponse};
+    use crate::service::{AiError, AiResponse};
     use async_trait::async_trait;
 
     /// A mock that returns a canned text reply.

@@ -340,7 +340,7 @@ fn alert_summary_request(
     rule: &AlertRule,
     metadata: &serde_json::Value,
     deterministic_summary: &str,
-) -> Option<temps_core::ai::AiRequest> {
+) -> Option<temps_ai::AiRequest> {
     let num = |k: &str| metadata.get(k).and_then(serde_json::Value::as_f64);
     let value = num("value")?;
     let mut facts = String::new();
@@ -376,7 +376,7 @@ fn alert_summary_request(
         "Deterministic summary for reference: {deterministic_summary}"
     ));
 
-    Some(temps_core::ai::AiRequest {
+    Some(temps_ai::AiRequest {
         purpose: "alert.summary".to_string(),
         project_id: Some(rule.project_id),
         system: Some(ALERT_SUMMARY_SYSTEM.to_string()),
@@ -675,7 +675,7 @@ pub struct MetricAlertEvaluator {
     /// deterministic Tier-1 text; when present (and the project opts in) it is
     /// called inside a timeout on each fire and may replace the lead sentence,
     /// never block or fail the alert.
-    ai: Option<Arc<dyn temps_core::ai::AiService>>,
+    ai: Option<Arc<dyn temps_ai::AiService>>,
 }
 
 impl MetricAlertEvaluator {
@@ -684,7 +684,7 @@ impl MetricAlertEvaluator {
         otel_service: Arc<OtelService>,
         alarm_service: Arc<AlarmService>,
         db: Arc<sea_orm::DatabaseConnection>,
-        ai: Option<Arc<dyn temps_core::ai::AiService>>,
+        ai: Option<Arc<dyn temps_ai::AiService>>,
     ) -> Self {
         Self {
             alert_service,
@@ -1013,7 +1013,7 @@ impl MetricAlertEvaluator {
         if let Some(ai) = &self.ai {
             if self.ai_summaries_enabled(rule.project_id).await && ai.is_available().await {
                 if let Some(req) = alert_summary_request(rule, &metadata, &message) {
-                    let fut = temps_core::ai::complete_text(ai.as_ref(), req);
+                    let fut = temps_ai::complete_text(ai.as_ref(), req);
                     if let Ok(Some(text)) = tokio::time::timeout(AI_SUMMARY_TIMEOUT, fut).await {
                         let text = text.trim();
                         if !text.is_empty() {

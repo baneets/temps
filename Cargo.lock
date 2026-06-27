@@ -10640,6 +10640,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "temps-ai"
+version = "0.1.0-beta.39"
+dependencies = [
+ "async-trait",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "temps-ai-gateway"
 version = "0.1.0-beta.39"
 dependencies = [
@@ -10657,6 +10670,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "temps-ai",
  "temps-auth",
  "temps-core",
  "temps-entities",
@@ -11149,7 +11163,6 @@ dependencies = [
  "log",
  "once_cell",
  "rand 0.8.6",
- "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -12187,6 +12200,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "temps-ai",
  "temps-auth",
  "temps-config",
  "temps-core",

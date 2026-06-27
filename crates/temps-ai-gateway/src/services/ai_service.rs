@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tracing::debug;
 
-use temps_core::ai::{AiError, AiRequest, AiResponse, AiService};
+use temps_ai::{AiError, AiRequest, AiResponse, AiService};
 
 use crate::services::{ByokOverride, GatewayService};
 use crate::types::{ChatCompletionRequest, ChatCompletionResponse, MessageContent};
@@ -147,7 +147,7 @@ impl AiService for GatewayAiService {
 
         let text = first_text(&resp).unwrap_or_default();
         let json = if wants_json {
-            temps_core::ai::extract_json_block(&text)
+            temps_ai::extract_json_block(&text)
         } else {
             None
         };

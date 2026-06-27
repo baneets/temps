@@ -55,7 +55,7 @@ impl TempsPlugin for AiGatewayPlugin {
                 gateway_service.clone(),
                 db.clone(),
             ));
-            context.register_service(ai_service as Arc<dyn temps_core::ai::AiService>);
+            context.register_service(ai_service as Arc<dyn temps_ai::AiService>);
 
             let usage_service = Arc::new(UsageService::new(db));
             context.register_service(usage_service.clone());
