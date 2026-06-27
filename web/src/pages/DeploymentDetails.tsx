@@ -10,6 +10,7 @@ import {
   triggerProjectPipelineMutation,
 } from '@/api/client/@tanstack/react-query.gen'
 import { DeploymentContainerLogs } from '@/components/deployments/DeploymentContainerLogs'
+import { DeploymentDebugChat } from '@/components/deployments/DeploymentDebugChat'
 import { DeploymentStages } from '@/components/deployments/DeploymentStages'
 import { RedeploymentModal } from '@/components/deployments/RedeploymentModal'
 import { Badge } from '@/components/ui/badge'
@@ -679,6 +680,15 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
             </CardContent>
           </Card>
         )}
+
+        {/* AI debugging chat for failed deployments (ADR-023), opt-in per project */}
+        {project.ai_debug_chat_enabled === true &&
+          deployment?.status === 'failed' && (
+            <DeploymentDebugChat
+              projectId={project.id}
+              deploymentId={Number(deploymentId)}
+            />
+          )}
 
         {/* Deployment Pipeline */}
         {deployment && (
