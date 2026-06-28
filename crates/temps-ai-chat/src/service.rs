@@ -395,8 +395,10 @@ impl ConversationService {
     /// answers in prose (or a round cap is hit). Returns a single-shot stream of
     /// the final answer (and persists it). `None` when the model can't do tools
     /// or never settled on an answer — the caller then falls back to plain
-    /// streaming. Tool turns are intentionally *not* persisted: only the final
-    /// user→assistant exchange is stored, so the next turn re-derives context.
+    /// streaming. The conversation *history* replayed to the model is still just
+    /// the user→assistant exchange (intermediate tool turns are re-derived each
+    /// turn), but the executed tools are persisted on the assistant message's
+    /// metadata so the UI can replay them after a reload.
     async fn try_tool_loop(
         &self,
         conv: &ai_conversations::Model,
@@ -411,6 +413,10 @@ impl ConversationService {
         // the client BEFORE the final answer. Each entry is a live-only event
         // (`ToolCall` then `ToolResult`); none of it is persisted.
         let mut tool_events: Vec<ChatStreamEvent> = Vec::new();
+        // Structured record of each executed tool, persisted on the final
+        // assistant message's metadata so the chat replays its tool work after a
+        // page reload (not just live during the stream).
+        let mut tools_meta: Vec<serde_json::Value> = Vec::new();
 
         for _ in 0..MAX_ROUNDS {
             let req = ChatTurnRequest {
@@ -449,6 +455,12 @@ impl ConversationService {
                     name: tc.name.clone(),
                     content: result.clone(),
                 });
+                tools_meta.push(serde_json::json!({
+                    "id": tc.id.clone(),
+                    "name": tc.name.clone(),
+                    "arguments": tc.arguments.clone(),
+                    "result": result.clone(),
+                }));
                 messages.push(ChatMessage::tool(tc.id.clone(), result));
             }
         }
@@ -458,8 +470,9 @@ impl ConversationService {
         // path): persist inside a DETACHED task and relay the tool activity plus
         // the single final-answer token over an mpsc channel. The insert runs to
         // completion even if the client dropped the SSE stream, so the final
-        // user→assistant exchange is always stored. Tool events are emitted live
-        // but never persisted.
+        // user→assistant exchange is always stored. The executed tools are also
+        // persisted on the assistant message metadata so the UI replays them on
+        // reload.
         let db = self.db.clone();
         let conv_id = conv.id;
         let (tx, mut rx) =
@@ -469,10 +482,16 @@ impl ConversationService {
                 let _ = tx.send(Ok(ev));
             }
             let _ = tx.send(Ok(ChatStreamEvent::Token(text.clone())));
+            let metadata = if tools_meta.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({ "tools": tools_meta }))
+            };
             let am = ai_messages::ActiveModel {
                 conversation_id: Set(conv_id),
                 role: Set("assistant".to_string()),
                 content: Set(text),
+                metadata: Set(metadata),
                 created_at: Set(Utc::now()),
                 ..Default::default()
             };

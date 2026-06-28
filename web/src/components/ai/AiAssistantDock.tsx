@@ -241,11 +241,11 @@ function DockBody({
               <button
                 type="button"
                 onClick={backToList}
-                className="-ml-1 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-sm font-normal text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                className="-ml-1 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 aria-label="Back to all conversations"
+                title="All chats"
               >
                 <ChevronLeft className="h-4 w-4" />
-                <span className="text-xs">All chats</span>
               </button>
             ) : (
               <Sparkles className="h-5 w-5 text-primary" />

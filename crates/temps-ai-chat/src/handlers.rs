@@ -82,14 +82,34 @@ pub struct MessageResponse {
     pub role: String,
     pub content: String,
     pub created_at: String,
+    /// Tools the assistant ran on this turn (persisted in message metadata), so
+    /// the chat replays its tool work after a reload. Absent for plain turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolInfo>>,
+}
+
+/// One persisted tool invocation + its result, attached to an assistant message.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ToolInfo {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+    pub result: Option<String>,
 }
 
 impl From<ai_messages::Model> for MessageResponse {
     fn from(m: ai_messages::Model) -> Self {
+        let tools = m
+            .metadata
+            .as_ref()
+            .and_then(|v| v.get("tools"))
+            .and_then(|t| serde_json::from_value::<Vec<ToolInfo>>(t.clone()).ok())
+            .filter(|t| !t.is_empty());
         Self {
             role: m.role,
             content: m.content,
             created_at: m.created_at.to_rfc3339(),
+            tools,
         }
     }
 }
@@ -487,6 +507,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         ConversationResponse,
         GlobalConversationResponse,
         MessageResponse,
+        ToolInfo,
         ConversationDetailResponse,
         CreateConversationRequest,
         SendMessageRequest,

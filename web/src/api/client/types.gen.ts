@@ -1783,6 +1783,39 @@ export type CliLoginRequest = {
 };
 
 /**
+ * Configuration for a Cloudflare Email Sending notification provider.
+ *
+ * Notifications are delivered through Cloudflare's transactional Email Sending
+ * API. Only the account, token, sender and recipients are configured here —
+ * subject and body are derived from each notification.
+ */
+export type CloudflareConfig = {
+    /**
+     * Cloudflare account id that owns the Email Sending configuration.
+     */
+    account_id: string;
+    /**
+     * Cloudflare API token with the Email Sending permission. Encrypted at
+     * rest; like the other notification providers, it is returned decrypted to
+     * authorized callers so the edit form can prefill (not masked).
+     */
+    api_token: string;
+    /**
+     * Verified sender address (must belong to a domain enabled for Cloudflare
+     * Email Sending).
+     */
+    from_address: string;
+    /**
+     * Optional human-friendly sender name shown in the recipient's inbox.
+     */
+    from_name?: string | null;
+    /**
+     * Recipients that should receive the notification.
+     */
+    to_addresses: Array<string>;
+};
+
+/**
  * Response body for `GET /external-services/{id}/cluster-health`.
  */
 export type ClusterHealthReportResponse = {
@@ -2618,6 +2651,12 @@ export type CreateBackupScheduleRequest = {
      * via `POST /backups/schedules/{id}/services`. Omit to use the default.
      */
     target_all_services?: boolean | null;
+};
+
+export type CreateCloudflareProviderRequest = {
+    config: CloudflareConfig;
+    enabled?: boolean | null;
+    name: string;
 };
 
 export type CreateConversationRequest = {
@@ -8165,6 +8204,11 @@ export type MessageResponse = {
     content: string;
     created_at: string;
     role: string;
+    /**
+     * Tools the assistant ran on this turn (persisted in message metadata), so
+     * the chat replays its tool work after a reload. Absent for plain turns.
+     */
+    tools?: Array<ToolInfo> | null;
 };
 
 /**
@@ -14250,6 +14294,40 @@ export type TokenRenewalRequest = {
     refresh_token: string;
 };
 
+/**
+ * Payload for the `tool_call` SSE event: the model is about to run a tool.
+ * Serialized as compact single-line JSON onto one `data:` line.
+ */
+export type ToolCallEvent = {
+    /**
+     * The raw JSON-args string the model emitted.
+     */
+    arguments: string;
+    id: string;
+    name: string;
+};
+
+/**
+ * One persisted tool invocation + its result, attached to an assistant message.
+ */
+export type ToolInfo = {
+    arguments: string;
+    id: string;
+    name: string;
+    result?: string | null;
+};
+
+/**
+ * Payload for the `tool_result` SSE event: a tool finished running. Serialized
+ * as compact single-line JSON; `content` is JSON-string-escaped so it stays on
+ * one `data:` line even when long.
+ */
+export type ToolResultEvent = {
+    content: string;
+    id: string;
+    name: string;
+};
+
 export type TopModelsQueryParams = {
     /**
      * ISO 8601 start time (defaults to 24h ago)
@@ -14620,6 +14698,12 @@ export type UpdateBlobResponse = {
      * Whether the operation succeeded
      */
     success: boolean;
+};
+
+export type UpdateCloudflareProviderRequest = {
+    config: CloudflareConfig;
+    enabled?: boolean | null;
+    name?: string | null;
 };
 
 export type UpdateConfigBody = {
@@ -28833,6 +28917,65 @@ export type CreateNotificationProviderResponses = {
 };
 
 export type CreateNotificationProviderResponse = CreateNotificationProviderResponses[keyof CreateNotificationProviderResponses];
+
+export type CreateCloudflareProviderData = {
+    body: CreateCloudflareProviderRequest;
+    path?: never;
+    query?: never;
+    url: '/notification-providers/cloudflare';
+};
+
+export type CreateCloudflareProviderErrors = {
+    /**
+     * Invalid request
+     */
+    400: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CreateCloudflareProviderResponses = {
+    /**
+     * Successfully created Cloudflare provider
+     */
+    201: NotificationProviderResponse;
+};
+
+export type CreateCloudflareProviderResponse = CreateCloudflareProviderResponses[keyof CreateCloudflareProviderResponses];
+
+export type UpdateCloudflareProviderData = {
+    body: UpdateCloudflareProviderRequest;
+    path: {
+        /**
+         * Provider ID
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/notification-providers/cloudflare/{id}';
+};
+
+export type UpdateCloudflareProviderErrors = {
+    /**
+     * Provider not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type UpdateCloudflareProviderResponses = {
+    /**
+     * Successfully updated Cloudflare provider
+     */
+    200: NotificationProviderResponse;
+};
+
+export type UpdateCloudflareProviderResponse = UpdateCloudflareProviderResponses[keyof UpdateCloudflareProviderResponses];
 
 export type CreateNotificationEmailProviderData = {
     body: CreateNotificationEmailProviderRequest;

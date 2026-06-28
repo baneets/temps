@@ -1,5 +1,4 @@
 import {
-  type MessageResponse,
   createConversation,
   findConversation,
   getConversation,
@@ -7,6 +6,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { TimeAgo } from '@/components/utils/TimeAgo'
 import {
   ChevronDown,
   ChevronRight,
@@ -19,20 +19,27 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-/** A tool invocation surfaced over the stream, with its result once it returns. */
+/** A tool invocation surfaced over the stream / persisted on the message. */
 interface ToolCall {
   id: string
   name: string
   arguments: string
-  result?: string
+  /** undefined while running (live), a string once done; null only from the API. */
+  result?: string | null
 }
 
 /**
- * Local chat message shape — extends the SDK's MessageResponse with the tool
- * invocations attached to an assistant turn (the SDK type has no `tools` field
- * since tools are a streaming-only concern, not persisted in message history).
+ * Local chat message shape. Mirrors the SDK's MessageResponse but with the tool
+ * invocations attached to an assistant turn typed as the local ToolCall (the API
+ * sends them as `tools` on persisted assistant messages; the live stream fills
+ * them in as events arrive).
  */
-type ChatMessage = MessageResponse & { tools?: ToolCall[] }
+interface ChatMessage {
+  role: string
+  content: string
+  created_at?: string
+  tools?: ToolCall[]
+}
 
 /** Pretty-print a JSON-args string when it parses; otherwise return it raw. */
 function prettyJson(raw: string): string {
@@ -364,7 +371,16 @@ export function DebugChatPanel({
         const { data: detail } = await getConversation({
           path: { project_id: projectId, public_id: conv.public_id },
         }).catch(() => ({ data: null }))
-        if (!ignore && detail) setMessages(detail.messages ?? [])
+        if (!ignore && detail) {
+          setMessages(
+            (detail.messages ?? []).map((m) => ({
+              role: m.role,
+              content: m.content,
+              created_at: m.created_at,
+              tools: m.tools ?? undefined,
+            }))
+          )
+        }
       } catch {
         /* best-effort: leave the panel in its empty state */
       } finally {
@@ -440,37 +456,52 @@ export function DebugChatPanel({
 
         {visible.map((m, i) =>
           m.role === 'user' ? (
-            <div key={i} className="flex justify-end">
+            <div key={i} className="flex flex-col items-end gap-0.5">
               <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary px-3.5 py-2.5 text-sm text-primary-foreground">
                 {m.content}
               </div>
+              {m.created_at && (
+                <TimeAgo
+                  date={m.created_at}
+                  className="px-1 text-[10px] text-muted-foreground"
+                />
+              )}
             </div>
           ) : (
             <div key={i} className="flex items-start gap-2.5">
               <AssistantAvatar />
-              <div className="min-w-0 flex-1 space-y-2 rounded-2xl rounded-tl-sm bg-muted/60 px-3.5 py-2.5">
-                {m.tools && m.tools.length > 0 && (
-                  <div className="min-w-0 space-y-1.5">
-                    {m.tools.map((tool) => (
-                      <ToolCard key={tool.id} tool={tool} />
-                    ))}
-                  </div>
-                )}
-                {m.content ? (
-                  <div className={proseClasses}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {m.content}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  // Only the trailing turn that is actively streaming, and which
-                  // has neither content nor tools yet, gets dots — never an empty
-                  // turn left behind by a failed send, and never once tool cards
-                  // are already showing the work in progress.
-                  streaming &&
-                  i === visible.length - 1 &&
-                  !(m.tools && m.tools.length > 0) && <TypingDots />
-                )}
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="min-w-0 space-y-2 rounded-2xl rounded-tl-sm bg-muted/60 px-3.5 py-2.5">
+                  {m.tools && m.tools.length > 0 && (
+                    <div className="min-w-0 space-y-1.5">
+                      {m.tools.map((tool) => (
+                        <ToolCard key={tool.id} tool={tool} />
+                      ))}
+                    </div>
+                  )}
+                  {m.content ? (
+                    <div className={proseClasses}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {m.content}
+                      </ReactMarkdown>
+                    </div>
+                  ) : (
+                    // Only the trailing turn that is actively streaming, and which
+                    // has neither content nor tools yet, gets dots — never an empty
+                    // turn left behind by a failed send, and never once tool cards
+                    // are already showing the work in progress.
+                    streaming &&
+                    i === visible.length - 1 &&
+                    !(m.tools && m.tools.length > 0) && <TypingDots />
+                  )}
+                </div>
+                {m.created_at &&
+                  (m.content || (m.tools && m.tools.length > 0)) && (
+                    <TimeAgo
+                      date={m.created_at}
+                      className="px-1 text-[10px] text-muted-foreground"
+                    />
+                  )}
               </div>
             </div>
           )
