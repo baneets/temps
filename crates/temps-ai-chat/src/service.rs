@@ -17,6 +17,31 @@ use temps_entities::{ai_conversations, ai_messages};
 use crate::provider::ConversationContextProvider;
 use crate::ChatError;
 
+/// One item in the live `send_message` stream. The plain-text path yields only
+/// `Token`s; the agentic tool loop additionally surfaces each tool invocation
+/// (`ToolCall`, emitted just before the tool runs) and its outcome
+/// (`ToolResult`, emitted right after), so the client can render tool activity
+/// in real time. Only the final assistant text is persisted; tool events are
+/// live-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatStreamEvent {
+    /// A chunk of assistant prose to append to the message content.
+    Token(String),
+    /// The model is about to invoke a tool. `arguments` is the raw JSON-args
+    /// string the model emitted.
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// A tool finished; `content` is the string it returned.
+    ToolResult {
+        id: String,
+        name: String,
+        content: String,
+    },
+}
+
 /// A conversation plus its project's display info, for the unified switcher.
 pub struct ConversationWithProject {
     pub conversation: ai_conversations::Model,
@@ -257,7 +282,8 @@ impl ConversationService {
         &self,
         conv: &ai_conversations::Model,
         user_text: &str,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>>, ChatError> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, ChatError>> + Send>>, ChatError>
+    {
         if !self.ai.is_available().await {
             return Err(ChatError::AiUnavailable);
         }
@@ -323,7 +349,8 @@ impl ConversationService {
         // orphans the user turn. The send error is ignored on purpose.
         let db = self.db.clone();
         let conv_id = conv.id;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<String, ChatError>>();
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<ChatStreamEvent, ChatError>>();
         tokio::spawn(async move {
             let mut acc = String::new();
             while let Some(item) = token_stream.next().await {
@@ -332,7 +359,7 @@ impl ConversationService {
                         acc.push_str(&tok);
                         // Ignore send errors: the client may have disconnected,
                         // but we still want to finish accumulating and persist.
-                        let _ = tx.send(Ok(tok));
+                        let _ = tx.send(Ok(ChatStreamEvent::Token(tok)));
                     }
                     Err(e) => {
                         let _ = tx.send(Err(ChatError::Ai(e.to_string())));
@@ -376,10 +403,14 @@ impl ConversationService {
         base_messages: &[ChatMessage],
         provider: &Arc<dyn ConversationContextProvider>,
         tools: Vec<ChatTool>,
-    ) -> Option<Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>>> {
+    ) -> Option<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, ChatError>> + Send>>> {
         const MAX_ROUNDS: usize = 6;
         let mut messages = base_messages.to_vec();
         let mut final_text: Option<String> = None;
+        // Buffer the tool activity we observed this turn so it can be replayed to
+        // the client BEFORE the final answer. Each entry is a live-only event
+        // (`ToolCall` then `ToolResult`); none of it is persisted.
+        let mut tool_events: Vec<ChatStreamEvent> = Vec::new();
 
         for _ in 0..MAX_ROUNDS {
             let req = ChatTurnRequest {
@@ -403,24 +434,41 @@ impl ConversationService {
                 tool_call_id: None,
             });
             for tc in &resp.tool_calls {
+                // Surface the invocation just before running it.
+                tool_events.push(ChatStreamEvent::ToolCall {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                });
                 let result = provider
                     .execute_tool(conv.project_id, &conv.context_id, &tc.name, &tc.arguments)
                     .await;
+                // Surface the result right after.
+                tool_events.push(ChatStreamEvent::ToolResult {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    content: result.clone(),
+                });
                 messages.push(ChatMessage::tool(tc.id.clone(), result));
             }
         }
 
         let text = final_text.filter(|t| !t.is_empty())?;
         // Disconnect-safe persistence (same rationale as the plain-streaming
-        // path): persist inside a DETACHED task and relay the single final-answer
-        // token over an mpsc channel. The insert runs to completion even if the
-        // client dropped the SSE stream, so the final user→assistant exchange is
-        // always stored.
+        // path): persist inside a DETACHED task and relay the tool activity plus
+        // the single final-answer token over an mpsc channel. The insert runs to
+        // completion even if the client dropped the SSE stream, so the final
+        // user→assistant exchange is always stored. Tool events are emitted live
+        // but never persisted.
         let db = self.db.clone();
         let conv_id = conv.id;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<String, ChatError>>();
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<ChatStreamEvent, ChatError>>();
         tokio::spawn(async move {
-            let _ = tx.send(Ok(text.clone()));
+            for ev in tool_events {
+                let _ = tx.send(Ok(ev));
+            }
+            let _ = tx.send(Ok(ChatStreamEvent::Token(text.clone())));
             let am = ai_messages::ActiveModel {
                 conversation_id: Set(conv_id),
                 role: Set("assistant".to_string()),
@@ -601,13 +649,13 @@ mod tests {
     }
 
     async fn drain(
-        stream: Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>>,
-    ) -> Vec<String> {
+        stream: Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, ChatError>> + Send>>,
+    ) -> Vec<ChatStreamEvent> {
         let mut s = stream;
         let mut out = Vec::new();
         while let Some(item) = s.next().await {
-            if let Ok(tok) = item {
-                out.push(tok);
+            if let Ok(ev) = item {
+                out.push(ev);
             }
         }
         out
@@ -648,7 +696,24 @@ mod tests {
             .expect("loop should produce a final answer stream");
         let out = drain(stream).await;
 
-        assert_eq!(out, vec!["final answer".to_string()]);
+        // The scripted tool call surfaces as ToolCall -> ToolResult (live-only),
+        // followed by the final assistant prose as a single Token.
+        assert_eq!(
+            out,
+            vec![
+                ChatStreamEvent::ToolCall {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                ChatStreamEvent::ToolResult {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    content: "tool result".to_string(),
+                },
+                ChatStreamEvent::Token("final answer".to_string()),
+            ]
+        );
         assert_eq!(tool_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(chat_count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }

@@ -17,7 +17,7 @@ pub use plugin::AiChatPlugin;
 pub use provider::{ConversationContextProvider, ConversationSeed};
 pub use providers::alert::AlertChatProvider;
 pub use providers::deployment::DeploymentChatProvider;
-pub use service::ConversationService;
+pub use service::{ChatStreamEvent, ConversationService};
 
 /// Errors from the conversation layer. All map cleanly to HTTP at the handler.
 #[derive(Debug, thiserror::Error)]

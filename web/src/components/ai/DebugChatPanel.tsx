@@ -7,10 +7,88 @@ import {
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
-import { Loader2, Send, Sparkles } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Send,
+  Sparkles,
+  Wrench,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+/** A tool invocation surfaced over the stream, with its result once it returns. */
+interface ToolCall {
+  id: string
+  name: string
+  arguments: string
+  result?: string
+}
+
+/**
+ * Local chat message shape — extends the SDK's MessageResponse with the tool
+ * invocations attached to an assistant turn (the SDK type has no `tools` field
+ * since tools are a streaming-only concern, not persisted in message history).
+ */
+type ChatMessage = MessageResponse & { tools?: ToolCall[] }
+
+/** Pretty-print a JSON-args string when it parses; otherwise return it raw. */
+function prettyJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
+const toolBlockClasses =
+  'max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 font-mono text-[11px]'
+
+/** A collapsible card for one tool invocation + its result. */
+function ToolCard({ tool }: { tool: ToolCall }) {
+  const [open, setOpen] = useState(false)
+  const running = tool.result === undefined
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border bg-muted/40 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-muted/70"
+        aria-expanded={open}
+      >
+        <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate font-medium">{tool.name}</span>
+        {running && (
+          <Loader2
+            className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground"
+            aria-label="Running"
+          />
+        )}
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        )}
+      </button>
+      {open && (
+        <div className="min-w-0 space-y-2 border-t px-2.5 py-2">
+          <div className="min-w-0 space-y-1">
+            <div className="font-medium text-muted-foreground">Arguments</div>
+            <pre className={toolBlockClasses}>{prettyJson(tool.arguments)}</pre>
+          </div>
+          {!running && (
+            <div className="min-w-0 space-y-1">
+              <div className="font-medium text-muted-foreground">Result</div>
+              <pre className={toolBlockClasses}>{tool.result}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface DebugChatPanelProps {
   projectId: number
@@ -68,7 +146,7 @@ export function DebugChatPanel({
   const base = `/api/projects/${projectId}/ai/conversations`
   const ctxId = String(contextId)
   const [publicId, setPublicId] = useState<string | null>(null)
-  const [messages, setMessages] = useState<MessageResponse[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [starting, setStarting] = useState(false)
@@ -133,19 +211,75 @@ export function DebugChatPanel({
           while ((boundary = buffer.indexOf('\n\n')) >= 0) {
             const rawEvent = buffer.slice(0, boundary)
             buffer = buffer.slice(boundary + 2)
-            let isError = false
+            let eventName = ''
             const dataParts: string[] = []
             for (const line of rawEvent.split('\n')) {
               if (line.startsWith('event:')) {
-                if (line.slice(6).trim() === 'error') isError = true
+                eventName = line.slice(6).trim()
               } else if (line.startsWith('data:')) {
                 dataParts.push(line.slice(5).replace(/^ /, ''))
               }
             }
             const chunk = dataParts.join('\n')
-            if (isError) {
+            if (eventName === 'error') {
               if (chunk) setError(chunk)
               dropEmptyAssistantTurn()
+              continue
+            }
+            if (eventName === 'tool_call') {
+              try {
+                const t = JSON.parse(chunk) as {
+                  id: string
+                  name: string
+                  arguments: string
+                }
+                setMessages((m) => {
+                  const copy = [...m]
+                  const last = copy[copy.length - 1]
+                  if (last?.role === 'assistant') {
+                    copy[copy.length - 1] = {
+                      ...last,
+                      tools: [
+                        ...(last.tools ?? []),
+                        {
+                          id: t.id,
+                          name: t.name,
+                          arguments: t.arguments,
+                          result: undefined,
+                        },
+                      ],
+                    }
+                  }
+                  return copy
+                })
+              } catch {
+                /* ignore malformed tool_call frame */
+              }
+              continue
+            }
+            if (eventName === 'tool_result') {
+              try {
+                const t = JSON.parse(chunk) as {
+                  id: string
+                  name: string
+                  content: string
+                }
+                setMessages((m) => {
+                  const copy = [...m]
+                  const last = copy[copy.length - 1]
+                  if (last?.role === 'assistant' && last.tools) {
+                    copy[copy.length - 1] = {
+                      ...last,
+                      tools: last.tools.map((tool) =>
+                        tool.id === t.id ? { ...tool, result: t.content } : tool
+                      ),
+                    }
+                  }
+                  return copy
+                })
+              } catch {
+                /* ignore malformed tool_result frame */
+              }
               continue
             }
             if (chunk) {
@@ -153,6 +287,7 @@ export function DebugChatPanel({
                 const copy = [...m]
                 const last = copy[copy.length - 1]
                 copy[copy.length - 1] = {
+                  ...last,
                   role: 'assistant',
                   content: (last?.content ?? '') + chunk,
                   created_at: last?.created_at ?? new Date().toISOString(),
@@ -313,7 +448,14 @@ export function DebugChatPanel({
           ) : (
             <div key={i} className="flex items-start gap-2.5">
               <AssistantAvatar />
-              <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-muted/60 px-3.5 py-2.5">
+              <div className="min-w-0 flex-1 space-y-2 rounded-2xl rounded-tl-sm bg-muted/60 px-3.5 py-2.5">
+                {m.tools && m.tools.length > 0 && (
+                  <div className="min-w-0 space-y-1.5">
+                    {m.tools.map((tool) => (
+                      <ToolCard key={tool.id} tool={tool} />
+                    ))}
+                  </div>
+                )}
                 {m.content ? (
                   <div className={proseClasses}>
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -321,9 +463,13 @@ export function DebugChatPanel({
                     </ReactMarkdown>
                   </div>
                 ) : (
-                  // Only the trailing turn that is actively streaming gets dots —
-                  // never an empty turn left behind by a failed send.
-                  streaming && i === visible.length - 1 && <TypingDots />
+                  // Only the trailing turn that is actively streaming, and which
+                  // has neither content nor tools yet, gets dots — never an empty
+                  // turn left behind by a failed send, and never once tool cards
+                  // are already showing the work in progress.
+                  streaming &&
+                  i === visible.length - 1 &&
+                  !(m.tools && m.tools.length > 0) && <TypingDots />
                 )}
               </div>
             </div>

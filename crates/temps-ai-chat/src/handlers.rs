@@ -24,6 +24,7 @@ use temps_auth::{deny_deployment_token, permission_guard, project_scope_guard, R
 use temps_core::problemdetails::{self, Problem};
 use temps_entities::{ai_conversations, ai_messages};
 
+use crate::service::ChatStreamEvent;
 use crate::{ChatError, ConversationService};
 
 /// Shared state for the chat routes.
@@ -117,6 +118,26 @@ pub struct FindConversationQuery {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
+    pub content: String,
+}
+
+/// Payload for the `tool_call` SSE event: the model is about to run a tool.
+/// Serialized as compact single-line JSON onto one `data:` line.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ToolCallEvent {
+    pub id: String,
+    pub name: String,
+    /// The raw JSON-args string the model emitted.
+    pub arguments: String,
+}
+
+/// Payload for the `tool_result` SSE event: a tool finished running. Serialized
+/// as compact single-line JSON; `content` is JSON-string-escaped so it stays on
+/// one `data:` line even when long.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ToolResultEvent {
+    pub id: String,
+    pub name: String,
     pub content: String,
 }
 
@@ -362,7 +383,36 @@ pub async fn send_message(
 
     let sse = token_stream.map(|item| {
         let event = match item {
-            Ok(tok) => Event::default().data(tok),
+            Ok(ChatStreamEvent::Token(text)) => Event::default().data(text),
+            Ok(ChatStreamEvent::ToolCall {
+                id,
+                name,
+                arguments,
+            }) => {
+                let payload = ToolCallEvent {
+                    id,
+                    name,
+                    arguments,
+                };
+                // Single-line compact JSON so it occupies one `data:` line. On
+                // the (practically impossible) serialization failure, surface an
+                // error event rather than dropping the frame silently.
+                match serde_json::to_string(&payload) {
+                    Ok(json) => Event::default().event("tool_call").data(json),
+                    Err(e) => Event::default()
+                        .event("error")
+                        .data(format!("failed to encode tool_call event: {e}")),
+                }
+            }
+            Ok(ChatStreamEvent::ToolResult { id, name, content }) => {
+                let payload = ToolResultEvent { id, name, content };
+                match serde_json::to_string(&payload) {
+                    Ok(json) => Event::default().event("tool_result").data(json),
+                    Err(e) => Event::default()
+                        .event("error")
+                        .data(format!("failed to encode tool_result event: {e}")),
+                }
+            }
             Err(e) => Event::default().event("error").data(e.to_string()),
         };
         Ok::<_, Infallible>(event)
@@ -440,6 +490,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         ConversationDetailResponse,
         CreateConversationRequest,
         SendMessageRequest,
+        ToolCallEvent,
+        ToolResultEvent,
     ))
 )]
 pub struct AiChatApiDoc;
