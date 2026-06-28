@@ -1,34 +1,36 @@
+import { listProviderKeys } from '@/api/client'
 import { useAiAssistant } from '@/components/ai/AiAssistantContext'
-import { getProjectBySlugOptions } from '@/api/client/@tanstack/react-query.gen'
 import { Button } from '@/components/ui/button'
 import { useQuery } from '@tanstack/react-query'
 import { Sparkles } from 'lucide-react'
 
 /**
- * Top-bar entry point to the persistent AI assistant dock (ADR-023). Renders
- * only inside a project that has AI debug chat enabled. Toggles the dock open on
- * its conversation list, so any past chat can be resumed — and because the dock
- * lives in the app shell, it stays open while you navigate the project.
+ * Global top-bar entry point to the persistent AI assistant dock (ADR-023).
+ * Shown on every page whenever an AI provider is configured — the dock opens on
+ * the cross-project conversation list, so any chat can be resumed from anywhere
+ * (it lives in the app shell and stays open while you navigate). Starting new
+ * chats still happens from a failed deployment stage or a firing alert.
  */
-export function AiAssistantButton({ projectSlug }: { projectSlug: string }) {
-  const { open, close, isOpen, projectId } = useAiAssistant()
-  const { data: project } = useQuery({
-    ...getProjectBySlugOptions({ path: { slug: projectSlug } }),
+export function AiAssistantButton() {
+  const { open, close, isOpen } = useAiAssistant()
+  // Shared cache key with AiGateway / AiProvidersPage — no extra fetch.
+  const { data: keys } = useQuery({
+    queryKey: ['providerKeys'],
+    queryFn: async () => (await listProviderKeys()).data ?? [],
+    staleTime: 60_000,
+    retry: false,
   })
 
-  if (!project || project.ai_debug_chat_enabled !== true) return null
-
-  const showingThisProject = isOpen && projectId === project.id
-  const onClick = () =>
-    showingThisProject ? close() : open({ projectId: project.id })
+  const aiConfigured = (keys ?? []).some((k) => k.is_active)
+  if (!aiConfigured) return null
 
   return (
     <Button
-      variant={showingThisProject ? 'secondary' : 'outline'}
+      variant={isOpen ? 'secondary' : 'outline'}
       size="icon"
-      onClick={onClick}
+      onClick={() => (isOpen ? close() : open())}
       title="AI assistant"
-      aria-pressed={showingThisProject}
+      aria-pressed={isOpen}
     >
       <Sparkles className="h-4 w-4" />
       <span className="sr-only">AI assistant</span>

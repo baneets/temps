@@ -1,4 +1,10 @@
-import { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+} from 'react'
 
 /** A conversation the assistant can open directly into (e.g. a failed stage). */
 export interface AiChatContext {
@@ -13,7 +19,8 @@ export interface AiChatContext {
 }
 
 interface OpenOptions {
-  projectId: number
+  /** Project for an initial-context open; omitted for a global list-only open. */
+  projectId?: number
   /** Open straight into this conversation; omit to open on the chat list. */
   context?: AiChatContext
 }
@@ -24,7 +31,7 @@ interface AiAssistantValue {
   initialContext?: AiChatContext
   /** Increments on every `open()` so the dock can remount into the new target. */
   openSeq: number
-  open: (opts: OpenOptions) => void
+  open: (opts?: OpenOptions) => void
   close: () => void
   toggle: () => void
 }
@@ -36,17 +43,21 @@ const AiAssistantContext = createContext<AiAssistantValue | null>(null)
  * router lets the dock stay open and keep streaming while the user navigates the
  * rest of the console — it is rendered once in the app shell, not per page.
  */
-export function AiAssistantProvider({ children }: { children: React.ReactNode }) {
+export function AiAssistantProvider({
+  children,
+}: {
+  children: React.ReactNode
+}) {
   const [isOpen, setIsOpen] = useState(false)
   const [projectId, setProjectId] = useState<number | null>(null)
-  const [initialContext, setInitialContext] = useState<AiChatContext | undefined>(
-    undefined
-  )
+  const [initialContext, setInitialContext] = useState<
+    AiChatContext | undefined
+  >(undefined)
   const [openSeq, setOpenSeq] = useState(0)
 
-  const open = useCallback((opts: OpenOptions) => {
-    setProjectId(opts.projectId)
-    setInitialContext(opts.context)
+  const open = useCallback((opts?: OpenOptions) => {
+    setProjectId(opts?.projectId ?? null)
+    setInitialContext(opts?.context)
     setOpenSeq((n) => n + 1)
     setIsOpen(true)
   }, [])

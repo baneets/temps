@@ -282,7 +282,7 @@ export function Header() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          {projectSlug && <AiAssistantButton projectSlug={projectSlug} />}
+          <AiAssistantButton />
           <BackupAlertsButton />
           <ThemeToggle />
         </div>
