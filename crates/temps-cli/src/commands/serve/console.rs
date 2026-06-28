@@ -1787,6 +1787,7 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             service_context.get_service::<temps_deployments::DeploymentService>();
         let health_notification_service =
             service_context.get_service::<dyn temps_core::notifications::NotificationService>();
+        let health_config_service = service_context.get_service::<temps_config::ConfigService>();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
@@ -1817,9 +1818,13 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                     }
                 }
 
-                // Alert on node resource pressure (CPU/mem/disk) + heartbeat lag.
-                if let Some(ref notification_service) = health_notification_service {
-                    check_node_resources(health_db.as_ref(), notification_service).await;
+                // Alert on node resource pressure (CPU/mem/disk) against the
+                // operator-configurable thresholds in settings.multi_node.
+                if let (Some(ref notification_service), Some(ref config_service)) =
+                    (&health_notification_service, &health_config_service)
+                {
+                    check_node_resources(health_db.as_ref(), config_service, notification_service)
+                        .await;
                 }
 
                 // Transition fully-drained nodes from "draining" to "drained".

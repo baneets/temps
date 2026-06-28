@@ -440,6 +440,28 @@ pub struct MultiNodeSettings {
     /// workers have re-enrolled with certs.
     #[serde(default)]
     pub require_mtls: bool,
+    /// CPU-usage percent above which a worker node raises a resource alert
+    /// (ADR-020 / monitoring). `None` disables CPU alerting. Default 90.
+    #[serde(default = "default_node_cpu_alert_percent")]
+    pub node_cpu_alert_percent: Option<f64>,
+    /// Memory-usage percent above which a worker node raises a resource alert.
+    /// `None` disables memory alerting. Default 90.
+    #[serde(default = "default_node_memory_alert_percent")]
+    pub node_memory_alert_percent: Option<f64>,
+    /// Disk-usage percent above which a worker node raises a resource alert.
+    /// `None` disables disk alerting. Default 90.
+    #[serde(default = "default_node_disk_alert_percent")]
+    pub node_disk_alert_percent: Option<f64>,
+}
+
+fn default_node_cpu_alert_percent() -> Option<f64> {
+    Some(90.0)
+}
+fn default_node_memory_alert_percent() -> Option<f64> {
+    Some(90.0)
+}
+fn default_node_disk_alert_percent() -> Option<f64> {
+    Some(90.0)
 }
 
 fn default_legacy_shared_token_enabled() -> bool {
@@ -455,6 +477,9 @@ impl Default for MultiNodeSettings {
             cluster_ca_cert_pem: None,
             cluster_ca_key_encrypted: None,
             require_mtls: false,
+            node_cpu_alert_percent: default_node_cpu_alert_percent(),
+            node_memory_alert_percent: default_node_memory_alert_percent(),
+            node_disk_alert_percent: default_node_disk_alert_percent(),
         }
     }
 }

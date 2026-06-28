@@ -168,15 +168,6 @@ pub async fn notify_node_recovered(
     }
 }
 
-/// Percent thresholds above which a node resource raises a Warning alert.
-const NODE_CPU_ALERT_PERCENT: f64 = 90.0;
-const NODE_MEMORY_ALERT_PERCENT: f64 = 90.0;
-const NODE_DISK_ALERT_PERCENT: f64 = 90.0;
-/// A still-"active" node whose last heartbeat is older than this (but under the
-/// offline threshold) is lagging — an early "node is struggling / slow to
-/// respond" signal short of a full outage.
-const NODE_HEARTBEAT_LAG_ALERT_SECS: i64 = 60;
-
 /// Send one resource-pressure alert. The title is STABLE (value lives in the
 /// body) so the notification pipeline's batch-key throttle collapses repeated
 /// alerts for the same node+metric instead of firing every 60s cycle.
@@ -215,13 +206,30 @@ async fn send_node_resource_alert(
 }
 
 /// Check active nodes' resource usage (CPU / memory / disk from the heartbeat
-/// `capacity`) and heartbeat freshness, alerting on threshold breaches
+/// `capacity`) against operator-configurable thresholds, alerting on breaches
 /// (ADR-020 / monitoring). Runs in the 60s health loop after the offline check.
 /// Best-effort: query/delivery failures are logged, never fatal.
 pub async fn check_node_resources(
     db: &DatabaseConnection,
+    config_service: &temps_config::ConfigService,
     notification_service: &std::sync::Arc<dyn temps_core::notifications::NotificationService>,
 ) {
+    // Operator-configurable thresholds (settings.multi_node.node_*_alert_percent);
+    // `None` disables alerting for that metric. Defaults to 90%.
+    let settings = match config_service.get_settings().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Node resource check: failed to read settings: {}", e);
+            return;
+        }
+    };
+    let cpu_threshold = settings.multi_node.node_cpu_alert_percent;
+    let mem_threshold = settings.multi_node.node_memory_alert_percent;
+    let disk_threshold = settings.multi_node.node_disk_alert_percent;
+    if cpu_threshold.is_none() && mem_threshold.is_none() && disk_threshold.is_none() {
+        return; // all node resource alerts disabled
+    }
+
     let active = match nodes::Entity::find()
         .filter(nodes::Column::Status.eq("active"))
         .all(db)
@@ -234,93 +242,65 @@ pub async fn check_node_resources(
         }
     };
 
-    let now = chrono::Utc::now();
     for node in &active {
         let cap = &node.capacity;
 
-        if let Some(cpu) = cap.get("cpu_percent").and_then(|v| v.as_f64()) {
-            if cpu > NODE_CPU_ALERT_PERCENT {
-                send_node_resource_alert(
-                    notification_service,
-                    &node.name,
-                    node.id,
-                    "CPU",
-                    cpu,
-                    NODE_CPU_ALERT_PERCENT,
-                )
-                .await;
-            }
-        }
-
-        if let (Some(used), Some(total)) = (
-            cap.get("memory_used_bytes").and_then(|v| v.as_f64()),
-            cap.get("memory_total_bytes").and_then(|v| v.as_f64()),
-        ) {
-            if total > 0.0 {
-                let pct = used / total * 100.0;
-                if pct > NODE_MEMORY_ALERT_PERCENT {
+        if let Some(threshold) = cpu_threshold {
+            if let Some(cpu) = cap.get("cpu_percent").and_then(|v| v.as_f64()) {
+                if cpu > threshold {
                     send_node_resource_alert(
                         notification_service,
                         &node.name,
                         node.id,
-                        "memory",
-                        pct,
-                        NODE_MEMORY_ALERT_PERCENT,
+                        "CPU",
+                        cpu,
+                        threshold,
                     )
                     .await;
                 }
             }
         }
 
-        if let (Some(used), Some(total)) = (
-            cap.get("disk_used_bytes").and_then(|v| v.as_f64()),
-            cap.get("disk_total_bytes").and_then(|v| v.as_f64()),
-        ) {
-            if total > 0.0 {
-                let pct = used / total * 100.0;
-                if pct > NODE_DISK_ALERT_PERCENT {
-                    send_node_resource_alert(
-                        notification_service,
-                        &node.name,
-                        node.id,
-                        "disk",
-                        pct,
-                        NODE_DISK_ALERT_PERCENT,
-                    )
-                    .await;
+        if let Some(threshold) = mem_threshold {
+            if let (Some(used), Some(total)) = (
+                cap.get("memory_used_bytes").and_then(|v| v.as_f64()),
+                cap.get("memory_total_bytes").and_then(|v| v.as_f64()),
+            ) {
+                if total > 0.0 {
+                    let pct = used / total * 100.0;
+                    if pct > threshold {
+                        send_node_resource_alert(
+                            notification_service,
+                            &node.name,
+                            node.id,
+                            "memory",
+                            pct,
+                            threshold,
+                        )
+                        .await;
+                    }
                 }
             }
         }
 
-        // Heartbeat lag — the node is still alive but slow to check in
-        // (responsiveness / latency proxy short of a full outage).
-        if let Some(hb) = node.last_heartbeat {
-            let lag = (now - hb).num_seconds();
-            if lag > NODE_HEARTBEAT_LAG_ALERT_SECS {
-                use temps_core::notifications::{
-                    NotificationData, NotificationPriority, NotificationType,
-                };
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("event".to_string(), "node_heartbeat_lag".to_string());
-                metadata.insert("node_id".to_string(), node.id.to_string());
-                metadata.insert("node_name".to_string(), node.name.clone());
-                metadata.insert("lag_seconds".to_string(), lag.to_string());
-                let notification = NotificationData {
-                    title: format!("Worker node '{}' is slow to respond", node.name),
-                    message: format!(
-                        "Node '{}' (id {}) last sent a heartbeat {}s ago — it is lagging \
-                         (marked offline at {}s). The node may be overloaded or network-degraded.",
-                        node.name, node.id, lag, HEARTBEAT_STALE_THRESHOLD_SECS
-                    ),
-                    notification_type: NotificationType::Warning,
-                    priority: NotificationPriority::High,
-                    metadata,
-                    ..Default::default()
-                };
-                if let Err(e) = notification_service.send_notification(notification).await {
-                    tracing::error!(node_id = node.id, "Failed to send node-lag alert: {}", e);
-                } else {
-                    tracing::info!(node_id = node.id, node_name = %node.name, lag, "Sent node-lag alert");
+        if let Some(threshold) = disk_threshold {
+            if let (Some(used), Some(total)) = (
+                cap.get("disk_used_bytes").and_then(|v| v.as_f64()),
+                cap.get("disk_total_bytes").and_then(|v| v.as_f64()),
+            ) {
+                if total > 0.0 {
+                    let pct = used / total * 100.0;
+                    if pct > threshold {
+                        send_node_resource_alert(
+                            notification_service,
+                            &node.name,
+                            node.id,
+                            "disk",
+                            pct,
+                            threshold,
+                        )
+                        .await;
+                    }
                 }
             }
         }
