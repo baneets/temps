@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::streaming::{ChatTurnRequest, TokenStream};
+use crate::streaming::{ChatTurnRequest, ChatTurnResponse, TokenStream};
 
 /// A single AI completion request. Construct with `..Default::default()` and set
 /// only what you need:
@@ -82,4 +82,13 @@ pub trait AiService: Send + Sync {
     /// and streams the assistant reply token-by-token. The substrate for
     /// persistent debugging conversations. Best-effort like [`Self::complete`].
     async fn chat_stream(&self, request: ChatTurnRequest) -> Result<TokenStream, AiError>;
+
+    /// Non-streaming multi-turn completion that supports tool calling. Returns
+    /// either assistant text or a set of tool calls to execute and feed back
+    /// (one step of an agentic loop). Default impl reports no tool support, so
+    /// callers fall back to [`Self::chat_stream`]; the gateway implementation
+    /// overrides it. Best-effort like [`Self::complete`].
+    async fn chat(&self, _request: ChatTurnRequest) -> Result<ChatTurnResponse, AiError> {
+        Err(AiError::NotAvailable)
+    }
 }

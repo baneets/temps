@@ -47,11 +47,14 @@ impl TempsPlugin for AiChatPlugin {
             let db = context.require_service::<sea_orm::DatabaseConnection>();
             let ai = context.require_service::<dyn temps_ai::AiService>();
             let log_service = context.require_service::<temps_logs::LogService>();
+            // Optional: read-only repo access for the deployment debugger's
+            // `read_repo_file` tool. Absent → the tool simply isn't offered.
+            let git = context.get_service::<temps_git::GitProviderManager>();
 
             // Built-in providers (one per context_type). Future context types add
             // their provider here (or via a registry once there are many).
             let providers: Vec<Arc<dyn ConversationContextProvider>> = vec![
-                Arc::new(DeploymentChatProvider::new(db.clone(), log_service)),
+                Arc::new(DeploymentChatProvider::new(db.clone(), log_service, git)),
                 Arc::new(AlertChatProvider::new(db.clone())),
             ];
 

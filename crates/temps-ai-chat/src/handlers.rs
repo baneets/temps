@@ -59,6 +59,23 @@ impl From<ai_conversations::Model> for ConversationResponse {
     }
 }
 
+/// A conversation in the unified cross-project switcher: carries the project it
+/// belongs to (name/slug) so the UI can show where the chat was started and
+/// link back to the source.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GlobalConversationResponse {
+    pub public_id: String,
+    pub project_id: i32,
+    pub project_name: Option<String>,
+    pub project_slug: Option<String>,
+    pub context_type: String,
+    pub context_id: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub last_activity_at: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MessageResponse {
     pub role: String,
@@ -173,6 +190,64 @@ pub async fn find_conversation(
         .find_by_context(project_id, &q.context_type, &q.context_id)
         .await?;
     Ok(Json(found.map(ConversationResponse::from)))
+}
+
+/// List every active conversation across all projects, most-recently-active
+/// first, annotated with project name/slug. Powers the unified "all chats"
+/// switcher in the AI assistant dock.
+#[utoipa::path(
+    get, tag = "AI Chat",
+    path = "/ai/conversations",
+    responses((status = 200, body = Vec<GlobalConversationResponse>), (status = 401), (status = 403)),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_all_conversations(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<GlobalConversationResponse>>, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    let items = state.service.list_all_conversations().await?;
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|i| GlobalConversationResponse {
+                public_id: i.conversation.public_id,
+                project_id: i.conversation.project_id,
+                project_name: i.project_name,
+                project_slug: i.project_slug,
+                context_type: i.conversation.context_type,
+                context_id: i.conversation.context_id,
+                title: i.conversation.title,
+                status: i.conversation.status,
+                created_at: i.conversation.created_at.to_rfc3339(),
+                last_activity_at: i.conversation.last_activity_at.to_rfc3339(),
+            })
+            .collect(),
+    ))
+}
+
+/// List all active conversations for a project, most-recently-active first.
+/// Powers the conversation switcher in the AI assistant sidebar.
+#[utoipa::path(
+    get, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/conversations/list",
+    params(("project_id" = i32, Path,)),
+    responses((status = 200, body = Vec<ConversationResponse>), (status = 401), (status = 403)),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_conversations(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<i32>,
+) -> Result<Json<Vec<ConversationResponse>>, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    let conversations = state.service.list_conversations(project_id).await?;
+    Ok(Json(
+        conversations
+            .into_iter()
+            .map(ConversationResponse::from)
+            .collect(),
+    ))
 }
 
 /// Get-or-create the chat for a context (seeds it on first open).
@@ -293,9 +368,17 @@ pub async fn archive_conversation(
 
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
+        // Unified cross-project switcher.
+        .route("/ai/conversations", get(list_all_conversations))
         .route(
             "/projects/{project_id}/ai/conversations",
             get(find_conversation).post(create_conversation),
+        )
+        // Static `/list` registered before the `{public_id}` param route; matchit
+        // prioritizes the literal segment so it can't be shadowed.
+        .route(
+            "/projects/{project_id}/ai/conversations/list",
+            get(list_conversations),
         )
         .route(
             "/projects/{project_id}/ai/conversations/{public_id}",
@@ -315,6 +398,8 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
 #[openapi(
     paths(
         find_conversation,
+        list_conversations,
+        list_all_conversations,
         create_conversation,
         get_conversation,
         send_message,
@@ -322,6 +407,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
     ),
     components(schemas(
         ConversationResponse,
+        GlobalConversationResponse,
         MessageResponse,
         ConversationDetailResponse,
         CreateConversationRequest,

@@ -13,7 +13,10 @@ use futures_util::StreamExt;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tracing::debug;
 
-use temps_ai::{AiError, AiRequest, AiResponse, AiService, ChatTurnRequest, TokenStream};
+use temps_ai::{
+    AiError, AiRequest, AiResponse, AiService, ChatMessage, ChatTool, ChatTurnRequest,
+    ChatTurnResponse, TokenStream, ToolCall,
+};
 
 use crate::services::{ByokOverride, GatewayService};
 use crate::types::{
@@ -117,6 +120,70 @@ fn first_text(resp: &ChatCompletionResponse) -> Option<String> {
     }
 }
 
+/// Render one of our flat [`ChatMessage`]s as an OpenAI-format message value,
+/// preserving tool-call / tool-result shape for the agentic loop.
+fn message_to_json(m: &ChatMessage) -> serde_json::Value {
+    if let Some(tool_call_id) = &m.tool_call_id {
+        return serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": m.content,
+        });
+    }
+    if let Some(tool_calls) = &m.tool_calls {
+        let calls: Vec<serde_json::Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": { "name": tc.name, "arguments": tc.arguments },
+                })
+            })
+            .collect();
+        let content = if m.content.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!(m.content)
+        };
+        return serde_json::json!({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": calls,
+        });
+    }
+    serde_json::json!({ "role": m.role, "content": m.content })
+}
+
+/// OpenAI "function" tool schema for one [`ChatTool`].
+fn tool_to_json(t: &ChatTool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+        },
+    })
+}
+
+/// Parse one OpenAI tool-call value (`{id, function:{name, arguments}}`).
+fn parse_tool_call(v: &serde_json::Value) -> Option<ToolCall> {
+    let id = v.get("id")?.as_str()?.to_string();
+    let function = v.get("function")?;
+    let name = function.get("name")?.as_str()?.to_string();
+    let arguments = function
+        .get("arguments")
+        .and_then(|a| a.as_str())
+        .unwrap_or("{}")
+        .to_string();
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
+}
+
 #[async_trait]
 impl AiService for GatewayAiService {
     async fn is_available(&self) -> bool {
@@ -180,6 +247,70 @@ impl AiService for GatewayAiService {
             text: text.trim().to_string(),
             json,
             model,
+        })
+    }
+
+    async fn chat(&self, request: ChatTurnRequest) -> Result<ChatTurnResponse, AiError> {
+        let model = self
+            .resolve_model(request.project_id, request.model.as_deref())
+            .await
+            .ok_or_else(|| AiError::NoModel {
+                purpose: request.purpose.clone(),
+            })?;
+
+        let messages: Vec<serde_json::Value> =
+            request.messages.iter().map(message_to_json).collect();
+        let mut body = serde_json::json!({ "model": model, "messages": messages });
+        if !request.tools.is_empty() {
+            body["tools"] =
+                serde_json::Value::Array(request.tools.iter().map(tool_to_json).collect());
+        }
+        if let Some(mt) = request.max_tokens {
+            body["max_tokens"] = serde_json::json!(mt);
+        }
+        if let Some(t) = request.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+
+        let chat_req: ChatCompletionRequest =
+            serde_json::from_value(body).map_err(|e| AiError::Provider {
+                purpose: request.purpose.clone(),
+                reason: format!("malformed request: {e}"),
+            })?;
+
+        let (resp, _cred) = self
+            .gateway
+            .chat_completion(&chat_req, &ByokOverride::default())
+            .await
+            .map_err(|e| AiError::Provider {
+                purpose: request.purpose.clone(),
+                reason: e.to_string(),
+            })?;
+
+        let choice = resp.choices.into_iter().next();
+        let (content, tool_calls) = match choice {
+            Some(c) => {
+                let content = c
+                    .message
+                    .content
+                    .as_ref()
+                    .and_then(|mc| mc.as_text())
+                    .map(str::to_string)
+                    .filter(|s| !s.is_empty());
+                let tool_calls = c
+                    .message
+                    .tool_calls
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(parse_tool_call)
+                    .collect();
+                (content, tool_calls)
+            }
+            None => (None, Vec::new()),
+        };
+        Ok(ChatTurnResponse {
+            content,
+            tool_calls,
         })
     }
 
@@ -284,5 +415,54 @@ mod tests {
         assert_eq!(rf["type"], "json_schema");
         assert_eq!(rf["json_schema"]["schema"]["type"], "object");
         assert_eq!(rf["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn test_parse_tool_call() {
+        let v = serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "read_repo_file", "arguments": "{\"path\":\"tsconfig.json\"}" }
+        });
+        let tc = parse_tool_call(&v).expect("parses");
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.name, "read_repo_file");
+        assert_eq!(tc.arguments, "{\"path\":\"tsconfig.json\"}");
+        // Missing function → None, not a panic.
+        assert!(parse_tool_call(&serde_json::json!({"id": "x"})).is_none());
+    }
+
+    #[test]
+    fn test_message_to_json_tool_shapes() {
+        // tool-result message
+        let tool_msg = ChatMessage::tool("call_1", "file contents");
+        let j = message_to_json(&tool_msg);
+        assert_eq!(j["role"], "tool");
+        assert_eq!(j["tool_call_id"], "call_1");
+        assert_eq!(j["content"], "file contents");
+
+        // assistant message carrying a tool call
+        let asst = ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                name: "read_repo_file".into(),
+                arguments: "{}".into(),
+            }]),
+            tool_call_id: None,
+        };
+        let j = message_to_json(&asst);
+        assert_eq!(j["role"], "assistant");
+        assert!(j["content"].is_null());
+        assert_eq!(j["tool_calls"][0]["function"]["name"], "read_repo_file");
+        assert_eq!(j["tool_calls"][0]["type"], "function");
+
+        // plain message
+        let plain = ChatMessage::user("hi");
+        let j = message_to_json(&plain);
+        assert_eq!(j["role"], "user");
+        assert_eq!(j["content"], "hi");
+        assert!(j.get("tool_calls").is_none());
     }
 }

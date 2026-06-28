@@ -7,17 +7,25 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
+use temps_ai::ChatTool;
 use temps_entities::types::JobStatus;
-use temps_entities::{deployment_jobs, deployments};
+use temps_entities::{deployment_jobs, deployments, projects};
+use temps_git::GitProviderManager;
 use temps_logs::LogService;
 
 use crate::provider::{ConversationContextProvider, ConversationSeed};
 
+/// Max bytes of a repo file fed back to the model in one `read_repo_file` call.
+const MAX_REPO_FILE_BYTES: usize = 16_000;
+
 /// Per-step log tail budget (bytes), trimmed to a line boundary. Bounds the seed
-/// so a huge build log can't blow the model's context / token budget.
-const MAX_LOG_TAIL_BYTES: usize = 2_500;
+/// so a huge build log can't blow the model's context / token budget. Sized to
+/// comfortably hold a framework build's error block (stack/trace + the failing
+/// command), which is where the actual diagnosis lives.
+const MAX_LOG_TAIL_BYTES: usize = 6_000;
 
 /// The last `MAX_LOG_TAIL_BYTES` of a log, trimmed to a line boundary.
 fn log_tail(content: &str) -> &str {
@@ -41,12 +49,113 @@ clarifying question only when essential. Be concise and practical.";
 pub struct DeploymentChatProvider {
     db: Arc<DatabaseConnection>,
     log_service: Arc<LogService>,
+    /// Read-only repo access via the configured Git provider. `None` disables
+    /// the `read_repo_file` tool (e.g. git plugin absent); seeding still works.
+    git: Option<Arc<GitProviderManager>>,
 }
 
 impl DeploymentChatProvider {
-    pub fn new(db: Arc<DatabaseConnection>, log_service: Arc<LogService>) -> Self {
-        Self { db, log_service }
+    pub fn new(
+        db: Arc<DatabaseConnection>,
+        log_service: Arc<LogService>,
+        git: Option<Arc<GitProviderManager>>,
+    ) -> Self {
+        Self {
+            db,
+            log_service,
+            git,
+        }
     }
+
+    /// Read one repo file for this deployment via the Git provider API. Returns a
+    /// human-readable string either way — errors come back as text the model can
+    /// reason about, never as a hard failure.
+    async fn read_repo_file(&self, project_id: i32, deployment_id: i32, path: &str) -> String {
+        let path = path.trim().trim_start_matches('/');
+        if path.is_empty() {
+            return "Invalid arguments: provide a non-empty repo-relative \"path\".".to_string();
+        }
+        let Some(git) = &self.git else {
+            return "Repository access is not configured on this server.".to_string();
+        };
+
+        let dep = match deployments::Entity::find_by_id(deployment_id)
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(d)) if d.project_id == project_id => d,
+            _ => return format!("Deployment {deployment_id} not found."),
+        };
+        let project = match projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await
+        {
+            Ok(Some(p)) => p,
+            _ => return format!("Project {project_id} not found."),
+        };
+        let Some(connection_id) = project.git_provider_connection_id else {
+            return "This project has no connected Git repository, so repo files can't be read."
+                .to_string();
+        };
+        // Read at the exact deployed commit when known, else the branch.
+        let reference = dep.commit_sha.clone().or_else(|| dep.branch_ref.clone());
+
+        let token = match git.get_connection_token(connection_id).await {
+            Ok(t) => t,
+            Err(e) => return format!("Could not authenticate with the Git provider: {e}"),
+        };
+        let connection = match git.get_connection(connection_id).await {
+            Ok(c) => c,
+            Err(e) => return format!("Git connection unavailable: {e}"),
+        };
+        let service = match git.get_provider_service(connection.provider_id).await {
+            Ok(s) => s,
+            Err(e) => return format!("Git provider unavailable: {e}"),
+        };
+
+        match service
+            .get_file_content(
+                &token,
+                &project.repo_owner,
+                &project.repo_name,
+                path,
+                reference.as_deref(),
+            )
+            .await
+        {
+            Ok(file) => bound(&decode_file_content(&file.content, &file.encoding), path),
+            Err(e) => format!(
+                "Could not read '{path}' from {}/{}: {e}",
+                project.repo_owner, project.repo_name
+            ),
+        }
+    }
+}
+
+/// Decode a provider `FileContent`. GitHub returns base64 (with embedded
+/// newlines); GitLab/raw returns utf-8. Fall back to the raw string if base64
+/// decoding fails so the model still sees *something*.
+fn decode_file_content(content: &str, encoding: &str) -> String {
+    if encoding.eq_ignore_ascii_case("base64") {
+        let stripped: String = content.split_whitespace().collect();
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(stripped) {
+            return String::from_utf8_lossy(&bytes).into_owned();
+        }
+    }
+    content.to_string()
+}
+
+/// Bound a file body so a large file can't blow the model's context.
+fn bound(content: &str, path: &str) -> String {
+    if content.len() <= MAX_REPO_FILE_BYTES {
+        return content.to_string();
+    }
+    let head = &content[..MAX_REPO_FILE_BYTES];
+    format!(
+        "{head}\n\n[truncated — '{path}' is {} bytes; showing the first {}]",
+        content.len(),
+        MAX_REPO_FILE_BYTES
+    )
 }
 
 #[async_trait]
@@ -90,6 +199,23 @@ impl ConversationContextProvider for DeploymentChatProvider {
         if let Some(reason) = &dep.cancelled_reason {
             ctx.push_str(&format!("Failure reason: {reason}\n"));
         }
+
+        // Pipeline overview — every step and its status, in order, so the model
+        // can place the failure within the build/deploy sequence.
+        if !jobs.is_empty() {
+            let mut ordered: Vec<&deployment_jobs::Model> = jobs.iter().collect();
+            ordered.sort_by_key(|j| j.execution_order.unwrap_or(0));
+            ctx.push_str("\nPipeline steps (in order):\n");
+            for j in ordered {
+                ctx.push_str(&format!(
+                    "- {} [{}]: {}\n",
+                    j.name,
+                    j.job_id,
+                    j.status.as_str()
+                ));
+            }
+        }
+
         if failed.is_empty() {
             ctx.push_str("No individual job failures were recorded.\n");
         } else {
@@ -128,5 +254,106 @@ impl ConversationContextProvider for DeploymentChatProvider {
             title: Some(format!("Debug deployment #{deployment_id}")),
             metadata: Some(metadata),
         })
+    }
+
+    async fn tools(&self, project_id: i32, _context_id: &str) -> Vec<ChatTool> {
+        // No repo access configured, or the project has no connected repo →
+        // offer no tools, so the chat stays plain-streaming.
+        if self.git.is_none() {
+            return Vec::new();
+        }
+        let has_repo = matches!(
+            projects::Entity::find_by_id(project_id)
+                .one(self.db.as_ref())
+                .await,
+            Ok(Some(p)) if p.git_provider_connection_id.is_some()
+        );
+        if !has_repo {
+            return Vec::new();
+        }
+
+        vec![ChatTool {
+            name: "read_repo_file".to_string(),
+            description: "Read a file from this project's Git repository at the deployed commit, \
+via the configured Git provider API (no clone, no filesystem). Use it to confirm the real cause \
+of the failure: read the file named in the error or stack trace, plus relevant config such as \
+tsconfig.json, package.json, next.config.js, Dockerfile, or lockfiles. Provide a \
+repository-root-relative path."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Repository-root-relative file path, e.g. 'tsconfig.json' or 'src/app/page.tsx'."
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        }]
+    }
+
+    async fn execute_tool(
+        &self,
+        project_id: i32,
+        context_id: &str,
+        name: &str,
+        arguments: &str,
+    ) -> String {
+        if name != "read_repo_file" {
+            return format!("Unknown tool '{name}'.");
+        }
+        let deployment_id: i32 = match context_id.parse() {
+            Ok(id) => id,
+            Err(_) => return "Invalid deployment reference.".to_string(),
+        };
+        let path = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string));
+        match path {
+            Some(p) => self.read_repo_file(project_id, deployment_id, &p).await,
+            None => "Invalid arguments: expected {\"path\": \"<repo-relative path>\"}.".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_file_content_base64() {
+        // GitHub returns base64 with embedded newlines.
+        let raw = base64::engine::general_purpose::STANDARD.encode("hello\nworld");
+        let with_newlines = format!("{}\n{}", &raw[..4], &raw[4..]);
+        assert_eq!(
+            decode_file_content(&with_newlines, "base64"),
+            "hello\nworld"
+        );
+    }
+
+    #[test]
+    fn test_decode_file_content_utf8_passthrough() {
+        assert_eq!(decode_file_content("{ \"a\": 1 }", "utf-8"), "{ \"a\": 1 }");
+    }
+
+    #[test]
+    fn test_decode_file_content_bad_base64_falls_back() {
+        // Not valid base64 → return the raw string rather than losing it.
+        assert_eq!(
+            decode_file_content("!!!not base64!!!", "base64"),
+            "!!!not base64!!!"
+        );
+    }
+
+    #[test]
+    fn test_bound_truncates() {
+        let big = "x".repeat(MAX_REPO_FILE_BYTES + 100);
+        let out = bound(&big, "big.txt");
+        assert!(out.len() < big.len() + 100);
+        assert!(out.contains("truncated"));
+        let small = "small";
+        assert_eq!(bound(small, "s.txt"), "small");
     }
 }
