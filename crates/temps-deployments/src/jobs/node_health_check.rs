@@ -127,6 +127,47 @@ pub async fn notify_nodes_offline(
     }
 }
 
+/// Notify operators that a worker node came back online (ADR-020 / monitoring).
+///
+/// Called from the heartbeat handler when a node transitions offline->active
+/// (the `was_offline` signal). Sends one Info-priority notification through the
+/// shared notification pipeline — the recovery counterpart to
+/// [`notify_nodes_offline`]. Best-effort: failures are logged, never fatal.
+pub async fn notify_node_recovered(
+    node_id: i32,
+    node_name: &str,
+    notification_service: &std::sync::Arc<dyn temps_core::notifications::NotificationService>,
+) {
+    use temps_core::notifications::{NotificationData, NotificationPriority, NotificationType};
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert("event".to_string(), "node_recovered".to_string());
+    metadata.insert("node_id".to_string(), node_id.to_string());
+    metadata.insert("node_name".to_string(), node_name.to_string());
+
+    let notification = NotificationData {
+        title: format!("Worker node '{}' is back online", node_name),
+        message: format!(
+            "Node '{}' (id {}) resumed sending heartbeats and was marked active again.",
+            node_name, node_id
+        ),
+        notification_type: NotificationType::Info,
+        priority: NotificationPriority::Normal,
+        metadata,
+        ..Default::default()
+    };
+
+    match notification_service.send_notification(notification).await {
+        Ok(()) => tracing::info!(node_id, node_name = %node_name, "Sent node-recovery alert"),
+        Err(e) => tracing::error!(
+            node_id,
+            node_name = %node_name,
+            "Failed to send node-recovery alert: {}",
+            e
+        ),
+    }
+}
+
 /// Check all draining nodes for drain completion and transition them
 /// to "drained" status when all containers have been migrated.
 ///

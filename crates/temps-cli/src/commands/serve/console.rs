@@ -1772,6 +1772,8 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         telemetry: node_telemetry,
         rate_limiter: Arc::new(temps_deployments::handlers::nodes::RegistrationRateLimiter::new()),
         enrollment_token_service: Arc::new(temps_config::EnrollmentTokenService::new(db.clone())),
+        notification_service: service_context
+            .get_service::<dyn temps_core::notifications::NotificationService>(),
     });
     let node_routes =
         temps_deployments::handlers::nodes::configure_routes().with_state(node_app_state);

@@ -42,6 +42,9 @@ pub struct NodeAppState {
     pub rate_limiter: Arc<RegistrationRateLimiter>,
     /// Short-lived, single-use node enrollment tokens (ADR-020 WS-1.1).
     pub enrollment_token_service: Arc<temps_config::EnrollmentTokenService>,
+    /// Notification pipeline — used to alert operators when a node recovers
+    /// (offline->active on heartbeat). Optional: absent if no provider is wired.
+    pub notification_service: Option<Arc<dyn temps_core::notifications::NotificationService>>,
 }
 
 /// Fixed-window rate limiter for the public node-registration endpoint
@@ -1053,6 +1056,20 @@ async fn node_heartbeat(
         .heartbeat(node_id, heartbeat)
         .await
         .map_err(Problem::from)?;
+
+    // The node just came back: it was offline and this heartbeat flipped it to
+    // active. Alert operators (recovery counterpart to the node-offline alert).
+    if was_offline {
+        info!(node_id, node_name = %node.name, "Node recovered (offline -> active)");
+        if let Some(ref notification_service) = app_state.notification_service {
+            crate::jobs::node_health_check::notify_node_recovered(
+                node_id,
+                &node.name,
+                notification_service,
+            )
+            .await;
+        }
+    }
 
     // Reconcile container state when the agent sends its inventory.
     // This happens on the first heartbeat after agent startup/reconnect.
@@ -2536,6 +2553,7 @@ mod tests {
             enrollment_token_service: Arc::new(temps_config::EnrollmentTokenService::new(
                 test_db_for_enrollment,
             )),
+            notification_service: None,
         });
         // The production router is served with connect info; tests use `oneshot`
         // (no peer address), so inject a mock so the `ConnectInfo` extractor
