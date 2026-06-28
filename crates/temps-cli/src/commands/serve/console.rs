@@ -72,7 +72,8 @@ use tracing::{debug, info};
 // Multi-node support
 use temps_deployments::handlers::nodes::NodeAppState;
 use temps_deployments::jobs::node_health_check::{
-    check_drain_completion, check_node_health, failover_offline_nodes, notify_nodes_offline,
+    check_drain_completion, check_node_health, check_node_resources, failover_offline_nodes,
+    notify_nodes_offline,
 };
 use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
@@ -1814,6 +1815,11 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                         )
                         .await;
                     }
+                }
+
+                // Alert on node resource pressure (CPU/mem/disk) + heartbeat lag.
+                if let Some(ref notification_service) = health_notification_service {
+                    check_node_resources(health_db.as_ref(), notification_service).await;
                 }
 
                 // Transition fully-drained nodes from "draining" to "drained".
