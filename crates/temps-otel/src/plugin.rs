@@ -404,6 +404,12 @@ impl TempsPlugin for OtelPlugin {
                 rate_limiter,
             ));
             context.register_service(otel_service.clone());
+            // Also expose the same service behind the storage-agnostic read
+            // contract so read-only consumers (e.g. the AI debugging chat in
+            // `temps-ai-chat`) can query traces via `temps_core::TraceReader`
+            // WITHOUT depending on this heavy crate. Absent → those consumers
+            // simply offer no trace tools.
+            context.register_service(otel_service.clone() as Arc<dyn temps_core::TraceReader>);
 
             // Build a MetricsStore pointing at the same TimescaleDB connection.
             // This forwards OTLP-pushed metrics into `service_metrics` alongside

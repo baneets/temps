@@ -6,6 +6,8 @@ pub mod health_service;
 pub mod metric_alert_evaluator;
 pub mod metric_alert_service;
 pub mod otel_service;
+/// `temps_core::TraceReader` impl for `OtelService` (storage-agnostic read API).
+pub mod trace_reader;
 
 pub use dashboard_service::MetricDashboardService;
 pub use health_service::HealthComputeService;
