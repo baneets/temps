@@ -215,6 +215,17 @@ pub struct PreviewGatewaySettingsMasked {
 pub struct MultiNodeSettingsMasked {
     pub has_join_token: bool,
     pub private_address: Option<String>,
+    /// Whether control-plane↔agent mutual TLS is enforced.
+    pub require_mtls: bool,
+    /// Whether the deprecated shared join token is still accepted.
+    pub legacy_shared_token_enabled: bool,
+    /// SHA-256 fingerprint of the cluster CA certificate (public — operators can
+    /// verify it out of band; the CA private key is never exposed).
+    pub cluster_ca_fingerprint: Option<String>,
+    /// Node resource-alert thresholds (percent); `None` = that alert disabled.
+    pub node_cpu_alert_percent: Option<f64>,
+    pub node_memory_alert_percent: Option<f64>,
+    pub node_disk_alert_percent: Option<f64>,
 }
 
 /// DNS provider settings with masked sensitive fields
@@ -303,6 +314,16 @@ impl From<AppSettings> for AppSettingsResponse {
             },
             multi_node: MultiNodeSettingsMasked {
                 has_join_token: settings.multi_node.join_token_hash.is_some(),
+                require_mtls: settings.multi_node.require_mtls,
+                legacy_shared_token_enabled: settings.multi_node.legacy_shared_token_enabled,
+                cluster_ca_fingerprint: settings
+                    .multi_node
+                    .cluster_ca_cert_pem
+                    .as_deref()
+                    .and_then(|pem| temps_core::node_pki::ca_fingerprint_sha256(pem).ok()),
+                node_cpu_alert_percent: settings.multi_node.node_cpu_alert_percent,
+                node_memory_alert_percent: settings.multi_node.node_memory_alert_percent,
+                node_disk_alert_percent: settings.multi_node.node_disk_alert_percent,
                 private_address: settings.multi_node.private_address,
             },
             // `effective_metrics_store` defaults to the configured store here;
@@ -419,6 +440,9 @@ pub struct MintEnrollmentTokenResponse {
     pub token: String,
     pub expires_at: String,
     pub max_uses: i32,
+    /// SHA-256 fingerprint of the cluster CA (if mTLS is set up). Pass it to the
+    /// worker as `temps join --ca-fingerprint <fp>` to verify the CA on join.
+    pub ca_fingerprint: Option<String>,
     pub message: String,
 }
 
@@ -486,6 +510,22 @@ async fn mint_enrollment_token(
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, SettingsWrite);
 
+    // If a cluster CA already exists, embed its SHA-256 fingerprint so a joining
+    // node can verify the control plane's CA out of band (ADR-020 WS-2.2). The
+    // CA is minted lazily on the first mTLS enrollment, so the very first token
+    // may carry no fingerprint; subsequent tokens do.
+    let settings = app_state.config_service.get_settings().await.map_err(|e| {
+        ErrorBuilder::new(StatusCode::INTERNAL_SERVER_ERROR)
+            .title("Settings Error")
+            .detail(format!("Failed to read settings: {e}"))
+            .build()
+    })?;
+    let ca_fingerprint = settings
+        .multi_node
+        .cluster_ca_cert_pem
+        .as_deref()
+        .and_then(|pem| temps_core::node_pki::ca_fingerprint_sha256(pem).ok());
+
     let params = crate::enrollment_tokens::MintParams {
         max_uses: req.max_uses.unwrap_or(1),
         ttl_secs: req.ttl_secs.unwrap_or(3600),
@@ -495,7 +535,7 @@ async fn mint_enrollment_token(
             .filter(|s| !s.is_empty()),
         bound_labels: None,
         created_by_user_id: Some(auth.user_id()),
-        ca_fingerprint: None,
+        ca_fingerprint: ca_fingerprint.clone(),
     };
 
     let (plaintext, model) = app_state
@@ -515,6 +555,7 @@ async fn mint_enrollment_token(
         token: plaintext,
         expires_at: model.expires_at.to_rfc3339(),
         max_uses: model.max_uses,
+        ca_fingerprint,
         message: "Enrollment token minted. Save it now — it will not be shown again.".to_string(),
     }))
 }

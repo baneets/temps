@@ -40,6 +40,13 @@ pub struct JoinCommand {
     /// Labels for node scheduling (key=value pairs)
     #[arg(long, value_delimiter = ',')]
     pub labels: Vec<String>,
+
+    /// Expected SHA-256 fingerprint of the cluster CA, shown when the enrollment
+    /// token was minted. When set, the join aborts if the CA returned by the
+    /// control plane doesn't match — defeating a man-in-the-middle that swaps in
+    /// its own CA (ADR-020 WS-2.2).
+    #[arg(long)]
+    pub ca_fingerprint: Option<String>,
 }
 
 /// Response body from the control plane registration endpoint.
@@ -250,6 +257,28 @@ impl JoinCommand {
             "Registered with control plane successfully (node_id={}).",
             register_response.id
         );
+
+        // Verify the cluster CA out of band before trusting it (ADR-020 WS-2.2):
+        // if the operator passed the expected fingerprint, the CA the control
+        // plane returned must match it, or a MITM could have swapped its own CA.
+        if let Some(expected) = self.ca_fingerprint.as_deref() {
+            match register_response.ca_cert_pem.as_deref() {
+                Some(ca_pem) => {
+                    let actual = temps_core::node_pki::ca_fingerprint_sha256(ca_pem)
+                        .map_err(|e| anyhow::anyhow!("could not fingerprint received CA: {e}"))?;
+                    if !actual.eq_ignore_ascii_case(expected.trim()) {
+                        anyhow::bail!(
+                            "Cluster CA fingerprint mismatch — expected {expected}, got {actual}. \
+                             Aborting join (possible man-in-the-middle)."
+                        );
+                    }
+                    println!("Cluster CA fingerprint verified.");
+                }
+                None => anyhow::bail!(
+                    "--ca-fingerprint was provided but the control plane returned no CA certificate."
+                ),
+            }
+        }
 
         // Persist the signed leaf + cluster CA so `temps agent` can serve mTLS.
         let tls_paths = persist_tls(&tls_material, &register_response);

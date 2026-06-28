@@ -94,6 +94,19 @@ impl NodeService {
                 message: "Node name cannot be empty".into(),
             });
         }
+        // Restrict to a DNS-label-style charset. The name is surfaced in logs
+        // and injected into every container's `TEMPS_NODE_NAME` env var, so
+        // reject shell metacharacters / newlines / control chars defensively.
+        if request.name.len() > 63
+            || !request
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.' || b == b'_')
+        {
+            return Err(NodeError::Validation {
+                message: "Node name must be <=63 chars of letters, digits, '-', '.', or '_'".into(),
+            });
+        }
 
         if request.address.is_empty() {
             return Err(NodeError::Validation {

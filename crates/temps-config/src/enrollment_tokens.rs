@@ -71,14 +71,18 @@ impl EnrollmentTokenService {
         &self,
         params: MintParams,
     ) -> Result<(String, node_enrollment_tokens::Model), EnrollmentError> {
-        if params.max_uses < 1 {
+        // Server-side caps so a careless or compromised admin can't recreate the
+        // eternal, unlimited shared token the enrollment model replaces.
+        const MAX_USES_CAP: i32 = 100;
+        const TTL_SECS_CAP: i64 = 86_400; // 24h
+        if params.max_uses < 1 || params.max_uses > MAX_USES_CAP {
             return Err(EnrollmentError::Validation {
-                message: "max_uses must be >= 1".into(),
+                message: format!("max_uses must be between 1 and {MAX_USES_CAP}"),
             });
         }
-        if params.ttl_secs <= 0 {
+        if params.ttl_secs <= 0 || params.ttl_secs > TTL_SECS_CAP {
             return Err(EnrollmentError::Validation {
-                message: "ttl_secs must be > 0".into(),
+                message: format!("ttl_secs must be between 1 and {TTL_SECS_CAP}"),
             });
         }
 
@@ -147,7 +151,7 @@ impl EnrollmentTokenService {
              SET used_count = used_count + 1, updated_at = now() \
              WHERE token_hash = $1 AND revoked_at IS NULL \
                AND expires_at > now() AND used_count < max_uses",
-            [token_hash.into()],
+            [token_hash.clone().into()],
         );
         let res = self.db.execute(stmt).await?;
         if res.rows_affected() == 0 {
@@ -155,7 +159,14 @@ impl EnrollmentTokenService {
             return Err(EnrollmentError::Exhausted);
         }
 
-        Ok(row)
+        // Re-read so the returned row reflects the post-increment `used_count`
+        // (the row read above is now stale by one use).
+        let updated = node_enrollment_tokens::Entity::find()
+            .filter(node_enrollment_tokens::Column::TokenHash.eq(&token_hash))
+            .one(self.db.as_ref())
+            .await?
+            .unwrap_or(row);
+        Ok(updated)
     }
 
     /// List currently-valid (non-revoked, non-expired) tokens, newest first.

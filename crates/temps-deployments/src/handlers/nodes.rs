@@ -733,6 +733,29 @@ async fn register_node(
                         )));
                 }
             }
+            // Enforce a label pin if the token requires specific scheduling
+            // labels — every required key/value must be present on the node.
+            if let Some(serde_json::Value::Object(required)) = token_row.bound_labels.as_ref() {
+                let provided = request
+                    .labels
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let provided_obj = provided.as_object();
+                let satisfied = required
+                    .iter()
+                    .all(|(k, v)| provided_obj.and_then(|o| o.get(k)) == Some(v));
+                if !satisfied {
+                    warn!(
+                        node = %request.name,
+                        "Node registration rejected: enrollment token requires labels the node did not present"
+                    );
+                    return Err(problemdetails::new(StatusCode::FORBIDDEN)
+                        .with_title("Enrollment Token Label Mismatch")
+                        .with_detail(
+                            "This enrollment token requires specific node labels that were not provided.",
+                        ));
+                }
+            }
             info!(node = %request.name, "Node authorized via enrollment token");
         }
         Err(temps_config::EnrollmentError::InvalidToken) => {
@@ -1275,6 +1298,15 @@ async fn edge_routes(
                 .with_title("Invalid Token")
                 .with_detail("No node found with this token")
         })?;
+
+    // Final auth decision via constant-time compare, consistent with the other
+    // node-token handlers (the DB lookup above already matched, but keep the
+    // comparison explicit and timing-safe).
+    if !constant_time_eq(node.token_hash.as_bytes(), token_hash.as_bytes()) {
+        return Err(problemdetails::new(StatusCode::UNAUTHORIZED)
+            .with_title("Invalid Token")
+            .with_detail("No node found with this token"));
+    }
 
     // WS-3.4 (netiso-6): only an ACTIVE node may pull the route table. A
     // draining/drained/offline node is being retired and must stop receiving
