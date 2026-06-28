@@ -30,6 +30,15 @@ pub struct LogLine {
     /// Active deployment ID (deployments.id) at time of log
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_id: Option<i32>,
+    /// Worker node the container ran on. `None` = control-plane-local container
+    /// (collected from the local Docker daemon). `Some` = a remote worker node,
+    /// set by the remote log collector. Serde-defaulted so existing chunk files
+    /// written before this field existed deserialize cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<i32>,
+    /// Human-readable node name (denormalized for display in search results).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
 }
 
 /// Log output stream
@@ -102,6 +111,10 @@ pub struct ChunkMeta {
     pub service: String,
     pub container_id: String,
     pub deploy_id: Option<i32>,
+    /// Worker node the chunk's container ran on (`None` = control-plane-local).
+    pub node_id: Option<i32>,
+    /// Human-readable node name (denormalized for display).
+    pub node_name: Option<String>,
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub storage_key: String,
@@ -134,6 +147,16 @@ pub struct LogSearchFilter {
     pub services: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub envs: Vec<String>,
+    /// Filter to specific containers (by Docker container ID). Empty = all
+    /// containers in the project. This is what powers "filter by container /
+    /// show all" — a multi-node deployment's history spans many containers, and
+    /// each chunk is tagged with exactly one container_id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub container_ids: Vec<String>,
+    /// Filter to specific worker nodes (by node_id). Empty = all nodes
+    /// (including control-plane-local logs, which carry `node_id = NULL`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_ids: Vec<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_id: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,6 +232,16 @@ pub struct LogSearchLine {
     pub line_offset: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deploy_id: Option<i32>,
+    /// Container this line came from — lets the UI tag/group lines by container
+    /// in a combined ("show all") multi-container view.
+    #[serde(default)]
+    pub container_id: String,
+    /// Worker node the line came from (`None` = control-plane-local).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<i32>,
+    /// Human-readable node name for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
     /// Raw surrounding lines (grep -C). `None` unless `context_lines > 0` was
     /// requested. Overlapping windows between nearby matches are merged: the
     /// shared neighbors appear on the earlier match only, so the frontend can
@@ -390,6 +423,8 @@ mod tests {
             env: "2".to_string(),
             project_id: 42,
             deploy_id: None,
+            node_id: None,
+            node_name: None,
         };
 
         let json = serde_json::to_string(&line).expect("should serialize");

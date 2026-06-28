@@ -50,6 +50,8 @@ impl LogMetadataService {
             service: Set(meta.service.clone()),
             container_id: Set(meta.container_id.clone()),
             deploy_id: Set(meta.deploy_id),
+            node_id: Set(meta.node_id),
+            node_name: Set(meta.node_name.clone()),
             started_at: Set(meta.started_at),
             ended_at: Set(meta.ended_at),
             storage_key: Set(meta.storage_key.clone()),
@@ -146,6 +148,7 @@ impl LogMetadataService {
     /// When `deploy_id` is provided, only chunks tagged with that deployment ID
     /// are returned. This is a SQL-level prefilter that skips entire chunks
     /// before they are fetched and decompressed during archive search.
+    #[allow(clippy::too_many_arguments)]
     pub async fn find_chunks(
         &self,
         project_id: i32,
@@ -153,6 +156,8 @@ impl LogMetadataService {
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
         deploy_id: Option<i32>,
+        container_ids: &[String],
+        node_ids: &[i32],
     ) -> Result<Vec<ChunkMeta>, LogAggregatorError> {
         let mut condition = Condition::all()
             .add(temps_entities::log_chunks::Column::ProjectId.eq(project_id))
@@ -166,6 +171,19 @@ impl LogMetadataService {
 
         if let Some(deploy) = deploy_id {
             condition = condition.add(temps_entities::log_chunks::Column::DeployId.eq(deploy));
+        }
+
+        // Container prefilter — each chunk belongs to exactly one container, so
+        // this skips entire chunks before any file is fetched/decompressed.
+        if !container_ids.is_empty() {
+            condition = condition
+                .add(temps_entities::log_chunks::Column::ContainerId.is_in(container_ids.to_vec()));
+        }
+
+        // Node prefilter on node_id.
+        if !node_ids.is_empty() {
+            condition =
+                condition.add(temps_entities::log_chunks::Column::NodeId.is_in(node_ids.to_vec()));
         }
 
         let chunks = temps_entities::log_chunks::Entity::find()
@@ -183,6 +201,8 @@ impl LogMetadataService {
                 service: m.service,
                 container_id: m.container_id,
                 deploy_id: m.deploy_id,
+                node_id: m.node_id,
+                node_name: m.node_name,
                 started_at: m.started_at,
                 ended_at: m.ended_at,
                 storage_key: m.storage_key,
@@ -253,6 +273,8 @@ impl LogMetadataService {
                 service: m.service,
                 container_id: m.container_id,
                 deploy_id: m.deploy_id,
+                node_id: m.node_id,
+                node_name: m.node_name,
                 started_at: m.started_at,
                 ended_at: m.ended_at,
                 storage_key: m.storage_key,
@@ -327,6 +349,8 @@ impl LogMetadataService {
             service: m.service,
             container_id: m.container_id,
             deploy_id: m.deploy_id,
+            node_id: m.node_id,
+            node_name: m.node_name,
             started_at: m.started_at,
             ended_at: m.ended_at,
             storage_key: m.storage_key,
@@ -358,6 +382,8 @@ mod tests {
             service: svc.to_string(),
             container_id: "test-container".to_string(),
             deploy_id: None,
+            node_id: None,
+            node_name: None,
             started_at: Utc::now() - Duration::minutes(5),
             ended_at: Utc::now(),
             storage_key: format!("test/{}/{}", project_id, Uuid::new_v4()),

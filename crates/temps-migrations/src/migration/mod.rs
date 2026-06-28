@@ -123,6 +123,7 @@ mod m20260618_000002_add_domains_on_demand_backoff;
 mod m20260619_000001_add_settings_change_trigger;
 mod m20260621_000001_create_telemetry_milestones;
 mod m20260627_000001_node_enrollment_tokens;
+mod m20260628_000001_add_node_to_log_chunks;
 
 pub struct Migrator;
 
@@ -249,6 +250,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260619_000001_add_settings_change_trigger::Migration),
             Box::new(m20260621_000001_create_telemetry_milestones::Migration),
             Box::new(m20260627_000001_node_enrollment_tokens::Migration),
+            Box::new(m20260628_000001_add_node_to_log_chunks::Migration),
         ]
     }
 }

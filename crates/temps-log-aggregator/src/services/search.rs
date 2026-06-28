@@ -196,6 +196,8 @@ impl LogSearchService {
                 filter.start_time,
                 effective_end,
                 filter.deploy_id,
+                &filter.container_ids,
+                &filter.node_ids,
             )
             .await?;
 
@@ -338,6 +340,12 @@ impl LogSearchService {
                                     chunk_id,
                                     line_offset: line_idx as i32,
                                     deploy_id: parsed.deploy_id,
+                                    // Per-line container/node tags so the UI can
+                                    // group/colour a combined "all containers"
+                                    // view and show which node each line is from.
+                                    container_id: parsed.container_id,
+                                    node_id: parsed.node_id,
+                                    node_name: parsed.node_name,
                                     // Filled in by attach_context() after the
                                     // page is finalized, when context_lines > 0.
                                     context: None,
@@ -546,6 +554,22 @@ impl LogSearchService {
             }
         }
 
+        // Container filter — chunks are already prefiltered by container in
+        // find_chunks, but a chunk-level match still needs the per-line guard
+        // so mixed sources can't leak through.
+        if !filter.container_ids.is_empty() && !filter.container_ids.contains(&line.container_id) {
+            return false;
+        }
+
+        // Node filter. Lines without a node_id (control-plane-local) only match
+        // when no node filter is set.
+        if !filter.node_ids.is_empty() {
+            match line.node_id {
+                Some(nid) if filter.node_ids.contains(&nid) => {}
+                _ => return false,
+            }
+        }
+
         // Text search (simple substring match for archive)
         if let Some(ref text) = filter.text {
             if !line.msg.to_lowercase().contains(&text.to_lowercase()) {
@@ -614,6 +638,8 @@ mod tests {
             levels: vec![],
             services: vec![],
             envs: vec![],
+            container_ids: vec![],
+            node_ids: vec![],
             deploy_id: None,
             text: None,
             field_filters: vec![],
@@ -635,6 +661,8 @@ mod tests {
             env: "1".to_string(),
             project_id: 1,
             deploy_id: None,
+            node_id: None,
+            node_name: None,
         }
     }
 
@@ -749,6 +777,64 @@ mod tests {
 
         assert!(service.line_matches_filter(&match_line, &filter));
         assert!(!service.line_matches_filter(&no_match, &filter));
+    }
+
+    #[test]
+    fn test_line_matches_filter_container() {
+        let storage: Arc<dyn LogStorage> = Arc::new(
+            crate::storage::FilesystemStorage::new(std::path::PathBuf::from("/tmp/test-logs-cnt"))
+                .unwrap_or_else(|_| panic!("test setup failed")),
+        );
+        let metadata = Arc::new(LogMetadataService::new(Arc::new(
+            sea_orm::DatabaseConnection::Disconnected,
+        )));
+        let service = LogSearchService::new(storage, metadata);
+
+        let mut filter = make_filter();
+        filter.container_ids = vec!["cnt-a".into()];
+
+        let mut a = make_log_line(LogLevel::Info, "from a");
+        a.container_id = "cnt-a".into();
+        let mut b = make_log_line(LogLevel::Info, "from b");
+        b.container_id = "cnt-b".into();
+
+        // Only the selected container matches; "show all" (empty list) matches both.
+        assert!(service.line_matches_filter(&a, &filter));
+        assert!(!service.line_matches_filter(&b, &filter));
+        filter.container_ids.clear();
+        assert!(service.line_matches_filter(&a, &filter));
+        assert!(service.line_matches_filter(&b, &filter));
+    }
+
+    #[test]
+    fn test_line_matches_filter_node() {
+        let storage: Arc<dyn LogStorage> = Arc::new(
+            crate::storage::FilesystemStorage::new(std::path::PathBuf::from("/tmp/test-logs-node"))
+                .unwrap_or_else(|_| panic!("test setup failed")),
+        );
+        let metadata = Arc::new(LogMetadataService::new(Arc::new(
+            sea_orm::DatabaseConnection::Disconnected,
+        )));
+        let service = LogSearchService::new(storage, metadata);
+
+        let mut filter = make_filter();
+        filter.node_ids = vec![5];
+
+        let mut on_node = make_log_line(LogLevel::Info, "remote");
+        on_node.node_id = Some(5);
+        let mut other_node = make_log_line(LogLevel::Info, "other remote");
+        other_node.node_id = Some(6);
+        let local = make_log_line(LogLevel::Info, "local"); // node_id None
+
+        // A node filter matches only that node; control-plane-local lines
+        // (node_id None) never match a node filter.
+        assert!(service.line_matches_filter(&on_node, &filter));
+        assert!(!service.line_matches_filter(&other_node, &filter));
+        assert!(!service.line_matches_filter(&local, &filter));
+        // "All nodes" (empty) includes local + remote.
+        filter.node_ids.clear();
+        assert!(service.line_matches_filter(&local, &filter));
+        assert!(service.line_matches_filter(&on_node, &filter));
     }
 
     #[test]
@@ -901,6 +987,8 @@ mod tests {
                 levels: vec![],
                 services: vec!["web".into()],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -950,6 +1038,8 @@ mod tests {
                 levels: vec![],
                 services: vec!["web".into(), "api".into()],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -996,6 +1086,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec!["production".into()],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -1047,6 +1139,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: Some(deploy),
                 text: None,
                 field_filters: vec![],
@@ -1085,6 +1179,8 @@ mod tests {
                 levels: vec![LogLevel::Error],
                 services: vec!["api".into()],
                 envs: vec!["production".into()],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -1126,6 +1222,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("connection refused".into()),
                 field_filters: vec![],
@@ -1165,6 +1263,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("api.example.com".into()),
                 field_filters: vec![],
@@ -1215,6 +1315,8 @@ mod tests {
                 levels: vec![LogLevel::Error],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("timeout".into()),
                 field_filters: vec![],
@@ -1264,6 +1366,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1285,6 +1389,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1333,6 +1439,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1354,6 +1462,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1375,6 +1485,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1396,6 +1508,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1417,6 +1531,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1456,6 +1572,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1499,6 +1617,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![
@@ -1527,6 +1647,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![
@@ -1586,6 +1708,8 @@ mod tests {
                 levels: vec![],
                 services: vec!["payments".into()],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -1608,6 +1732,8 @@ mod tests {
                 levels: vec![],
                 services: vec!["billing".into()],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -1621,6 +1747,36 @@ mod tests {
                 .filter(|l| search.line_matches_filter(l, &filter_none))
                 .collect();
             assert_eq!(no_matches.len(), 0);
+        }
+
+        #[tokio::test]
+        async fn test_roundtrip_preserves_node_tags() {
+            // Remote-node logs carry node_id/node_name. They must survive the
+            // NDJSON → zstd → storage → read roundtrip so search can attribute
+            // each line to its source container + node.
+            let tmp = tempfile::tempdir().unwrap();
+            let storage = Arc::new(FilesystemStorage::new(tmp.path().to_path_buf()).unwrap());
+            let writer = ChunkWriterService::new(storage.clone());
+
+            let project_id = test_project_id();
+            let ctx = ContainerContext {
+                project_id,
+                env: "production".into(),
+                service: "web".into(),
+                container_id: "cnt-remote".into(),
+                deploy_id: Some(9),
+            };
+            let mut line = parse_json_line(r#"{"level":"info","msg":"hello from worker"}"#, &ctx);
+            line.node_id = Some(7);
+            line.node_name = Some("worker-1".into());
+
+            let roundtripped =
+                write_and_read_back(&storage, &writer, std::slice::from_ref(&line), "cnt-remote")
+                    .await;
+            assert_eq!(roundtripped.len(), 1);
+            assert_eq!(roundtripped[0].node_id, Some(7));
+            assert_eq!(roundtripped[0].node_name.as_deref(), Some("worker-1"));
+            assert_eq!(roundtripped[0].container_id, "cnt-remote");
         }
 
         #[tokio::test]
@@ -1667,6 +1823,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("users".into()),
                 field_filters: vec![],
@@ -1689,6 +1847,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("500".into()),
                 field_filters: vec![],
@@ -1712,6 +1872,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("CONNECTION REFUSED".into()),
                 field_filters: vec![],
@@ -1778,6 +1940,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1805,6 +1969,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1835,6 +2001,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![FieldFilter {
@@ -1896,6 +2064,8 @@ mod tests {
                 levels: vec![LogLevel::Error],
                 services: vec!["api".into()],
                 envs: vec!["production".into()],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("timeout".into()),
                 field_filters: vec![
@@ -1959,6 +2129,8 @@ mod tests {
                 levels: vec![LogLevel::Error],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -1982,6 +2154,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("disk".into()),
                 field_filters: vec![],
@@ -2030,6 +2204,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -2057,6 +2233,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -2088,6 +2266,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("search query".into()), // full text + > 24h
                 field_filters: vec![],
@@ -2173,6 +2353,8 @@ mod tests {
                 levels: vec![LogLevel::Error],
                 services: vec!["api".into()],
                 envs: vec!["production".into()],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: Some("timeout".into()),
                 field_filters: vec![FieldFilter {
@@ -2241,6 +2423,8 @@ mod tests {
                 levels: vec![],
                 services: vec![],
                 envs: vec![],
+                container_ids: vec![],
+                node_ids: vec![],
                 deploy_id: None,
                 text: None,
                 field_filters: vec![],
@@ -2276,6 +2460,8 @@ mod tests {
                     env: "1".to_string(),
                     project_id: 1,
                     deploy_id: None,
+                    node_id: None,
+                    node_name: None,
                 })
             })
             .collect()
@@ -2291,6 +2477,9 @@ mod tests {
             chunk_id,
             line_offset,
             deploy_id: None,
+            container_id: "cnt1".to_string(),
+            node_id: None,
+            node_name: None,
             context: None,
         }
     }

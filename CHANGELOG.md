@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Node identity in deployed containers.** Every deployed container receives
   `TEMPS_NODE_NAME`, `TEMPS_NODE_ID`, and `TEMPS_REPLICA` environment variables,
   so an app can report which node and replica is serving a request.
+- **Remote-node logs in searchable history (ADR-021).** Log history
+  (`/api/logs/search`) now includes containers running on remote worker nodes,
+  not just the control plane. A control-plane collector keeps a stream open to
+  each remote container over the existing mTLS agent channel and feeds the lines
+  into the same searchable store as local logs, tagged with the node they ran on.
+- **Filter history by container or node, or show all.** A project's history
+  spans many deployments and many containers; the history viewer adds a
+  **Container** and a **Node** filter (default "show all", interleaved across
+  every container) plus a per-line **source** column showing which container and
+  worker node each line came from. The search API gained `container_ids` /
+  `node_ids` filters and returns `container_id` / `node_name` per line.
 
 ### Changed
 -

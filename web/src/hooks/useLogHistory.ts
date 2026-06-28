@@ -29,6 +29,12 @@ export interface LogSearchLine {
   chunk_id: string
   line_offset: number
   deploy_id: number | null
+  /** Container this line came from — lets the UI tag/group a combined view. */
+  container_id?: string
+  /** Worker node id (null/absent = control-plane-local). */
+  node_id?: number | null
+  /** Human-readable node name for display. */
+  node_name?: string | null
   /** Raw grep -C surrounding lines, present only when contextLines > 0. */
   context?: LineContext | null
 }
@@ -54,6 +60,10 @@ export interface LogSearchParams {
   contextLines?: number
   /** Filter to logs emitted by a single deployment (deployments.id). */
   deployId?: number
+  /** Filter to specific containers (Docker container IDs). Empty/undefined = all. */
+  containerIds?: string[]
+  /** Filter to specific worker nodes (node_id). Empty/undefined = all nodes. */
+  nodeIds?: number[]
 }
 
 // ── API call ───────────────────────────────────────────────────────────
@@ -74,6 +84,8 @@ async function searchLogs(params: LogSearchParams): Promise<SearchLogsResponse> 
   if (params.contextLines && params.contextLines > 0)
     body.context_lines = params.contextLines
   if (params.deployId != null) body.deploy_id = params.deployId
+  if (params.containerIds?.length) body.container_ids = params.containerIds
+  if (params.nodeIds?.length) body.node_ids = params.nodeIds
 
   const response = await client.post({
     url: '/logs/search',
@@ -101,6 +113,8 @@ export function useLogHistory(params: LogSearchParams, enabled = true) {
       params.pageSize,
       params.contextLines,
       params.deployId,
+      params.containerIds,
+      params.nodeIds,
     ],
     queryFn: () => searchLogs(params),
     enabled: enabled && !!params.projectId,
