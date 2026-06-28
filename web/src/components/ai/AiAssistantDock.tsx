@@ -1,4 +1,9 @@
 import {
+  type GlobalConversationResponse,
+  archiveConversation,
+  listAllConversations,
+} from '@/api/client'
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -28,19 +33,6 @@ import { toast } from 'sonner'
 import { AiChatContext, useAiAssistant } from './AiAssistantContext'
 import { DebugChatPanel } from './DebugChatPanel'
 
-interface GlobalConversation {
-  public_id: string
-  project_id: number
-  project_name?: string | null
-  project_slug?: string | null
-  context_type: string
-  context_id: string
-  title?: string | null
-  status: string
-  created_at: string
-  last_activity_at: string
-}
-
 interface ActiveChat {
   projectId: number
   projectSlug?: string
@@ -53,13 +45,16 @@ interface ActiveChat {
   autoStart: boolean
 }
 
-const CONTEXT_META: Record<string, { label: string; Icon: typeof GitBranch }> = {
-  deployment: { label: 'Deployment', Icon: GitBranch },
-  alert: { label: 'Alert', Icon: Bell },
-}
+const CONTEXT_META: Record<string, { label: string; Icon: typeof GitBranch }> =
+  {
+    deployment: { label: 'Deployment', Icon: GitBranch },
+    alert: { label: 'Alert', Icon: Bell },
+  }
 
 function metaFor(contextType: string) {
-  return CONTEXT_META[contextType] ?? { label: contextType, Icon: MessageSquare }
+  return (
+    CONTEXT_META[contextType] ?? { label: contextType, Icon: MessageSquare }
+  )
 }
 
 /** Route to the entity a chat was started from, when we know its project. */
@@ -102,7 +97,11 @@ export function AiAssistantDock() {
           left, so the dock stays put ("sticky") while navigating. */}
       <div className="sticky top-0 h-svh w-full">
         {isOpen && (
-          <DockBody key={openSeq} initialContext={initialContext} onClose={close} />
+          <DockBody
+            key={openSeq}
+            initialContext={initialContext}
+            onClose={close}
+          />
         )}
       </div>
     </aside>
@@ -142,7 +141,9 @@ function DockBody({
         }
       : null
   )
-  const [conversations, setConversations] = useState<GlobalConversation[]>([])
+  const [conversations, setConversations] = useState<
+    GlobalConversationResponse[]
+  >([])
   const [loadingList, setLoadingList] = useState(false)
   const [activePublicId, setActivePublicId] = useState<string | null>(null)
   const [resetKey, setResetKey] = useState(0)
@@ -155,20 +156,27 @@ function DockBody({
   // Unified list across every project.
   const loadList = useCallback(() => {
     setLoadingList(true)
-    fetch(`/api/ai/conversations`, { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : []))
-      .then((rows: GlobalConversation[]) =>
-        setConversations(Array.isArray(rows) ? rows : [])
-      )
+    listAllConversations()
+      .then(({ data }) => setConversations(data ?? []))
       .catch(() => setConversations([]))
       .finally(() => setLoadingList(false))
   }, [])
 
   useEffect(() => {
-    if (!initialContext) loadList()
+    if (initialContext) return
+    // Defer to a microtask so the synchronous setLoadingList(true) inside
+    // loadList() doesn't fire during the effect's render-commit phase (which
+    // would trigger a cascading render warning).
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) loadList()
+    })
+    return () => {
+      cancelled = true
+    }
   }, [initialContext, loadList])
 
-  const openConversation = (c: GlobalConversation) => {
+  const openConversation = (c: GlobalConversationResponse) => {
     setActivePublicId(null)
     setActive({
       projectId: c.project_id,
@@ -191,10 +199,9 @@ function DockBody({
   // source (re-seeds + re-diagnoses).
   const resetConversation = async () => {
     if (active && activePublicId) {
-      await fetch(
-        `/api/projects/${active.projectId}/ai/conversations/${activePublicId}/archive`,
-        { method: 'POST', credentials: 'include' }
-      ).catch(() => {})
+      await archiveConversation({
+        path: { project_id: active.projectId, public_id: activePublicId },
+      }).catch(() => {})
     }
     setActivePublicId(null)
     setActive((a) => (a ? { ...a, autoStart: true } : a))
@@ -207,10 +214,9 @@ function DockBody({
     const d = pendingDelete
     if (!d) return
     setPendingDelete(null)
-    await fetch(
-      `/api/projects/${d.projectId}/ai/conversations/${d.publicId}/archive`,
-      { method: 'POST', credentials: 'include' }
-    ).catch(() => {})
+    await archiveConversation({
+      path: { project_id: d.projectId, public_id: d.publicId },
+    }).catch(() => {})
     toast.success('Chat deleted')
     if (active && activePublicId === d.publicId) {
       backToList()
@@ -263,8 +269,8 @@ function DockBody({
             </p>
           ) : (
             <p className="text-sm text-muted-foreground">
-              Resume any AI conversation across your projects, or start one from a
-              failed deployment or alert.
+              Resume any AI conversation across your projects, or start one from
+              a failed deployment or alert.
             </p>
           )}
         </div>
@@ -339,7 +345,8 @@ function DockBody({
               setPendingDelete({
                 projectId: c.project_id,
                 publicId: c.public_id,
-                title: c.title ?? `${metaFor(c.context_type).label} ${c.context_id}`,
+                title:
+                  c.title ?? `${metaFor(c.context_type).label} ${c.context_id}`,
               })
             }
           />
@@ -354,8 +361,8 @@ function DockBody({
           <AlertDialogHeader>
             <AlertDialogTitle>Delete this chat?</AlertDialogTitle>
             <AlertDialogDescription>
-              “{pendingDelete?.title}” will be removed from your list. This can't
-              be undone from here.
+              “{pendingDelete?.title}” will be removed from your list. This
+              can&apos;t be undone from here.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -381,10 +388,10 @@ function ConversationList({
   onDelete,
 }: {
   loading: boolean
-  conversations: GlobalConversation[]
-  onOpen: (c: GlobalConversation) => void
-  onOpenSource: (c: GlobalConversation) => void
-  onDelete: (c: GlobalConversation) => void
+  conversations: GlobalConversationResponse[]
+  onOpen: (c: GlobalConversationResponse) => void
+  onOpenSource: (c: GlobalConversationResponse) => void
+  onDelete: (c: GlobalConversationResponse) => void
 }) {
   if (loading) {
     return (

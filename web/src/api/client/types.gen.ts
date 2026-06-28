@@ -6740,6 +6740,24 @@ export type GitRefResponse = {
     url: string;
 };
 
+/**
+ * A conversation in the unified cross-project switcher: carries the project it
+ * belongs to (name/slug) so the UI can show where the chat was started and
+ * link back to the source.
+ */
+export type GlobalConversationResponse = {
+    context_id: string;
+    context_type: string;
+    created_at: string;
+    last_activity_at: string;
+    project_id: number;
+    project_name?: string | null;
+    project_slug?: string | null;
+    public_id: string;
+    status: string;
+    title?: string | null;
+};
+
 export type GlobalEventStatsResponse = {
     bounce_rate?: number | null;
     bounced: number;
@@ -16818,6 +16836,24 @@ export type WebhookTriggerResponses = {
 };
 
 export type WebhookTriggerResponse2 = WebhookTriggerResponses[keyof WebhookTriggerResponses];
+
+export type ListAllConversationsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/ai/conversations';
+};
+
+export type ListAllConversationsErrors = {
+    401: unknown;
+    403: unknown;
+};
+
+export type ListAllConversationsResponses = {
+    200: Array<GlobalConversationResponse>;
+};
+
+export type ListAllConversationsResponse = ListAllConversationsResponses[keyof ListAllConversationsResponses];
 
 export type GetPricingData = {
     body?: never;
@@ -32231,6 +32267,26 @@ export type CreateConversationResponses = {
 };
 
 export type CreateConversationResponse = CreateConversationResponses[keyof CreateConversationResponses];
+
+export type ListConversationsData = {
+    body?: never;
+    path: {
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/list';
+};
+
+export type ListConversationsErrors = {
+    401: unknown;
+    403: unknown;
+};
+
+export type ListConversationsResponses = {
+    200: Array<ConversationResponse>;
+};
+
+export type ListConversationsResponse = ListConversationsResponses[keyof ListConversationsResponses];
 
 export type GetConversationData = {
     body?: never;

@@ -1,14 +1,16 @@
+import {
+  type MessageResponse,
+  createConversation,
+  findConversation,
+  getConversation,
+} from '@/api/client'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { Loader2, Send, Sparkles } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-
-interface ChatMessage {
-  role: string
-  content: string
-}
 
 interface DebugChatPanelProps {
   projectId: number
@@ -52,7 +54,7 @@ function AssistantAvatar() {
  * scrollable message list that fills its parent plus a follow-up composer — no
  * surrounding card, so it can drop into a sidebar/sheet or a page section. The
  * streaming reply is consumed via a manual SSE fetch reader (the generated SDK
- * can't stream); find/history use the same cookie-authed `/api` surface.
+ * can't stream); find/create/history go through the generated SDK.
  */
 export function DebugChatPanel({
   projectId,
@@ -66,10 +68,14 @@ export function DebugChatPanel({
   const base = `/api/projects/${projectId}/ai/conversations`
   const ctxId = String(contextId)
   const [publicId, setPublicId] = useState<string | null>(null)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [messages, setMessages] = useState<MessageResponse[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [starting, setStarting] = useState(false)
+  // True until the run-once init fetch resolves. Lets us show a skeleton instead
+  // of flashing the "Start AI diagnosis" empty state while resuming a chat —
+  // that empty condition is indistinguishable from the initial mount state.
+  const [initializing, setInitializing] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -85,10 +91,11 @@ export function DebugChatPanel({
       // stream fills in. The empty assistant turn renders a typing indicator
       // while streaming; on any failure below we drop it again so it can't linger
       // as a perpetual fake "typing" bubble next to the error message.
+      const now = new Date().toISOString()
       setMessages((m) => [
         ...m,
-        { role: 'user', content },
-        { role: 'assistant', content: '' },
+        { role: 'user', content, created_at: now },
+        { role: 'assistant', content: '', created_at: now },
       ])
       // Pop the trailing optimistic assistant turn if it never received content
       // (used on every failure path so a failed send leaves only the error line).
@@ -148,6 +155,7 @@ export function DebugChatPanel({
                 copy[copy.length - 1] = {
                   role: 'assistant',
                   content: (last?.content ?? '') + chunk,
+                  created_at: last?.created_at ?? new Date().toISOString(),
                 }
                 return copy
               })
@@ -168,21 +176,17 @@ export function DebugChatPanel({
     setStarting(true)
     setError(null)
     try {
-      const res = await fetch(base, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ context_type: contextType, context_id: ctxId }),
+      const { data: conv, error: problem } = await createConversation({
+        path: { project_id: projectId },
+        body: { context_type: contextType, context_id: ctxId },
       })
-      if (!res.ok) {
-        const problem = await res.json().catch(() => ({}))
+      if (!conv) {
         setError(
-          problem.detail ||
+          (problem as { detail?: string } | undefined)?.detail ||
             'Could not start the chat. Make sure an AI provider is configured.'
         )
         return
       }
-      const conv = await res.json()
       setPublicId(conv.public_id)
       setMessages([])
       void send(startPrompt, conv.public_id)
@@ -191,7 +195,7 @@ export function DebugChatPanel({
     } finally {
       setStarting(false)
     }
-  }, [base, contextType, ctxId, startPrompt, send])
+  }, [projectId, contextType, ctxId, startPrompt, send])
 
   // Keep the latest send/start in refs so the one-shot init effect below can
   // call them without listing them as dependencies (which would make it re-run
@@ -212,24 +216,24 @@ export function DebugChatPanel({
     let ignore = false
     ;(async () => {
       try {
-        const conv = await fetch(
-          `${base}?context_type=${encodeURIComponent(contextType)}&context_id=${encodeURIComponent(ctxId)}`,
-          { credentials: 'include' }
-        ).then((r) => (r.ok ? r.json() : null))
+        const { data: conv } = await findConversation({
+          path: { project_id: projectId },
+          query: { context_type: contextType, context_id: ctxId },
+        })
         if (ignore) return
         if (!conv) {
           if (autoStart) void startRef.current()
           return
         }
         setPublicId(conv.public_id)
-        const detail = await fetch(`${base}/${conv.public_id}`, {
-          credentials: 'include',
-        })
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null)
+        const { data: detail } = await getConversation({
+          path: { project_id: projectId, public_id: conv.public_id },
+        }).catch(() => ({ data: null }))
         if (!ignore && detail) setMessages(detail.messages ?? [])
       } catch {
         /* best-effort: leave the panel in its empty state */
+      } finally {
+        if (!ignore) setInitializing(false)
       }
     })()
     return () => {
@@ -259,7 +263,23 @@ export function DebugChatPanel({
         ref={scrollRef}
         className="flex-1 min-h-0 space-y-4 overflow-y-auto pr-1"
       >
-        {visible.length === 0 && !busy && !publicId && (
+        {/* Until the run-once init fetch resolves we can't tell "no chat yet"
+            (show the start button) apart from "resuming an existing chat"
+            (about to load history) — both look like the empty mount state. Show
+            a skeleton meanwhile so resuming doesn't flash "Start AI diagnosis". */}
+        {initializing && visible.length === 0 && !busy && (
+          <div className="space-y-4">
+            <div className="flex items-start gap-2.5">
+              <Skeleton className="h-7 w-7 shrink-0 rounded-full" />
+              <Skeleton className="h-16 flex-1 rounded-2xl rounded-tl-sm" />
+            </div>
+            <div className="flex justify-end">
+              <Skeleton className="h-9 w-2/3 rounded-2xl rounded-tr-sm" />
+            </div>
+          </div>
+        )}
+
+        {!initializing && visible.length === 0 && !busy && !publicId && (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
             <Sparkles className="h-6 w-6 text-muted-foreground" />
             <Button onClick={() => void start()} disabled={starting}>

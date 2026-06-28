@@ -84,6 +84,16 @@ impl ConversationService {
     /// first, each annotated with its project's name/slug so the UI can show
     /// where the chat was started and link back to it. Powers the unified
     /// "all chats" switcher.
+    ///
+    /// Scoping decision: this is **team-visible** — any human with project access
+    /// (gated by `ProjectsRead` + non-deployment principal at the handler) sees
+    /// that project's chats, matching the instance-wide `ProjectsRead` model and
+    /// the dock copy. We deliberately do NOT filter by `created_by`.
+    ///
+    /// Conversations whose project has `ai_debug_chat_enabled != Some(true)` are
+    /// EXCLUDED so a disabled project's chats never surface in the global
+    /// switcher — consistent with the per-project read gate, which 403s when the
+    /// toggle is off.
     pub async fn list_all_conversations(&self) -> Result<Vec<ConversationWithProject>, ChatError> {
         let convs = ai_conversations::Entity::find()
             .filter(ai_conversations::Column::Status.eq("active"))
@@ -102,19 +112,28 @@ impl ConversationService {
                 .all(self.db.as_ref())
                 .await?
         };
-        let by_id: HashMap<i32, (String, String)> = projects
+        // Carry the toggle alongside name/slug so we can both annotate and filter.
+        let by_id: HashMap<i32, (String, String, bool)> = projects
             .into_iter()
-            .map(|p| (p.id, (p.name, p.slug)))
+            .map(|p| {
+                let enabled = matches!(p.ai_debug_chat_enabled, Some(true));
+                (p.id, (p.name, p.slug, enabled))
+            })
             .collect();
 
         Ok(convs
             .into_iter()
-            .map(|c| {
+            .filter_map(|c| {
                 let info = by_id.get(&c.project_id).cloned();
-                ConversationWithProject {
-                    project_name: info.as_ref().map(|x| x.0.clone()),
-                    project_slug: info.map(|x| x.1),
-                    conversation: c,
+                // Exclude any conversation whose project is missing or has the
+                // toggle off — a disabled project's chats must not appear here.
+                match info {
+                    Some((name, slug, true)) => Some(ConversationWithProject {
+                        project_name: Some(name),
+                        project_slug: Some(slug),
+                        conversation: c,
+                    }),
+                    _ => None,
                 }
             })
             .collect())
@@ -296,23 +315,33 @@ impl ConversationService {
             .await
             .map_err(|e| ChatError::Ai(e.to_string()))?;
 
+        // Disconnect-safe persistence: drive the AI stream, accumulation, and the
+        // final DB insert inside a DETACHED task, relaying tokens to the client
+        // over an mpsc channel. If the client (the receiver) disconnects
+        // mid-stream the send fails, but the task keeps running to completion and
+        // still persists the assistant turn — so a dropped SSE connection never
+        // orphans the user turn. The send error is ignored on purpose.
         let db = self.db.clone();
         let conv_id = conv.id;
-        let out = async_stream::stream! {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<String, ChatError>>();
+        tokio::spawn(async move {
             let mut acc = String::new();
             while let Some(item) = token_stream.next().await {
                 match item {
                     Ok(tok) => {
                         acc.push_str(&tok);
-                        yield Ok(tok);
+                        // Ignore send errors: the client may have disconnected,
+                        // but we still want to finish accumulating and persist.
+                        let _ = tx.send(Ok(tok));
                     }
                     Err(e) => {
-                        yield Err(ChatError::Ai(e.to_string()));
+                        let _ = tx.send(Err(ChatError::Ai(e.to_string())));
                         break;
                     }
                 }
             }
-            // Persist the assistant turn once the reply is complete.
+            // Persist the assistant turn once the reply is complete, regardless of
+            // whether the client is still listening.
             if !acc.is_empty() {
                 let am = ai_messages::ActiveModel {
                     conversation_id: Set(conv_id),
@@ -322,6 +351,13 @@ impl ConversationService {
                     ..Default::default()
                 };
                 let _ = am.insert(db.as_ref()).await;
+            }
+        });
+        // Relay channel -> stream. Dropping this stream drops `rx`, which makes
+        // `tx.send` fail in the task, but the task continues and persists.
+        let out = async_stream::stream! {
+            while let Some(item) = rx.recv().await {
+                yield item;
             }
         };
         Ok(Box::pin(out))
@@ -375,10 +411,16 @@ impl ConversationService {
         }
 
         let text = final_text.filter(|t| !t.is_empty())?;
+        // Disconnect-safe persistence (same rationale as the plain-streaming
+        // path): persist inside a DETACHED task and relay the single final-answer
+        // token over an mpsc channel. The insert runs to completion even if the
+        // client dropped the SSE stream, so the final user→assistant exchange is
+        // always stored.
         let db = self.db.clone();
         let conv_id = conv.id;
-        let out = async_stream::stream! {
-            yield Ok(text.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<String, ChatError>>();
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(text.clone()));
             let am = ai_messages::ActiveModel {
                 conversation_id: Set(conv_id),
                 role: Set("assistant".to_string()),
@@ -387,6 +429,11 @@ impl ConversationService {
                 ..Default::default()
             };
             let _ = am.insert(db.as_ref()).await;
+        });
+        let out = async_stream::stream! {
+            while let Some(item) = rx.recv().await {
+                yield item;
+            }
         };
         Some(Box::pin(out))
     }
@@ -664,5 +711,233 @@ mod tests {
         let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
         let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
         assert!(result.is_none());
+    }
+
+    // --- service-layer DB tests (MockDatabase) ------------------------------
+
+    /// A `ConversationService` backed by the given mock DB. The AI is a dummy
+    /// (`ScriptedAi` with no scripted responses) since these tests exercise only
+    /// the DB query/scoping logic, never an AI turn.
+    fn db_service(db: DatabaseConnection) -> ConversationService {
+        ConversationService {
+            db: Arc::new(db),
+            ai: Arc::new(ScriptedAi::new(vec![])),
+            providers: HashMap::new(),
+        }
+    }
+
+    /// Build a conversation row for a given project, with controllable public_id.
+    fn conv_for(id: i64, project_id: i32, public_id: &str) -> ai_conversations::Model {
+        let now = Utc::now();
+        ai_conversations::Model {
+            id,
+            public_id: public_id.to_string(),
+            project_id,
+            context_type: "deployment".to_string(),
+            context_id: "1".to_string(),
+            title: Some("t".to_string()),
+            status: "active".to_string(),
+            created_by: Some(5),
+            metadata: None,
+            created_at: now,
+            last_activity_at: now,
+        }
+    }
+
+    /// Build a minimal valid `projects::Model` carrying a chosen
+    /// `ai_debug_chat_enabled` toggle.
+    fn project_with_toggle(
+        id: i32,
+        name: &str,
+        slug: &str,
+        toggle: Option<bool>,
+    ) -> temps_entities::projects::Model {
+        let now = Utc::now();
+        temps_entities::projects::Model {
+            id,
+            name: name.to_string(),
+            repo_name: "r".to_string(),
+            repo_owner: "o".to_string(),
+            directory: ".".to_string(),
+            main_branch: "main".to_string(),
+            preset: temps_entities::preset::Preset::Static,
+            preset_config: None,
+            deployment_config: None,
+            created_at: now,
+            updated_at: now,
+            slug: slug.to_string(),
+            is_deleted: false,
+            deleted_at: None,
+            last_deployment: None,
+            is_public_repo: false,
+            git_url: None,
+            git_provider_connection_id: None,
+            attack_mode: false,
+            ai_alert_summaries_enabled: None,
+            ai_debug_chat_enabled: toggle,
+            enable_preview_environments: false,
+            preview_envs_on_demand: false,
+            preview_envs_idle_timeout_seconds: 300,
+            preview_envs_wake_timeout_seconds: 30,
+            source_type: temps_entities::source_type::SourceType::Git,
+            gitlab_webhook_id: None,
+            gitlab_webhook_signing_token: None,
+        }
+    }
+
+    // find_by_context: returns the active conversation when one exists.
+    #[tokio::test]
+    async fn test_find_by_context_returns_match() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![conv_for(1, 7, "pubA")]])
+            .into_connection();
+        let svc = db_service(db);
+
+        let found = svc
+            .find_by_context(7, "deployment", "1")
+            .await
+            .expect("query ok");
+        let conv = found.expect("a conversation should be found");
+        assert_eq!(conv.project_id, 7);
+        assert_eq!(conv.public_id, "pubA");
+    }
+
+    // find_by_context: returns None when no row matches.
+    #[tokio::test]
+    async fn test_find_by_context_none_when_absent() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<ai_conversations::Model>::new()])
+            .into_connection();
+        let svc = db_service(db);
+
+        let found = svc
+            .find_by_context(7, "deployment", "1")
+            .await
+            .expect("query ok");
+        assert!(found.is_none());
+    }
+
+    // list_conversations: returns the project's active conversations.
+    #[tokio::test]
+    async fn test_list_conversations_returns_rows() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![conv_for(1, 7, "pubA"), conv_for(2, 7, "pubB")]])
+            .into_connection();
+        let svc = db_service(db);
+
+        let convs = svc.list_conversations(7).await.expect("query ok");
+        assert_eq!(convs.len(), 2);
+        assert!(convs.iter().all(|c| c.project_id == 7));
+    }
+
+    // list_all_conversations: annotates each conversation with its project's
+    // name/slug, team-visible (no created_by filter).
+    #[tokio::test]
+    async fn test_list_all_conversations_annotates_enabled_projects() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // 1st query: the conversations.
+            .append_query_results(vec![vec![conv_for(1, 7, "pubA"), conv_for(2, 8, "pubB")]])
+            // 2nd query: the projects for those ids (both enabled).
+            .append_query_results(vec![vec![
+                project_with_toggle(7, "Alpha", "alpha", Some(true)),
+                project_with_toggle(8, "Beta", "beta", Some(true)),
+            ]])
+            .into_connection();
+        let svc = db_service(db);
+
+        let items = svc.list_all_conversations().await.expect("query ok");
+        assert_eq!(items.len(), 2);
+        let alpha = items
+            .iter()
+            .find(|i| i.conversation.project_id == 7)
+            .expect("alpha present");
+        assert_eq!(alpha.project_name.as_deref(), Some("Alpha"));
+        assert_eq!(alpha.project_slug.as_deref(), Some("alpha"));
+    }
+
+    // list_all_conversations: a conversation whose project has the toggle off (or
+    // NULL) is EXCLUDED from the global switcher, even though its row is active.
+    #[tokio::test]
+    async fn test_list_all_conversations_excludes_disabled_projects() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![
+                conv_for(1, 7, "pubEnabled"),
+                conv_for(2, 8, "pubDisabled"),
+                conv_for(3, 9, "pubNull"),
+            ]])
+            .append_query_results(vec![vec![
+                project_with_toggle(7, "Alpha", "alpha", Some(true)),
+                project_with_toggle(8, "Beta", "beta", Some(false)),
+                project_with_toggle(9, "Gamma", "gamma", None),
+            ]])
+            .into_connection();
+        let svc = db_service(db);
+
+        let items = svc.list_all_conversations().await.expect("query ok");
+        assert_eq!(items.len(), 1, "only the enabled project's chat survives");
+        assert_eq!(items[0].conversation.project_id, 7);
+        assert_eq!(items[0].conversation.public_id, "pubEnabled");
+    }
+
+    // list_all_conversations: also excludes conversations whose project row is
+    // missing entirely (defensive — a dangling project_id must not leak).
+    #[tokio::test]
+    async fn test_list_all_conversations_excludes_missing_project() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![conv_for(1, 7, "pubA")]])
+            // Project lookup returns nothing for id 7.
+            .append_query_results(vec![Vec::<temps_entities::projects::Model>::new()])
+            .into_connection();
+        let svc = db_service(db);
+
+        let items = svc.list_all_conversations().await.expect("query ok");
+        assert!(items.is_empty());
+    }
+
+    // get_by_public_id: returns the row when the (project_id, public_id) pair
+    // matches; the filter scopes to the project so a wrong project can't fetch it.
+    #[tokio::test]
+    async fn test_get_by_public_id_returns_scoped_row() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![conv_for(1, 7, "pubA")]])
+            .into_connection();
+        let svc = db_service(db);
+
+        let conv = svc.get_by_public_id(7, "pubA").await.expect("found");
+        assert_eq!(conv.project_id, 7);
+        assert_eq!(conv.public_id, "pubA");
+    }
+
+    // get_by_public_id: when the scoped query returns no row (e.g. wrong project
+    // or unknown id), a `NotFound` carrying the public_id is returned.
+    #[tokio::test]
+    async fn test_get_by_public_id_not_found_is_scoped_error() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<ai_conversations::Model>::new()])
+            .into_connection();
+        let svc = db_service(db);
+
+        let err = svc
+            .get_by_public_id(99, "pubA")
+            .await
+            .expect_err("should not find a conversation in the wrong project");
+        match err {
+            ChatError::NotFound(id) => assert_eq!(id, "pubA"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    // archive: flips status to "archived" via an UPDATE returning the row.
+    #[tokio::test]
+    async fn test_archive_succeeds() {
+        let mut archived = conv_for(1, 7, "pubA");
+        archived.status = "archived".to_string();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![archived]])
+            .into_connection();
+        let svc = db_service(db);
+
+        let conv = conv_for(1, 7, "pubA");
+        svc.archive(&conv).await.expect("archive ok");
     }
 }

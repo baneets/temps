@@ -398,6 +398,215 @@ impl AiService for GatewayAiService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
+    use temps_core::EncryptionService;
+
+    use crate::services::ProviderKeyService;
+
+    /// Build a [`GatewayAiService`] over the given mock connection. The gateway
+    /// half is never exercised by `resolve_model`, but the struct still needs
+    /// one; wire a throwaway encryption key + provider-key service through.
+    fn service_over(db: DatabaseConnection) -> GatewayAiService {
+        let db = Arc::new(db);
+        let encryption =
+            Arc::new(EncryptionService::new("01234567890123456789012345678901").unwrap());
+        let provider_keys = Arc::new(ProviderKeyService::new(db.clone(), encryption));
+        let gateway = Arc::new(GatewayService::new(provider_keys));
+        GatewayAiService::new(gateway, db)
+    }
+
+    fn config_row(
+        scope: &str,
+        allowed: Option<serde_json::Value>,
+    ) -> temps_entities::ai_gateway_config::Model {
+        temps_entities::ai_gateway_config::Model {
+            id: 1,
+            scope: scope.to_string(),
+            allowed_models: allowed,
+            max_requests_per_minute: None,
+            max_cost_per_month_microcents: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn active_key(provider: &str) -> temps_entities::ai_provider_keys::Model {
+        temps_entities::ai_provider_keys::Model {
+            id: 1,
+            provider: provider.to_string(),
+            display_name: format!("{provider} key"),
+            api_key_encrypted: "enc".to_string(),
+            base_url: None,
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn chat_response(content: Option<MessageContent>) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: "resp_1".to_string(),
+            object: "chat.completion".to_string(),
+            created: 0,
+            model: "gpt-4o-mini".to_string(),
+            choices: vec![crate::types::ChatCompletionChoice {
+                index: 0,
+                // `crate::types::ChatMessage` (wire shape) — distinct from the
+                // `temps_ai::ChatMessage` imported at module scope.
+                message: crate::types::ChatMessage {
+                    role: "assistant".to_string(),
+                    content,
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_explicit_wins_without_db_lookup() {
+        // No query results queued: an explicit, non-empty model must short-circuit
+        // before any database access. (A DB hit here would panic the mock.)
+        let svc = service_over(MockDatabase::new(DatabaseBackend::Postgres).into_connection());
+        let model = svc.resolve_model(Some(7), Some("gpt-4.1")).await;
+        assert_eq!(model, Some("gpt-4.1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_empty_explicit_falls_through_to_default() {
+        // Empty explicit string is ignored; no allow-list config exists, so it
+        // falls back to the default model for the first active provider key.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // ai_gateway_config: nothing configured
+            .append_query_results(vec![Vec::<temps_entities::ai_gateway_config::Model>::new()])
+            // ai_provider_keys: one active anthropic key
+            .append_query_results(vec![vec![active_key("anthropic")]])
+            .into_connection();
+        let svc = service_over(db);
+        let model = svc.resolve_model(None, Some("")).await;
+        assert_eq!(model, Some("claude-3-5-haiku-latest".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_allowlist_first_entry_wins() {
+        // A project-scoped allow-list names a concrete model; its first entry is
+        // used and no provider-key fallback query is performed.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![config_row(
+                "project:7",
+                Some(serde_json::json!(["gpt-4o", "gpt-4o-mini"])),
+            )]])
+            .into_connection();
+        let svc = service_over(db);
+        let model = svc.resolve_model(Some(7), None).await;
+        assert_eq!(model, Some("gpt-4o".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_default_for_first_active_key() {
+        // No allow-list -> default model for the first active provider key.
+        for (provider, expected) in [
+            ("openai", "gpt-4o-mini"),
+            ("anthropic", "claude-3-5-haiku-latest"),
+            ("gemini", "gemini-1.5-flash"),
+            ("xai", "grok-2-latest"),
+        ] {
+            let db = MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results(vec![Vec::<temps_entities::ai_gateway_config::Model>::new()])
+                .append_query_results(vec![vec![active_key(provider)]])
+                .into_connection();
+            let svc = service_over(db);
+            let model = svc.resolve_model(None, None).await;
+            assert_eq!(model, Some(expected.to_string()), "provider {provider}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_none_when_no_active_key() {
+        // No allow-list and no active provider key -> nothing names a model.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<temps_entities::ai_gateway_config::Model>::new()])
+            .append_query_results(vec![Vec::<temps_entities::ai_provider_keys::Model>::new()])
+            .into_connection();
+        let svc = service_over(db);
+        assert_eq!(svc.resolve_model(None, None).await, None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_none_for_unknown_provider() {
+        // Active key exists but its provider has no default mapping -> None.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<temps_entities::ai_gateway_config::Model>::new()])
+            .append_query_results(vec![vec![active_key("custom")]])
+            .into_connection();
+        let svc = service_over(db);
+        assert_eq!(svc.resolve_model(None, None).await, None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_model_null_allowlist_falls_through_to_default() {
+        // A config row with NULL allowed_models ("all allowed") names no specific
+        // model, so resolution falls through to the provider-key default.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![config_row("instance", None)]])
+            .append_query_results(vec![vec![active_key("openai")]])
+            .into_connection();
+        let svc = service_over(db);
+        let model = svc.resolve_model(None, None).await;
+        assert_eq!(model, Some("gpt-4o-mini".to_string()));
+    }
+
+    #[test]
+    fn test_default_model_for_provider_mapping() {
+        assert_eq!(
+            default_model_for_provider("openai"),
+            Some("gpt-4o-mini".to_string())
+        );
+        assert_eq!(
+            default_model_for_provider("anthropic"),
+            Some("claude-3-5-haiku-latest".to_string())
+        );
+        assert_eq!(
+            default_model_for_provider("gemini"),
+            Some("gemini-1.5-flash".to_string())
+        );
+        assert_eq!(
+            default_model_for_provider("xai"),
+            Some("grok-2-latest".to_string())
+        );
+        // Unknown / custom providers have no built-in default.
+        assert_eq!(default_model_for_provider("custom"), None);
+        assert_eq!(default_model_for_provider(""), None);
+    }
+
+    #[test]
+    fn test_first_text_extraction() {
+        // Plain text content -> extracted verbatim.
+        let resp = chat_response(Some(MessageContent::Text("hello world".to_string())));
+        assert_eq!(first_text(&resp), Some("hello world".to_string()));
+
+        // Multi-part content is not flattened here -> None.
+        let parts = chat_response(Some(MessageContent::Parts(vec![
+            crate::types::ContentPart {
+                r#type: "text".to_string(),
+                text: Some("ignored".to_string()),
+                image_url: None,
+            },
+        ])));
+        assert_eq!(first_text(&parts), None);
+
+        // Null content -> None.
+        let empty = chat_response(None);
+        assert_eq!(first_text(&empty), None);
+
+        // No choices -> None, not a panic.
+        let mut no_choices = chat_response(Some(MessageContent::Text("x".to_string())));
+        no_choices.choices.clear();
+        assert_eq!(first_text(&no_choices), None);
+    }
 
     #[test]
     fn test_first_model() {

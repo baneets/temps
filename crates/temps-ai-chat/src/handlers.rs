@@ -145,8 +145,12 @@ impl From<ChatError> for Problem {
     }
 }
 
-/// Gate: the project must have opted into AI debug chat AND AI must be configured.
-async fn ensure_enabled(state: &AppState, project_id: i32) -> Result<(), Problem> {
+/// Toggle-only gate: the project must have opted into AI debug chat
+/// (`ai_debug_chat_enabled == Some(true)`). Used by the read/archive handlers so
+/// that disabling the feature consistently revokes access (returns 403) to
+/// existing chat content — reading or archiving history must not require an AI
+/// provider to be configured, only the per-project toggle.
+async fn ensure_chat_enabled(state: &AppState, project_id: i32) -> Result<(), Problem> {
     let project = temps_entities::projects::Entity::find_by_id(project_id)
         .one(state.db.as_ref())
         .await
@@ -160,6 +164,14 @@ async fn ensure_enabled(state: &AppState, project_id: i32) -> Result<(), Problem
             .with_title("AI Debug Chat Disabled")
             .with_detail("Enable AI debug chat for this project to use it."));
     }
+    Ok(())
+}
+
+/// Gate for create/send: the project must have opted into AI debug chat AND AI
+/// must be configured. Builds on [`ensure_chat_enabled`] (toggle) and adds the
+/// AI-availability check required to actually run a turn.
+async fn ensure_enabled(state: &AppState, project_id: i32) -> Result<(), Problem> {
+    ensure_chat_enabled(state, project_id).await?;
     if !state.service.ai_available().await {
         return Err(problemdetails::new(axum::http::StatusCode::CONFLICT)
             .with_title("AI Not Configured")
@@ -170,7 +182,9 @@ async fn ensure_enabled(state: &AppState, project_id: i32) -> Result<(), Problem
 
 // --- handlers ----------------------------------------------------------------
 
-/// Find the existing chat for a context (returns `null` if none yet).
+/// Find the existing chat for a context (returns `null` if none yet). Requires
+/// the per-project `ai_debug_chat_enabled` toggle to be on; returns 403 when the
+/// feature is disabled so revoking it consistently hides existing chat content.
 #[utoipa::path(
     get, tag = "AI Chat",
     path = "/projects/{project_id}/ai/conversations",
@@ -186,6 +200,7 @@ pub async fn find_conversation(
 ) -> Result<Json<Option<ConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
     project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(&state, project_id).await?;
     let found = state
         .service
         .find_by_context(project_id, &q.context_type, &q.context_id)
@@ -247,6 +262,7 @@ pub async fn list_conversations(
 ) -> Result<Json<Vec<ConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
     project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(&state, project_id).await?;
     let conversations = state.service.list_conversations(project_id).await?;
     Ok(Json(
         conversations
@@ -301,6 +317,7 @@ pub async fn get_conversation(
 ) -> Result<Json<ConversationDetailResponse>, Problem> {
     permission_guard!(auth, ProjectsRead);
     project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(&state, project_id).await?;
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)
@@ -368,6 +385,7 @@ pub async fn archive_conversation(
 ) -> Result<axum::http::StatusCode, Problem> {
     permission_guard!(auth, ProjectsWrite);
     project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(&state, project_id).await?;
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)
@@ -425,3 +443,69 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
     ))
 )]
 pub struct AiChatApiDoc;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    /// The `title` value the mapping set on the Problem body, if any.
+    fn title_of(p: &Problem) -> Option<String> {
+        p.body
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    // (a) Every `ChatError` variant maps to the expected HTTP status + title.
+    // Pure: exercises `From<ChatError> for Problem` directly.
+
+    #[test]
+    fn test_not_found_maps_to_404() {
+        let p: Problem = ChatError::NotFound("abc".to_string()).into();
+        assert_eq!(p.status_code, StatusCode::NOT_FOUND);
+        assert_eq!(title_of(&p).as_deref(), Some("Conversation Not Found"));
+    }
+
+    #[test]
+    fn test_no_provider_maps_to_404_context_unavailable() {
+        let p: Problem = ChatError::NoProvider("deployment".to_string()).into();
+        assert_eq!(p.status_code, StatusCode::NOT_FOUND);
+        assert_eq!(title_of(&p).as_deref(), Some("Context Not Available"));
+    }
+
+    #[test]
+    fn test_context_unavailable_maps_to_404() {
+        let p: Problem = ChatError::ContextUnavailable.into();
+        assert_eq!(p.status_code, StatusCode::NOT_FOUND);
+        assert_eq!(title_of(&p).as_deref(), Some("Context Not Available"));
+    }
+
+    #[test]
+    fn test_ai_unavailable_maps_to_409() {
+        let p: Problem = ChatError::AiUnavailable.into();
+        assert_eq!(p.status_code, StatusCode::CONFLICT);
+        assert_eq!(title_of(&p).as_deref(), Some("AI Not Configured"));
+    }
+
+    #[test]
+    fn test_db_error_maps_to_500() {
+        let p: Problem = ChatError::Db(sea_orm::DbErr::Custom("boom".to_string())).into();
+        assert_eq!(p.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(title_of(&p).as_deref(), Some("Internal Server Error"));
+    }
+
+    #[test]
+    fn test_ai_error_maps_to_500() {
+        let p: Problem = ChatError::Ai("provider exploded".to_string()).into();
+        assert_eq!(p.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(title_of(&p).as_deref(), Some("Internal Server Error"));
+    }
+
+    // Note on handler-level (401/403/success) coverage: the only sibling crate
+    // that unit-tests axum handlers (`temps-notifications`) does so via a
+    // Docker-backed `TestDatabase` + `oneshot`, asserting just 401 for
+    // unauthenticated requests — too heavyweight and not pure. We therefore cover
+    // the authorization/toggle behavior at the service layer (see service.rs
+    // tests) and the HTTP mapping here via the pure `From<ChatError>` conversion.
+}
