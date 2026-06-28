@@ -8,13 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
--
+- **Worker-node monitoring & alerts.** Temps now automatically watches every
+  worker node and notifies operators through the existing notification channels
+  (email / Slack / webhook) — no per-node rules to configure. You get a
+  **critical alert when a node goes offline** (>90s without a heartbeat, with
+  automatic failover of its workloads), an **info notification when it
+  recovers**, and **warning alerts on resource pressure** (CPU / memory / disk).
+  Resource thresholds are operator-configurable under `multi_node`
+  (`node_cpu_alert_percent` / `node_memory_alert_percent` /
+  `node_disk_alert_percent`, default 90, `null` to disable).
+- **Control plane shown as a node.** The control plane now appears in the node
+  list (id `0`, role `control-plane`) so containers scheduled onto it are
+  visible alongside worker nodes in the dashboard and per-node views.
+- **Node identity in deployed containers.** Every deployed container receives
+  `TEMPS_NODE_NAME`, `TEMPS_NODE_ID`, and `TEMPS_REPLICA` environment variables,
+  so an app can report which node and replica is serving a request.
 
 ### Changed
 -
 
 ### Fixed
 -
+
+### Security
+- **Mutual TLS between the control plane and worker agents (ADR-020).** Optional
+  per-cluster CA that signs each node's CSR into a per-node certificate (private
+  keys never leave the node; the CA key is encrypted at rest). When enabled via
+  `multi_node.require_mtls`, the agent serves rustls mutual TLS and every
+  control-plane→agent call — deploy, drain, log streaming, exec, and the
+  terminal WebSocket — is encrypted and mutually authenticated. Defaults off
+  (observe-then-enforce); existing clusters are unaffected until flipped on.
+- **Short-lived, single-use node enrollment tokens.** Replace the eternal shared
+  join token with expiring, optionally node-scoped enrollment tokens
+  (mint / list / revoke API; only the SHA-256 hash is stored, plaintext shown
+  once). The legacy shared token remains available behind
+  `multi_node.legacy_shared_token_enabled` for upgrades.
+- **Node identity-takeover hardening.** Node re-registration that changes a
+  node's token / address / key must now prove possession of the prior
+  credential, closing a name-keyed-upsert hijack; `/internal/nodes/register` is
+  rate-limited and audit-logged; and `edge_routes` rejects tokens belonging to
+  non-active (draining / offline) nodes.
+- **Per-source S3 credential scoping.** The node S3-credential endpoint is now
+  scoped to sources the node is authorized for, preventing one node's token from
+  exfiltrating every tenant's S3 credentials.
+- **Supply-chain hardening** of the `install.sh` / join scripts (fail-closed
+  checksum verification) and the internal proxy strips client-supplied
+  `x-forwarded-*` / `x-temps-*` headers before forwarding.
 
 
 ## [0.1.0-beta.39] - 2026-06-25
