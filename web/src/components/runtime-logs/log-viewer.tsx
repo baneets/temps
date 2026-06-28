@@ -332,10 +332,22 @@ const MAX_LIVE_ALL_CONTAINERS = 20
 // A visible log line plus its optional source (which container/node it came
 // from). `source` is only set in "All containers" mode; single-container mode
 // leaves it undefined and the row falls back to the selected container's
-// service name.
+// service name. `tsMs` is the line's log timestamp in epoch ms, precomputed at
+// enqueue time in all-mode so the merged buffer can be sorted chronologically
+// with a cheap numeric key (no re-parse).
 interface LogEntry {
   raw: string
   source?: string
+  tsMs?: number
+}
+
+// Pull the leading ISO timestamp out of a raw line (present when the stream was
+// requested with timestamps=true) and return it as epoch ms.
+function extractTsMs(raw: string): number | undefined {
+  const m = raw.match(TIMESTAMP_PREFIX)
+  if (!m) return undefined
+  const t = Date.parse(m[1])
+  return Number.isNaN(t) ? undefined : t
 }
 
 // Short per-line source label for the merged "All containers" view —
@@ -630,32 +642,29 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
     droppedSinceFlushRef.current = 0
     if (incoming.length === 0) return
     lastFlushTsRef.current = Date.now()
-    // In "All containers" mode, order each batch by log timestamp so lines
-    // merged from multiple container streams interleave chronologically —
-    // arrival order across streams is jittery (different nodes, mTLS hop).
-    // Lines without a parseable timestamp keep arrival order (stable sort).
-    // Skipped in single-container mode where lines already arrive ordered.
-    if (isAllRef.current) {
-      const withTs = incoming.map((e) => ({
-        e,
-        ts: parseLogLine(e.raw).timestamp,
-      }))
-      withTs.sort((a, b) =>
-        !a.ts || !b.ts ? 0 : a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0,
-      )
-      for (let i = 0; i < withTs.length; i++) incoming[i] = withTs[i].e
-    }
     setLogs((prev) => {
       const merged = [...prev, ...incoming]
+      // "All containers" mode: sort the *whole* merged buffer by log timestamp
+      // so the streams interleave chronologically. A per-batch sort isn't
+      // enough — each container's backlog arrives as its own burst, so the
+      // bursts would otherwise just concatenate container-by-container. tsMs is
+      // precomputed at enqueue, so this is a cheap numeric-key sort (stable in
+      // modern JS, so equal timestamps keep arrival order). After sorting, the
+      // newest lines are the tail, so slice(-MAX) keeps the most recent.
+      if (isAllRef.current) {
+        merged.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0))
+      }
       const trimmed =
         merged.length > MAX_VISIBLE_LOGS
           ? merged.slice(-MAX_VISIBLE_LOGS)
           : merged
-      // Capture where this batch starts in the trimmed list so the row
-      // renderer can apply the fade-in animation to just the new rows.
-      // When we trim, the start is `length - incoming.length`; when we
-      // don't, it's `prev.length`.
-      const batchStart = Math.max(0, trimmed.length - incoming.length)
+      // Capture where this batch starts so the row renderer can fade in the new
+      // rows. After an all-mode sort the new lines aren't a contiguous tail, so
+      // skip the animation there (batchStart = end) so we don't fade in the
+      // wrong rows.
+      const batchStart = isAllRef.current
+        ? trimmed.length
+        : Math.max(0, trimmed.length - incoming.length)
       lastBatchStartRef.current = batchStart
       setLastBatchStart(batchStart)
       return trimmed
@@ -673,7 +682,13 @@ export default function LogViewer({ project }: { project: ProjectResponse }) {
   const enqueueLog = useCallback(
     (line: string, source?: string) => {
       const buf = pendingLogsRef.current
-      buf.push({ raw: line, source })
+      // In all-mode, stamp each line with its log time so the merged buffer can
+      // be sorted chronologically. Fall back to now() if the line carries no
+      // timestamp (so it sorts at the live frontier rather than jumping).
+      const tsMs = isAllRef.current
+        ? (extractTsMs(line) ?? Date.now())
+        : undefined
+      buf.push({ raw: line, source, tsMs })
       if (buf.length > MAX_PENDING_BUFFER) {
         const overflow = buf.length - MAX_PENDING_BUFFER
         buf.splice(0, overflow)
