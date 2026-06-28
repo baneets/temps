@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use temps_core::{JobResult, WorkflowContext, WorkflowError, WorkflowTask};
 use temps_deployer::compose::{ComposeDeployRequest, ComposeExecutor};
@@ -222,6 +222,10 @@ impl WorkflowTask for DeployComposeJob {
 
         // Read compose file from repo checkout or inline content
         let compose_file_name = self.compose_path.as_deref().unwrap_or("docker-compose.yml");
+        // Confine user-supplied paths to the repo checkout / project directory
+        // so a project writer cannot escape the intended work directory.
+        validate_relative_path(compose_file_name, "compose_path")?;
+        validate_relative_path(&self.directory, "directory")?;
 
         let compose_content = if let Some(ref inline) = self.compose_content {
             // Inline compose content (manual project, no git repo)
@@ -464,5 +468,62 @@ impl WorkflowTask for DeployComposeJob {
         }
 
         Ok(JobResult::success(context))
+    }
+}
+
+/// Confine a user-supplied path (`compose_path`, `directory`) to the repo
+/// checkout / project directory: reject empty values, absolute paths, and any
+/// `..` / root / prefix component that would escape the project tree.
+fn validate_relative_path(path: &str, field: &str) -> Result<(), WorkflowError> {
+    let candidate = Path::new(path);
+    if candidate.as_os_str().is_empty() || candidate.is_absolute() {
+        return Err(WorkflowError::JobValidationFailed(format!(
+            "{field} must be a non-empty relative path (got '{path}')"
+        )));
+    }
+
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(WorkflowError::JobValidationFailed(format!(
+            "{field} must not contain '..' or absolute/root path components (got '{path}')"
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_relative_path_accepts_confined_paths() {
+        for ok in [".", "docker-compose.yml", "apps/web", "./compose.yml"] {
+            assert!(
+                validate_relative_path(ok, "compose_path").is_ok(),
+                "expected '{ok}' to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_relative_path_rejects_escape_paths() {
+        for bad in [
+            "",
+            "/tmp/compose.yml",
+            "/etc/passwd",
+            "../compose.yml",
+            "apps/../../compose.yml",
+        ] {
+            let err = validate_relative_path(bad, "compose_path").unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::JobValidationFailed(_)),
+                "expected '{bad}' to be rejected"
+            );
+        }
     }
 }

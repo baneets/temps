@@ -8,7 +8,7 @@ use bollard::Docker;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -37,6 +37,13 @@ pub enum ComposeError {
     #[error("Failed to parse compose YAML for '{compose_source}': {reason}")]
     InvalidComposeYaml {
         compose_source: String,
+        reason: String,
+    },
+
+    #[error("Compose path '{path}' rejected for field '{field}': {reason}")]
+    InvalidComposePath {
+        field: String,
+        path: String,
         reason: String,
     },
 
@@ -112,6 +119,13 @@ impl ComposeExecutor {
     ) -> Result<Vec<ComposeServiceResult>, ComposeError> {
         let project_dir = self.project_dir(&request.project_name);
         let project_name = request.project_name.clone();
+        Self::validate_relative_path(
+            request
+                .compose_path
+                .as_deref()
+                .unwrap_or("docker-compose.yml"),
+            "compose_path",
+        )?;
         self.validate_compose_security_policy("compose file", &request.compose_content)?;
         if let Some(ref compose_override) = request.compose_override {
             self.validate_compose_security_policy("compose override", compose_override)?;
@@ -298,6 +312,7 @@ impl ComposeExecutor {
             .compose_path
             .as_deref()
             .unwrap_or("docker-compose.yml");
+        Self::validate_relative_path(compose_file, "compose_path")?;
         let compose_path = project_dir.join(compose_file);
 
         // Ensure parent directories exist (for nested paths like "subdir/docker-compose.yml")
@@ -479,6 +494,12 @@ impl ComposeExecutor {
                 continue;
             };
 
+            // Reject `${...}`/`$(...)` interpolation in security-guarded fields
+            // first. Otherwise `network_mode: ${NET:-host}` or
+            // `privileged: ${P:-true}` slip past the literal `host`/`true`
+            // checks below because the YAML value is an interpolation string.
+            self.reject_interpolation_in_guarded_fields(service, service_name)?;
+
             self.reject_bool(
                 service,
                 service_name,
@@ -647,6 +668,65 @@ impl ComposeExecutor {
             });
         }
         Ok(())
+    }
+
+    /// Service fields whose value (or any nested sequence/mapping value) must
+    /// never contain `${...}` / `$(...)` interpolation. An attacker could
+    /// otherwise smuggle host/privileged access past the static checks via env
+    /// defaults like `network_mode: ${NET:-host}` or `privileged: ${P:-true}`,
+    /// because the literal YAML value is an interpolation string rather than
+    /// `host`/`true`.
+    const INTERPOLATION_GUARDED_FIELDS: &'static [&'static str] = &[
+        "privileged",
+        "use_api_socket",
+        "network_mode",
+        "pid",
+        "ipc",
+        "userns_mode",
+        "uts",
+        "cgroup",
+        "cap_add",
+        "devices",
+        "volumes",
+        "security_opt",
+        "group_add",
+        "device_cgroup_rules",
+    ];
+
+    /// Reject `${...}` / `$(...)` interpolation appearing anywhere within a
+    /// security-guarded field's value (recursing into sequences and mappings).
+    fn reject_interpolation_in_guarded_fields(
+        &self,
+        service: &serde_yaml::Mapping,
+        service_name: &str,
+    ) -> Result<(), ComposeError> {
+        for field in Self::INTERPOLATION_GUARDED_FIELDS {
+            let Some(value) = service.get(YamlValue::String((*field).to_string())) else {
+                continue;
+            };
+            if Self::value_contains_interpolation(value) {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: service_name.to_string(),
+                    field: (*field).to_string(),
+                    reason: format!(
+                        "'${{...}}' interpolation in guarded field '{field}' is not allowed; \
+                         it can smuggle host/privileged access past static validation"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursively check whether a YAML value (string, sequence, or mapping)
+    /// contains shell/compose variable interpolation.
+    fn value_contains_interpolation(value: &YamlValue) -> bool {
+        match value {
+            YamlValue::String(s) => Self::contains_interpolation(s),
+            YamlValue::Sequence(seq) => seq.iter().any(Self::value_contains_interpolation),
+            YamlValue::Mapping(map) => map.values().any(Self::value_contains_interpolation),
+            _ => false,
+        }
     }
 
     fn reject_bool(
@@ -842,6 +922,33 @@ impl ComposeExecutor {
         } else {
             joined
         }
+    }
+
+    /// Confine a user-supplied path (e.g. `compose_path`) to the project
+    /// checkout directory: reject empty values, absolute paths, and any `..`
+    /// / root / prefix component that would escape the project tree.
+    fn validate_relative_path(path: &str, field: &str) -> Result<(), ComposeError> {
+        let candidate = Path::new(path);
+        if candidate.as_os_str().is_empty() || candidate.is_absolute() {
+            return Err(ComposeError::InvalidComposePath {
+                field: field.to_string(),
+                path: path.to_string(),
+                reason: "must be a non-empty relative path".to_string(),
+            });
+        }
+        if candidate.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(ComposeError::InvalidComposePath {
+                field: field.to_string(),
+                path: path.to_string(),
+                reason: "must not contain '..' or absolute/root path components".to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Check if a compose file contains build: directives (services that need building)
@@ -2074,6 +2181,68 @@ services:
         assert!(ComposeExecutor::is_dangerous_host_path("../escape"));
         assert!(!ComposeExecutor::is_dangerous_host_path("./data"));
         assert!(!ComposeExecutor::is_dangerous_host_path("/tmp/ok"));
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_interpolation_bypass() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+
+        // network_mode via env default would resolve to `host` at runtime but
+        // the literal value is `${NET_MODE:-host}`, bypassing the `host` check.
+        let net = "services:\n  web:\n    image: alpine\n    network_mode: ${NET_MODE:-host}\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", net)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "network_mode");
+
+        // privileged via env default bypasses the `as_bool()` check.
+        let priv_compose = "services:\n  web:\n    image: alpine\n    privileged: ${P:-true}\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", priv_compose)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "privileged");
+
+        // $(...) command-substitution form inside a guarded sequence field.
+        let grp = "services:\n  web:\n    image: alpine\n    group_add:\n      - $(id -g docker)\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", grp)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "group_add");
+
+        // userns_mode via interpolation.
+        let userns = "services:\n  web:\n    image: alpine\n    userns_mode: ${U:-host}\n";
+        let err = executor
+            .validate_compose_security_policy("compose file", userns)
+            .unwrap_err();
+        assert_eq!(violation_field(err), "userns_mode");
+    }
+
+    #[test]
+    fn test_validate_relative_path_confines_to_project_dir() {
+        // Valid relative paths are accepted.
+        assert!(ComposeExecutor::validate_relative_path("docker-compose.yml", "compose_path").is_ok());
+        assert!(
+            ComposeExecutor::validate_relative_path("apps/web/compose.yml", "compose_path").is_ok()
+        );
+        assert!(ComposeExecutor::validate_relative_path("./compose.yml", "compose_path").is_ok());
+
+        // Empty, absolute, and traversing paths are rejected.
+        for bad in [
+            "",
+            "/tmp/compose.yml",
+            "/etc/passwd",
+            "../compose.yml",
+            "apps/../../compose.yml",
+        ] {
+            let err =
+                ComposeExecutor::validate_relative_path(bad, "compose_path").unwrap_err();
+            assert!(matches!(
+                err,
+                ComposeError::InvalidComposePath { ref field, .. } if field == "compose_path"
+            ));
+        }
     }
 
     #[test]
