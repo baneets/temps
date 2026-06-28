@@ -27,13 +27,48 @@ const MAX_REPO_FILE_BYTES: usize = 16_000;
 /// command), which is where the actual diagnosis lives.
 const MAX_LOG_TAIL_BYTES: usize = 6_000;
 
-/// The last `MAX_LOG_TAIL_BYTES` of a log, trimmed to a line boundary.
+/// Reject a model-supplied repo path that is absolute, escapes the repo root, or
+/// uses Windows-style separators. The Git provider only ever reads files inside
+/// the repo; without this a path like `../../etc/passwd` (or `..%2f` after
+/// encoding) could traverse outside it. Returns a human-readable reason on
+/// rejection so the model gets text it can recover from, never a panic.
+fn validate_repo_path(path: &str) -> Result<(), String> {
+    if path.contains('\\') {
+        return Err(
+            "Invalid path: use forward slashes ('/') for a repo-relative path, not backslashes."
+                .to_string(),
+        );
+    }
+    // An absolute path (`/...` already stripped by the caller, but a Windows
+    // drive prefix like `C:` is still absolute) must be rejected.
+    if path.starts_with('/') || path.contains(':') {
+        return Err("Invalid path: provide a repo-relative path, not an absolute one.".to_string());
+    }
+    for segment in path.split('/') {
+        if segment == ".." || segment == "." {
+            return Err(
+                "Invalid path: '.' and '..' segments are not allowed; provide a path inside the \
+                 repository."
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The last `MAX_LOG_TAIL_BYTES` of a log, trimmed to a line boundary. Never
+/// slices on a multibyte char boundary: the start index is advanced forward to
+/// the next valid `char` boundary so a UTF-8 char straddling the cut isn't split.
 fn log_tail(content: &str) -> &str {
     let trimmed = content.trim_end();
     if trimmed.len() <= MAX_LOG_TAIL_BYTES {
         return trimmed;
     }
-    let start = trimmed.len() - MAX_LOG_TAIL_BYTES;
+    let mut start = trimmed.len() - MAX_LOG_TAIL_BYTES;
+    // Advance to a valid char boundary so slicing can't panic mid-codepoint.
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
     match trimmed[start..].find('\n') {
         Some(nl) => &trimmed[start + nl + 1..],
         None => &trimmed[start..],
@@ -74,6 +109,9 @@ impl DeploymentChatProvider {
         let path = path.trim().trim_start_matches('/');
         if path.is_empty() {
             return "Invalid arguments: provide a non-empty repo-relative \"path\".".to_string();
+        }
+        if let Err(reason) = validate_repo_path(path) {
+            return reason;
         }
         let Some(git) = &self.git else {
             return "Repository access is not configured on this server.".to_string();
@@ -145,12 +183,18 @@ fn decode_file_content(content: &str, encoding: &str) -> String {
     content.to_string()
 }
 
-/// Bound a file body so a large file can't blow the model's context.
+/// Bound a file body so a large file can't blow the model's context. Never
+/// slices on a multibyte char boundary: the cut index is retreated to the
+/// previous valid `char` boundary so a UTF-8 char straddling it isn't split.
 fn bound(content: &str, path: &str) -> String {
     if content.len() <= MAX_REPO_FILE_BYTES {
         return content.to_string();
     }
-    let head = &content[..MAX_REPO_FILE_BYTES];
+    let mut end = MAX_REPO_FILE_BYTES;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &content[..end];
     format!(
         "{head}\n\n[truncated — '{path}' is {} bytes; showing the first {}]",
         content.len(),
@@ -355,5 +399,60 @@ mod tests {
         assert!(out.contains("truncated"));
         let small = "small";
         assert_eq!(bound(small, "s.txt"), "small");
+    }
+
+    #[test]
+    fn test_bound_multibyte_boundary_does_not_panic() {
+        // Build content whose byte length exceeds the cap and whose cut index
+        // (MAX_REPO_FILE_BYTES) lands in the middle of a multibyte char. Each
+        // emoji is 4 bytes, so a string of emoji guarantees the byte cut is not
+        // on a char boundary for most cap values. This must not panic.
+        // Place a 4-byte emoji so the fixed cut (MAX_REPO_FILE_BYTES) lands on
+        // its 3rd byte — the naive `&content[..MAX]` would panic mid-codepoint.
+        let big = "a".repeat(MAX_REPO_FILE_BYTES - 2) + &"😀".repeat(10);
+        assert!(!big.is_char_boundary(MAX_REPO_FILE_BYTES));
+        let out = bound(&big, "emoji.txt");
+        assert!(out.contains("truncated"));
+        // Accented content over the cap, too.
+        let accented = "café—".repeat(MAX_REPO_FILE_BYTES); // multibyte é and em dash
+        let out2 = bound(&accented, "accent.txt");
+        assert!(out2.contains("truncated"));
+    }
+
+    #[test]
+    fn test_log_tail_multibyte_boundary_does_not_panic() {
+        // Place 4-byte emoji at the front so the cut (len - MAX_LOG_TAIL_BYTES)
+        // lands inside one — the naive `&trimmed[start..]` would panic mid-char.
+        let big = "🚀".repeat(10) + &"a".repeat(MAX_LOG_TAIL_BYTES - 2);
+        assert!(!big.is_char_boundary(big.len() - MAX_LOG_TAIL_BYTES));
+        let tail = log_tail(&big);
+        assert!(tail.len() <= MAX_LOG_TAIL_BYTES);
+        // Accented + newline content straddling the cut.
+        let line = "café résumé naïve\n";
+        let accented = line.repeat((MAX_LOG_TAIL_BYTES / line.len()) + 50);
+        let tail2 = log_tail(&accented);
+        assert!(tail2.len() <= MAX_LOG_TAIL_BYTES);
+    }
+
+    #[test]
+    fn test_validate_repo_path_rejects_traversal() {
+        assert!(validate_repo_path("../../etc/passwd").is_err());
+        assert!(validate_repo_path("src/../../../secret").is_err());
+        assert!(validate_repo_path("./hidden").is_err());
+        assert!(validate_repo_path("src/./x").is_err());
+        assert!(validate_repo_path("..").is_err());
+        assert!(validate_repo_path("src\\windows").is_err());
+        assert!(validate_repo_path("/etc/passwd").is_err());
+        assert!(validate_repo_path("C:/Windows").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_path_accepts_normal() {
+        assert!(validate_repo_path("tsconfig.json").is_ok());
+        assert!(validate_repo_path("src/app/page.tsx").is_ok());
+        assert!(validate_repo_path("a/b/c/d.txt").is_ok());
+        // A dot inside a filename (not a whole segment) is fine.
+        assert!(validate_repo_path("src/next.config.js").is_ok());
+        assert!(validate_repo_path(".gitignore").is_ok());
     }
 }

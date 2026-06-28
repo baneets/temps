@@ -20,7 +20,7 @@ use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
 use utoipa::{OpenApi, ToSchema};
 
-use temps_auth::{permission_guard, RequireAuth};
+use temps_auth::{deny_deployment_token, permission_guard, project_scope_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
 use temps_entities::{ai_conversations, ai_messages};
 
@@ -185,6 +185,7 @@ pub async fn find_conversation(
     Query(q): Query<FindConversationQuery>,
 ) -> Result<Json<Option<ConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
     let found = state
         .service
         .find_by_context(project_id, &q.context_type, &q.context_id)
@@ -206,6 +207,10 @@ pub async fn list_all_conversations(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<GlobalConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
+    // This global endpoint returns conversations across every project; a
+    // project-scoped deployment/project token must not reach another tenant's
+    // chats through it. Restrict to human/admin (user/API-key) principals.
+    deny_deployment_token!(auth);
     let items = state.service.list_all_conversations().await?;
     Ok(Json(
         items
@@ -241,6 +246,7 @@ pub async fn list_conversations(
     Path(project_id): Path<i32>,
 ) -> Result<Json<Vec<ConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
     let conversations = state.service.list_conversations(project_id).await?;
     Ok(Json(
         conversations
@@ -266,6 +272,7 @@ pub async fn create_conversation(
     Json(req): Json<CreateConversationRequest>,
 ) -> Result<Json<ConversationResponse>, Problem> {
     permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
     ensure_enabled(&state, project_id).await?;
     let conv = state
         .service
@@ -293,6 +300,7 @@ pub async fn get_conversation(
     Path((project_id, public_id)): Path<(i32, String)>,
 ) -> Result<Json<ConversationDetailResponse>, Problem> {
     permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)
@@ -327,6 +335,7 @@ pub async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Problem> {
     permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
     ensure_enabled(&state, project_id).await?;
     let conv = state
         .service
@@ -358,6 +367,7 @@ pub async fn archive_conversation(
     Path((project_id, public_id)): Path<(i32, String)>,
 ) -> Result<axum::http::StatusCode, Problem> {
     permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)

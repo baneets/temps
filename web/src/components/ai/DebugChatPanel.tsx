@@ -82,12 +82,23 @@ export function DebugChatPanel({
       setError(null)
       setStreaming(true)
       // Optimistically append the user's turn + an empty assistant turn that the
-      // stream fills in. The empty assistant turn renders a typing indicator.
+      // stream fills in. The empty assistant turn renders a typing indicator
+      // while streaming; on any failure below we drop it again so it can't linger
+      // as a perpetual fake "typing" bubble next to the error message.
       setMessages((m) => [
         ...m,
         { role: 'user', content },
         { role: 'assistant', content: '' },
       ])
+      // Pop the trailing optimistic assistant turn if it never received content
+      // (used on every failure path so a failed send leaves only the error line).
+      const dropEmptyAssistantTurn = () =>
+        setMessages((m) => {
+          const last = m[m.length - 1]
+          return last?.role === 'assistant' && last.content === ''
+            ? m.slice(0, -1)
+            : m
+        })
       try {
         const res = await fetch(`${base}/${id}/messages`, {
           method: 'POST',
@@ -101,6 +112,7 @@ export function DebugChatPanel({
         if (!res.ok || !res.body) {
           const problem = await res.json().catch(() => ({}))
           setError(problem.detail || 'The AI request failed.')
+          dropEmptyAssistantTurn()
           return
         }
         const reader = res.body.getReader()
@@ -126,6 +138,7 @@ export function DebugChatPanel({
             const chunk = dataParts.join('\n')
             if (isError) {
               if (chunk) setError(chunk)
+              dropEmptyAssistantTurn()
               continue
             }
             if (chunk) {
@@ -143,6 +156,7 @@ export function DebugChatPanel({
         }
       } catch {
         setError('Connection error while talking to the AI.')
+        dropEmptyAssistantTurn()
       } finally {
         setStreaming(false)
       }
@@ -287,7 +301,9 @@ export function DebugChatPanel({
                     </ReactMarkdown>
                   </div>
                 ) : (
-                  <TypingDots />
+                  // Only the trailing turn that is actively streaming gets dots —
+                  // never an empty turn left behind by a failed send.
+                  streaming && i === visible.length - 1 && <TypingDots />
                 )}
               </div>
             </div>

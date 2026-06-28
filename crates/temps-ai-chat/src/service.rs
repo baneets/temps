@@ -402,3 +402,267 @@ impl ConversationService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    use temps_ai::{AiError, AiRequest, AiResponse, ChatTurnResponse, TokenStream, ToolCall};
+
+    /// A scripted `AiService`: each `chat()` call pops the next queued response
+    /// (or error) so a test can drive the tool loop turn-by-turn, while counting
+    /// how many times `chat()` was invoked.
+    struct ScriptedAi {
+        /// Front-to-back queue of responses for successive `chat()` calls.
+        responses: Mutex<std::collections::VecDeque<Result<ChatTurnResponse, AiError>>>,
+        chat_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedAi {
+        fn new(responses: Vec<Result<ChatTurnResponse, AiError>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                chat_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AiService for ScriptedAi {
+        async fn is_available(&self) -> bool {
+            true
+        }
+        async fn complete(&self, _request: AiRequest) -> Result<AiResponse, AiError> {
+            Err(AiError::NotAvailable)
+        }
+        async fn chat_stream(&self, _request: ChatTurnRequest) -> Result<TokenStream, AiError> {
+            Err(AiError::NotAvailable)
+        }
+        async fn chat(&self, _request: ChatTurnRequest) -> Result<ChatTurnResponse, AiError> {
+            self.chat_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // When the script is exhausted, keep requesting tool calls so a
+            // misbehaving loop would run forever — letting MAX_ROUNDS assert.
+            self.responses
+                .lock()
+                .expect("scripted-ai lock")
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Ok(ChatTurnResponse {
+                        content: None,
+                        tool_calls: vec![ToolCall {
+                            id: "loop".to_string(),
+                            name: "echo".to_string(),
+                            arguments: "{}".to_string(),
+                        }],
+                    })
+                })
+        }
+    }
+
+    /// A stub provider exposing a single `echo` tool, counting executions.
+    struct StubProvider {
+        tool_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ConversationContextProvider for StubProvider {
+        fn context_type(&self) -> &'static str {
+            "test"
+        }
+        async fn seed(
+            &self,
+            _project_id: i32,
+            _context_id: &str,
+        ) -> Option<crate::provider::ConversationSeed> {
+            None
+        }
+        async fn tools(&self, _project_id: i32, _context_id: &str) -> Vec<ChatTool> {
+            vec![ChatTool {
+                name: "echo".to_string(),
+                description: "Echoes its input.".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }]
+        }
+        async fn execute_tool(
+            &self,
+            _project_id: i32,
+            _context_id: &str,
+            _name: &str,
+            _arguments: &str,
+        ) -> String {
+            self.tool_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            "tool result".to_string()
+        }
+    }
+
+    fn test_conversation() -> ai_conversations::Model {
+        let now = Utc::now();
+        ai_conversations::Model {
+            id: 1,
+            public_id: "pub1".to_string(),
+            project_id: 7,
+            context_type: "test".to_string(),
+            context_id: "42".to_string(),
+            title: None,
+            status: "active".to_string(),
+            created_by: None,
+            metadata: None,
+            created_at: now,
+            last_activity_at: now,
+        }
+    }
+
+    fn assistant_msg_model() -> ai_messages::Model {
+        ai_messages::Model {
+            id: 1,
+            conversation_id: 1,
+            role: "assistant".to_string(),
+            content: "final answer".to_string(),
+            metadata: None,
+            tokens_in: None,
+            tokens_out: None,
+            cost_microcents: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Build a service whose only DB interaction (the final assistant insert) is
+    /// satisfied by one mocked query result, plus the `echo` tool list to drive
+    /// the loop. The provider is passed directly to `try_tool_loop` per test.
+    fn service_with(ai: Arc<ScriptedAi>) -> (ConversationService, Vec<ChatTool>) {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![vec![assistant_msg_model()]])
+            .into_connection();
+        let tools = vec![ChatTool {
+            name: "echo".to_string(),
+            description: "Echoes its input.".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }];
+        let svc = ConversationService {
+            db: Arc::new(db),
+            ai,
+            providers: HashMap::new(),
+        };
+        (svc, tools)
+    }
+
+    async fn drain(
+        stream: Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>>,
+    ) -> Vec<String> {
+        let mut s = stream;
+        let mut out = Vec::new();
+        while let Some(item) = s.next().await {
+            if let Ok(tok) = item {
+                out.push(tok);
+            }
+        }
+        out
+    }
+
+    // (a) model calls a tool, then returns prose -> tool executed, final text
+    // streamed + persisted.
+    #[tokio::test]
+    async fn test_tool_loop_executes_tool_then_returns_prose() {
+        let ai = Arc::new(ScriptedAi::new(vec![
+            // Round 1: request a tool call.
+            Ok(ChatTurnResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: "{}".to_string(),
+                }],
+            }),
+            // Round 2: settle on prose.
+            Ok(ChatTurnResponse {
+                content: Some("final answer".to_string()),
+                tool_calls: vec![],
+            }),
+        ]));
+        let provider = Arc::new(StubProvider {
+            tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let tool_count = provider.tool_calls.clone();
+        let chat_count = ai.chat_calls.clone();
+        let (svc, tools) = service_with(ai);
+
+        let conv = test_conversation();
+        let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
+        let stream = svc
+            .try_tool_loop(&conv, &[], &provider_dyn, tools)
+            .await
+            .expect("loop should produce a final answer stream");
+        let out = drain(stream).await;
+
+        assert_eq!(out, vec!["final answer".to_string()]);
+        assert_eq!(tool_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(chat_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    // (b) chat() errors on round 1 -> returns None (caller falls back).
+    #[tokio::test]
+    async fn test_tool_loop_chat_error_returns_none() {
+        let ai = Arc::new(ScriptedAi::new(vec![Err(AiError::Provider {
+            purpose: "chat.test.tools".to_string(),
+            reason: "boom".to_string(),
+        })]));
+        let provider = Arc::new(StubProvider {
+            tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let (svc, tools) = service_with(ai);
+
+        let conv = test_conversation();
+        let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
+        let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
+        assert!(result.is_none());
+    }
+
+    // (c) MAX_ROUNDS enforced: a model that always asks for a tool must never
+    // exceed 6 chat() calls, and the loop yields None (no final prose).
+    #[tokio::test]
+    async fn test_tool_loop_enforces_max_rounds() {
+        // Empty script: the fallback in ScriptedAi::chat always returns a tool
+        // call, so the loop would spin forever without the round cap.
+        let ai = Arc::new(ScriptedAi::new(vec![]));
+        let provider = Arc::new(StubProvider {
+            tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let chat_count = ai.chat_calls.clone();
+        let (svc, tools) = service_with(ai);
+
+        let conv = test_conversation();
+        let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
+        let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
+
+        assert!(result.is_none(), "no final prose -> None");
+        assert!(
+            chat_count.load(std::sync::atomic::Ordering::SeqCst) <= 6,
+            "chat() must not be called more than MAX_ROUNDS (6) times"
+        );
+    }
+
+    // (d) empty final text -> None.
+    #[tokio::test]
+    async fn test_tool_loop_empty_final_text_returns_none() {
+        let ai = Arc::new(ScriptedAi::new(vec![Ok(ChatTurnResponse {
+            content: Some(String::new()),
+            tool_calls: vec![],
+        })]));
+        let provider = Arc::new(StubProvider {
+            tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let (svc, tools) = service_with(ai);
+
+        let conv = test_conversation();
+        let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
+        let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
+        assert!(result.is_none());
+    }
+}
