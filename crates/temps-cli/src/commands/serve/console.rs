@@ -72,7 +72,7 @@ use tracing::{debug, info};
 // Multi-node support
 use temps_deployments::handlers::nodes::NodeAppState;
 use temps_deployments::jobs::node_health_check::{
-    check_drain_completion, check_node_health, failover_offline_nodes,
+    check_drain_completion, check_node_health, failover_offline_nodes, notify_nodes_offline,
 };
 use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
@@ -1782,6 +1782,8 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         let health_db = db.clone();
         let deployment_service_for_failover =
             service_context.get_service::<temps_deployments::DeploymentService>();
+        let health_notification_service =
+            service_context.get_service::<dyn temps_core::notifications::NotificationService>();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
@@ -1792,6 +1794,15 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                         "Node health check: marked {} node(s) as offline",
                         offline_ids.len()
                     );
+                    // Alert operators that worker node(s) went down (best-effort).
+                    if let Some(ref notification_service) = health_notification_service {
+                        notify_nodes_offline(
+                            &offline_ids,
+                            &health_node_service,
+                            notification_service,
+                        )
+                        .await;
+                    }
                     // Trigger failover redeployment for affected environments
                     if let Some(ref deployment_service) = deployment_service_for_failover {
                         failover_offline_nodes(

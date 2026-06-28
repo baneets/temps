@@ -76,6 +76,57 @@ pub async fn check_node_health(node_service: &NodeService, db: &DatabaseConnecti
     marked_offline
 }
 
+/// Notify operators that worker nodes went offline (ADR-020 / monitoring).
+///
+/// Called by the health-check loop right after `check_node_health` marks
+/// nodes offline. Sends one Alert-priority notification per node through the
+/// shared notification pipeline (email / Slack / webhook, per the operator's
+/// configured channels). A node is only marked offline on the active->offline
+/// transition, so this fires exactly once per outage — no repeat spam while a
+/// node stays down. Best-effort: delivery failures are logged, never fatal.
+pub async fn notify_nodes_offline(
+    offline_node_ids: &[i32],
+    node_service: &NodeService,
+    notification_service: &std::sync::Arc<dyn temps_core::notifications::NotificationService>,
+) {
+    use temps_core::notifications::{NotificationData, NotificationPriority, NotificationType};
+
+    for &node_id in offline_node_ids {
+        let name = node_service
+            .get_by_id(node_id)
+            .await
+            .map(|n| n.name)
+            .unwrap_or_else(|_| format!("node-{}", node_id));
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("event".to_string(), "node_offline".to_string());
+        metadata.insert("node_id".to_string(), node_id.to_string());
+        metadata.insert("node_name".to_string(), name.clone());
+
+        let notification = NotificationData {
+            title: format!("Worker node '{}' is offline", name),
+            message: format!(
+                "Node '{}' (id {}) stopped sending heartbeats for over {}s and was marked offline. \
+                 Affected workloads are being failed over to healthy nodes.",
+                name, node_id, HEARTBEAT_STALE_THRESHOLD_SECS
+            ),
+            notification_type: NotificationType::Alert,
+            priority: NotificationPriority::Critical,
+            ..Default::default()
+        };
+
+        match notification_service.send_notification(notification).await {
+            Ok(()) => tracing::info!(node_id, node_name = %name, "Sent node-offline alert"),
+            Err(e) => tracing::error!(
+                node_id,
+                node_name = %name,
+                "Failed to send node-offline alert: {}",
+                e
+            ),
+        }
+    }
+}
+
 /// Check all draining nodes for drain completion and transition them
 /// to "drained" status when all containers have been migrated.
 ///
