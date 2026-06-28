@@ -9,7 +9,6 @@ import {
   rollbackToDeploymentMutation,
   triggerProjectPipelineMutation,
 } from '@/api/client/@tanstack/react-query.gen'
-import { DebugChat } from '@/components/ai/DebugChat'
 import { DeploymentContainerLogs } from '@/components/deployments/DeploymentContainerLogs'
 import { DeploymentStages } from '@/components/deployments/DeploymentStages'
 import { RedeploymentModal } from '@/components/deployments/RedeploymentModal'
@@ -400,7 +399,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                     Current
                   </Badge>
                 )}
-                <span className="hidden text-muted-foreground/30 sm:inline">•</span>
+                <span className="hidden text-muted-foreground/60 sm:inline">•</span>
                 <div className="flex items-center gap-1.5">
                   <Clock className="h-4 w-4" />
                   <span>Started:</span>
@@ -408,7 +407,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                 </div>
                 {deployment.finished_at && (
                   <>
-                    <span className="hidden text-muted-foreground/30 sm:inline">•</span>
+                    <span className="hidden text-muted-foreground/60 sm:inline">•</span>
                     <div className="flex items-center gap-1.5">
                       <Clock className="h-4 w-4" />
                       <span>Duration:</span>
@@ -431,25 +430,31 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                     </div>
                   </>
                 )}
-                <span className="hidden text-muted-foreground/30 sm:inline">•</span>
-                <div className="flex items-center gap-1.5">
-                  <GitBranch className="h-4 w-4" />
-                  <span>Branch:</span>
-                  <span className="font-medium text-foreground">
-                    {deployment.branch}
-                  </span>
-                </div>
-                <span className="hidden text-muted-foreground/30 sm:inline">•</span>
-                <div className="flex items-center gap-1.5">
-                  <GitCommit className="h-4 w-4" />
-                  <span>Commit:</span>
-                  <span className="font-mono font-medium text-foreground">
-                    {deployment.commit_hash?.slice(0, 7)}
-                  </span>
-                </div>
+                {deployment.branch && (
+                  <>
+                    <span className="hidden text-muted-foreground/60 sm:inline">•</span>
+                    <div className="flex items-center gap-1.5">
+                      <GitBranch className="h-4 w-4" />
+                      <span>Branch:</span>
+                      <span>{deployment.branch}</span>
+                    </div>
+                  </>
+                )}
+                {deployment.commit_hash && (
+                  <>
+                    <span className="hidden text-muted-foreground/60 sm:inline">•</span>
+                    <div className="flex items-center gap-1.5">
+                      <GitCommit className="h-4 w-4" />
+                      <span>Commit:</span>
+                      <span className="font-mono">
+                        {deployment.commit_hash.slice(0, 7)}
+                      </span>
+                    </div>
+                  </>
+                )}
                 {deployment.environment && (
                   <>
-                    <span className="hidden text-muted-foreground/30 sm:inline">•</span>
+                    <span className="hidden text-muted-foreground/60 sm:inline">•</span>
                     <div className="flex items-center gap-1.5">
                       <span>Environment:</span>
                       <Badge variant="secondary" className="capitalize">
@@ -648,8 +653,10 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                         </div>
                       )
                     })}
-                    {/* Show deployment URL only if current, otherwise show environment URL */}
-                    {deployment.is_current && deployment.url ? (
+                    {/* The environment's main URL is already shown above via
+                        `environment.domains` (domains[0] is the env URL). For the
+                        current deployment, also surface its deployment-specific URL. */}
+                    {deployment.is_current && deployment.url && (
                       <div
                         className="flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
                         onClick={() => window.open(deployment.url, '_blank')}
@@ -659,20 +666,6 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
                         </span>
                         <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                       </div>
-                    ) : (
-                      deployment.environment.main_url && (
-                        <div
-                          className="flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
-                          onClick={() =>
-                            window.open(deployment.environment.main_url, '_blank')
-                          }
-                        >
-                          <span className="text-sm text-muted-foreground truncate">
-                            {deployment.environment.main_url}
-                          </span>
-                          <ExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                        </div>
-                      )
                     )}
                   </div>
                 </div>
@@ -681,19 +674,8 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
           </Card>
         )}
 
-        {/* AI debugging chat for failed deployments (ADR-023), opt-in per project */}
-        {project.ai_debug_chat_enabled === true &&
-          deployment?.status === 'failed' && (
-            <DebugChat
-              projectId={project.id}
-              contextType="deployment"
-              contextId={Number(deploymentId)}
-              description="Start an AI chat to investigate why this deployment failed. It opens with a diagnosis and you can ask follow-up questions."
-              startPrompt="Diagnose this deployment failure and suggest concrete fixes."
-            />
-          )}
-
-        {/* Deployment Pipeline */}
+        {/* Deployment Pipeline — failed stages expose a "Debug with AI" sidebar
+            (ADR-023), gated on the project's ai_debug_chat_enabled toggle */}
         {deployment && (
           <DeploymentStages project={project} deployment={deployment} />
         )}

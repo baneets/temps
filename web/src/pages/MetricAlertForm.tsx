@@ -377,10 +377,12 @@ function AlertFormBody({ project, isEditing, id, existing }: AlertFormBodyProps)
           projectId={project.id}
           contextType="alert"
           contextId={id}
-          title="Investigate with AI"
+          title={existing ? `Investigate alert: ${existing.name}` : 'Investigate alert'}
           triggerLabel="Investigate with AI"
           description="Ask AI what this alert means, why it may be firing, and the prioritized steps to act on it."
           startPrompt="Explain what this alert means, why it may be firing, and the prioritized steps to investigate and resolve it."
+          projectSlug={project.slug}
+          projectName={project.name}
         />
       )}
 

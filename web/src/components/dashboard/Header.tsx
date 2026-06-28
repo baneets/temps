@@ -2,6 +2,7 @@ import {
   getLastDeploymentOptions,
   getProjectsOptions,
 } from '@/api/client/@tanstack/react-query.gen'
+import { AiAssistantButton } from '@/components/ai/AiAssistantButton'
 import { BackupAlertsButton } from '@/components/dashboard/BackupAlertsButton'
 import { ThemeToggle } from '@/components/theme/ThemeToggle'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
@@ -281,6 +282,7 @@ export function Header() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          {projectSlug && <AiAssistantButton projectSlug={projectSlug} />}
           <BackupAlertsButton />
           <ThemeToggle />
         </div>

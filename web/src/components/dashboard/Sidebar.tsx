@@ -163,6 +163,7 @@ const settingsGroups: SettingsGroupDef[] = [
     label: 'General',
     items: [
       { title: 'Platform', url: '/settings', icon: Settings2 },
+      { title: 'AI Providers', url: '/settings/ai-providers', icon: Sparkles },
       { title: 'Notifications', url: '/settings/notifications', icon: Bell },
     ],
   },

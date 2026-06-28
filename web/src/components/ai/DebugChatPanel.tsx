@@ -1,0 +1,329 @@
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Loader2, Send, Sparkles } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+
+interface ChatMessage {
+  role: string
+  content: string
+}
+
+interface DebugChatPanelProps {
+  projectId: number
+  /** The interaction this chat is attached to, e.g. 'deployment' | 'alert'. */
+  contextType: string
+  contextId: string | number
+  /** Auto-asked when a new chat is started, so it opens already working. */
+  startPrompt?: string
+  /** Create + seed the conversation automatically if none exists yet. */
+  autoStart?: boolean
+  /** Placeholder for the follow-up input. */
+  placeholder?: string
+  /** Notifies the parent of the active conversation's public id (for reset). */
+  onConversationChange?: (publicId: string | null) => void
+}
+
+const proseClasses =
+  'prose prose-sm dark:prose-invert max-w-none prose-pre:bg-black/30 prose-pre:text-muted-foreground prose-pre:text-xs prose-pre:border-0 prose-code:before:content-none prose-code:after:content-none prose-p:my-1.5 prose-headings:my-2 prose-ul:my-1.5 prose-ul:list-disc prose-ul:pl-5 prose-ol:my-1.5 prose-ol:list-decimal prose-ol:pl-5 prose-li:my-0.5 prose-li:marker:text-foreground/60 prose-hr:my-3 prose-hr:border-border prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1'
+
+/** Three-dot "assistant is thinking" indicator. */
+function TypingDots() {
+  return (
+    <span className="inline-flex items-center gap-1 py-1" aria-label="Thinking">
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.3s]" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.15s]" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-muted-foreground/70" />
+    </span>
+  )
+}
+
+function AssistantAvatar() {
+  return (
+    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10">
+      <Sparkles className="h-4 w-4 text-primary" />
+    </div>
+  )
+}
+
+/**
+ * The body of the AI debugging chat attached to any entity (ADR-023). Renders a
+ * scrollable message list that fills its parent plus a follow-up composer — no
+ * surrounding card, so it can drop into a sidebar/sheet or a page section. The
+ * streaming reply is consumed via a manual SSE fetch reader (the generated SDK
+ * can't stream); find/history use the same cookie-authed `/api` surface.
+ */
+export function DebugChatPanel({
+  projectId,
+  contextType,
+  contextId,
+  startPrompt = 'Diagnose this and suggest concrete next steps.',
+  autoStart = false,
+  placeholder = 'Ask a follow-up…',
+  onConversationChange,
+}: DebugChatPanelProps) {
+  const base = `/api/projects/${projectId}/ai/conversations`
+  const ctxId = String(contextId)
+  const [publicId, setPublicId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [input, setInput] = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  const send = useCallback(
+    async (text: string, conversationId?: string) => {
+      const id = conversationId ?? publicId
+      const content = text.trim()
+      if (!id || !content) return
+      setInput('')
+      setError(null)
+      setStreaming(true)
+      // Optimistically append the user's turn + an empty assistant turn that the
+      // stream fills in. The empty assistant turn renders a typing indicator.
+      setMessages((m) => [
+        ...m,
+        { role: 'user', content },
+        { role: 'assistant', content: '' },
+      ])
+      try {
+        const res = await fetch(`${base}/${id}/messages`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify({ content }),
+        })
+        if (!res.ok || !res.body) {
+          const problem = await res.json().catch(() => ({}))
+          setError(problem.detail || 'The AI request failed.')
+          return
+        }
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let boundary
+          while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+            const rawEvent = buffer.slice(0, boundary)
+            buffer = buffer.slice(boundary + 2)
+            let isError = false
+            const dataParts: string[] = []
+            for (const line of rawEvent.split('\n')) {
+              if (line.startsWith('event:')) {
+                if (line.slice(6).trim() === 'error') isError = true
+              } else if (line.startsWith('data:')) {
+                dataParts.push(line.slice(5).replace(/^ /, ''))
+              }
+            }
+            const chunk = dataParts.join('\n')
+            if (isError) {
+              if (chunk) setError(chunk)
+              continue
+            }
+            if (chunk) {
+              setMessages((m) => {
+                const copy = [...m]
+                const last = copy[copy.length - 1]
+                copy[copy.length - 1] = {
+                  role: 'assistant',
+                  content: (last?.content ?? '') + chunk,
+                }
+                return copy
+              })
+            }
+          }
+        }
+      } catch {
+        setError('Connection error while talking to the AI.')
+      } finally {
+        setStreaming(false)
+      }
+    },
+    [base, publicId]
+  )
+
+  const start = useCallback(async () => {
+    setStarting(true)
+    setError(null)
+    try {
+      const res = await fetch(base, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ context_type: contextType, context_id: ctxId }),
+      })
+      if (!res.ok) {
+        const problem = await res.json().catch(() => ({}))
+        setError(
+          problem.detail ||
+            'Could not start the chat. Make sure an AI provider is configured.'
+        )
+        return
+      }
+      const conv = await res.json()
+      setPublicId(conv.public_id)
+      setMessages([])
+      void send(startPrompt, conv.public_id)
+    } catch {
+      setError('Could not start the chat.')
+    } finally {
+      setStarting(false)
+    }
+  }, [base, contextType, ctxId, startPrompt, send])
+
+  // Keep the latest send/start in refs so the one-shot init effect below can
+  // call them without listing them as dependencies (which would make it re-run
+  // every time `publicId` changes — reloading history on top of the live stream
+  // and duplicating turns).
+  const startRef = useRef(start)
+  useEffect(() => {
+    startRef.current = start
+  }, [start])
+
+  // Initialise exactly once per mount: load the existing conversation for this
+  // context, or auto-start a fresh one. The panel is re-keyed per context by its
+  // parent, so a context switch is a remount — hence run-once is correct.
+  const initialised = useRef(false)
+  useEffect(() => {
+    if (initialised.current) return
+    initialised.current = true
+    let ignore = false
+    ;(async () => {
+      try {
+        const conv = await fetch(
+          `${base}?context_type=${encodeURIComponent(contextType)}&context_id=${encodeURIComponent(ctxId)}`,
+          { credentials: 'include' }
+        ).then((r) => (r.ok ? r.json() : null))
+        if (ignore) return
+        if (!conv) {
+          if (autoStart) void startRef.current()
+          return
+        }
+        setPublicId(conv.public_id)
+        const detail = await fetch(`${base}/${conv.public_id}`, {
+          credentials: 'include',
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)
+        if (!ignore && detail) setMessages(detail.messages ?? [])
+      } catch {
+        /* best-effort: leave the panel in its empty state */
+      }
+    })()
+    return () => {
+      ignore = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
+  }, [messages])
+
+  // Report the active conversation id upward (lets the dock reset it).
+  useEffect(() => {
+    onConversationChange?.(publicId)
+  }, [publicId, onConversationChange])
+
+  const visible = messages.filter((m) => m.role !== 'system')
+  const busy = streaming || starting
+  // Show a standalone "thinking" row only before the optimistic assistant turn
+  // exists (i.e. while the conversation is being created).
+  const showBootRow = visible.length === 0 && busy
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <div
+        ref={scrollRef}
+        className="flex-1 min-h-0 space-y-4 overflow-y-auto pr-1"
+      >
+        {visible.length === 0 && !busy && !publicId && (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+            <Sparkles className="h-6 w-6 text-muted-foreground" />
+            <Button onClick={() => void start()} disabled={starting}>
+              {starting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
+              <span className="ml-2">Start AI diagnosis</span>
+            </Button>
+          </div>
+        )}
+
+        {showBootRow && (
+          <div className="flex items-start gap-2.5">
+            <AssistantAvatar />
+            <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm bg-muted/60 px-3.5 py-2.5 text-sm text-muted-foreground">
+              <TypingDots />
+              Reading logs and analyzing the failure…
+            </div>
+          </div>
+        )}
+
+        {visible.map((m, i) =>
+          m.role === 'user' ? (
+            <div key={i} className="flex justify-end">
+              <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-primary px-3.5 py-2.5 text-sm text-primary-foreground">
+                {m.content}
+              </div>
+            </div>
+          ) : (
+            <div key={i} className="flex items-start gap-2.5">
+              <AssistantAvatar />
+              <div className="min-w-0 flex-1 rounded-2xl rounded-tl-sm bg-muted/60 px-3.5 py-2.5">
+                {m.content ? (
+                  <div className={proseClasses}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {m.content}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <TypingDots />
+                )}
+              </div>
+            </div>
+          )
+        )}
+      </div>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      <div className="flex items-end gap-2 border-t pt-3">
+        <Textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder={placeholder}
+          rows={2}
+          disabled={streaming || (!publicId && !starting)}
+          className="resize-none"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              void send(input)
+            }
+          }}
+        />
+        <Button
+          onClick={() => void send(input)}
+          disabled={streaming || !input.trim() || !publicId}
+          size="icon"
+        >
+          {streaming ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Send className="h-4 w-4" />
+          )}
+        </Button>
+      </div>
+    </div>
+  )
+}
