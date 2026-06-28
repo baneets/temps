@@ -10657,6 +10657,7 @@ dependencies = [
 name = "temps-ai-chat"
 version = "0.1.0-beta.39"
 dependencies = [
+ "anyhow",
  "async-stream",
  "async-trait",
  "axum 0.8.9",

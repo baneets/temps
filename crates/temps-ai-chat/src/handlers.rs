@@ -12,18 +12,21 @@ use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures::stream::Stream;
 use futures_util::StreamExt;
 use sea_orm::{DatabaseConnection, EntityTrait};
 use serde::{Deserialize, Serialize};
+use tracing::error;
 use utoipa::{OpenApi, ToSchema};
 
 use temps_auth::{deny_deployment_token, permission_guard, project_scope_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
+use temps_core::{AuditContext, AuditLogger, RequestMetadata};
 use temps_entities::{ai_conversations, ai_messages};
 
+use crate::audit::{ChatMessageSentAudit, ConversationArchivedAudit, ConversationCreatedAudit};
 use crate::service::ChatStreamEvent;
 use crate::{ChatError, ConversationService};
 
@@ -31,6 +34,18 @@ use crate::{ChatError, ConversationService};
 pub struct AppState {
     pub service: Arc<ConversationService>,
     pub db: Arc<DatabaseConnection>,
+    /// Audit logger for write operations (best-effort; never fails a request).
+    pub audit_service: Arc<dyn AuditLogger>,
+}
+
+impl AppState {
+    /// Emit an audit entry, best-effort: a logging failure must never fail the
+    /// underlying operation (it already succeeded).
+    async fn audit(&self, op: &dyn temps_core::AuditOperation) {
+        if let Err(e) = self.audit_service.create_audit_log(op).await {
+            error!("Failed to write AI-chat audit log: {e}");
+        }
+    }
 }
 
 // --- DTOs --------------------------------------------------------------------
@@ -191,9 +206,9 @@ impl From<ChatError> for Problem {
 /// that disabling the feature consistently revokes access (returns 403) to
 /// existing chat content — reading or archiving history must not require an AI
 /// provider to be configured, only the per-project toggle.
-async fn ensure_chat_enabled(state: &AppState, project_id: i32) -> Result<(), Problem> {
+async fn ensure_chat_enabled(db: &DatabaseConnection, project_id: i32) -> Result<(), Problem> {
     let project = temps_entities::projects::Entity::find_by_id(project_id)
-        .one(state.db.as_ref())
+        .one(db)
         .await
         .map_err(|e| {
             problemdetails::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
@@ -212,13 +227,28 @@ async fn ensure_chat_enabled(state: &AppState, project_id: i32) -> Result<(), Pr
 /// must be configured. Builds on [`ensure_chat_enabled`] (toggle) and adds the
 /// AI-availability check required to actually run a turn.
 async fn ensure_enabled(state: &AppState, project_id: i32) -> Result<(), Problem> {
-    ensure_chat_enabled(state, project_id).await?;
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
     if !state.service.ai_available().await {
         return Err(problemdetails::new(axum::http::StatusCode::CONFLICT)
             .with_title("AI Not Configured")
             .with_detail("Configure an AI provider to use debugging chat."));
     }
     Ok(())
+}
+
+/// Upper bounds on client-supplied chat inputs, enforced before any DB or AI
+/// call so oversized payloads can't bloat storage or run up AI token cost.
+const MAX_CONTEXT_TYPE_LEN: usize = 64;
+const MAX_CONTEXT_ID_LEN: usize = 128;
+const MAX_MESSAGE_CONTENT_LEN: usize = 32_000;
+
+/// 400 for an over-length input field.
+fn too_long(field: &str, max: usize) -> Problem {
+    problemdetails::new(axum::http::StatusCode::BAD_REQUEST)
+        .with_title("Input Too Long")
+        .with_detail(format!(
+            "'{field}' exceeds the maximum length of {max} characters."
+        ))
 }
 
 // --- handlers ----------------------------------------------------------------
@@ -241,7 +271,15 @@ pub async fn find_conversation(
 ) -> Result<Json<Option<ConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
     project_scope_guard!(auth, project_id);
-    ensure_chat_enabled(&state, project_id).await?;
+    // Bound the lookup keys, consistent with create_conversation, so oversized
+    // query strings can't reach the DB.
+    if q.context_type.len() > MAX_CONTEXT_TYPE_LEN {
+        return Err(too_long("context_type", MAX_CONTEXT_TYPE_LEN));
+    }
+    if q.context_id.len() > MAX_CONTEXT_ID_LEN {
+        return Err(too_long("context_id", MAX_CONTEXT_ID_LEN));
+    }
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
     let found = state
         .service
         .find_by_context(project_id, &q.context_type, &q.context_id)
@@ -303,7 +341,7 @@ pub async fn list_conversations(
 ) -> Result<Json<Vec<ConversationResponse>>, Problem> {
     permission_guard!(auth, ProjectsRead);
     project_scope_guard!(auth, project_id);
-    ensure_chat_enabled(&state, project_id).await?;
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
     let conversations = state.service.list_conversations(project_id).await?;
     Ok(Json(
         conversations
@@ -325,11 +363,19 @@ pub async fn list_conversations(
 pub async fn create_conversation(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path(project_id): Path<i32>,
     Json(req): Json<CreateConversationRequest>,
 ) -> Result<Json<ConversationResponse>, Problem> {
-    permission_guard!(auth, ProjectsRead);
+    // Creating a conversation mutates state and can drive AI cost → write scope.
+    permission_guard!(auth, ProjectsWrite);
     project_scope_guard!(auth, project_id);
+    if req.context_type.len() > MAX_CONTEXT_TYPE_LEN {
+        return Err(too_long("context_type", MAX_CONTEXT_TYPE_LEN));
+    }
+    if req.context_id.len() > MAX_CONTEXT_ID_LEN {
+        return Err(too_long("context_id", MAX_CONTEXT_ID_LEN));
+    }
     ensure_enabled(&state, project_id).await?;
     let conv = state
         .service
@@ -340,6 +386,18 @@ pub async fn create_conversation(
             Some(auth.user_id()),
         )
         .await?;
+    state
+        .audit(&ConversationCreatedAudit {
+            context: AuditContext {
+                user_id: auth.user_id(),
+                ip_address: Some(metadata.ip_address.clone()),
+                user_agent: metadata.user_agent.clone(),
+            },
+            project_id,
+            conversation_id: conv.public_id.clone(),
+            context_type: conv.context_type.clone(),
+        })
+        .await;
     Ok(Json(ConversationResponse::from(conv)))
 }
 
@@ -358,7 +416,7 @@ pub async fn get_conversation(
 ) -> Result<Json<ConversationDetailResponse>, Problem> {
     permission_guard!(auth, ProjectsRead);
     project_scope_guard!(auth, project_id);
-    ensure_chat_enabled(&state, project_id).await?;
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)
@@ -389,17 +447,40 @@ pub async fn get_conversation(
 pub async fn send_message(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path((project_id, public_id)): Path<(i32, String)>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Problem> {
-    permission_guard!(auth, ProjectsRead);
+    // Sending a message runs an AI turn (mutates state + incurs cost) → write scope.
+    permission_guard!(auth, ProjectsWrite);
     project_scope_guard!(auth, project_id);
+    if req.content.trim().is_empty() {
+        return Err(problemdetails::new(axum::http::StatusCode::BAD_REQUEST)
+            .with_title("Empty Message")
+            .with_detail("Message content must not be empty."));
+    }
+    if req.content.len() > MAX_MESSAGE_CONTENT_LEN {
+        return Err(too_long("content", MAX_MESSAGE_CONTENT_LEN));
+    }
     ensure_enabled(&state, project_id).await?;
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)
         .await?;
+    // `send_message` persists the user turn before returning the stream, so the
+    // turn is durable by the time we audit it.
     let token_stream = state.service.send_message(&conv, &req.content).await?;
+    state
+        .audit(&ChatMessageSentAudit {
+            context: AuditContext {
+                user_id: auth.user_id(),
+                ip_address: Some(metadata.ip_address.clone()),
+                user_agent: metadata.user_agent.clone(),
+            },
+            project_id,
+            conversation_id: conv.public_id.clone(),
+        })
+        .await;
 
     let sse = token_stream.map(|item| {
         let event = match item {
@@ -451,16 +532,28 @@ pub async fn send_message(
 pub async fn archive_conversation(
     RequireAuth(auth): RequireAuth,
     State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
     Path((project_id, public_id)): Path<(i32, String)>,
 ) -> Result<axum::http::StatusCode, Problem> {
     permission_guard!(auth, ProjectsWrite);
     project_scope_guard!(auth, project_id);
-    ensure_chat_enabled(&state, project_id).await?;
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
     let conv = state
         .service
         .get_by_public_id(project_id, &public_id)
         .await?;
     state.service.archive(&conv).await?;
+    state
+        .audit(&ConversationArchivedAudit {
+            context: AuditContext {
+                user_id: auth.user_id(),
+                ip_address: Some(metadata.ip_address.clone()),
+                user_agent: metadata.user_agent.clone(),
+            },
+            project_id,
+            conversation_id: conv.public_id.clone(),
+        })
+        .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -575,10 +668,102 @@ mod tests {
         assert_eq!(title_of(&p).as_deref(), Some("Internal Server Error"));
     }
 
-    // Note on handler-level (401/403/success) coverage: the only sibling crate
-    // that unit-tests axum handlers (`temps-notifications`) does so via a
-    // Docker-backed `TestDatabase` + `oneshot`, asserting just 401 for
-    // unauthenticated requests — too heavyweight and not pure. We therefore cover
-    // the authorization/toggle behavior at the service layer (see service.rs
-    // tests) and the HTTP mapping here via the pure `From<ChatError>` conversion.
+    // (b) The `ai_debug_chat_enabled` gate is a security control (revoking the
+    // toggle must hide/deny chat). `ensure_chat_enabled` is DB-only, so we test
+    // it directly with a MockDatabase — no router/Docker needed.
+
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    fn project_with_toggle(id: i32, toggle: Option<bool>) -> temps_entities::projects::Model {
+        let now = chrono::Utc::now();
+        temps_entities::projects::Model {
+            id,
+            name: "P".to_string(),
+            repo_name: "r".to_string(),
+            repo_owner: "o".to_string(),
+            directory: ".".to_string(),
+            main_branch: "main".to_string(),
+            preset: temps_entities::preset::Preset::Static,
+            preset_config: None,
+            deployment_config: None,
+            created_at: now,
+            updated_at: now,
+            slug: "p".to_string(),
+            is_deleted: false,
+            deleted_at: None,
+            last_deployment: None,
+            is_public_repo: false,
+            git_url: None,
+            git_provider_connection_id: None,
+            attack_mode: false,
+            ai_alert_summaries_enabled: None,
+            ai_debug_chat_enabled: toggle,
+            enable_preview_environments: false,
+            preview_envs_on_demand: false,
+            preview_envs_idle_timeout_seconds: 300,
+            preview_envs_wake_timeout_seconds: 30,
+            source_type: temps_entities::source_type::SourceType::Git,
+            gitlab_webhook_id: None,
+            gitlab_webhook_signing_token: None,
+        }
+    }
+
+    fn db_returning(project: Option<temps_entities::projects::Model>) -> DatabaseConnection {
+        let rows = match project {
+            Some(p) => vec![p],
+            None => Vec::new(),
+        };
+        MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![rows])
+            .into_connection()
+    }
+
+    #[tokio::test]
+    async fn test_ensure_chat_enabled_allows_when_toggle_on() {
+        let db = db_returning(Some(project_with_toggle(7, Some(true))));
+        assert!(ensure_chat_enabled(&db, 7).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_chat_enabled_403_when_toggle_off() {
+        let db = db_returning(Some(project_with_toggle(7, Some(false))));
+        let err = ensure_chat_enabled(&db, 7)
+            .await
+            .expect_err("toggle off must be denied");
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_chat_enabled_403_when_toggle_null() {
+        let db = db_returning(Some(project_with_toggle(7, None)));
+        let err = ensure_chat_enabled(&db, 7)
+            .await
+            .expect_err("toggle null (default off) must be denied");
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_chat_enabled_403_when_project_missing() {
+        let db = db_returning(None);
+        let err = ensure_chat_enabled(&db, 999)
+            .await
+            .expect_err("missing project must be denied");
+        assert_eq!(err.status_code, StatusCode::FORBIDDEN);
+    }
+
+    // (c) Over-length input is rejected as 400 before any DB/AI work (cost/DoS
+    // hardening).
+    #[test]
+    fn test_too_long_is_400() {
+        let p = too_long("content", 10);
+        assert_eq!(p.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(title_of(&p).as_deref(), Some("Input Too Long"));
+    }
+
+    // Note on full handler-level (401/403 via the guard macros) coverage: the
+    // `permission_guard!` / `project_scope_guard!` / `deny_deployment_token!`
+    // macros are themselves tested in `temps-auth`; here we cover the
+    // crate-specific toggle gate (above), the input-length gate, the service-
+    // layer scoping (see service.rs tests), and the HTTP error mapping via the
+    // pure `From<ChatError>` conversion.
 }

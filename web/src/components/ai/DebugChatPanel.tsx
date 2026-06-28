@@ -108,6 +108,15 @@ interface DebugChatPanelProps {
   autoStart?: boolean
   /** Placeholder for the follow-up input. */
   placeholder?: string
+  /**
+   * Create the conversation lazily on the first user message instead of
+   * requiring an explicit "Start" action. Used for free-form chats (e.g. a new
+   * project chat) where there's nothing to auto-diagnose: the composer is live
+   * immediately and the first send seeds the conversation.
+   */
+  lazyCreate?: boolean
+  /** Friendly empty-state line shown for a lazy-create chat before any message. */
+  emptyHint?: string
   /** Notifies the parent of the active conversation's public id (for reset). */
   onConversationChange?: (publicId: string | null) => void
 }
@@ -148,6 +157,8 @@ export function DebugChatPanel({
   startPrompt = 'Diagnose this and suggest concrete next steps.',
   autoStart = false,
   placeholder = 'Ask a follow-up…',
+  lazyCreate = false,
+  emptyHint = 'Ask anything about this project.',
   onConversationChange,
 }: DebugChatPanelProps) {
   const base = `/api/projects/${projectId}/ai/conversations`
@@ -166,9 +177,10 @@ export function DebugChatPanel({
 
   const send = useCallback(
     async (text: string, conversationId?: string) => {
-      const id = conversationId ?? publicId
+      let id = conversationId ?? publicId
       const content = text.trim()
-      if (!id || !content) return
+      // Need either an existing conversation or permission to create one lazily.
+      if (!content || (!id && !lazyCreate)) return
       setInput('')
       setError(null)
       setStreaming(true)
@@ -192,6 +204,23 @@ export function DebugChatPanel({
             : m
         })
       try {
+        // Lazy-create the conversation on the first message (new project chat).
+        if (!id) {
+          const { data: conv, error: problem } = await createConversation({
+            path: { project_id: projectId },
+            body: { context_type: contextType, context_id: ctxId },
+          })
+          if (!conv) {
+            setError(
+              (problem as { detail?: string } | undefined)?.detail ||
+                'Could not start the chat. Make sure an AI provider is configured.'
+            )
+            dropEmptyAssistantTurn()
+            return
+          }
+          id = conv.public_id
+          setPublicId(conv.public_id)
+        }
         const res = await fetch(`${base}/${id}/messages`, {
           method: 'POST',
           credentials: 'include',
@@ -311,7 +340,7 @@ export function DebugChatPanel({
         setStreaming(false)
       }
     },
-    [base, publicId]
+    [base, publicId, lazyCreate, projectId, contextType, ctxId]
   )
 
   const start = useCallback(async () => {
@@ -430,19 +459,32 @@ export function DebugChatPanel({
           </div>
         )}
 
-        {!initializing && visible.length === 0 && !busy && !publicId && (
-          <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-            <Sparkles className="h-6 w-6 text-muted-foreground" />
-            <Button onClick={() => void start()} disabled={starting}>
-              {starting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Sparkles className="h-4 w-4" />
-              )}
-              <span className="ml-2">Start AI diagnosis</span>
-            </Button>
-          </div>
-        )}
+        {!initializing &&
+          visible.length === 0 &&
+          !busy &&
+          !publicId &&
+          (lazyCreate ? (
+            // Free-form chat (e.g. a project chat): nothing to auto-diagnose, so
+            // invite the user to type — the first message creates the chat.
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+              <Sparkles className="h-6 w-6 text-muted-foreground" />
+              <p className="max-w-xs text-sm text-muted-foreground">
+                {emptyHint}
+              </p>
+            </div>
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+              <Sparkles className="h-6 w-6 text-muted-foreground" />
+              <Button onClick={() => void start()} disabled={starting}>
+                {starting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                <span className="ml-2">Start AI diagnosis</span>
+              </Button>
+            </div>
+          ))}
 
         {showBootRow && (
           <div className="flex items-start gap-2.5">
@@ -516,7 +558,7 @@ export function DebugChatPanel({
           onChange={(e) => setInput(e.target.value)}
           placeholder={placeholder}
           rows={2}
-          disabled={streaming || (!publicId && !starting)}
+          disabled={streaming || (!publicId && !starting && !lazyCreate)}
           className="resize-none"
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -527,7 +569,7 @@ export function DebugChatPanel({
         />
         <Button
           onClick={() => void send(input)}
-          disabled={streaming || !input.trim() || !publicId}
+          disabled={streaming || !input.trim() || (!publicId && !lazyCreate)}
           size="icon"
         >
           {streaming ? (

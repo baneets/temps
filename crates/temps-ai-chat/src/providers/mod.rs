@@ -2,3 +2,4 @@
 
 pub mod alert;
 pub mod deployment;
+pub mod project;

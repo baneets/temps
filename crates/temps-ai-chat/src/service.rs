@@ -8,13 +8,15 @@ use chrono::Utc;
 use futures::Stream;
 use futures_util::StreamExt;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 
 use temps_ai::{AiService, ChatMessage, ChatTool, ChatTurnRequest};
 use temps_entities::{ai_conversations, ai_messages};
 
 use crate::provider::ConversationContextProvider;
+use crate::trace_tools::TraceTools;
 use crate::ChatError;
 
 /// One item in the live `send_message` stream. The plain-text path yields only
@@ -55,19 +57,33 @@ pub struct ConversationService {
     db: Arc<DatabaseConnection>,
     ai: Arc<dyn AiService>,
     providers: HashMap<&'static str, Arc<dyn ConversationContextProvider>>,
+    /// Shared, project-scoped trace tools (list/inspect distributed traces),
+    /// merged into EVERY context's tool loop. `None` when no trace store is
+    /// configured (OTel disabled) — then no trace tools are offered.
+    trace_tools: Option<TraceTools>,
 }
 
 impl ConversationService {
+    /// Upper bound on rows returned by the global switcher, so the response (and
+    /// the in-memory toggle filter that follows) can't grow without limit.
+    const LIST_ALL_LIMIT: u64 = 200;
+
     pub fn new(
         db: Arc<DatabaseConnection>,
         ai: Arc<dyn AiService>,
         providers: Vec<Arc<dyn ConversationContextProvider>>,
+        trace_reader: Option<Arc<dyn temps_core::TraceReader>>,
     ) -> Self {
         let providers = providers
             .into_iter()
             .map(|p| (p.context_type(), p))
             .collect();
-        Self { db, ai, providers }
+        Self {
+            db,
+            ai,
+            providers,
+            trace_tools: trace_reader.map(TraceTools::new),
+        }
     }
 
     /// Is AI configured at all? (Capability gate; feature opt-in is checked at the handler.)
@@ -119,10 +135,16 @@ impl ConversationService {
     /// EXCLUDED so a disabled project's chats never surface in the global
     /// switcher — consistent with the per-project read gate, which 403s when the
     /// toggle is off.
+    ///
+    /// Bounded by [`Self::LIST_ALL_LIMIT`] (most-recently-active first) so the
+    /// response can't grow unbounded with thread count — a resource-exhaustion
+    /// guard. The switcher only needs the recent set; older chats remain
+    /// reachable per-project.
     pub async fn list_all_conversations(&self) -> Result<Vec<ConversationWithProject>, ChatError> {
         let convs = ai_conversations::Entity::find()
             .filter(ai_conversations::Column::Status.eq("active"))
             .order_by_desc(ai_conversations::Column::LastActivityAt)
+            .limit(Self::LIST_ALL_LIMIT)
             .all(self.db.as_ref())
             .await?;
 
@@ -316,16 +338,26 @@ impl ConversationService {
             }
         }
 
-        // Agentic tool path: when this context exposes tools (e.g. a git-backed
-        // deployment can read repo files), run a non-streaming tool loop and
-        // return the final answer. Falls back to plain streaming if the model
-        // can't do tools or the loop yields nothing.
-        if let Some(provider) = self.providers.get(conv.context_type.as_str()).cloned() {
-            let tools = provider.tools(conv.project_id, &conv.context_id).await;
-            if !tools.is_empty() {
-                if let Some(stream) = self.try_tool_loop(conv, &messages, &provider, tools).await {
-                    return Ok(stream);
-                }
+        // Agentic tool path: gather the tools available for this turn — the
+        // context provider's own tools (e.g. a git-backed deployment can read
+        // repo files) PLUS the shared, project-scoped trace tools (available in
+        // every context when a trace store is configured). When any tool exists,
+        // run a non-streaming tool loop and return the final answer; fall back to
+        // plain streaming if the model can't do tools or the loop yields nothing.
+        let provider = self.providers.get(conv.context_type.as_str()).cloned();
+        let mut tools: Vec<ChatTool> = Vec::new();
+        if let Some(p) = &provider {
+            tools.extend(p.tools(conv.project_id, &conv.context_id).await);
+        }
+        if let Some(tt) = &self.trace_tools {
+            tools.extend(tt.tools());
+        }
+        if !tools.is_empty() {
+            if let Some(stream) = self
+                .try_tool_loop(conv, &messages, provider.as_ref(), tools)
+                .await
+            {
+                return Ok(stream);
             }
         }
 
@@ -403,7 +435,7 @@ impl ConversationService {
         &self,
         conv: &ai_conversations::Model,
         base_messages: &[ChatMessage],
-        provider: &Arc<dyn ConversationContextProvider>,
+        provider: Option<&Arc<dyn ConversationContextProvider>>,
         tools: Vec<ChatTool>,
     ) -> Option<Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, ChatError>> + Send>>> {
         const MAX_ROUNDS: usize = 6;
@@ -426,9 +458,14 @@ impl ConversationService {
                 tools: tools.clone(),
                 ..Default::default()
             };
-            // An error here (e.g. the model/provider can't do tools) aborts the
-            // loop; the caller falls back to plain streaming.
-            let resp = self.ai.chat(req).await.ok()?;
+            // An error here (e.g. the model/provider can't do tools) breaks the
+            // loop. If we already gathered tool evidence, the salvage call below
+            // still lets the model answer from it; if not, the caller falls back
+            // to plain streaming.
+            let resp = match self.ai.chat(req).await {
+                Ok(r) => r,
+                Err(_) => break,
+            };
             if resp.tool_calls.is_empty() {
                 final_text = resp.content;
                 break;
@@ -446,9 +483,19 @@ impl ConversationService {
                     name: tc.name.clone(),
                     arguments: tc.arguments.clone(),
                 });
-                let result = provider
-                    .execute_tool(conv.project_id, &conv.context_id, &tc.name, &tc.arguments)
-                    .await;
+                // Route to the shared trace tools when they own the tool name;
+                // otherwise to the context provider. `project_id` is always the
+                // conversation's project, never anything the model supplied — so
+                // a tool can't be steered to another tenant's data.
+                let result =
+                    if let Some(tt) = self.trace_tools.as_ref().filter(|tt| tt.handles(&tc.name)) {
+                        tt.execute(conv.project_id, &tc.name, &tc.arguments).await
+                    } else if let Some(p) = provider {
+                        p.execute_tool(conv.project_id, &conv.context_id, &tc.name, &tc.arguments)
+                            .await
+                    } else {
+                        format!("Tool '{}' is not available in this context.", tc.name)
+                    };
                 // Surface the result right after.
                 tool_events.push(ChatStreamEvent::ToolResult {
                     id: tc.id.clone(),
@@ -462,6 +509,24 @@ impl ConversationService {
                     "result": result.clone(),
                 }));
                 messages.push(ChatMessage::tool(tc.id.clone(), result));
+            }
+        }
+
+        // Salvage: if the loop ended without prose (round cap hit, or a mid-loop
+        // provider error) BUT we executed at least one tool, make one final
+        // tool-free call so the model answers from the evidence it gathered —
+        // instead of the caller discarding it all and answering blind. Bounded:
+        // at most one extra call. If it still yields nothing, fall through to the
+        // plain-streaming fallback as before.
+        if final_text.is_none() && !tools_meta.is_empty() {
+            let req = ChatTurnRequest {
+                purpose: format!("chat.{}.tools.final", conv.context_type),
+                project_id: Some(conv.project_id),
+                messages: messages.clone(),
+                ..Default::default()
+            };
+            if let Ok(resp) = self.ai.chat(req).await {
+                final_text = resp.content;
             }
         }
 
@@ -663,6 +728,7 @@ mod tests {
             db: Arc::new(db),
             ai,
             providers: HashMap::new(),
+            trace_tools: None,
         };
         (svc, tools)
     }
@@ -710,7 +776,7 @@ mod tests {
         let conv = test_conversation();
         let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
         let stream = svc
-            .try_tool_loop(&conv, &[], &provider_dyn, tools)
+            .try_tool_loop(&conv, &[], Some(&provider_dyn), tools)
             .await
             .expect("loop should produce a final answer stream");
         let out = drain(stream).await;
@@ -751,16 +817,20 @@ mod tests {
 
         let conv = test_conversation();
         let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
-        let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
+        let result = svc
+            .try_tool_loop(&conv, &[], Some(&provider_dyn), tools)
+            .await;
         assert!(result.is_none());
     }
 
     // (c) MAX_ROUNDS enforced: a model that always asks for a tool must never
-    // exceed 6 chat() calls, and the loop yields None (no final prose).
+    // exceed MAX_ROUNDS + 1 chat() calls (the rounds plus the single tool-free
+    // salvage call), and the loop yields None (no final prose ever materialises).
     #[tokio::test]
     async fn test_tool_loop_enforces_max_rounds() {
         // Empty script: the fallback in ScriptedAi::chat always returns a tool
-        // call, so the loop would spin forever without the round cap.
+        // call, so the loop would spin forever without the round cap. The salvage
+        // call also gets a tool call (no prose), so the result stays None.
         let ai = Arc::new(ScriptedAi::new(vec![]));
         let provider = Arc::new(StubProvider {
             tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -770,12 +840,63 @@ mod tests {
 
         let conv = test_conversation();
         let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
-        let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
+        let result = svc
+            .try_tool_loop(&conv, &[], Some(&provider_dyn), tools)
+            .await;
 
         assert!(result.is_none(), "no final prose -> None");
         assert!(
-            chat_count.load(std::sync::atomic::Ordering::SeqCst) <= 6,
-            "chat() must not be called more than MAX_ROUNDS (6) times"
+            chat_count.load(std::sync::atomic::Ordering::SeqCst) <= 7,
+            "chat() must not exceed MAX_ROUNDS (6) + 1 salvage call"
+        );
+    }
+
+    // (c2) Salvage: after the loop exhausts MAX_ROUNDS still wanting tools, one
+    // final tool-free call lets the model answer from the gathered evidence
+    // instead of the caller discarding it. Result is Some(prose), not None.
+    #[tokio::test]
+    async fn test_tool_loop_salvages_evidence_after_round_cap() {
+        // 6 tool-call rounds (never settles on prose), then the 7th (salvage)
+        // call finally answers.
+        let mut responses: Vec<Result<ChatTurnResponse, AiError>> = (0..6)
+            .map(|i| {
+                Ok(ChatTurnResponse {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("c{i}"),
+                        name: "echo".to_string(),
+                        arguments: "{}".to_string(),
+                    }],
+                })
+            })
+            .collect();
+        responses.push(Ok(ChatTurnResponse {
+            content: Some("salvaged answer".to_string()),
+            tool_calls: vec![],
+        }));
+        let ai = Arc::new(ScriptedAi::new(responses));
+        let provider = Arc::new(StubProvider {
+            tool_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let chat_count = ai.chat_calls.clone();
+        let (svc, tools) = service_with(ai);
+
+        let conv = test_conversation();
+        let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
+        let stream = svc
+            .try_tool_loop(&conv, &[], Some(&provider_dyn), tools)
+            .await
+            .expect("salvage should produce a final answer stream");
+        let out = drain(stream).await;
+
+        assert!(
+            out.contains(&ChatStreamEvent::Token("salvaged answer".to_string())),
+            "final token should be the salvaged answer; got {out:?}"
+        );
+        assert_eq!(
+            chat_count.load(std::sync::atomic::Ordering::SeqCst),
+            7,
+            "6 tool rounds + 1 salvage call"
         );
     }
 
@@ -793,7 +914,9 @@ mod tests {
 
         let conv = test_conversation();
         let provider_dyn: Arc<dyn ConversationContextProvider> = provider;
-        let result = svc.try_tool_loop(&conv, &[], &provider_dyn, tools).await;
+        let result = svc
+            .try_tool_loop(&conv, &[], Some(&provider_dyn), tools)
+            .await;
         assert!(result.is_none());
     }
 
@@ -807,6 +930,7 @@ mod tests {
             db: Arc::new(db),
             ai: Arc::new(ScriptedAi::new(vec![])),
             providers: HashMap::new(),
+            trace_tools: None,
         }
     }
 

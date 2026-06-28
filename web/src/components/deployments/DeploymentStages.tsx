@@ -19,11 +19,13 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 import AnsiToHtml from 'ansi-to-html'
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   ChevronDownIcon,
   ChevronUpIcon,
   Copy,
+  Info,
   Loader2,
   Settings,
   Sparkles,
@@ -340,7 +342,7 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
             onClick={() => toggleFilter('info')}
             className="gap-2"
           >
-            <span className="text-blue-500">ℹ️</span>
+            <Info className="text-blue-500" />
             Info
             {logCounts.info > 0 && (
               <span className="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-blue-500/20">
@@ -354,7 +356,7 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
             onClick={() => toggleFilter('success')}
             className="gap-2"
           >
-            <span className="text-green-500">✅</span>
+            <CheckCircle2 className="text-green-500" />
             Success
             {logCounts.success > 0 && (
               <span className="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-green-500/20">
@@ -368,7 +370,7 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
             onClick={() => toggleFilter('warning')}
             className="gap-2"
           >
-            <span className="text-yellow-500">⚠️</span>
+            <AlertTriangle className="text-yellow-500" />
             Warning
             {logCounts.warning > 0 && (
               <span className="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-yellow-500/20">
@@ -382,7 +384,7 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
             onClick={() => toggleFilter('error')}
             className="gap-2"
           >
-            <span className="text-red-500">❌</span>
+            <XCircle className="text-red-500" />
             Error
             {logCounts.error > 0 && (
               <span className="ml-1 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20">
@@ -780,7 +782,6 @@ export function DeploymentStages({
           stage={configModalStage}
         />
       )}
-
     </div>
   )
 }

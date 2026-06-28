@@ -33,6 +33,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
