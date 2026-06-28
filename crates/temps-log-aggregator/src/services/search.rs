@@ -78,7 +78,27 @@ impl LogSearchService {
         let page_size = std::cmp::min(filter.page_size, 2000) as u64;
 
         // Always search from chunk files — no log_events table needed
-        self.archive_search(filter, page_size).await
+        let mut result = self.archive_search(filter, page_size).await?;
+
+        // On the first page only, attach the full set of sources for the scope
+        // (project + env + deployment + time) so the UI's container/node/service
+        // dropdowns show every option — NOT just the currently-filtered one.
+        // Skipped on "load older" pages (cursor set) to avoid the extra query.
+        if filter.cursor.is_none() {
+            result.available_sources = self
+                .metadata_service
+                .list_sources(
+                    filter.project_id,
+                    filter.envs.first().map(|s| s.as_str()),
+                    filter.deploy_id,
+                    filter.start_time,
+                    filter.end_time,
+                )
+                .await
+                .unwrap_or_default();
+        }
+
+        Ok(result)
     }
 
     /// Parse a pagination cursor of the form `<ts_millis>:<chunk_uuid>`.
@@ -207,6 +227,7 @@ impl LogSearchService {
                 next_cursor: None,
                 search_mode: SearchMode::Archive,
                 total_scanned: 0,
+                available_sources: Vec::new(),
             });
         }
 
@@ -412,6 +433,7 @@ impl LogSearchService {
             next_cursor,
             search_mode: SearchMode::Archive,
             total_scanned,
+            available_sources: Vec::new(),
         })
     }
 

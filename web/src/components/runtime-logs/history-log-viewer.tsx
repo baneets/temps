@@ -684,28 +684,46 @@ export default function HistoryLogViewer({
     !!project.id,
   )
 
-  // Container + node filter options, derived from the current result page's
-  // per-line tags (same approach as the service dropdown). Containers are
-  // labeled with their node so replicas of the same service are distinguishable.
+  // Filter options come from `available_sources` — the FULL set of
+  // containers/nodes/services for the scope (project + env + deployment + time),
+  // computed server-side independently of the active container/node/service
+  // filter. Deriving from the (already-filtered) result lines would collapse the
+  // list to the current selection, making it impossible to switch.
+  const sources = data?.available_sources ?? []
+
+  // Service options (all services in scope) — switching service no longer hides
+  // the others.
+  const serviceOptions = useMemo(() => {
+    const set = new Set<string>()
+    for (const s of sources) {
+      if (s.service && s.service !== 'unknown') set.add(s.service)
+    }
+    return Array.from(set).sort()
+  }, [sources])
+
+  // Container options, labeled with their node so replicas are distinguishable.
+  // Narrowed to the selected service (if any) so the list stays relevant.
   const containerOptions = useMemo(() => {
     const map = new Map<string, string>()
-    for (const l of data?.lines ?? []) {
-      if (l.container_id && !map.has(l.container_id)) {
-        map.set(l.container_id, sourceLabel(l.container_id, l.node_name))
+    for (const s of sources) {
+      if (!s.container_id) continue
+      if (selectedService && s.service !== selectedService) continue
+      if (!map.has(s.container_id)) {
+        map.set(s.container_id, sourceLabel(s.container_id, s.node_name))
       }
     }
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]))
-  }, [data?.lines])
+  }, [sources, selectedService])
 
   const nodeOptions = useMemo(() => {
     const map = new Map<number, string>()
-    for (const l of data?.lines ?? []) {
-      if (l.node_id != null && !map.has(l.node_id)) {
-        map.set(l.node_id, l.node_name || `node-${l.node_id}`)
+    for (const s of sources) {
+      if (s.node_id != null && !map.has(s.node_id)) {
+        map.set(s.node_id, s.node_name || `node-${s.node_id}`)
       }
     }
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]))
-  }, [data?.lines])
+  }, [sources])
 
   // Build the rendered rope in ASC order (oldest at index 0, newest at end)
   // so the UI renders terminal-style with newest at the bottom.
@@ -963,19 +981,11 @@ export default function HistoryLogViewer({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All services</SelectItem>
-              {Array.from(
-                new Set(
-                  (data?.lines ?? [])
-                    .map((l) => l.service)
-                    .filter((s) => s && s !== 'unknown'),
-                ),
-              )
-                .sort()
-                .map((service) => (
-                  <SelectItem key={service} value={service}>
-                    {service}
-                  </SelectItem>
-                ))}
+              {serviceOptions.map((service) => (
+                <SelectItem key={service} value={service}>
+                  {service}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
 

@@ -39,11 +39,23 @@ export interface LogSearchLine {
   context?: LineContext | null
 }
 
+/** A distinct container/node/service available in the queried scope — used to
+    populate the filter dropdowns with the full set of options regardless of the
+    active container/node filter. */
+export interface LogSource {
+  container_id: string
+  service: string
+  node_id?: number | null
+  node_name?: string | null
+}
+
 export interface SearchLogsResponse {
   lines: LogSearchLine[]
   next_cursor: string | null
   search_mode: SearchMode
   total_scanned: number
+  /** Full set of sources for the scope (first page only). */
+  available_sources?: LogSource[]
 }
 
 export interface LogSearchParams {

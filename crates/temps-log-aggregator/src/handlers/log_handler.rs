@@ -198,6 +198,10 @@ pub struct SearchLogsResponse {
     pub next_cursor: Option<String>,
     pub search_mode: SearchMode,
     pub total_scanned: u64,
+    /// Distinct containers/nodes/services available in the queried scope, for
+    /// the filter dropdowns. Populated on the first page (no cursor).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_sources: Vec<LogSource>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -246,6 +250,7 @@ pub struct PurgeLogsRequest {
             TailLogsRequest,
             PurgeLogsRequest,
             LogSearchLine,
+            LogSource,
             ContextLine,
             LineContext,
             SearchMode,
@@ -341,6 +346,7 @@ async fn search_logs(
         next_cursor: result.next_cursor,
         search_mode: result.search_mode,
         total_scanned: result.total_scanned,
+        available_sources: result.available_sources,
     }))
 }
 

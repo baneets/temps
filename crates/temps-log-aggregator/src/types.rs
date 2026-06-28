@@ -205,6 +205,20 @@ pub enum FieldFilterOp {
     Lte,
 }
 
+/// A distinct log source (container) seen in the queried scope. Used to populate
+/// the history filter dropdowns with the *full* set of containers/nodes for the
+/// project + env + deployment + time window — independent of the active
+/// container/node/service filter, so the user can switch between them.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LogSource {
+    pub container_id: String,
+    pub service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_name: Option<String>,
+}
+
 /// Search result page
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogSearchResult {
@@ -215,6 +229,11 @@ pub struct LogSearchResult {
     pub search_mode: SearchMode,
     /// How many lines were examined to produce the results
     pub total_scanned: u64,
+    /// Distinct containers/nodes/services available in the queried scope (the
+    /// full universe for the filter dropdowns). Populated only on the first page
+    /// (no cursor); empty on "load older" pages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_sources: Vec<LogSource>,
 }
 
 /// A single line in search results
