@@ -7,6 +7,7 @@
 use bollard::Docker;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
+use serde_yaml::{Mapping, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +24,9 @@ pub enum ComposeError {
 
     #[error("Failed to discover containers for project '{project}': {reason}")]
     DiscoveryFailed { project: String, reason: String },
+
+    #[error("Invalid compose override for project '{project}': {reason}")]
+    InvalidOverride { project: String, reason: String },
 
     #[error("Docker API error: {0}")]
     Docker(String),
@@ -418,9 +422,17 @@ impl ComposeExecutor {
             }
         }
 
-        // Write user-provided override if present (ports, volumes, commands, etc.)
+        // Write user-provided override if present. Inline overrides come from project
+        // settings, so validate them (structural allow-list) before handing them to the
+        // host Docker daemon — defense-in-depth alongside the value-level policy above.
         if let Some(ref user_override) = request.compose_override {
             if !user_override.trim().is_empty() {
+                Self::validate_compose_override(
+                    &request.project_name,
+                    &request.compose_content,
+                    user_override,
+                )?;
+
                 let override_path = project_dir.join("docker-compose.temps-override.yml");
                 tokio::fs::write(&override_path, user_override)
                     .await
@@ -947,6 +959,142 @@ impl ComposeExecutor {
                 reason: "must not contain '..' or absolute/root path components".to_string(),
             });
         }
+        Ok(())
+    }
+
+    /// Structural allow-list for inline compose overrides. Complements the
+    /// value-level `validate_compose_security_policy`: an inline override may
+    /// only modify services that already exist in the base compose file, may not
+    /// introduce top-level keys other than `services`, and may not use
+    /// host-affecting service keys (privileged, network_mode, volumes, ...).
+    fn validate_compose_override(
+        project_name: &str,
+        compose_content: &str,
+        override_content: &str,
+    ) -> Result<(), ComposeError> {
+        let base = Self::parse_compose_yaml(project_name, compose_content, "compose file")?;
+        let override_yaml =
+            Self::parse_compose_yaml(project_name, override_content, "compose override")?;
+
+        let base_services = Self::compose_services(&base).ok_or_else(|| ComposeError::InvalidOverride {
+            project: project_name.to_string(),
+            reason: "base compose file must define a services mapping before an inline override can be applied".to_string(),
+        })?;
+
+        let Some(override_root) = override_yaml.as_mapping() else {
+            return Err(ComposeError::InvalidOverride {
+                project: project_name.to_string(),
+                reason: "inline compose override must be a mapping".to_string(),
+            });
+        };
+        for key in override_root.keys().filter_map(Self::yaml_key) {
+            if key != "services" {
+                return Err(ComposeError::InvalidOverride {
+                    project: project_name.to_string(),
+                    reason: format!(
+                        "inline compose override cannot set top-level key '{key}'; only service-level changes are allowed"
+                    ),
+                });
+            }
+        }
+
+        let Some(override_services) = Self::compose_services(&override_yaml) else {
+            return Err(ComposeError::InvalidOverride {
+                project: project_name.to_string(),
+                reason:
+                    "inline compose override must define only service-level changes under services"
+                        .to_string(),
+            });
+        };
+
+        let base_service_names: HashSet<String> =
+            base_services.keys().filter_map(Self::yaml_key).collect();
+        for (service_name_value, service_config) in override_services {
+            let service_name = Self::yaml_key(service_name_value).ok_or_else(|| {
+                ComposeError::InvalidOverride {
+                    project: project_name.to_string(),
+                    reason: "service names in inline compose override must be strings".to_string(),
+                }
+            })?;
+
+            if !base_service_names.contains(&service_name) {
+                return Err(ComposeError::InvalidOverride {
+                    project: project_name.to_string(),
+                    reason: format!(
+                        "inline compose override cannot add service '{service_name}'; add new services to the repository compose file for review"
+                    ),
+                });
+            }
+
+            Self::validate_override_service(project_name, &service_name, service_config)?;
+        }
+
+        Ok(())
+    }
+
+    fn parse_compose_yaml(
+        project_name: &str,
+        content: &str,
+        label: &str,
+    ) -> Result<Value, ComposeError> {
+        serde_yaml::from_str::<Value>(content).map_err(|e| ComposeError::InvalidOverride {
+            project: project_name.to_string(),
+            reason: format!("failed to parse {label} YAML: {e}"),
+        })
+    }
+
+    fn compose_services(compose: &Value) -> Option<&Mapping> {
+        compose
+            .as_mapping()?
+            .get(Value::String("services".to_string()))?
+            .as_mapping()
+    }
+
+    fn yaml_key(value: &Value) -> Option<String> {
+        value.as_str().map(ToString::to_string)
+    }
+
+    fn validate_override_service(
+        project_name: &str,
+        service_name: &str,
+        service_config: &Value,
+    ) -> Result<(), ComposeError> {
+        let Some(service) = service_config.as_mapping() else {
+            return Err(ComposeError::InvalidOverride {
+                project: project_name.to_string(),
+                reason: format!("service '{service_name}' override must be a mapping"),
+            });
+        };
+
+        const FORBIDDEN_SERVICE_KEYS: &[&str] = &[
+            "privileged",
+            "network_mode",
+            "pid",
+            "ipc",
+            "uts",
+            "cgroup",
+            "cgroup_parent",
+            "cap_add",
+            "cap_drop",
+            "devices",
+            "device_cgroup_rules",
+            "security_opt",
+            "sysctls",
+            "userns_mode",
+            "volumes",
+        ];
+
+        for key in service.keys().filter_map(Self::yaml_key) {
+            if FORBIDDEN_SERVICE_KEYS.contains(&key.as_str()) {
+                return Err(ComposeError::InvalidOverride {
+                    project: project_name.to_string(),
+                    reason: format!(
+                        "service '{service_name}' uses forbidden inline override key '{key}'; put host-affecting Compose settings in the repository compose file for review"
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -1673,6 +1821,107 @@ services:
     }
 
     #[test]
+    fn test_validate_compose_override_allows_safe_service_changes() {
+        let compose = r#"
+services:
+  web:
+    image: nginx
+"#;
+        let override_content = r#"
+services:
+  web:
+    ports:
+      - "127.0.0.1:8080:80"
+    environment:
+      RUST_LOG: info
+    command: ["nginx", "-g", "daemon off;"]
+"#;
+
+        ComposeExecutor::validate_compose_override("temps-test", compose, override_content)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_validate_compose_override_rejects_new_services() {
+        let compose = r#"
+services:
+  web:
+    image: nginx
+"#;
+        let override_content = r#"
+services:
+  attacker:
+    image: alpine
+"#;
+
+        let error =
+            ComposeExecutor::validate_compose_override("temps-test", compose, override_content)
+                .unwrap_err();
+        assert!(error.to_string().contains("cannot add service 'attacker'"));
+    }
+
+    #[test]
+    fn test_validate_compose_override_rejects_host_escape_keys() {
+        let compose = r#"
+services:
+  web:
+    image: nginx
+"#;
+        let dangerous_overrides = [
+            "privileged: true",
+            "network_mode: host",
+            "pid: host",
+            "cap_add: [SYS_ADMIN]",
+            "devices: ['/dev/kvm:/dev/kvm']",
+            "security_opt: ['apparmor:unconfined']",
+            "sysctls: {net.ipv4.ip_forward: '1'}",
+            "volumes: ['/:/host:rw']",
+        ];
+
+        for dangerous_override in dangerous_overrides {
+            let override_content = format!(
+                "services:
+  web:
+    {dangerous_override}
+"
+            );
+            let error = ComposeExecutor::validate_compose_override(
+                "temps-test",
+                compose,
+                &override_content,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("forbidden inline override key"),
+                "expected {dangerous_override} to be rejected, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_compose_override_rejects_top_level_escape_keys() {
+        let compose = r#"
+services:
+  web:
+    image: nginx
+"#;
+        let override_content = r#"
+services:
+  web:
+    ports:
+      - "8080:80"
+networks:
+  hostnet:
+    external: true
+"#;
+
+        let error =
+            ComposeExecutor::validate_compose_override("temps-test", compose, override_content)
+                .unwrap_err();
+        assert!(error.to_string().contains("top-level key 'networks'"));
+    }
+
+    #[test]
     fn test_has_build_directives() {
         let docker = Docker::connect_with_defaults();
         if docker.is_err() {
@@ -2181,7 +2430,9 @@ services:
     #[test]
     fn test_validate_relative_path_confines_to_project_dir() {
         // Valid relative paths are accepted.
-        assert!(ComposeExecutor::validate_relative_path("docker-compose.yml", "compose_path").is_ok());
+        assert!(
+            ComposeExecutor::validate_relative_path("docker-compose.yml", "compose_path").is_ok()
+        );
         assert!(
             ComposeExecutor::validate_relative_path("apps/web/compose.yml", "compose_path").is_ok()
         );
@@ -2195,8 +2446,7 @@ services:
             "../compose.yml",
             "apps/../../compose.yml",
         ] {
-            let err =
-                ComposeExecutor::validate_relative_path(bad, "compose_path").unwrap_err();
+            let err = ComposeExecutor::validate_relative_path(bad, "compose_path").unwrap_err();
             assert!(matches!(
                 err,
                 ComposeError::InvalidComposePath { ref field, .. } if field == "compose_path"
