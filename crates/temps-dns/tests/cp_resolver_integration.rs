@@ -50,6 +50,9 @@ fn dns_client() -> TokioResolver {
     opts.use_hosts_file = ResolveHosts::Never;
     opts.attempts = 1;
     opts.timeout = Duration::from_secs(2);
+    // No client-side cache: the propagation assertion below must observe the
+    // resolver's live zone, not a TTL-cached first answer.
+    opts.cache_size = 0;
     TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default())
         .with_options(opts)
         .build()
@@ -129,4 +132,46 @@ async fn cp_resolver_serves_zone_from_real_db() {
         msg.contains("no record") || msg.contains("nxdomain") || msg.contains("not found"),
         "expected NXDOMAIN-style error, got: {msg}"
     );
+
+    // --- The feeder must pick up a live change (generation bump) ---
+    // Repoint the same owner's record to a new IP. `replace_endpoints_for_owner`
+    // advances the zone generation, so the feeder re-reads the DB and replaces
+    // the in-memory zone within a poll cycle (client cache is disabled, so each
+    // lookup hits the resolver fresh). This guards the feeder's change-detection
+    // path, which the initial load alone does not exercise.
+    const TEST_IP_2: &str = "10.222.33.44";
+    let updated = EndpointDraft {
+        fqdn: TEST_FQDN.into(),
+        record_type: RecordType::A,
+        target_ip: Some(TEST_IP_2.into()),
+        target_port: Some(8080),
+        ttl: 10,
+        owner_kind: OwnerKind::Deployment,
+        owner_id: 999,
+        node_id: None,
+    };
+    registry
+        .replace_endpoints_for_owner(OwnerKind::Deployment, 999, &[updated])
+        .await
+        .expect("update service_endpoint");
+
+    let mut reresolved: Option<Vec<IpAddr>> = None;
+    for _ in 0..30 {
+        if let Ok(answer) = client.lookup_ip(format!("{TEST_FQDN}.")).await {
+            let ips: Vec<IpAddr> = answer.iter().collect();
+            if ips.iter().any(|ip| ip.to_string() == TEST_IP_2) {
+                reresolved = Some(ips);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let ips =
+        reresolved.unwrap_or_else(|| panic!("feeder did not pick up the updated {TEST_FQDN}"));
+    assert_eq!(
+        ips.len(),
+        1,
+        "the old record must be replaced, not appended"
+    );
+    assert_eq!(ips[0].to_string(), TEST_IP_2);
 }
