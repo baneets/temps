@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Supply-chain hardening** of the `install.sh` / join scripts (fail-closed
   checksum verification) and the internal proxy strips client-supplied
   `x-forwarded-*` / `x-temps-*` headers before forwarding.
+- **Dependency security advisories cleared.** Patched four network-reachable
+  advisories via lockfile bumps: `postgres-protocol` → 0.6.12 (RUSTSEC-2026-0179
+  SCRAM CPU-exhaustion DoS, RUSTSEC-2026-0180 hstore decode panic — both
+  triggerable by a malicious Postgres server temps connects to),
+  `tokio-postgres` → 0.7.18 (RUSTSEC-2026-0178 DataRow panic DoS),
+  `quinn-proto` → 0.11.15 (RUSTSEC-2026-0185 remote memory exhaustion), and the
+  Python plugin SDK's `aiohttp` → 3.14.1 (eight advisories incl. websocket
+  memory-limit bypass and HTTP/1 pipeline flooding). The remaining audit findings
+  (`protobuf` 2.x, `remove_dir_all` 0.5, `opentelemetry_sdk` 0.30, `rsa` 0.9) are
+  transitive, upstream-blocked, and verified unreachable in our usage — documented
+  with reachability proofs in the root `Cargo.toml`.
 
 
 ## [0.1.0-beta.39] - 2026-06-25
