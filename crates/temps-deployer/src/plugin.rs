@@ -173,6 +173,12 @@ impl TempsPlugin for DeployerPlugin {
             // so it is the right home. Best-effort: any failure (Docker down,
             // :53 already bound, no gateway) leaves containers on Docker's
             // embedded DNS, exactly as before this change.
+            //
+            // `get_service` (not `require_service`) is deliberate: the DB is an
+            // optional dependency for this best-effort enhancement. A missing
+            // DB (e.g. an embedded/test configuration) must skip DNS startup,
+            // never fail the deployer plugin — do not promote this to
+            // `require_service`.
             if let Some(db) = context.get_service::<sea_orm::DatabaseConnection>() {
                 match docker_runtime.ensure_network_exists().await {
                     Ok(()) => match docker_runtime.inspect_app_network_gateway().await {
