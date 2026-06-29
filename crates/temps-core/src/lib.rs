@@ -18,6 +18,7 @@ pub mod problemdetails;
 pub mod retry;
 pub mod telemetry;
 pub mod tls;
+pub mod traces;
 pub use problemdetails::ProblemDetails;
 mod app_settings;
 mod constants;
@@ -50,6 +51,10 @@ pub use error_builder::*;
 pub use jobs::*;
 pub use on_demand::*;
 pub use telemetry::{NoopTelemetryReporter, TelemetryEvent, TelemetryEventKind, TelemetryReporter};
+pub use traces::{
+    TraceQueryFilter, TraceReader, TraceReaderError, TraceSpanDto, TraceSpanEventDto,
+    TraceSummaryDto,
+};
 pub use utils::*;
 
 // Re-export external dependencies
