@@ -243,68 +243,66 @@ pub async fn check_node_resources(
     };
 
     for node in &active {
-        let cap = &node.capacity;
-
-        if let Some(threshold) = cpu_threshold {
-            if let Some(cpu) = cap.get("cpu_percent").and_then(|v| v.as_f64()) {
-                if cpu > threshold {
-                    send_node_resource_alert(
-                        notification_service,
-                        &node.name,
-                        node.id,
-                        "CPU",
-                        cpu,
-                        threshold,
-                    )
-                    .await;
-                }
-            }
+        for (metric, value, threshold) in
+            resource_breaches(&node.capacity, cpu_threshold, mem_threshold, disk_threshold)
+        {
+            send_node_resource_alert(
+                notification_service,
+                &node.name,
+                node.id,
+                metric,
+                value,
+                threshold,
+            )
+            .await;
         }
+    }
+}
 
-        if let Some(threshold) = mem_threshold {
-            if let (Some(used), Some(total)) = (
-                cap.get("memory_used_bytes").and_then(|v| v.as_f64()),
-                cap.get("memory_total_bytes").and_then(|v| v.as_f64()),
-            ) {
-                if total > 0.0 {
-                    let pct = used / total * 100.0;
-                    if pct > threshold {
-                        send_node_resource_alert(
-                            notification_service,
-                            &node.name,
-                            node.id,
-                            "memory",
-                            pct,
-                            threshold,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
+/// Pure threshold evaluation for a node's heartbeat `capacity` JSON. Returns
+/// `(metric, value_percent, threshold)` for each breach (value strictly above
+/// threshold). `None` thresholds and missing/zero capacity fields are skipped.
+/// Extracted from `check_node_resources` so the breach logic is unit-testable
+/// without a DB / config / notification service.
+fn resource_breaches(
+    capacity: &serde_json::Value,
+    cpu_threshold: Option<f64>,
+    mem_threshold: Option<f64>,
+    disk_threshold: Option<f64>,
+) -> Vec<(&'static str, f64, f64)> {
+    let mut breaches = Vec::new();
 
-        if let Some(threshold) = disk_threshold {
-            if let (Some(used), Some(total)) = (
-                cap.get("disk_used_bytes").and_then(|v| v.as_f64()),
-                cap.get("disk_total_bytes").and_then(|v| v.as_f64()),
-            ) {
-                if total > 0.0 {
-                    let pct = used / total * 100.0;
-                    if pct > threshold {
-                        send_node_resource_alert(
-                            notification_service,
-                            &node.name,
-                            node.id,
-                            "disk",
-                            pct,
-                            threshold,
-                        )
-                        .await;
-                    }
-                }
+    if let Some(threshold) = cpu_threshold {
+        if let Some(cpu) = capacity.get("cpu_percent").and_then(|v| v.as_f64()) {
+            if cpu > threshold {
+                breaches.push(("CPU", cpu, threshold));
             }
         }
     }
+
+    let pct = |used_key: &str, total_key: &str| -> Option<f64> {
+        let used = capacity.get(used_key).and_then(|v| v.as_f64())?;
+        let total = capacity.get(total_key).and_then(|v| v.as_f64())?;
+        (total > 0.0).then(|| used / total * 100.0)
+    };
+
+    if let Some(threshold) = mem_threshold {
+        if let Some(pct) = pct("memory_used_bytes", "memory_total_bytes") {
+            if pct > threshold {
+                breaches.push(("memory", pct, threshold));
+            }
+        }
+    }
+
+    if let Some(threshold) = disk_threshold {
+        if let Some(pct) = pct("disk_used_bytes", "disk_total_bytes") {
+            if pct > threshold {
+                breaches.push(("disk", pct, threshold));
+            }
+        }
+    }
+
+    breaches
 }
 
 /// Check all draining nodes for drain completion and transition them
@@ -520,5 +518,78 @@ mod tests {
 
         let marked = check_node_health(&node_service, &db).await;
         assert_eq!(marked, vec![5]);
+    }
+
+    // ── Resource-alert threshold evaluation (resource_breaches) ──────────
+
+    #[test]
+    fn test_resource_breaches_cpu_above_and_below() {
+        let cap = serde_json::json!({ "cpu_percent": 95.0 });
+        let breaches = resource_breaches(&cap, Some(90.0), None, None);
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].0, "CPU");
+        assert!((breaches[0].1 - 95.0).abs() < f64::EPSILON);
+
+        // Below threshold → no breach. Exactly-at threshold is not a breach (>).
+        assert!(resource_breaches(
+            &serde_json::json!({"cpu_percent": 85.0}),
+            Some(90.0),
+            None,
+            None
+        )
+        .is_empty());
+        assert!(resource_breaches(
+            &serde_json::json!({"cpu_percent": 90.0}),
+            Some(90.0),
+            None,
+            None
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn test_resource_breaches_memory_and_disk_percentage() {
+        // 9 GiB used of 10 GiB = 90% — just over an 85% threshold.
+        let cap = serde_json::json!({
+            "memory_used_bytes": 9_000_000_000.0,
+            "memory_total_bytes": 10_000_000_000.0,
+            "disk_used_bytes": 1_000_000_000.0,
+            "disk_total_bytes": 10_000_000_000.0,
+        });
+        let breaches = resource_breaches(&cap, None, Some(85.0), Some(85.0));
+        // memory 90% > 85% breaches; disk 10% does not.
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].0, "memory");
+        assert!((breaches[0].1 - 90.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_resource_breaches_disabled_and_missing_fields() {
+        let cap = serde_json::json!({ "cpu_percent": 99.0 });
+        // All thresholds None → nothing evaluated even though CPU is pegged.
+        assert!(resource_breaches(&cap, None, None, None).is_empty());
+        // Threshold set but the capacity field is absent → no breach, no panic.
+        assert!(
+            resource_breaches(&serde_json::json!({}), Some(90.0), Some(90.0), Some(90.0))
+                .is_empty()
+        );
+        // Zero total guards against divide-by-zero.
+        let zero = serde_json::json!({"memory_used_bytes": 5.0, "memory_total_bytes": 0.0});
+        assert!(resource_breaches(&zero, None, Some(90.0), None).is_empty());
+    }
+
+    #[test]
+    fn test_resource_breaches_all_three_metrics() {
+        let cap = serde_json::json!({
+            "cpu_percent": 99.0,
+            "memory_used_bytes": 95.0, "memory_total_bytes": 100.0,
+            "disk_used_bytes": 91.0, "disk_total_bytes": 100.0,
+        });
+        let breaches = resource_breaches(&cap, Some(90.0), Some(90.0), Some(90.0));
+        assert_eq!(breaches.len(), 3);
+        let metrics: Vec<&str> = breaches.iter().map(|b| b.0).collect();
+        assert!(
+            metrics.contains(&"CPU") && metrics.contains(&"memory") && metrics.contains(&"disk")
+        );
     }
 }

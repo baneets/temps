@@ -915,7 +915,47 @@ async fn register_node(
         .await
         {
             Ok(ca) => {
-                match temps_core::node_pki::sign_node_csr(&ca.cert_pem, &ca.key_pem, csr_pem) {
+                // Server-authoritative SANs: the node's reachable host (the IP
+                // the control plane connects to) + its registered name. The
+                // worker's own CSR SANs are discarded by sign_node_csr — a
+                // compromised worker must not be able to mint a leaf valid for
+                // the CP's or another node's identity (cluster-wide CA trust).
+                let host_only = |addr: &str| -> String {
+                    let a = addr.trim();
+                    let a = a
+                        .strip_prefix("https://")
+                        .or_else(|| a.strip_prefix("http://"))
+                        .unwrap_or(a);
+                    let a = a.split('/').next().unwrap_or(a);
+                    if let Some(rest) = a.strip_prefix('[') {
+                        if let Some(end) = rest.find(']') {
+                            return rest[..end].to_string();
+                        }
+                    }
+                    match a.rsplit_once(':') {
+                        Some((host, port))
+                            if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+                        {
+                            host.to_string()
+                        }
+                        _ => a.to_string(),
+                    }
+                };
+                let mut allowed_sans = vec![node.name.clone()];
+                let addr_host = host_only(&node.address);
+                if !addr_host.is_empty() && !allowed_sans.contains(&addr_host) {
+                    allowed_sans.push(addr_host);
+                }
+                let priv_host = host_only(&node.private_address);
+                if !priv_host.is_empty() && !allowed_sans.contains(&priv_host) {
+                    allowed_sans.push(priv_host);
+                }
+                match temps_core::node_pki::sign_node_csr(
+                    &ca.cert_pem,
+                    &ca.key_pem,
+                    csr_pem,
+                    &allowed_sans,
+                ) {
                     Ok(signed) => {
                         info!(node_id = node.id, "Signed node CSR for mTLS");
                         // Switch the node's stored address to https:// so the

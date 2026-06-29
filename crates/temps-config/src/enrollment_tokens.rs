@@ -197,6 +197,7 @@ impl EnrollmentTokenService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temps_database::test_utils::TestDatabase;
 
     #[test]
     fn test_hash_is_stable_64_hex() {
@@ -205,5 +206,165 @@ mod tests {
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(h, EnrollmentTokenService::hash("abc"));
         assert_ne!(h, EnrollmentTokenService::hash("xyz"));
+    }
+
+    fn mint_params(max_uses: i32, ttl_secs: i64) -> MintParams {
+        MintParams {
+            max_uses,
+            ttl_secs,
+            bound_node_name: None,
+            bound_labels: None,
+            created_by_user_id: None,
+            ca_fingerprint: None,
+        }
+    }
+
+    /// Acquire a migrated test DB, or skip the test gracefully when Docker/DB
+    /// isn't available (no `#[ignore]` per CLAUDE.md).
+    async fn test_service() -> Option<(TestDatabase, EnrollmentTokenService)> {
+        match TestDatabase::with_migrations().await {
+            Ok(db) => {
+                let svc = EnrollmentTokenService::new(db.connection_arc());
+                Some((db, svc))
+            }
+            Err(_) => {
+                println!("Docker/DB not available, skipping test");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mint_then_consume_increments_used_count() {
+        let Some((_db, svc)) = test_service().await else {
+            return;
+        };
+        let (plaintext, minted) = svc.mint(mint_params(2, 3600)).await.unwrap();
+        assert_eq!(plaintext.len(), 64);
+        assert_eq!(minted.used_count, 0);
+
+        let after = svc.validate_and_consume(&plaintext).await.unwrap();
+        assert_eq!(after.used_count, 1, "one use consumed");
+
+        // A second use is still allowed (max_uses = 2).
+        let after2 = svc.validate_and_consume(&plaintext).await.unwrap();
+        assert_eq!(after2.used_count, 2);
+
+        // Third use exhausts it.
+        let err = svc.validate_and_consume(&plaintext).await.unwrap_err();
+        assert!(matches!(err, EnrollmentError::Exhausted));
+    }
+
+    #[tokio::test]
+    async fn test_single_use_token_concurrent_consume_only_one_wins() {
+        // The security-critical race: two registrations present the SAME
+        // single-use token at the same time. The atomic conditional UPDATE must
+        // let exactly ONE succeed; the other must be rejected as exhausted.
+        let Some((_db, svc)) = test_service().await else {
+            return;
+        };
+        let svc = Arc::new(svc);
+        let (plaintext, _) = svc.mint(mint_params(1, 3600)).await.unwrap();
+
+        let (s1, s2) = (svc.clone(), svc.clone());
+        let (p1, p2) = (plaintext.clone(), plaintext.clone());
+        let (r1, r2) = tokio::join!(
+            tokio::spawn(async move { s1.validate_and_consume(&p1).await }),
+            tokio::spawn(async move { s2.validate_and_consume(&p2).await }),
+        );
+        let oks = [r1.unwrap().is_ok(), r2.unwrap().is_ok()]
+            .iter()
+            .filter(|x| **x)
+            .count();
+        assert_eq!(
+            oks, 1,
+            "exactly one concurrent consume must win a single-use token"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_consume_revoked_token_rejected() {
+        let Some((_db, svc)) = test_service().await else {
+            return;
+        };
+        let (plaintext, minted) = svc.mint(mint_params(5, 3600)).await.unwrap();
+        svc.revoke(minted.id).await.unwrap();
+        let err = svc.validate_and_consume(&plaintext).await.unwrap_err();
+        assert!(matches!(err, EnrollmentError::Revoked));
+    }
+
+    #[tokio::test]
+    async fn test_consume_expired_token_rejected() {
+        let Some((db, svc)) = test_service().await else {
+            return;
+        };
+        // mint() enforces ttl_secs > 0, so insert an already-expired row directly.
+        let now = chrono::Utc::now();
+        let plaintext = "e".repeat(64);
+        node_enrollment_tokens::ActiveModel {
+            token_hash: Set(EnrollmentTokenService::hash(&plaintext)),
+            max_uses: Set(5),
+            used_count: Set(0),
+            expires_at: Set(now - chrono::Duration::seconds(60)),
+            created_at: Set(now - chrono::Duration::seconds(120)),
+            updated_at: Set(now - chrono::Duration::seconds(120)),
+            ..Default::default()
+        }
+        .insert(db.connection_arc().as_ref())
+        .await
+        .unwrap();
+
+        let err = svc.validate_and_consume(&plaintext).await.unwrap_err();
+        assert!(matches!(err, EnrollmentError::Expired));
+    }
+
+    #[tokio::test]
+    async fn test_consume_unknown_token_invalid() {
+        let Some((_db, svc)) = test_service().await else {
+            return;
+        };
+        let err = svc.validate_and_consume(&"f".repeat(64)).await.unwrap_err();
+        assert!(matches!(err, EnrollmentError::InvalidToken));
+    }
+
+    #[tokio::test]
+    async fn test_mint_persists_and_returns_bound_fields() {
+        let Some((_db, svc)) = test_service().await else {
+            return;
+        };
+        let mut params = mint_params(1, 3600);
+        params.bound_node_name = Some("worker-7".to_string());
+        params.bound_labels = Some(serde_json::json!({"zone": "eu"}));
+        let (plaintext, _) = svc.mint(params).await.unwrap();
+
+        let consumed = svc.validate_and_consume(&plaintext).await.unwrap();
+        assert_eq!(consumed.bound_node_name.as_deref(), Some("worker-7"));
+        assert_eq!(
+            consumed.bound_labels,
+            Some(serde_json::json!({"zone": "eu"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mint_validates_caps() {
+        let Some((_db, svc)) = test_service().await else {
+            return;
+        };
+        assert!(matches!(
+            svc.mint(mint_params(0, 3600)).await.unwrap_err(),
+            EnrollmentError::Validation { .. }
+        ));
+        assert!(matches!(
+            svc.mint(mint_params(101, 3600)).await.unwrap_err(),
+            EnrollmentError::Validation { .. }
+        ));
+        assert!(matches!(
+            svc.mint(mint_params(1, 0)).await.unwrap_err(),
+            EnrollmentError::Validation { .. }
+        ));
+        assert!(matches!(
+            svc.mint(mint_params(1, 90_000)).await.unwrap_err(),
+            EnrollmentError::Validation { .. }
+        ));
     }
 }

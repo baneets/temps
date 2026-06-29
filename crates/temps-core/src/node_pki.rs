@@ -18,10 +18,21 @@
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
-    DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    DnType, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+/// Classify a SAN string as an IP address or DNS name (rcgen needs typed SANs).
+fn san_from_str(s: &str) -> Result<SanType, PkiError> {
+    if let Ok(ip) = s.parse::<std::net::IpAddr>() {
+        Ok(SanType::IpAddress(ip))
+    } else {
+        Ia5String::try_from(s.to_string())
+            .map(SanType::DnsName)
+            .map_err(|e| PkiError::CertBuild(format!("invalid DNS SAN '{s}': {e}")))
+    }
+}
 
 /// Errors from CA / certificate operations.
 #[derive(Debug, Error)]
@@ -137,10 +148,19 @@ pub struct SignedNodeCert {
 /// Control-plane side: sign a node's CSR with the cluster CA, producing a
 /// client+server leaf certificate (the agent uses it as a TLS server cert and
 /// the control plane trusts it as a client cert; both EKUs are set).
+///
+/// `allowed_sans` are the **server-authoritative** Subject Alternative Names the
+/// leaf is constrained to — the node's registered `{IP, name}`. The worker's own
+/// SANs in the CSR are discarded. This is a security boundary: every node pins
+/// the same cluster CA, so a leaf the CA signs is trusted cluster-wide; without
+/// constraining SANs, a compromised worker could request (and the CA would sign)
+/// a cert valid for the control plane's or another node's identity, enabling
+/// impersonation / mTLS MITM. (ADR-020 WS-2.1.)
 pub fn sign_node_csr(
     ca_cert_pem: &str,
     ca_key_pem: &str,
     csr_pem: &str,
+    allowed_sans: &[String],
 ) -> Result<SignedNodeCert, PkiError> {
     // Reconstruct an issuer handle from the stored CA material.
     let ca_key = KeyPair::from_pem(ca_key_pem).map_err(|e| PkiError::PemParse {
@@ -172,6 +192,15 @@ pub fn sign_node_csr(
         ExtendedKeyUsagePurpose::ServerAuth,
         ExtendedKeyUsagePurpose::ClientAuth,
     ];
+
+    // Server-authoritative SANs: discard whatever the worker put in the CSR and
+    // set the leaf's identity from the values the control plane registered for
+    // this node. See the doc comment for the threat this closes.
+    let mut sans = Vec::with_capacity(allowed_sans.len());
+    for s in allowed_sans {
+        sans.push(san_from_str(s)?);
+    }
+    csr.params.subject_alt_names = sans;
 
     let leaf = csr
         .signed_by(&ca_cert, &ca_key)
@@ -247,7 +276,13 @@ mod tests {
         assert!(node.key_pem.contains("BEGIN PRIVATE KEY"));
         assert!(node.csr_pem.contains("CERTIFICATE REQUEST"));
 
-        let signed = sign_node_csr(&ca.cert_pem, &ca.key_pem, &node.csr_pem).unwrap();
+        let signed = sign_node_csr(
+            &ca.cert_pem,
+            &ca.key_pem,
+            &node.csr_pem,
+            &["10.0.0.5".to_string(), "worker-1".to_string()],
+        )
+        .unwrap();
         assert!(signed.cert_pem.contains("BEGIN CERTIFICATE"));
         assert_eq!(signed.fingerprint.len(), 64);
 
@@ -258,7 +293,50 @@ mod tests {
     #[test]
     fn test_sign_rejects_garbage_csr() {
         let ca = generate_cluster_ca().unwrap();
-        let err = sign_node_csr(&ca.cert_pem, &ca.key_pem, "not a csr").unwrap_err();
+        let err = sign_node_csr(&ca.cert_pem, &ca.key_pem, "not a csr", &[]).unwrap_err();
         assert!(matches!(err, PkiError::PemParse { .. }));
+    }
+
+    #[test]
+    fn test_sign_overwrites_worker_supplied_sans() {
+        // Security boundary (ADR-020 WS-2.1): a worker crafts a CSR claiming a
+        // rogue identity (the control plane's name + a wildcard). The CA must
+        // sign the leaf with ONLY the server-authoritative SANs and drop the
+        // worker's — otherwise the leaf would be trusted cluster-wide for an
+        // identity the worker doesn't own.
+        let ca = generate_cluster_ca().unwrap();
+        let rogue = generate_node_keypair_csr(
+            "worker-evil",
+            &[
+                "rogue-control-plane.invalid".to_string(),
+                "wildcard-attacker.invalid".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let signed = sign_node_csr(
+            &ca.cert_pem,
+            &ca.key_pem,
+            &rogue.csr_pem,
+            &["10.9.9.9".to_string(), "good-worker".to_string()],
+        )
+        .unwrap();
+
+        let der = pem_to_der(&signed.cert_pem, "leaf").unwrap();
+        let contains = |needle: &[u8]| der.windows(needle.len()).any(|w| w == needle);
+        // The worker's rogue DNS SANs must NOT survive into the signed leaf.
+        assert!(
+            !contains(b"rogue-control-plane.invalid"),
+            "worker-supplied rogue SAN leaked into the signed certificate"
+        );
+        assert!(
+            !contains(b"wildcard-attacker.invalid"),
+            "worker-supplied rogue SAN leaked into the signed certificate"
+        );
+        // The server-authoritative DNS SAN must be present.
+        assert!(
+            contains(b"good-worker"),
+            "server-authoritative SAN missing from the signed certificate"
+        );
     }
 }

@@ -228,6 +228,11 @@ impl RemoteLogCollectorService {
         }
     }
 
+    /// Number of active per-container streaming tasks (for tests/observability).
+    pub async fn active_count(&self) -> usize {
+        self.active.lock().await.len()
+    }
+
     /// Internal: stream one remote container's logs into the chunk pipeline,
     /// reconnecting with exponential backoff and resuming from the last line.
     async fn stream_remote_container(
@@ -346,5 +351,97 @@ impl RemoteLogCollectorService {
             // lines (the dedup pass in archive_search is the backstop).
             last_seen_ts = last_seen_ts.saturating_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::ChunkWriterService;
+    use crate::storage::{FilesystemStorage, LogStorage};
+    use std::sync::Mutex as StdMutex;
+
+    /// Mock source with a swappable container list. Streams are `pending()` so
+    /// the spawned tasks stay alive (never finish), letting the reconcile diff
+    /// be observed deterministically via `active_count()`.
+    struct MockSource {
+        containers: StdMutex<Vec<RemoteContainerInfo>>,
+    }
+
+    #[async_trait]
+    impl RemoteContainerLogSource for MockSource {
+        async fn list_remote_containers(
+            &self,
+        ) -> Result<Vec<RemoteContainerInfo>, RemoteLogSourceError> {
+            Ok(self.containers.lock().unwrap().clone())
+        }
+        async fn open_log_stream(
+            &self,
+            _node_id: i32,
+            _container_id: &str,
+            _since_unix: i64,
+        ) -> Result<RemoteLogStream, RemoteLogSourceError> {
+            Ok(Box::pin(futures::stream::pending::<
+                Result<String, RemoteLogSourceError>,
+            >()))
+        }
+    }
+
+    fn info(container_id: &str) -> RemoteContainerInfo {
+        RemoteContainerInfo {
+            node_id: 1,
+            node_name: "worker-1".into(),
+            container_id: container_id.into(),
+            project_id: 42,
+            env: "1".into(),
+            service: "web".into(),
+            deploy_id: Some(7),
+        }
+    }
+
+    fn collector(source: Arc<MockSource>) -> RemoteLogCollectorService {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        let tmp = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn LogStorage> =
+            Arc::new(FilesystemStorage::new(tmp.path().to_path_buf()).unwrap());
+        let chunk_writer = Arc::new(ChunkWriterService::new(storage));
+        // start_stream queries get_latest_chunk_end_for_container once per new
+        // container; return empty results (→ resume from 0). A few extra empty
+        // result sets cover any incidental queries. The pending streams produce
+        // no lines, so nothing is written back.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results(vec![Vec::<temps_entities::log_chunks::Model>::new(); 8])
+            .into_connection();
+        let metadata = Arc::new(LogMetadataService::new(Arc::new(db)));
+        let (tail_tx, _) = broadcast::channel(16);
+        RemoteLogCollectorService::new(source, chunk_writer, metadata, tail_tx)
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_starts_and_stops_streams() {
+        let source = Arc::new(MockSource {
+            containers: StdMutex::new(vec![info("cnt-a"), info("cnt-b")]),
+        });
+        let collector = collector(source.clone());
+
+        // Two remote containers → two active streams.
+        collector.reconcile().await.unwrap();
+        assert_eq!(collector.active_count().await, 2);
+
+        // Reconcile is idempotent: same set → still two (no duplicate streams).
+        collector.reconcile().await.unwrap();
+        assert_eq!(collector.active_count().await, 2);
+
+        // One container goes away → its stream is dropped.
+        *source.containers.lock().unwrap() = vec![info("cnt-a")];
+        collector.reconcile().await.unwrap();
+        assert_eq!(collector.active_count().await, 1);
+
+        // All gone → no active streams.
+        source.containers.lock().unwrap().clear();
+        collector.reconcile().await.unwrap();
+        assert_eq!(collector.active_count().await, 0);
+
+        collector.stop_all().await;
     }
 }
