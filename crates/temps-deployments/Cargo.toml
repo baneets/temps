@@ -49,6 +49,7 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 bollard = { workspace = true }
+sysinfo = { workspace = true }
 tar = { workspace = true }
 bytes = { workspace = true }
 http-body-util = { workspace = true }

@@ -72,8 +72,8 @@ use tracing::{debug, info};
 // Multi-node support
 use temps_deployments::handlers::nodes::NodeAppState;
 use temps_deployments::jobs::node_health_check::{
-    check_drain_completion, check_node_health, check_node_resources, failover_offline_nodes,
-    notify_nodes_offline,
+    check_control_plane_resources, check_drain_completion, check_node_health, check_node_resources,
+    failover_offline_nodes, notify_nodes_offline, refresh_control_plane_metrics,
 };
 use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
@@ -1792,6 +1792,10 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
+                // Sample the control plane's own host metrics so the synthetic
+                // control-plane node shows live CPU/mem/disk (it has no agent
+                // heartbeat). Always runs, independent of alert config.
+                refresh_control_plane_metrics();
                 let offline_ids = check_node_health(&health_node_service, health_db.as_ref()).await;
                 if !offline_ids.is_empty() {
                     tracing::info!(
@@ -1825,6 +1829,9 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                 {
                     check_node_resources(health_db.as_ref(), config_service, notification_service)
                         .await;
+                    // The control plane isn't a `nodes` row, so it's excluded
+                    // from the query above — alert on its own metrics separately.
+                    check_control_plane_resources(config_service, notification_service).await;
                 }
 
                 // Transition fully-drained nodes from "draining" to "drained".

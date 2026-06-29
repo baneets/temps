@@ -1641,6 +1641,14 @@ const CONTROL_PLANE_NODE_ID: i32 = 0;
 /// Surfacing it as node `0` makes those containers visible in the node list /
 /// per-node views instead of silently invisible (ADR-020 observability).
 fn control_plane_node_response() -> NodeInfoResponse {
+    // The CP self-samples its own host metrics in the 60s health loop (it isn't
+    // a worker agent, so it has no heartbeat). Surface them like any node;
+    // empty until the first sample lands.
+    let (capacity, last_heartbeat) =
+        match crate::jobs::node_health_check::latest_control_plane_metrics() {
+            Some((cap, sampled_at)) => (cap, Some(sampled_at.to_rfc3339())),
+            None => (serde_json::json!({}), None),
+        };
     NodeInfoResponse {
         id: CONTROL_PLANE_NODE_ID,
         name: "control-plane".to_string(),
@@ -1649,8 +1657,8 @@ fn control_plane_node_response() -> NodeInfoResponse {
         role: "control-plane".to_string(),
         status: "active".to_string(),
         labels: serde_json::json!({}),
-        capacity: serde_json::json!({}),
-        last_heartbeat: None,
+        capacity,
+        last_heartbeat,
         created_at: chrono::Utc::now().to_rfc3339(),
     }
 }

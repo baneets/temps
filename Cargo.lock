@@ -11221,6 +11221,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "sysinfo 0.29.11",
  "tar",
  "tempfile",
  "temps-auth",
