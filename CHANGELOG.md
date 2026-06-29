@@ -62,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   email template). Adds dedicated `POST`/`PUT /notification-providers/cloudflare`
   endpoints plus a "Cloudflare Email" option in the notification provider UI
   (#160).
+- **Service discovery on a single node (ADR-024).** Containers can now reach
+  each other by their `*.temps.local` name on a standalone control plane, not
+  just in multi-node clusters. The control plane runs the same internal DNS
+  resolver the worker nodes use, fed directly from its own service registry, so
+  a request to `http://production.api.temps.local` resolves from any container
+  it schedules. Purely additive and best-effort: if the resolver can't bind
+  (e.g. port 53 is unavailable), containers keep Docker's embedded DNS exactly
+  as before.
 
 ### Changed
 - **Project navigation grouped into OpenTelemetry + Monitoring.** The OTel
@@ -94,6 +102,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   firing kept a frozen `firing` state (the evaluator only scans enabled rules);
   the status model now treats a disabled monitor as not-firing everywhere, so
   dashboards and the alerts list don't flash a false red alarm (#158).
+- **Container DNS: IPv4-only hosts were unreachable through the resolver.** The
+  internal resolver's upstream forwarder returned `NXDOMAIN` for the AAAA (IPv6)
+  lookup of a host that has only an IPv4 address, which makes `getaddrinfo`
+  abandon the whole name — so calls to IPv4-only hosts (e.g. `api.github.com`)
+  failed from any container using the resolver, even though the IPv4 record
+  resolved fine. The forwarder now returns the correct `NOERROR`/NODATA while
+  still passing genuine `NXDOMAIN` through. Affects both worker and
+  control-plane resolvers.
 
 ### Security
 - **Mutual TLS between the control plane and worker agents (ADR-020).** Optional
