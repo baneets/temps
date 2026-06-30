@@ -77,6 +77,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it schedules. Purely additive and best-effort: if the resolver can't bind
   (e.g. port 53 is unavailable), containers keep Docker's embedded DNS exactly
   as before.
+- **Streaming AI chat that can query your platform data (ADR-024).** The AI
+  assistant now streams its reply **token-by-token** with **tool calls shown
+  live** as it works (and a **Stop** control to cancel a turn). It can answer
+  grounded questions about a project — "how many deployments?", "show this
+  trace", "list errors with traces" — through a built-in **read-only `temps`
+  CLI tool** over the platform's GET API: the model discovers endpoints with
+  `--help` and runs them scoped to the conversation's project and the user's own
+  permissions (it can only read what you can; writes are never exposed). Half-
+  typed drafts and the open conversation persist across reloads, and the chat is
+  seeded with context about the page you're viewing (#173).
+- **Trace detail: spans and logs in one view.** The trace page pairs the span
+  waterfall with the OTel **logs correlated to that trace**, colour-codes spans
+  by service, and opens a per-span detail panel (a focused drawer on mobile)
+  showing the span's timing, attributes, events, and its own logs — correlated
+  by `span_id`, Jaeger-style (#173).
+- **Per-provider default AI model.** Each AI provider key can pin the model used
+  for AI features (Settings → AI Providers), instead of relying on a built-in
+  per-provider default (#173).
 
 ### Changed
 - **Project navigation grouped into OpenTelemetry + Monitoring.** The OTel
@@ -117,6 +135,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved fine. The forwarder now returns the correct `NOERROR`/NODATA while
   still passing genuine `NXDOMAIN` through. Affects both worker and
   control-plane resolvers.
+- **OTel logs now ingest and display correctly.** Two bugs in the OTLP logs
+  path are fixed: `LogRecord.flags` was decoded with the wrong protobuf wire
+  type (rejecting otherwise-valid log batches), and only `WARN`+ records were
+  persisted to the queryable store. All severities are now stored, so a trace's
+  correlated logs and the Logs explorer show the full picture (#173).
 
 ### Security
 - **Mutual TLS between the control plane and worker agents (ADR-020).** Optional
