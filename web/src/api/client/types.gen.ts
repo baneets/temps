@@ -10088,6 +10088,27 @@ export type PeerListResponse = {
     peers: Array<PeerEntry>;
 };
 
+/**
+ * A proposed AI write action awaiting human confirmation.
+ */
+export type PendingActionResponse = {
+    confirmed_at?: string | null;
+    created_at: string;
+    error?: string | null;
+    executed_at?: string | null;
+    method: string;
+    operation_id: string;
+    /**
+     * The flat params to be replayed at execute time (shown pre-execution for review).
+     */
+    params: unknown;
+    public_id: string;
+    required_permission?: string | null;
+    result?: unknown;
+    status: string;
+    summary: string;
+};
+
 export type PerformanceMetricsQuery = {
     deployment_id?: number | null;
     /**
@@ -10686,7 +10707,7 @@ export type ProjectResponse = {
      */
     ai_debug_chat_enabled?: boolean | null;
     /**
-     * Opt-in to AI-proposed write actions (human confirm-gated; false = off).
+     * Opt-in to AI propose-then-confirm write capability (false = off).
      */
     ai_write_actions_enabled: boolean;
     /**
@@ -15355,7 +15376,7 @@ export type UpdateProjectSettingsRequest = {
      */
     ai_debug_chat_enabled?: boolean | null;
     /**
-     * Opt in to AI-proposed write actions (human confirm-gated). Omit to leave unchanged.
+     * Opt in to AI propose-then-confirm write capability.
      */
     ai_write_actions_enabled?: boolean | null;
     /**
@@ -32911,6 +32932,100 @@ export type SendMessageResponses = {
      */
     200: unknown;
 };
+
+export type ListPendingActionsData = {
+    body?: never;
+    path: {
+        project_id: number;
+        /**
+         * Conversation public id
+         */
+        public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/conversations/{public_id}/pending-actions';
+};
+
+export type ListPendingActionsErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type ListPendingActionsResponses = {
+    200: Array<PendingActionResponse>;
+};
+
+export type ListPendingActionsResponse = ListPendingActionsResponses[keyof ListPendingActionsResponses];
+
+export type GetPendingActionData = {
+    body?: never;
+    path: {
+        project_id: number;
+        action_public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/pending-actions/{action_public_id}';
+};
+
+export type GetPendingActionErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+};
+
+export type GetPendingActionResponses = {
+    200: PendingActionResponse;
+};
+
+export type GetPendingActionResponse = GetPendingActionResponses[keyof GetPendingActionResponses];
+
+export type ConfirmPendingActionData = {
+    body?: never;
+    path: {
+        project_id: number;
+        action_public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/pending-actions/{action_public_id}/confirm';
+};
+
+export type ConfirmPendingActionErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+    409: unknown;
+    503: unknown;
+};
+
+export type ConfirmPendingActionResponses = {
+    200: PendingActionResponse;
+};
+
+export type ConfirmPendingActionResponse = ConfirmPendingActionResponses[keyof ConfirmPendingActionResponses];
+
+export type RejectPendingActionData = {
+    body?: never;
+    path: {
+        project_id: number;
+        action_public_id: string;
+    };
+    query?: never;
+    url: '/projects/{project_id}/ai/pending-actions/{action_public_id}/reject';
+};
+
+export type RejectPendingActionErrors = {
+    401: unknown;
+    403: unknown;
+    404: unknown;
+    409: unknown;
+};
+
+export type RejectPendingActionResponses = {
+    200: PendingActionResponse;
+};
+
+export type RejectPendingActionResponse = RejectPendingActionResponses[keyof RejectPendingActionResponses];
 
 export type ListProjectAlarmsData = {
     body?: never;
