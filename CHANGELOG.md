@@ -115,6 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were removed (#158).
 
 ### Fixed
+
+- **Edge cache-miss token isolation**: cacheable static asset misses in `temps edge` no longer attach the edge control-plane bearer token when fetching tenant-routed origin paths. This preserves pull-through caching while preventing deployed applications from observing node/join credentials in the `Authorization` header.
+- **Edge origin fetch credential leak**: removed the privileged bearer credential from cache-miss origin requests that use the public `Host` header for routing, because those requests can be handled by untrusted deployed application code.
+
 - **Notification email provider update hit the wrong endpoint in the SDK.** Both
   `temps-email` and `temps-notifications` exposed an `update_email_provider`
   handler, producing a duplicate `updateEmailProvider` operationId; the generated
@@ -127,6 +131,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   firing kept a frozen `firing` state (the evaluator only scans enabled rules);
   the status model now treats a disabled monitor as not-firing everywhere, so
   dashboards and the alerts list don't flash a false red alarm (#158).
+
+- **Flaky provider lifecycle tests isolated.** `test_create_redis_service`,
+  `test_delete_service`, and `test_update_service_parameters` used fixed
+  container names and default host ports, causing intermittent CI failures
+  (`port is already allocated`, `No such container`) under runner contention.
+  They now allocate an unused port and a unique service name, matching the
+  existing `test_create_postgres_service` idiom (#171).
+
 - **Container DNS: IPv4-only hosts were unreachable through the resolver.** The
   internal resolver's upstream forwarder returned `NXDOMAIN` for the AAAA (IPv6)
   lookup of a host that has only an IPv4 address, which makes `getaddrinfo`
@@ -140,6 +152,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type (rejecting otherwise-valid log batches), and only `WARN`+ records were
   persisted to the queryable store. All severities are now stored, so a trace's
   correlated logs and the Logs explorer show the full picture (#173).
+- **Proxy no longer queries Postgres on every request.** Under load the proxy
+  opened a database connection per request for the IP block-list check and the
+  IP-geolocation lookup, saturating the connection pool (~114 busy connections
+  at ~1k req/s) and capping throughput. Both are now served from memory — block
+  rules from an in-process snapshot refreshed every 30s (and immediately on
+  change), and geolocation from a bounded TTL cache — so steady-state request
+  handling makes no per-request database queries (#174).
 
 ### Security
 - **Mutual TLS between the control plane and worker agents (ADR-020).** Optional
