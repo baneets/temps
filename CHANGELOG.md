@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("what changed"). Datadog-style firing status — triaged dots, severity sort,
   and a needs-attention header — surfaces on the metrics overview, the
   dashboards list, and the dashboard view (#158).
+- **Full-fidelity OpenTelemetry metrics on TimescaleDB.** The default
+  (TimescaleDB) metrics backend now stores and queries the complete decoded
+  metric record at parity with the ClickHouse path — histograms (with
+  temporality-aware reconstruction and Prometheus-style p50/p95/p99 bucket
+  interpolation), exponential histograms, summaries, exemplars, and
+  monotonicity/flags/description — served from the raw hypertable with day-one
+  composite and GIN indexes (verified safe on compressed chunks) (#173).
 - **AI-assisted debugging & assistant (bring-your-own-key).** Configure an AI
   provider (OpenAI, Anthropic, xAI, or Google Gemini) under **Settings → AI
   Providers** to power a persistent, cross-project AI assistant dock with

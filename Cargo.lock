@@ -10657,6 +10657,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "temps-ai-api-tools"
+version = "0.1.0-beta.39"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "bytes",
+ "chrono",
+ "http 1.4.0",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "temps-auth",
+ "temps-entities",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+ "urlencoding",
+ "utoipa",
+]
+
+[[package]]
 name = "temps-ai-chat"
 version = "0.1.0-beta.39"
 dependencies = [
@@ -10672,6 +10694,7 @@ dependencies = [
  "serde",
  "serde_json",
  "temps-ai",
+ "temps-ai-api-tools",
  "temps-auth",
  "temps-core",
  "temps-entities",
@@ -11078,6 +11101,7 @@ dependencies = [
  "tar",
  "temps-agent",
  "temps-agents",
+ "temps-ai-api-tools",
  "temps-ai-chat",
  "temps-ai-gateway",
  "temps-analytics",
@@ -12113,12 +12137,14 @@ version = "0.1.0-beta.39"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "futures",
  "maplit",
  "sea-orm",
  "serde",
  "serde_json",
+ "temps-auth",
  "temps-config",
  "temps-core",
  "temps-database",
@@ -12128,6 +12154,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
