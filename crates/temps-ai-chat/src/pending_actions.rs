@@ -11,15 +11,11 @@ use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
 };
-use tracing::error;
 
 use temps_auth::context::AuthContext;
 use temps_auth::permissions::Permission;
-use temps_core::{AuditContext, AuditLogger};
 use temps_entities::ai_pending_actions;
 use temps_ai_api_tools::{ApiCallScope, WriteApiToolsHandle};
-
-use crate::audit::{AiActionConfirmedAudit, AiActionRejectedAudit};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -36,6 +32,9 @@ pub enum PendingActionError {
 
     #[error("permission '{permission}' is required to confirm this action")]
     PermissionDenied { permission: String },
+
+    #[error("AI write actions are disabled for project {project_id}")]
+    Disabled { project_id: i32 },
 
     #[error("write action feature is not available (write caller not yet wired)")]
     Unavailable,
@@ -55,26 +54,16 @@ pub enum PendingActionError {
 pub struct PendingActionService {
     db: Arc<DatabaseConnection>,
     write_handle: Arc<WriteApiToolsHandle>,
-    audit_service: Arc<dyn AuditLogger>,
 }
 
 impl PendingActionService {
     pub fn new(
         db: Arc<DatabaseConnection>,
         write_handle: Arc<WriteApiToolsHandle>,
-        audit_service: Arc<dyn AuditLogger>,
     ) -> Self {
         Self {
             db,
             write_handle,
-            audit_service,
-        }
-    }
-
-    /// Emit an audit entry best-effort: a failure must never block the caller.
-    async fn audit(&self, op: &dyn temps_core::AuditOperation) {
-        if let Err(e) = self.audit_service.create_audit_log(op).await {
-            error!("Failed to write pending-action audit log: {e}");
         }
     }
 
@@ -160,11 +149,17 @@ impl PendingActionService {
     }
 
     /// All pending actions for a conversation, most-recently-created first.
+    ///
+    /// `project_id` is required as an additional scope guard: the conversation id
+    /// alone is not sufficient because a caller could supply a conversation id from
+    /// a different project if they constructed the request manually.
     pub async fn list_for_conversation(
         &self,
+        project_id: i32,
         conversation_id: i64,
     ) -> Result<Vec<ai_pending_actions::Model>, PendingActionError> {
         Ok(ai_pending_actions::Entity::find()
+            .filter(ai_pending_actions::Column::ProjectId.eq(project_id))
             .filter(ai_pending_actions::Column::ConversationId.eq(conversation_id))
             .order_by_desc(ai_pending_actions::Column::CreatedAt)
             .all(self.db.as_ref())
@@ -185,7 +180,11 @@ impl PendingActionService {
         // 1. Load + project-scope check.
         let action = self.get(project_id, public_id).await?;
 
-        // 2. Status pre-check.
+        // 2. Defense-in-depth: re-check the write-actions toggle at confirm time
+        //    (the toggle may have been turned off after the action was proposed).
+        self.check_write_actions_enabled(project_id).await?;
+
+        // 3. Status pre-check.
         if action.status != "proposed" {
             return Err(PendingActionError::InvalidState {
                 public_id: public_id.to_string(),
@@ -193,7 +192,9 @@ impl PendingActionService {
             });
         }
 
-        // 3. Advisory permission check using the caller's auth.
+        // 4. Advisory permission check using the caller's auth.
+        //    This MUST run before the atomic claim so a denied user never leaves
+        //    a stuck "executing" row.
         if let Some(ref perm_str) = action.required_permission {
             if let Some(perm) = Permission::from_str(perm_str) {
                 if !auth.has_permission(&perm) {
@@ -206,7 +207,7 @@ impl PendingActionService {
             // real boundary at execute time).
         }
 
-        // 4. Atomic claim: flip to "executing" only if still "proposed".
+        // 5. Atomic claim: flip to "executing" only if still "proposed".
         let now = Utc::now();
         let rows_affected = ai_pending_actions::Entity::update_many()
             .col_expr(
@@ -227,7 +228,7 @@ impl PendingActionService {
             });
         }
 
-        // 5. Get write caller.
+        // 6. Get write caller.
         let caller = match self.write_handle.get() {
             Some(c) => c,
             None => {
@@ -237,7 +238,7 @@ impl PendingActionService {
             }
         };
 
-        // 6. Execute with the CONFIRMING user's auth, scoped to the action's project.
+        // 7. Execute with the CONFIRMING user's auth, scoped to the action's project.
         let scope = ApiCallScope {
             auth: auth.clone(),
             project_ids: vec![project_id],
@@ -246,7 +247,7 @@ impl PendingActionService {
             .execute_write(&action.operation_id, action.params.clone(), &scope)
             .await;
 
-        // 7. Persist outcome regardless of success/failure.
+        // 8. Persist outcome regardless of success/failure.
         let updated = match exec_result {
             Ok(resp) => {
                 ai_pending_actions::ActiveModel {
@@ -275,64 +276,82 @@ impl PendingActionService {
             }
         };
 
-        // 8. Audit best-effort.
-        self.audit(&AiActionConfirmedAudit {
-            context: AuditContext {
-                user_id: auth.user_id(),
-                ip_address: None,
-                user_agent: String::new(),
-            },
-            project_id,
-            action_id: updated.public_id.clone(),
-            operation_id: updated.operation_id.clone(),
-            status: updated.status.clone(),
-        })
-        .await;
-
+        // Audit is emitted by the handler with full RequestMetadata (ip/user_agent).
         Ok(updated)
     }
 
     /// Reject a proposed action (no execution — simply mark rejected).
+    ///
+    /// Uses the same atomic claim pattern as `confirm` to prevent a
+    /// confirmed/executed action from being flipped to "rejected" via a race.
     pub async fn reject(
         &self,
         project_id: i32,
         public_id: &str,
-        auth: &AuthContext,
+        _auth: &AuthContext,
         rejected_by: Option<i32>,
     ) -> Result<ai_pending_actions::Model, PendingActionError> {
+        // Load first so we have the id and can return the updated row.
         let action = self.get(project_id, public_id).await?;
 
-        if action.status != "proposed" {
+        // Defense-in-depth: re-check the write-actions toggle (same as confirm).
+        self.check_write_actions_enabled(project_id).await?;
+
+        let now = Utc::now();
+
+        // Atomic claim: flip to "rejected" only if still "proposed".
+        // This prevents a race where a confirmed/executed row gets flipped.
+        let rows_affected = ai_pending_actions::Entity::update_many()
+            .col_expr(
+                ai_pending_actions::Column::Status,
+                sea_orm::sea_query::Expr::value("rejected"),
+            )
+            .col_expr(
+                ai_pending_actions::Column::ConfirmedBy,
+                sea_orm::sea_query::Expr::value(rejected_by),
+            )
+            .col_expr(
+                ai_pending_actions::Column::ConfirmedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(ai_pending_actions::Column::Id.eq(action.id))
+            .filter(ai_pending_actions::Column::Status.eq("proposed"))
+            .exec(self.db.as_ref())
+            .await?
+            .rows_affected;
+
+        if rows_affected == 0 {
+            // Lost a race or already handled — treat as invalid state.
             return Err(PendingActionError::InvalidState {
                 public_id: public_id.to_string(),
-                status: action.status.clone(),
+                status: "already handled (concurrent confirm/reject)".to_string(),
             });
         }
 
-        let now = Utc::now();
-        let updated = ai_pending_actions::ActiveModel {
-            id: Set(action.id),
-            status: Set("rejected".to_string()),
-            confirmed_by: Set(rejected_by),
-            confirmed_at: Set(Some(now)),
-            ..Default::default()
-        }
-        .update(self.db.as_ref())
-        .await?;
+        // Reload the row to return its current state.
+        let updated = self.get(project_id, public_id).await?;
 
-        self.audit(&AiActionRejectedAudit {
-            context: AuditContext {
-                user_id: auth.user_id(),
-                ip_address: None,
-                user_agent: String::new(),
-            },
-            project_id,
-            action_id: updated.public_id.clone(),
-            operation_id: updated.operation_id.clone(),
-        })
-        .await;
-
+        // Audit is emitted by the handler with full RequestMetadata (ip/user_agent).
         Ok(updated)
+    }
+
+    /// Check that `ai_write_actions_enabled` is true for `project_id`.
+    ///
+    /// Returns `PendingActionError::Disabled` when the toggle is off or the
+    /// project cannot be loaded. Called at the start of both `confirm` and
+    /// `reject` so the toggle is enforced even after a row was proposed while
+    /// the feature was on.
+    async fn check_write_actions_enabled(
+        &self,
+        project_id: i32,
+    ) -> Result<(), PendingActionError> {
+        let project = temps_entities::projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await?;
+        match project {
+            Some(p) if p.ai_write_actions_enabled => Ok(()),
+            _ => Err(PendingActionError::Disabled { project_id }),
+        }
     }
 
     /// Helper: mark a row as failed (best-effort, used in the confirm error path).
@@ -373,6 +392,7 @@ mod tests {
             summary: "POST /projects/{project_id}/deployments/redeploy — redeploy_deployment"
                 .to_string(),
             params: serde_json::json!({"deployment_id": 42}),
+            required_permission: Some("deployments:create".to_string()),
         }
     }
 
@@ -400,24 +420,70 @@ mod tests {
         }
     }
 
-    struct NoOpAudit;
-
-    #[async_trait::async_trait]
-    impl AuditLogger for NoOpAudit {
-        async fn create_audit_log(
-            &self,
-            _op: &dyn temps_core::AuditOperation,
-        ) -> anyhow::Result<()> {
-            Ok(())
+    fn make_project(id: i32, write_enabled: bool) -> temps_entities::projects::Model {
+        let now = Utc::now();
+        temps_entities::projects::Model {
+            id,
+            name: "test-project".to_string(),
+            repo_name: "repo".to_string(),
+            repo_owner: "owner".to_string(),
+            directory: ".".to_string(),
+            main_branch: "main".to_string(),
+            preset: temps_entities::preset::Preset::Static,
+            preset_config: None,
+            deployment_config: None,
+            created_at: now,
+            updated_at: now,
+            slug: "test-project".to_string(),
+            is_deleted: false,
+            deleted_at: None,
+            last_deployment: None,
+            is_public_repo: false,
+            git_url: None,
+            git_provider_connection_id: None,
+            attack_mode: false,
+            ai_alert_summaries_enabled: None,
+            ai_debug_chat_enabled: Some(true),
+            ai_write_actions_enabled: write_enabled,
+            enable_preview_environments: false,
+            preview_envs_on_demand: false,
+            preview_envs_idle_timeout_seconds: 300,
+            preview_envs_wake_timeout_seconds: 30,
+            source_type: temps_entities::source_type::SourceType::Git,
+            gitlab_webhook_id: None,
+            gitlab_webhook_signing_token: None,
         }
+    }
+
+    fn make_auth() -> AuthContext {
+        let user = temps_entities::users::Model {
+            id: 1,
+            name: "t".to_string(),
+            email: "t@t.com".to_string(),
+            password_hash: None,
+            email_verified: true,
+            email_verification_token: None,
+            email_verification_expires: None,
+            password_reset_token: None,
+            password_reset_expires: None,
+            deleted_at: None,
+            mfa_secret: None,
+            mfa_enabled: false,
+            mfa_recovery_codes: None,
+            oidc_subject: None,
+            oidc_provider_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        AuthContext::new_session(user, temps_auth::permissions::Role::Admin)
     }
 
     fn noop_write_handle() -> Arc<WriteApiToolsHandle> {
         Arc::new(WriteApiToolsHandle::new())
     }
 
-    fn noop_audit() -> Arc<dyn AuditLogger> {
-        Arc::new(NoOpAudit)
+    fn make_svc(db: sea_orm::DatabaseConnection) -> PendingActionService {
+        PendingActionService::new(Arc::new(db), noop_write_handle())
     }
 
     // create inserts a proposed row.
@@ -427,7 +493,7 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results(vec![vec![row.clone()]])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
+        let svc = make_svc(db);
         let prepared = make_prepared();
         let result = svc.create(1, 7, &prepared, None, Some(1)).await;
         assert!(result.is_ok(), "create should succeed: {:?}", result.err());
@@ -442,7 +508,7 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results(vec![Vec::<ai_pending_actions::Model>::new()])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
+        let svc = make_svc(db);
         let err = svc
             .get(7, "nonexistent")
             .await
@@ -453,36 +519,66 @@ mod tests {
         );
     }
 
-    // confirm on non-proposed → InvalidState.
+    // confirm: write-actions toggle is off → Disabled before anything else.
+    #[tokio::test]
+    async fn test_confirm_disabled_returns_disabled_error() {
+        let action = make_proposed(1, "abc", 7);
+        let project = make_project(7, false); // toggle OFF
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // get() for the action
+            .append_query_results(vec![vec![action]])
+            // check_write_actions_enabled → project query
+            .append_query_results(vec![vec![project]])
+            .into_connection();
+        let svc = make_svc(db);
+        let auth = make_auth();
+        let err = svc
+            .confirm(7, "abc", &auth, Some(1))
+            .await
+            .expect_err("should fail with Disabled");
+        assert!(
+            matches!(err, PendingActionError::Disabled { project_id: 7 }),
+            "unexpected: {err:?}"
+        );
+    }
+
+    // reject: write-actions toggle is off → Disabled.
+    #[tokio::test]
+    async fn test_reject_disabled_returns_disabled_error() {
+        let action = make_proposed(1, "abc", 7);
+        let project = make_project(7, false); // toggle OFF
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // get() for the action
+            .append_query_results(vec![vec![action]])
+            // check_write_actions_enabled → project query
+            .append_query_results(vec![vec![project]])
+            .into_connection();
+        let svc = make_svc(db);
+        let auth = make_auth();
+        let err = svc
+            .reject(7, "abc", &auth, Some(1))
+            .await
+            .expect_err("should fail with Disabled");
+        assert!(
+            matches!(err, PendingActionError::Disabled { project_id: 7 }),
+            "unexpected: {err:?}"
+        );
+    }
+
+    // confirm on non-proposed → InvalidState (after the enabled check).
     #[tokio::test]
     async fn test_confirm_non_proposed_returns_invalid_state() {
         let mut row = make_proposed(1, "abc", 7);
         row.status = "executed".to_string();
+        let project = make_project(7, true); // toggle ON
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // get() for the action (executed status)
             .append_query_results(vec![vec![row]])
+            // check_write_actions_enabled → project query
+            .append_query_results(vec![vec![project]])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
-
-        let user = temps_entities::users::Model {
-            id: 1,
-            name: "t".to_string(),
-            email: "t@t.com".to_string(),
-            password_hash: None,
-            email_verified: true,
-            email_verification_token: None,
-            email_verification_expires: None,
-            password_reset_token: None,
-            password_reset_expires: None,
-            deleted_at: None,
-            mfa_secret: None,
-            mfa_enabled: false,
-            mfa_recovery_codes: None,
-            oidc_subject: None,
-            oidc_provider_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let auth = AuthContext::new_session(user, temps_auth::permissions::Role::Admin);
+        let svc = make_svc(db);
+        let auth = make_auth();
         let err = svc
             .confirm(7, "abc", &auth, Some(1))
             .await
@@ -493,7 +589,7 @@ mod tests {
         );
     }
 
-    // reject: proposed → rejected.
+    // reject: proposed → rejected (atomic path: exec_result 1 row, then get).
     #[tokio::test]
     async fn test_reject_transitions_to_rejected() {
         let proposed = make_proposed(1, "abc", 7);
@@ -502,70 +598,47 @@ mod tests {
             m.status = "rejected".to_string();
             m
         };
+        let project = make_project(7, true); // toggle ON
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            // get() returns proposed
+            // get() for the action
             .append_query_results(vec![vec![proposed]])
-            // update() returns rejected
+            // check_write_actions_enabled → project query
+            .append_query_results(vec![vec![project]])
+            // atomic update_many (exec result)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            // reload get() after successful claim
             .append_query_results(vec![vec![rejected]])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
-
-        let user = temps_entities::users::Model {
-            id: 1,
-            name: "t".to_string(),
-            email: "t@t.com".to_string(),
-            password_hash: None,
-            email_verified: true,
-            email_verification_token: None,
-            email_verification_expires: None,
-            password_reset_token: None,
-            password_reset_expires: None,
-            deleted_at: None,
-            mfa_secret: None,
-            mfa_enabled: false,
-            mfa_recovery_codes: None,
-            oidc_subject: None,
-            oidc_provider_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let auth = AuthContext::new_session(user, temps_auth::permissions::Role::Admin);
+        let svc = make_svc(db);
+        let auth = make_auth();
         let result = svc.reject(7, "abc", &auth, Some(1)).await;
         assert!(result.is_ok(), "reject should succeed: {:?}", result.err());
         let m = result.unwrap();
         assert_eq!(m.status, "rejected");
     }
 
-    // reject on non-proposed → InvalidState.
+    // reject on non-proposed → atomic update returns 0 rows → InvalidState.
     #[tokio::test]
     async fn test_reject_non_proposed_returns_invalid_state() {
         let mut row = make_proposed(1, "abc", 7);
         row.status = "rejected".to_string();
+        let project = make_project(7, true); // toggle ON
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // get() for the action (already rejected)
             .append_query_results(vec![vec![row]])
+            // check_write_actions_enabled → project query
+            .append_query_results(vec![vec![project]])
+            // atomic update_many returns 0 rows (nothing to flip)
+            .append_exec_results(vec![MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 0,
+            }])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
-
-        let user = temps_entities::users::Model {
-            id: 1,
-            name: "t".to_string(),
-            email: "t@t.com".to_string(),
-            password_hash: None,
-            email_verified: true,
-            email_verification_token: None,
-            email_verification_expires: None,
-            password_reset_token: None,
-            password_reset_expires: None,
-            deleted_at: None,
-            mfa_secret: None,
-            mfa_enabled: false,
-            mfa_recovery_codes: None,
-            oidc_subject: None,
-            oidc_provider_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let auth = AuthContext::new_session(user, temps_auth::permissions::Role::Admin);
+        let svc = make_svc(db);
+        let auth = make_auth();
         let err = svc
             .reject(7, "abc", &auth, Some(1))
             .await
@@ -576,7 +649,7 @@ mod tests {
         );
     }
 
-    // list_for_conversation: returns rows ordered by created_at DESC.
+    // list_for_conversation: returns rows ordered by created_at DESC (project-scoped).
     #[tokio::test]
     async fn test_list_for_conversation_returns_rows() {
         let r1 = make_proposed(1, "p1", 7);
@@ -584,17 +657,19 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results(vec![vec![r1, r2]])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
-        let rows = svc.list_for_conversation(1).await.expect("should succeed");
+        let svc = make_svc(db);
+        let rows = svc
+            .list_for_conversation(7, 1)
+            .await
+            .expect("should succeed");
         assert_eq!(rows.len(), 2);
     }
 
     // link_message: no-op on empty slice.
     #[tokio::test]
     async fn test_link_message_empty_slice_is_noop() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let svc = make_svc(db);
         let result = svc.link_message(&[], 42).await;
         assert!(result.is_ok());
     }
@@ -608,14 +683,19 @@ mod tests {
                 rows_affected: 2,
             }])
             .into_connection();
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
+        let svc = make_svc(db);
         let result = svc.link_message(&[1, 2], 99).await;
-        assert!(result.is_ok(), "link_message should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "link_message should succeed: {:?}",
+            result.err()
+        );
     }
 
     // confirm when write handle is empty → Unavailable (after claiming "executing").
-    // We simulate: get returns proposed, atomic claim returns 1 row affected, then
-    // handle is None → Unavailable. The "set_failed" update also needs a mock result.
+    // Sequence: get action → check_write_actions_enabled (project query) → status
+    // pre-check passes (proposed) → permission check passes (None) → atomic claim
+    // (1 row affected) → handle.get() returns None → set_failed → Unavailable.
     #[tokio::test]
     async fn test_confirm_unavailable_write_handle() {
         let proposed = make_proposed(1, "abc", 7);
@@ -624,9 +704,12 @@ mod tests {
             m.status = "failed".to_string();
             m
         };
+        let project = make_project(7, true); // toggle ON
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            // get()
+            // get() for the action
             .append_query_results(vec![vec![proposed]])
+            // check_write_actions_enabled → project query
+            .append_query_results(vec![vec![project]])
             // atomic claim update_many
             .append_exec_results(vec![MockExecResult {
                 last_insert_id: 0,
@@ -636,28 +719,8 @@ mod tests {
             .append_query_results(vec![vec![failed_model]])
             .into_connection();
         // Empty write handle (not wired)
-        let svc = PendingActionService::new(Arc::new(db), noop_write_handle(), noop_audit());
-
-        let user = temps_entities::users::Model {
-            id: 1,
-            name: "t".to_string(),
-            email: "t@t.com".to_string(),
-            password_hash: None,
-            email_verified: true,
-            email_verification_token: None,
-            email_verification_expires: None,
-            password_reset_token: None,
-            password_reset_expires: None,
-            deleted_at: None,
-            mfa_secret: None,
-            mfa_enabled: false,
-            mfa_recovery_codes: None,
-            oidc_subject: None,
-            oidc_provider_id: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let auth = AuthContext::new_session(user, temps_auth::permissions::Role::Admin);
+        let svc = make_svc(db);
+        let auth = make_auth();
         let err = svc
             .confirm(7, "abc", &auth, Some(1))
             .await

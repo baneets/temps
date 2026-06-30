@@ -103,6 +103,11 @@ pub struct PreparedWrite {
     /// The flat parameter object the model supplied (validated), persisted for
     /// later execution.
     pub params: serde_json::Value,
+    /// The advisory write permission required to confirm this action, derived
+    /// from the operation's OpenAPI tag + HTTP method at prepare time.
+    /// Stored on the `ai_pending_actions` row so the confirm handler can
+    /// pre-check it before claiming the row atomically.
+    pub required_permission: Option<String>,
 }
 
 /// Outcome of [`InternalApiCaller::prepare_write_cli`].
@@ -543,12 +548,15 @@ impl InternalApiCaller {
                     )),
                     Ok(_) => {
                         let summary = format!("{} {} — {}", op.method, op.path, op.operation_id);
+                        let required_permission =
+                            required_write_permission(op).map(|p| p.to_string());
                         WritePrepareOutcome::Prepared(PreparedWrite {
                             operation_id: op.operation_id.clone(),
                             method: op.method.clone(),
                             path: op.path.clone(),
                             summary,
                             params,
+                            required_permission,
                         })
                     }
                 }
@@ -1701,6 +1709,13 @@ mod tests {
                 assert_eq!(pw.operation_id, "create_deployment");
                 assert_eq!(pw.method, "POST");
                 assert!(!pw.summary.is_empty());
+                // FIX 2: required_permission must be populated at prepare time.
+                // The operation is tagged "Deployments" with method POST → DeploymentsCreate.
+                assert_eq!(
+                    pw.required_permission.as_deref(),
+                    Some("deployments:create"),
+                    "required_permission must be set from the operation tag + method"
+                );
             }
             WritePrepareOutcome::Help(h) => panic!("expected Prepared, got Help: {h}"),
             WritePrepareOutcome::Invalid(e) => panic!("expected Prepared, got Invalid: {e}"),

@@ -2070,9 +2070,8 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                             "create_environment_variable",
                             "update_environment_variable",
                             "delete_environment_variable",
-                            // ── Domains (attach / detach) ──
-                            "create_domain",
-                            "delete_domain",
+                            // ── Domains (attach / detach at the environment level only;
+                            //    account-global domain create/delete excluded) ──
                             "add_environment_domain",
                             "delete_environment_domain",
                         ]

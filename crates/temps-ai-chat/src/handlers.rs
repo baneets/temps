@@ -253,6 +253,11 @@ impl From<PendingActionError> for Problem {
                     .with_title("Permission Denied")
                     .with_detail(e.to_string())
             }
+            PendingActionError::Disabled { .. } => {
+                problemdetails::new(axum::http::StatusCode::FORBIDDEN)
+                    .with_title("AI Write Actions Disabled")
+                    .with_detail(e.to_string())
+            }
             PendingActionError::Unavailable => {
                 problemdetails::new(axum::http::StatusCode::SERVICE_UNAVAILABLE)
                     .with_title("Write Actions Unavailable")
@@ -270,6 +275,34 @@ impl From<PendingActionError> for Problem {
             }
         }
     }
+}
+
+/// Scrub top-level object keys that may carry sensitive values.
+///
+/// Any key whose name (case-insensitive) is or contains one of:
+/// `value`, `secret`, `password`, `token`, `key`
+/// has its value replaced with `"***"`. Structural fields
+/// (`operation`, `method`, `summary`, etc.) are left intact.
+/// Non-object values are returned unchanged.
+fn redact_params(v: &serde_json::Value) -> serde_json::Value {
+    const SENSITIVE: &[&str] = &["value", "secret", "password", "token", "key"];
+    let obj = match v.as_object() {
+        Some(o) => o,
+        None => return v.clone(),
+    };
+    let redacted: serde_json::Map<String, serde_json::Value> = obj
+        .iter()
+        .map(|(k, val)| {
+            let lower = k.to_ascii_lowercase();
+            let is_sensitive = SENSITIVE.iter().any(|s| lower.contains(s));
+            if is_sensitive {
+                (k.clone(), serde_json::Value::String("***".to_string()))
+            } else {
+                (k.clone(), val.clone())
+            }
+        })
+        .collect();
+    serde_json::Value::Object(redacted)
 }
 
 // --- Pending-action DTO ------------------------------------------------------
@@ -306,7 +339,9 @@ impl From<ai_pending_actions::Model> for PendingActionResponse {
             summary: m.summary,
             status: m.status,
             required_permission: m.required_permission,
-            params: m.params,
+            // Scrub sensitive values (e.g. env-var values) before returning to
+            // clients who may only hold a broad read permission.
+            params: redact_params(&m.params),
             result: m.result,
             error: m.error,
             created_at: m.created_at.to_rfc3339(),
@@ -715,7 +750,7 @@ pub async fn list_pending_actions(
         .await?;
     let rows = state
         .pending_actions
-        .list_for_conversation(conv.id)
+        .list_for_conversation(project_id, conv.id)
         .await
         .map_err(Problem::from)?;
     Ok(Json(rows.into_iter().map(PendingActionResponse::from).collect()))
@@ -1082,4 +1117,122 @@ mod tests {
     // crate-specific toggle gate (above), the input-length gate, the service-
     // layer scoping (see service.rs tests), and the HTTP error mapping via the
     // pure `From<ChatError>` conversion.
+
+    // ── PendingActionError → Problem mapping ─────────────────────────────────
+
+    #[test]
+    fn test_pending_action_not_found_maps_to_404() {
+        let p: Problem = PendingActionError::NotFound {
+            public_id: "abc".to_string(),
+        }
+        .into();
+        assert_eq!(p.status_code, StatusCode::NOT_FOUND);
+        assert_eq!(title_of(&p).as_deref(), Some("Pending Action Not Found"));
+    }
+
+    #[test]
+    fn test_pending_action_invalid_state_maps_to_409() {
+        let p: Problem = PendingActionError::InvalidState {
+            public_id: "abc".to_string(),
+            status: "executed".to_string(),
+        }
+        .into();
+        assert_eq!(p.status_code, StatusCode::CONFLICT);
+        assert_eq!(title_of(&p).as_deref(), Some("Invalid Action State"));
+    }
+
+    #[test]
+    fn test_pending_action_permission_denied_maps_to_403() {
+        let p: Problem = PendingActionError::PermissionDenied {
+            permission: "deployments:write".to_string(),
+        }
+        .into();
+        assert_eq!(p.status_code, StatusCode::FORBIDDEN);
+        assert_eq!(title_of(&p).as_deref(), Some("Permission Denied"));
+    }
+
+    #[test]
+    fn test_pending_action_disabled_maps_to_403() {
+        let p: Problem = PendingActionError::Disabled { project_id: 7 }.into();
+        assert_eq!(p.status_code, StatusCode::FORBIDDEN);
+        assert_eq!(title_of(&p).as_deref(), Some("AI Write Actions Disabled"));
+    }
+
+    #[test]
+    fn test_pending_action_unavailable_maps_to_503() {
+        let p: Problem = PendingActionError::Unavailable.into();
+        assert_eq!(p.status_code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(title_of(&p).as_deref(), Some("Write Actions Unavailable"));
+    }
+
+    #[test]
+    fn test_pending_action_database_error_maps_to_500() {
+        let p: Problem =
+            PendingActionError::Database(sea_orm::DbErr::Custom("boom".to_string())).into();
+        assert_eq!(p.status_code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(title_of(&p).as_deref(), Some("Internal Server Error"));
+    }
+
+    // ── redact_params ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_redact_params_masks_sensitive_keys() {
+        let params = serde_json::json!({
+            "name": "MY_SECRET",
+            "value": "super-secret",
+            "secret": "also-secret",
+            "password": "p@ssword",
+            "token": "tok_abc",
+            "key": "k123",
+            "operation": "update",
+        });
+        let redacted = redact_params(&params);
+        assert_eq!(redacted["name"], serde_json::json!("MY_SECRET"));
+        assert_eq!(redacted["operation"], serde_json::json!("update"));
+        assert_eq!(redacted["value"], serde_json::json!("***"));
+        assert_eq!(redacted["secret"], serde_json::json!("***"));
+        assert_eq!(redacted["password"], serde_json::json!("***"));
+        assert_eq!(redacted["token"], serde_json::json!("***"));
+        assert_eq!(redacted["key"], serde_json::json!("***"));
+    }
+
+    #[test]
+    fn test_redact_params_masks_keys_containing_sensitive_substrings() {
+        let params = serde_json::json!({
+            "api_key": "my-api-key",
+            "access_token": "tok",
+            "db_password": "hunter2",
+        });
+        let redacted = redact_params(&params);
+        assert_eq!(redacted["api_key"], serde_json::json!("***"));
+        assert_eq!(redacted["access_token"], serde_json::json!("***"));
+        assert_eq!(redacted["db_password"], serde_json::json!("***"));
+    }
+
+    #[test]
+    fn test_redact_params_non_object_passthrough() {
+        let arr = serde_json::json!([1, 2, 3]);
+        assert_eq!(redact_params(&arr), arr);
+        let s = serde_json::json!("hello");
+        assert_eq!(redact_params(&s), s);
+        let n = serde_json::json!(42);
+        assert_eq!(redact_params(&n), n);
+    }
+
+    #[test]
+    fn test_redact_params_empty_object_passthrough() {
+        let empty = serde_json::json!({});
+        assert_eq!(redact_params(&empty), empty);
+    }
+
+    #[test]
+    fn test_redact_params_case_insensitive() {
+        let params = serde_json::json!({
+            "VALUE": "sensitive",
+            "Secret": "also-sensitive",
+        });
+        let redacted = redact_params(&params);
+        assert_eq!(redacted["VALUE"], serde_json::json!("***"));
+        assert_eq!(redacted["Secret"], serde_json::json!("***"));
+    }
 }

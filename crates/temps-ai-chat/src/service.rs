@@ -1133,19 +1133,16 @@ async fn dispatch_write_tool(
         WritePrepareOutcome::Help(text) => text,
         WritePrepareOutcome::Invalid(msg) => msg,
         WritePrepareOutcome::Prepared(prepared) => {
-            // The advisory required_permission is stored as a colon-separated
-            // string (e.g. "deployments:create"). We pass None here because we
-            // only have the operation_id + method at this point and cannot look
-            // up the OpenAPI tag without the full index. The router's
-            // permission_guard! is the real enforcement boundary at execute time.
-            let required_permission: Option<String> = None;
-
+            // Pass the advisory required_permission computed at prepare time
+            // (from the operation's OpenAPI tag + HTTP method). The router's
+            // permission_guard! is the real enforcement boundary at execute time;
+            // this stored value is used for a pre-claim advisory check in confirm.
             match pending
                 .create(
                     conversation_id,
                     project_id,
                     &prepared,
-                    required_permission,
+                    prepared.required_permission.clone(),
                     Some(auth.user_id()),
                 )
                 .await
