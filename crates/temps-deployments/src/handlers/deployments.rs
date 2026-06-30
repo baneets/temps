@@ -1213,6 +1213,7 @@ async fn handle_filtered_container_logs_socket(
 /// This replaces the old deployment stages endpoint.
 #[utoipa::path(
     get,
+    tag = "Deployments",
     path = "/projects/{project_id}/deployments/{deployment_id}/jobs",
     responses(
         (status = 200, description = "Jobs retrieved successfully", body = DeploymentJobsResponse),
@@ -1248,6 +1249,7 @@ pub async fn get_deployment_jobs(
 /// Get logs for a specific deployment job
 #[utoipa::path(
     get,
+    tag = "Deployments",
     path = "/projects/{project_id}/deployments/{deployment_id}/jobs/{job_id}/logs",
     params(
         ("project_id" = i32, Path, description = "Project ID"),

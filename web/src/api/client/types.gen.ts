@@ -704,6 +704,75 @@ export type AiStatusBreakdownRow = {
     status_class: string;
 };
 
+/**
+ * Paginated list of alarms.
+ */
+export type AlarmListResponse = {
+    items: Array<AlarmResponse>;
+    page: number;
+    page_size: number;
+    total: number;
+};
+
+/**
+ * Full alarm representation returned by list/summary endpoints.
+ */
+export type AlarmResponse = {
+    /**
+     * ISO-8601 UTC timestamp when the alarm was acknowledged, if any.
+     */
+    acknowledged_at?: string | null;
+    /**
+     * User ID who acknowledged the alarm, if any.
+     */
+    acknowledged_by?: number | null;
+    alarm_type: string;
+    container_id?: number | null;
+    /**
+     * ISO-8601 UTC timestamp when the row was created.
+     */
+    created_at: string;
+    deployment_id?: number | null;
+    environment_id?: number | null;
+    /**
+     * ISO-8601 UTC timestamp when the alarm fired.
+     */
+    fired_at: string;
+    id: number;
+    message?: string | null;
+    /**
+     * Arbitrary JSON metadata attached by the alarm source.
+     */
+    metadata?: unknown;
+    project_id: number;
+    /**
+     * ISO-8601 UTC timestamp when the alarm was resolved, if any.
+     */
+    resolved_at?: string | null;
+    service_id?: number | null;
+    severity: string;
+    status: string;
+    title: string;
+    /**
+     * ISO-8601 UTC timestamp when the row was last updated.
+     */
+    updated_at: string;
+};
+
+/**
+ * Re-export AlarmSummary for the OpenAPI schema.
+ */
+export type AlarmSummaryResponse = {
+    acknowledged: number;
+    by_type: {
+        [key: string]: number;
+    };
+    critical: number;
+    firing: number;
+    total_active: number;
+    warning: number;
+};
+
 export type AlertRuleResponse = {
     cooldown_minutes: number;
     created_at: string;
@@ -3152,6 +3221,10 @@ export type CreateProjectSecretRequest = {
 export type CreateProviderKeyRequest = {
     api_key: string;
     base_url?: string | null;
+    /**
+     * Optional model id to pin for this provider (e.g. "gpt-4o-mini").
+     */
+    default_model?: string | null;
     display_name: string;
     provider: string;
 };
@@ -9176,6 +9249,14 @@ export type OtelMetricAlertsResponse = {
     total: number;
 };
 
+export type OtelMetricLabelKeysResponse = {
+    keys: Array<string>;
+};
+
+export type OtelMetricLabelValuesResponse = {
+    values: Array<string>;
+};
+
 export type OtelMetricNamesResponse = {
     names: Array<string>;
 };
@@ -10804,6 +10885,10 @@ export type ProviderKeyResponse = {
     api_key_masked: string;
     base_url?: string | null;
     created_at: string;
+    /**
+     * Model id this provider serves (NULL → per-provider default).
+     */
+    default_model?: string | null;
     display_name: string;
     id: number;
     is_active: boolean;
@@ -15135,6 +15220,11 @@ export type UpdateProviderCredentialsRequest = {
 export type UpdateProviderKeyRequest = {
     api_key?: string | null;
     base_url?: string | null;
+    /**
+     * Double-Option: outer `Some` = field present in patch, inner `None` =
+     * clear the pinned model (revert to the per-provider default).
+     */
+    default_model?: string | null;
     display_name?: string | null;
     is_active?: boolean | null;
 };
@@ -30085,6 +30175,114 @@ export type QueryLogsResponses = {
 
 export type QueryLogsResponse = QueryLogsResponses[keyof QueryLogsResponses];
 
+export type ListMetricLabelKeysData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Metric to inspect
+         */
+        metric_name: string;
+        /**
+         * Window start (RFC 3339); defaults to 24h before end
+         */
+        start_time?: string;
+        /**
+         * Window end (RFC 3339); defaults to now
+         */
+        end_time?: string;
+    };
+    url: '/otel/metric-label-keys';
+};
+
+export type ListMetricLabelKeysErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListMetricLabelKeysError = ListMetricLabelKeysErrors[keyof ListMetricLabelKeysErrors];
+
+export type ListMetricLabelKeysResponses = {
+    /**
+     * Distinct label keys
+     */
+    200: OtelMetricLabelKeysResponse;
+};
+
+export type ListMetricLabelKeysResponse = ListMetricLabelKeysResponses[keyof ListMetricLabelKeysResponses];
+
+export type ListMetricLabelValuesData = {
+    body?: never;
+    path?: never;
+    query: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Metric to inspect
+         */
+        metric_name: string;
+        /**
+         * Label key whose values to list (must match [a-zA-Z0-9_.:-])
+         */
+        label_key: string;
+        /**
+         * Window start (RFC 3339); defaults to 24h before end
+         */
+        start_time?: string;
+        /**
+         * Window end (RFC 3339); defaults to now
+         */
+        end_time?: string;
+    };
+    url: '/otel/metric-label-values';
+};
+
+export type ListMetricLabelValuesErrors = {
+    /**
+     * Invalid label key
+     */
+    400: ProblemDetails;
+    /**
+     * Unauthorized
+     */
+    401: ProblemDetails;
+    /**
+     * Insufficient permissions
+     */
+    403: ProblemDetails;
+    /**
+     * Internal server error
+     */
+    500: ProblemDetails;
+};
+
+export type ListMetricLabelValuesError = ListMetricLabelValuesErrors[keyof ListMetricLabelValuesErrors];
+
+export type ListMetricLabelValuesResponses = {
+    /**
+     * Distinct label values
+     */
+    200: OtelMetricLabelValuesResponse;
+};
+
+export type ListMetricLabelValuesResponse = ListMetricLabelValuesResponses[keyof ListMetricLabelValuesResponses];
+
 export type ListMetricNamesData = {
     body?: never;
     path: {
@@ -32494,6 +32692,195 @@ export type SendMessageErrors = {
 export type SendMessageResponses = {
     /**
      * SSE stream of assistant text deltas
+     */
+    200: unknown;
+};
+
+export type ListProjectAlarmsData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: {
+        /**
+         * Filter by alarm type (e.g. `container_restart`, `outage`).
+         */
+        alarm_type?: string | null;
+        /**
+         * Filter by status: `firing`, `acknowledged`, or `resolved`.
+         */
+        status?: string | null;
+        /**
+         * Filter by severity: `info`, `warning`, or `critical`.
+         */
+        severity?: string | null;
+        /**
+         * Filter by environment ID.
+         */
+        environment_id?: number | null;
+        /**
+         * Filter by deployment ID.
+         */
+        deployment_id?: number | null;
+        /**
+         * Filter by external service ID.
+         */
+        service_id?: number | null;
+        /**
+         * Page number (1-based, default 1).
+         */
+        page?: number | null;
+        /**
+         * Items per page (default 20, max 100).
+         */
+        page_size?: number | null;
+    };
+    url: '/projects/{project_id}/alarms';
+};
+
+export type ListProjectAlarmsErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListProjectAlarmsResponses = {
+    /**
+     * Paginated list of alarms
+     */
+    200: AlarmListResponse;
+};
+
+export type ListProjectAlarmsResponse = ListProjectAlarmsResponses[keyof ListProjectAlarmsResponses];
+
+export type GetProjectAlarmsSummaryData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/alarms/summary';
+};
+
+export type GetProjectAlarmsSummaryErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type GetProjectAlarmsSummaryResponses = {
+    /**
+     * Alarm summary counts
+     */
+    200: AlarmSummaryResponse;
+};
+
+export type GetProjectAlarmsSummaryResponse = GetProjectAlarmsSummaryResponses[keyof GetProjectAlarmsSummaryResponses];
+
+export type AcknowledgeAlarmData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alarm ID
+         */
+        alarm_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/alarms/{alarm_id}/acknowledge';
+};
+
+export type AcknowledgeAlarmErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Alarm not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type AcknowledgeAlarmResponses = {
+    /**
+     * Alarm acknowledged
+     */
+    200: unknown;
+};
+
+export type ResolveAlarmData = {
+    body?: never;
+    path: {
+        /**
+         * Project ID
+         */
+        project_id: number;
+        /**
+         * Alarm ID
+         */
+        alarm_id: number;
+    };
+    query?: never;
+    url: '/projects/{project_id}/alarms/{alarm_id}/resolve';
+};
+
+export type ResolveAlarmErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Alarm not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ResolveAlarmResponses = {
+    /**
+     * Alarm resolved
      */
     200: unknown;
 };

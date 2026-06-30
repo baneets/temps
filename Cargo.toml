@@ -80,6 +80,7 @@ members = [
     "crates/temps-revenue",
     "crates/temps-observability",
     "crates/temps-metrics",
+    "crates/temps-ai-api-tools",
     "examples/example-plugin",
     "examples/lighthouse-plugin",
     "examples/indexnow-plugin",

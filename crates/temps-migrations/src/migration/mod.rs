@@ -128,6 +128,7 @@ mod m20260627_000001_add_ai_alert_summaries;
 mod m20260627_000002_create_ai_conversations;
 mod m20260628_000001_otel_spans_root_index;
 mod m20260629_000001_otel_metrics_full_fidelity;
+mod m20260629_000002_add_provider_default_model;
 
 pub struct Migrator;
 
@@ -259,6 +260,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260627_000002_create_ai_conversations::Migration),
             Box::new(m20260628_000001_otel_spans_root_index::Migration),
             Box::new(m20260629_000001_otel_metrics_full_fidelity::Migration),
+            Box::new(m20260629_000002_add_provider_default_model::Migration),
         ]
     }
 }

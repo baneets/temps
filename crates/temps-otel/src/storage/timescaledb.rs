@@ -689,6 +689,16 @@ struct MetricNameRow {
 }
 
 #[derive(Debug, FromQueryResult)]
+struct LabelKeyRow {
+    label_key: String,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct LabelValueRow {
+    label_value: String,
+}
+
+#[derive(Debug, FromQueryResult)]
 struct BaselineRow {
     hour_of_day: i32,
     day_of_week: i32,
@@ -1274,6 +1284,77 @@ impl OtelStorage for TimescaleDbStorage {
         .all(self.db.as_ref())
         .await?;
         Ok(rows.into_iter().map(|r| r.metric_name).collect())
+    }
+
+    async fn list_metric_label_keys(
+        &self,
+        project_id: i32,
+        metric_name: &str,
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+    ) -> StorageResult<Vec<String>> {
+        // Sample the most-recent matching rows (subquery LIMIT) so the
+        // distinct-keys scan is bounded no matter how much history the metric
+        // has — TimescaleDB chunk exclusion + a per-chunk index make
+        // `ORDER BY timestamp DESC LIMIT N` over (project_id, metric_name) cheap.
+        // LATERAL jsonb_object_keys unnests each sampled row's attribute keys.
+        let sql = "SELECT DISTINCT key AS label_key FROM ( \
+                     SELECT attributes FROM otel_metrics \
+                     WHERE project_id = $1 AND metric_name = $2 \
+                       AND timestamp >= $3 AND timestamp <= $4 \
+                       AND attributes IS NOT NULL AND attributes <> '{}'::jsonb \
+                     ORDER BY timestamp DESC LIMIT 2000 \
+                   ) sub, LATERAL jsonb_object_keys(sub.attributes) AS key \
+                   ORDER BY label_key";
+        let rows = LabelKeyRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![
+                project_id.into(),
+                metric_name.into(),
+                start_time.into(),
+                end_time.into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+        Ok(rows.into_iter().map(|r| r.label_key).collect())
+    }
+
+    async fn list_metric_label_values(
+        &self,
+        project_id: i32,
+        metric_name: &str,
+        label_key: &str,
+        start_time: DateTime<Utc>,
+        end_time: DateTime<Utc>,
+    ) -> StorageResult<Vec<String>> {
+        // `attributes ->> $3` extracts the value for the chosen key (NULL when
+        // absent). Same bounded recent-sample strategy, then dedup and cap the
+        // value list so a high-cardinality label can't return unbounded rows.
+        let sql = "SELECT DISTINCT label_value FROM ( \
+                     SELECT attributes ->> $3 AS label_value, timestamp \
+                     FROM otel_metrics \
+                     WHERE project_id = $1 AND metric_name = $2 \
+                       AND timestamp >= $4 AND timestamp <= $5 \
+                       AND attributes ->> $3 IS NOT NULL \
+                     ORDER BY timestamp DESC LIMIT 5000 \
+                   ) sub \
+                   ORDER BY label_value LIMIT 500";
+        let rows = LabelValueRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            sql,
+            vec![
+                project_id.into(),
+                metric_name.into(),
+                label_key.into(),
+                start_time.into(),
+                end_time.into(),
+            ],
+        ))
+        .all(self.db.as_ref())
+        .await?;
+        Ok(rows.into_iter().map(|r| r.label_value).collect())
     }
 
     async fn query_spans(&self, query: TraceQuery) -> StorageResult<Vec<SpanRecord>> {
