@@ -71,7 +71,10 @@ use tracing::{debug, info};
 
 // Multi-node support
 use temps_deployments::handlers::nodes::NodeAppState;
-use temps_deployments::jobs::node_health_check::{check_node_health, failover_offline_nodes};
+use temps_deployments::jobs::node_health_check::{
+    check_control_plane_resources, check_drain_completion, check_node_health, check_node_resources,
+    failover_offline_nodes, notify_nodes_offline, refresh_control_plane_metrics,
+};
 use temps_deployments::services::node_service::NodeService;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -1774,6 +1777,10 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         config_service: config_service_for_nodes,
         encryption_service: encryption_service_for_nodes,
         telemetry: node_telemetry,
+        rate_limiter: Arc::new(temps_deployments::handlers::nodes::RegistrationRateLimiter::new()),
+        enrollment_token_service: Arc::new(temps_config::EnrollmentTokenService::new(db.clone())),
+        notification_service: service_context
+            .get_service::<dyn temps_core::notifications::NotificationService>(),
     });
     let node_routes =
         temps_deployments::handlers::nodes::configure_routes().with_state(node_app_state);
@@ -1784,16 +1791,32 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
         let health_db = db.clone();
         let deployment_service_for_failover =
             service_context.get_service::<temps_deployments::DeploymentService>();
+        let health_notification_service =
+            service_context.get_service::<dyn temps_core::notifications::NotificationService>();
+        let health_config_service = service_context.get_service::<temps_config::ConfigService>();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
+                // Sample the control plane's own host metrics so the synthetic
+                // control-plane node shows live CPU/mem/disk (it has no agent
+                // heartbeat). Always runs, independent of alert config.
+                refresh_control_plane_metrics();
                 let offline_ids = check_node_health(&health_node_service, health_db.as_ref()).await;
                 if !offline_ids.is_empty() {
                     tracing::info!(
                         "Node health check: marked {} node(s) as offline",
                         offline_ids.len()
                     );
+                    // Alert operators that worker node(s) went down (best-effort).
+                    if let Some(ref notification_service) = health_notification_service {
+                        notify_nodes_offline(
+                            &offline_ids,
+                            &health_node_service,
+                            notification_service,
+                        )
+                        .await;
+                    }
                     // Trigger failover redeployment for affected environments
                     if let Some(ref deployment_service) = deployment_service_for_failover {
                         failover_offline_nodes(
@@ -1803,6 +1826,30 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                         )
                         .await;
                     }
+                }
+
+                // Alert on node resource pressure (CPU/mem/disk) against the
+                // operator-configurable thresholds in settings.multi_node.
+                if let (Some(ref notification_service), Some(ref config_service)) =
+                    (&health_notification_service, &health_config_service)
+                {
+                    check_node_resources(health_db.as_ref(), config_service, notification_service)
+                        .await;
+                    // The control plane isn't a `nodes` row, so it's excluded
+                    // from the query above — alert on its own metrics separately.
+                    check_control_plane_resources(config_service, notification_service).await;
+                }
+
+                // Transition fully-drained nodes from "draining" to "drained".
+                // Without this, a node whose containers have all migrated stays
+                // stuck in "draining" forever (it never auto-completes), so the
+                // operator can never safely remove it. (ADR-020 WS-5.1 / lifecycle-7)
+                let drained_ids = check_drain_completion(&health_node_service).await;
+                if !drained_ids.is_empty() {
+                    tracing::info!(
+                        "Node drain check: {} node(s) completed draining",
+                        drained_ids.len()
+                    );
                 }
             }
         });
