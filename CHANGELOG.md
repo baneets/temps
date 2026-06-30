@@ -97,6 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were removed (#158).
 
 ### Fixed
+
+- **Edge cache-miss token isolation**: cacheable static asset misses in `temps edge` no longer attach the edge control-plane bearer token when fetching tenant-routed origin paths. This preserves pull-through caching while preventing deployed applications from observing node/join credentials in the `Authorization` header.
+- **Edge origin fetch credential leak**: removed the privileged bearer credential from cache-miss origin requests that use the public `Host` header for routing, because those requests can be handled by untrusted deployed application code.
+
 - **Notification email provider update hit the wrong endpoint in the SDK.** Both
   `temps-email` and `temps-notifications` exposed an `update_email_provider`
   handler, producing a duplicate `updateEmailProvider` operationId; the generated
@@ -161,7 +165,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`protobuf` 2.x, `remove_dir_all` 0.5, `opentelemetry_sdk` 0.30, `rsa` 0.9) are
   transitive, upstream-blocked, and verified unreachable in our usage — documented
   with reachability proofs in the root `Cargo.toml`.
-
 
 
 ## [0.1.0-beta.39] - 2026-06-25
