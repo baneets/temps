@@ -91,9 +91,9 @@ impl ConversationContextProvider for ApiToolsProvider {
     /// Seed every chat's system framing with the `temps` CLI's root help — the
     /// section list — so the model starts oriented and can drill in with
     /// `<section> --help`. Returns `None` until the caller is wired (startup).
-    fn system_appendix(&self) -> Option<String> {
+    fn system_appendix(&self, auth: &AuthContext) -> Option<String> {
         let caller = self.handle.get()?;
-        let root_help = caller.cli_root_help();
+        let root_help = caller.cli_root_help(auth);
         if root_help.trim().is_empty() {
             return None;
         }
