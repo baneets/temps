@@ -10686,6 +10686,10 @@ export type ProjectResponse = {
      */
     ai_debug_chat_enabled?: boolean | null;
     /**
+     * Opt-in to AI-proposed write actions (human confirm-gated; false = off).
+     */
+    ai_write_actions_enabled: boolean;
+    /**
      * Attack mode - when enabled, requires CAPTCHA verification for all project environments
      */
     attack_mode: boolean;
@@ -15350,6 +15354,10 @@ export type UpdateProjectSettingsRequest = {
      * Opt in to AI debugging chat, e.g. on deployment failures (ADR-023).
      */
     ai_debug_chat_enabled?: boolean | null;
+    /**
+     * Opt in to AI-proposed write actions (human confirm-gated). Omit to leave unchanged.
+     */
+    ai_write_actions_enabled?: boolean | null;
     /**
      * Enable/disable attack mode (CAPTCHA protection) for all project environments
      */
