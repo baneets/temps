@@ -8,14 +8,17 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { TimeAgo } from '@/components/utils/TimeAgo'
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   Loader2,
   Paperclip,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   Wrench,
+  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -207,6 +210,201 @@ function ToolCard({ tool }: { tool: ToolCall }) {
   )
 }
 
+/** The proposal payload a `temps_write` tool result carries (JSON string). */
+interface Proposal {
+  action_id: string
+  operation: string
+  method: string
+  summary: string
+}
+
+/** Parse a `temps_write` tool result into a proposal, or null when it's help /
+ *  validation text (rendered as a plain tool card instead). */
+function parseProposal(result?: string | null): Proposal | null {
+  if (!result) return null
+  try {
+    const o = JSON.parse(result) as Partial<Proposal> & { status?: string }
+    if (o && o.status === 'proposed' && o.action_id && o.operation) {
+      return {
+        action_id: String(o.action_id),
+        operation: String(o.operation),
+        method: String(o.method ?? ''),
+        summary: String(o.summary ?? ''),
+      }
+    }
+  } catch {
+    /* not a proposal payload */
+  }
+  return null
+}
+
+const ACTION_STATUS: Record<string, { label: string; cls: string }> = {
+  proposed: { label: 'Awaiting your confirmation', cls: 'text-amber-600 dark:text-amber-400' },
+  executing: { label: 'Running…', cls: 'text-muted-foreground' },
+  executed: { label: 'Executed', cls: 'text-green-600 dark:text-green-400' },
+  failed: { label: 'Failed', cls: 'text-destructive' },
+  rejected: { label: 'Rejected', cls: 'text-muted-foreground' },
+  expired: { label: 'Expired', cls: 'text-muted-foreground' },
+}
+
+/**
+ * A write/modify/delete the AI has *proposed* — never executed. This card is the
+ * human gate: Confirm replays the mutation server-side (permission-checked +
+ * audited), Reject discards it. On mount it reconciles the live status from the
+ * API, so a reloaded chat shows executed/rejected instead of a stale prompt.
+ */
+function PendingActionCard({
+  projectId,
+  tool,
+}: {
+  projectId: number
+  tool: ToolCall
+}) {
+  const proposal = parseProposal(tool.result)
+  const actionId = proposal?.action_id
+  const [status, setStatus] = useState('proposed')
+  const [busy, setBusy] = useState<'confirm' | 'reject' | null>(null)
+  const [result, setResult] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
+
+  // Reconcile the live status once the action id is known (covers reloads).
+  useEffect(() => {
+    if (!actionId) return
+    let cancelled = false
+    fetch(`/api/projects/${projectId}/ai/pending-actions/${actionId}`, {
+      credentials: 'include',
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || !d) return
+        if (typeof d.status === 'string') setStatus(d.status)
+        if (d.result != null) setResult(JSON.stringify(d.result))
+        if (typeof d.error === 'string') setError(d.error)
+      })
+      .catch(() => {
+        /* status reconcile is best-effort */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, actionId])
+
+  // Still streaming the proposal, or not a proposal at all (help/validation
+  // text) — fall back to the ordinary tool card.
+  if (tool.result === undefined || !proposal) {
+    return <ToolCard tool={tool} />
+  }
+
+  const act = async (kind: 'confirm' | 'reject') => {
+    setBusy(kind)
+    setError(null)
+    try {
+      const r = await fetch(
+        `/api/projects/${projectId}/ai/pending-actions/${proposal.action_id}/${kind}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )
+      const d = await r.json().catch(() => null)
+      if (!r.ok) {
+        setError(
+          (d as { detail?: string } | null)?.detail ||
+            `Could not ${kind} the action.`
+        )
+      } else if (d) {
+        if (typeof d.status === 'string') setStatus(d.status)
+        if (d.result != null) setResult(JSON.stringify(d.result))
+        if (typeof d.error === 'string') setError(d.error)
+      }
+    } catch {
+      setError(`Could not ${kind} the action.`)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const st = ACTION_STATUS[status] ?? ACTION_STATUS.proposed
+  const pending = status === 'proposed'
+  return (
+    <div className="min-w-0 overflow-hidden rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs">
+      <div className="flex min-w-0 items-start gap-2 px-2.5 py-2">
+        <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex items-center gap-1.5">
+            <span className="rounded bg-muted px-1 py-0.5 font-mono text-[10px] font-semibold uppercase">
+              {proposal.method}
+            </span>
+            <span className="min-w-0 truncate font-mono text-[11px] font-medium">
+              {proposal.operation}
+            </span>
+          </div>
+          {proposal.summary && (
+            <div className="text-muted-foreground">{proposal.summary}</div>
+          )}
+          <div className={cn('text-[11px] font-medium', st.cls)}>{st.label}</div>
+        </div>
+      </div>
+      {pending ? (
+        <div className="flex items-center gap-2 border-t border-amber-500/20 px-2.5 py-2">
+          <Button
+            type="button"
+            size="sm"
+            className="h-7 gap-1 px-2 text-xs"
+            disabled={busy !== null}
+            onClick={() => act('confirm')}
+          >
+            {busy === 'confirm' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Check className="h-3.5 w-3.5" />
+            )}
+            Confirm &amp; run
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 px-2 text-xs"
+            disabled={busy !== null}
+            onClick={() => act('reject')}
+          >
+            {busy === 'reject' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <X className="h-3.5 w-3.5" />
+            )}
+            Reject
+          </Button>
+        </div>
+      ) : result || error ? (
+        <div className="space-y-1 border-t border-amber-500/20 px-2.5 py-2">
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            className="flex items-center gap-1 font-medium text-muted-foreground hover:text-foreground"
+          >
+            {open ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+            {error ? 'Error' : 'Result'}
+          </button>
+          {open &&
+            (error ? (
+              <pre className={toolBlockClasses}>{error}</pre>
+            ) : (
+              <ToolBlock value={result ?? ''} />
+            ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 interface DebugChatPanelProps {
   projectId: number
   /** The interaction this chat is attached to, e.g. 'deployment' | 'alert'. */
@@ -302,9 +500,11 @@ function MarkdownText({ text }: { text: string }) {
 function AssistantBody({
   message,
   streaming,
+  projectId,
 }: {
   message: ChatMessage
   streaming: boolean
+  projectId: number
 }) {
   const parts = assistantParts(message)
   if (parts.length === 0) {
@@ -314,7 +514,17 @@ function AssistantBody({
     <>
       {parts.map((part, idx) =>
         part.type === 'tool' ? (
-          <ToolCard key={part.tool.id} tool={part.tool} />
+          // A `temps_write` tool is a *proposed* mutation — render the human
+          // confirm/reject gate instead of a read-only result card.
+          part.tool.name === 'temps_write' ? (
+            <PendingActionCard
+              key={part.tool.id}
+              projectId={projectId}
+              tool={part.tool}
+            />
+          ) : (
+            <ToolCard key={part.tool.id} tool={part.tool} />
+          )
         ) : (
           <MarkdownText key={`text-${idx}`} text={part.text} />
         )
@@ -780,6 +990,7 @@ export function DebugChatPanel({
                   <AssistantBody
                     message={m}
                     streaming={streaming && i === visible.length - 1}
+                    projectId={projectId}
                   />
                 </div>
                 {m.created_at && assistantParts(m).length > 0 && (
