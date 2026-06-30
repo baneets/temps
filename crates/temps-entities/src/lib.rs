@@ -3,6 +3,7 @@ pub mod acme_orders;
 pub mod ai_conversations;
 pub mod ai_gateway_config;
 pub mod ai_messages;
+pub mod ai_pending_actions;
 pub mod ai_provider_keys;
 pub mod ai_usage_logs;
 pub mod alarms;

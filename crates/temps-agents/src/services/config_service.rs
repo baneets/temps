@@ -1029,6 +1029,7 @@ mod tests {
             attack_mode: false,
             ai_alert_summaries_enabled: None,
             ai_debug_chat_enabled: None,
+            ai_write_actions_enabled: false,
             enable_preview_environments: false,
             preview_envs_on_demand: false,
             preview_envs_idle_timeout_seconds: 300,

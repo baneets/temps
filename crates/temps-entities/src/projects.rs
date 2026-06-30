@@ -47,6 +47,10 @@ pub struct Model {
     /// ADR-023: opt-in AI debugging chat (e.g. on deployment failures) for this
     /// project. NULL/false = off; true = offer the chat when AI is configured.
     pub ai_debug_chat_enabled: Option<bool>,
+    /// Opt-in for the AI propose-then-confirm write-action feature. When false
+    /// (the default), the AI may only read data; write-action proposals are
+    /// suppressed. Operators enable this per-project via the UI.
+    pub ai_write_actions_enabled: bool,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: bool,
     /// When true, preview environments auto-created for branches are
