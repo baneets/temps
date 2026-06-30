@@ -2037,6 +2037,59 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                     );
                     handle.set(caller);
                     debug!("ADR-024: InternalApiCaller populated in ApiToolsHandle");
+
+                    // ── Propose-then-confirm WRITE tool ──
+                    // Populate the separate WriteApiToolsHandle with a method-aware
+                    // caller over a CURATED allowlist of mutating operations. The AI
+                    // never executes these — calling `temps_write` only stages a
+                    // `proposed` ai_pending_actions row; a human confirm endpoint
+                    // replays the mutation through this same router (permission_guard!
+                    // + audit). The tool itself is also gated per-project behind
+                    // projects.ai_write_actions_enabled (default OFF). This allowlist
+                    // is conservative by design: high-value, mostly-reversible
+                    // lifecycle + config operations. Adding an entry is a product +
+                    // security decision (what may the AI propose for a human to run).
+                    if let Some(write_handle) = service_context
+                        .get_service::<temps_ai_api_tools::WriteApiToolsHandle>()
+                    {
+                        let write_allowlist: Vec<String> = [
+                            // ── Deployment lifecycle (reversible / safe) ──
+                            "rollback_to_deployment",
+                            "promote_deployment",
+                            "pause_deployment",
+                            "resume_deployment",
+                            "cancel_deployment",
+                            // ── Container runtime control (reversible) ──
+                            "restart_container",
+                            "stop_container",
+                            "start_container",
+                            // ── Environment wake/sleep (reversible) ──
+                            "wake_environment",
+                            "sleep_environment",
+                            // ── Environment variables (set / change) ──
+                            "create_environment_variable",
+                            "update_environment_variable",
+                            "delete_environment_variable",
+                            // ── Domains (attach / detach) ──
+                            "create_domain",
+                            "delete_domain",
+                            "add_environment_domain",
+                            "delete_environment_domain",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                        let write_caller =
+                            temps_ai_api_tools::InternalApiCaller::new_write_allowlisted(
+                                split.admin.clone(),
+                                &openapi,
+                                write_allowlist,
+                            );
+                        write_handle.set(write_caller);
+                        debug!("AI write tool: WriteApiToolsHandle populated (curated allowlist)");
+                    } else {
+                        debug!("AI write tool: WriteApiToolsHandle not registered; skipping");
+                    }
                 }
                 Err(e) => {
                     // Non-fatal: the AI API tools simply won't be available this
