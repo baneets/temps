@@ -153,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`protobuf` 2.x, `remove_dir_all` 0.5, `opentelemetry_sdk` 0.30, `rsa` 0.9) are
   transitive, upstream-blocked, and verified unreachable in our usage — documented
   with reachability proofs in the root `Cargo.toml`.
+- **OTel telemetry reads confined per project.** Every OpenTelemetry query
+  endpoint (metrics, traces, logs, trace summaries, insights, health, quota,
+  GenAI traces, metric names/labels) now enforces `project_scope_guard!`, so a
+  project-scoped deployment token can no longer read another project's telemetry.
+  No effect on user / API-key / session auth.
+- **AI debug-chat tool discovery is permission-scoped.** The read-only `temps`
+  CLI tool only surfaces (in `--help` discovery and the model's system prompt)
+  the API operations the calling user is permitted to read — derived from each
+  operation's domain. Execution was already enforced by the router's
+  `permission_guard!`; this stops the assistant from suggesting operations the
+  user can't run.
 
 
 ## [0.1.0-beta.39] - 2026-06-25
