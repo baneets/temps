@@ -3269,6 +3269,18 @@ mod tests {
             encryption_service: Arc::new(
                 temps_core::EncryptionService::new("01234567890123456789012345678901").unwrap(),
             ),
+            config_service: Arc::new(ConfigService::new(
+                Arc::new(
+                    temps_config::ServerConfig::new(
+                        "127.0.0.1:0".to_string(),
+                        "postgresql://test:test@localhost:5432/test".to_string(),
+                        None,
+                        None,
+                    )
+                    .expect("config"),
+                ),
+                db.clone(),
+            )),
             docker: Arc::new(
                 bollard::Docker::connect_with_local_defaults()
                     .unwrap_or_else(|_| bollard::Docker::connect_with_defaults().unwrap()),
