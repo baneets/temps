@@ -434,7 +434,7 @@ impl ConversationService {
         // provider so it always reflects the live allowlist; merged into EVERY
         // context for the same reason its tools are.
         if let Some(api_tools_provider) = self.providers.get("__api_tools__") {
-            if let Some(appendix) = api_tools_provider.system_appendix() {
+            if let Some(appendix) = api_tools_provider.system_appendix(auth) {
                 match messages.iter_mut().find(|m| m.role == "system") {
                     Some(sys) => {
                         sys.content.push_str("\n\n");

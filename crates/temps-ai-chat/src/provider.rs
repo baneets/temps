@@ -78,8 +78,9 @@ pub trait ConversationContextProvider: Send + Sync {
     /// turn, regardless of which provider seeded the chat. Used by the API-tools
     /// provider to inject the read-only endpoint catalogue (the "API map") so the
     /// model can pick an `operation_id` by path instead of guessing search
-    /// keywords. Default: nothing.
-    fn system_appendix(&self) -> Option<String> {
+    /// keywords. `auth` is the calling user's context, so the appendix can be
+    /// scoped to what they're permitted to discover. Default: nothing.
+    fn system_appendix(&self, _auth: &AuthContext) -> Option<String> {
         None
     }
 

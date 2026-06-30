@@ -30,6 +30,7 @@ use http::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use temps_auth::context::AuthContext;
+use temps_auth::permissions::Permission;
 use tower::ServiceExt as _;
 use tracing::{debug, warn};
 
@@ -345,20 +346,13 @@ impl InternalApiCaller {
         self
     }
 
-    /// Search the read-only API index.
-    ///
-    /// # Phase 2 TODO
-    ///
-    /// Filter results to operations the `scope` caller is permitted to use.
-    /// Currently returns all matching operations without permission filtering.
-    /// The `permitted` hook below is the insertion point.
+    /// Search the read-only API index, hiding operations the caller can't read
+    /// (advisory — execution is still guarded by the router; see [`Self::permitted`]).
     pub fn search(&self, query: &str, scope: &ApiCallScope) -> Vec<OperationSummary> {
         self.index
             .search(query)
             .into_iter()
-            // TODO(Phase 2): filter to ops the caller is permitted to discover.
-            // Currently returns all matching ops regardless of permission.
-            .filter(|op| self.permitted(op, scope))
+            .filter(|op| self.permitted(op, &scope.auth))
             .map(OperationSummary::from)
             .collect()
     }
@@ -376,8 +370,10 @@ impl InternalApiCaller {
 
     /// Render the virtual-CLI root help (`<root> --help`) — the section list —
     /// for injection into the chat system prompt so the model starts oriented.
-    pub fn cli_root_help(&self) -> String {
-        match crate::cli::resolve(&self.index, "--help") {
+    /// Sections the `auth` caller can't read at all are omitted.
+    pub fn cli_root_help(&self, auth: &AuthContext) -> String {
+        let permit = |op: &ApiOperation| self.permitted(op, auth);
+        match crate::cli::resolve(&self.index, "--help", &permit) {
             crate::cli::CliAction::Terminal(text) => text,
             // resolve("--help") is always Terminal; this arm is unreachable.
             crate::cli::CliAction::Execute(..) => String::new(),
@@ -389,7 +385,8 @@ impl InternalApiCaller {
     /// caller's scope (auth + `project_id` auto-fill + allowlist all apply).
     /// Always returns model-facing text — help, an error, or the response body.
     pub async fn run_cli(&self, command: &str, scope: &ApiCallScope) -> String {
-        match crate::cli::resolve(&self.index, command) {
+        let permit = |op: &ApiOperation| self.permitted(op, &scope.auth);
+        match crate::cli::resolve(&self.index, command, &permit) {
             crate::cli::CliAction::Terminal(text) => text,
             crate::cli::CliAction::Execute(op, params) => {
                 let op_id = op.operation_id.clone();
@@ -528,23 +525,69 @@ impl InternalApiCaller {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    /// Advisory permission filter for search results.
+    /// Advisory permission filter for discovery (search + `--help`).
     ///
-    /// # Phase 2 TODO
-    ///
-    /// This is currently a stub that always returns `true`.  Phase 2 will add a
-    /// generated `operation_id → Permission` map and call
-    /// `scope.auth.has_permission(required_perm)` here.
-    ///
-    /// This filter is *never* the security boundary — that role is played by the
-    /// router's `permission_guard!`.  This filter only governs what operations are
-    /// *shown* to the model during discovery.
-    #[allow(unused_variables)]
-    fn permitted(&self, op: &ApiOperation, scope: &ApiCallScope) -> bool {
-        // TODO(Phase 2): derive required permission from op.tags heuristic, then
-        // check scope.auth.has_permission(&required).
-        true
+    /// Returns whether the `scope` caller may *see* `op` during discovery: if the
+    /// operation's domain maps to a read [`Permission`] the caller must hold it,
+    /// otherwise (an unmapped tag) the op is shown — the router's
+    /// `permission_guard!` is the real boundary, so failing *open* here only
+    /// risks a confusing "not permitted" on execution, never an actual bypass.
+    /// An admin (or any role holding the read permission) passes.
+    pub(crate) fn permitted(&self, op: &ApiOperation, auth: &AuthContext) -> bool {
+        match required_read_permission(op) {
+            Some(perm) => auth.has_permission(&perm),
+            None => true,
+        }
     }
+}
+
+/// Best-effort mapping from an operation's OpenAPI tag to the read [`Permission`]
+/// that gates it, used only to filter what the AI sees during discovery (never to
+/// authorize execution — that's the router's job). Keyword-matched on the first
+/// tag so related tags (e.g. the several OTel telemetry tags) collapse onto one
+/// permission; `None` means "no known mapping → show it".
+fn required_read_permission(op: &ApiOperation) -> Option<Permission> {
+    let tag = op.tags.first()?.to_ascii_lowercase();
+    // Order matters: more specific keywords first (e.g. telemetry before metrics).
+    let perm = if tag.contains("telemetry")
+        || tag.contains("trace")
+        || tag.contains("span")
+        || tag.contains("otel")
+        || tag.contains("dashboard")
+        || tag.contains("insight")
+        || tag.contains("alert")
+    {
+        Permission::OtelRead
+    } else if tag.contains("error") {
+        Permission::ErrorTrackingRead
+    } else if tag.contains("backup") {
+        Permission::BackupsRead
+    } else if tag.contains("deployment") {
+        Permission::DeploymentsRead
+    } else if tag.contains("environment") {
+        Permission::EnvironmentsRead
+    } else if tag.contains("domain") {
+        Permission::DomainsRead
+    } else if tag.contains("external") || tag.contains("static bundle") || tag.contains("image") {
+        Permission::ExternalServicesRead
+    } else if tag.contains("audit") {
+        Permission::AuditRead
+    } else if tag.contains("analytic") {
+        Permission::AnalyticsRead
+    } else if tag.contains("metric") {
+        Permission::MetricsRead
+    } else if tag.contains("log") {
+        Permission::LogsRead
+    } else if tag.contains("notification") {
+        Permission::NotificationsRead
+    } else if tag.contains("setting") {
+        Permission::SettingsRead
+    } else if tag.contains("project") {
+        Permission::ProjectsRead
+    } else {
+        return None;
+    };
+    Some(perm)
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +696,51 @@ mod tests {
             enum_values: vec![],
             description: None,
         }
+    }
+
+    fn op_tagged(tag: &str) -> ApiOperation {
+        ApiOperation {
+            tags: if tag.is_empty() {
+                vec![]
+            } else {
+                vec![tag.to_string()]
+            },
+            ..make_op("x", "/x", vec![])
+        }
+    }
+
+    #[test]
+    fn required_read_permission_maps_tags_to_read_perms() {
+        use temps_auth::permissions::Permission;
+        assert_eq!(
+            required_read_permission(&op_tagged("Deployments")),
+            Some(Permission::DeploymentsRead)
+        );
+        // The several OTel telemetry tags collapse onto OtelRead.
+        for t in [
+            "Traces",
+            "Telemetry Metrics",
+            "Telemetry Logs",
+            "Dashboards",
+            "Alerts",
+        ] {
+            assert_eq!(
+                required_read_permission(&op_tagged(t)),
+                Some(Permission::OtelRead),
+                "tag {t}"
+            );
+        }
+        assert_eq!(
+            required_read_permission(&op_tagged("Backups")),
+            Some(Permission::BackupsRead)
+        );
+        assert_eq!(
+            required_read_permission(&op_tagged("Error Tracking")),
+            Some(Permission::ErrorTrackingRead)
+        );
+        // Unknown / missing tag → None (shown by default; router still guards).
+        assert_eq!(required_read_permission(&op_tagged("Wibble")), None);
+        assert_eq!(required_read_permission(&op_tagged("")), None);
     }
 
     fn enum_query_param(name: &str, values: &[&str]) -> ParamSpec {

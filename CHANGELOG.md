@@ -77,6 +77,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it schedules. Purely additive and best-effort: if the resolver can't bind
   (e.g. port 53 is unavailable), containers keep Docker's embedded DNS exactly
   as before.
+- **Streaming AI chat that can query your platform data (ADR-024).** The AI
+  assistant now streams its reply **token-by-token** with **tool calls shown
+  live** as it works (and a **Stop** control to cancel a turn). It can answer
+  grounded questions about a project — "how many deployments?", "show this
+  trace", "list errors with traces" — through a built-in **read-only `temps`
+  CLI tool** over the platform's GET API: the model discovers endpoints with
+  `--help` and runs them scoped to the conversation's project and the user's own
+  permissions (it can only read what you can; writes are never exposed). Half-
+  typed drafts and the open conversation persist across reloads, and the chat is
+  seeded with context about the page you're viewing (#173).
+- **Trace detail: spans and logs in one view.** The trace page pairs the span
+  waterfall with the OTel **logs correlated to that trace**, colour-codes spans
+  by service, and opens a per-span detail panel (a focused drawer on mobile)
+  showing the span's timing, attributes, events, and its own logs — correlated
+  by `span_id`, Jaeger-style (#173).
+- **Per-provider default AI model.** Each AI provider key can pin the model used
+  for AI features (Settings → AI Providers), instead of relying on a built-in
+  per-provider default (#173).
 
 ### Changed
 - **Project navigation grouped into OpenTelemetry + Monitoring.** The OTel
@@ -129,6 +147,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved fine. The forwarder now returns the correct `NOERROR`/NODATA while
   still passing genuine `NXDOMAIN` through. Affects both worker and
   control-plane resolvers.
+- **OTel logs now ingest and display correctly.** Two bugs in the OTLP logs
+  path are fixed: `LogRecord.flags` was decoded with the wrong protobuf wire
+  type (rejecting otherwise-valid log batches), and only `WARN`+ records were
+  persisted to the queryable store. All severities are now stored, so a trace's
+  correlated logs and the Logs explorer show the full picture (#173).
 - **Proxy no longer queries Postgres on every request.** Under load the proxy
   opened a database connection per request for the IP block-list check and the
   IP-geolocation lookup, saturating the connection pool (~114 busy connections
@@ -172,6 +195,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`protobuf` 2.x, `remove_dir_all` 0.5, `opentelemetry_sdk` 0.30, `rsa` 0.9) are
   transitive, upstream-blocked, and verified unreachable in our usage — documented
   with reachability proofs in the root `Cargo.toml`.
+- **OTel telemetry reads confined per project.** Every OpenTelemetry query
+  endpoint (metrics, traces, logs, trace summaries, insights, health, quota,
+  GenAI traces, metric names/labels) now enforces `project_scope_guard!`, so a
+  project-scoped deployment token can no longer read another project's telemetry.
+  No effect on user / API-key / session auth.
+- **AI debug-chat tool discovery is permission-scoped.** The read-only `temps`
+  CLI tool only surfaces (in `--help` discovery and the model's system prompt)
+  the API operations the calling user is permitted to read — derived from each
+  operation's domain. Execution was already enforced by the router's
+  `permission_guard!`; this stops the assistant from suggesting operations the
+  user can't run.
 
 
 ## [0.1.0-beta.39] - 2026-06-25

@@ -44,7 +44,17 @@ struct Section<'a> {
 }
 
 /// Parse a command line and resolve it to a [`CliAction`]. Never executes.
-pub(crate) fn resolve<'a>(index: &'a ReadOnlyApiIndex, command: &str) -> CliAction<'a> {
+///
+/// `permit` filters which operations are *discoverable* (shown in `--help` /
+/// section listings) — operations the caller can't read are hidden, and a
+/// section with no discoverable operations disappears. It is advisory: direct
+/// execution still goes through the router's `permission_guard!`, so a bare
+/// `operation_id` is resolved for execution even if hidden from discovery.
+pub(crate) fn resolve<'a>(
+    index: &'a ReadOnlyApiIndex,
+    command: &str,
+    permit: &dyn Fn(&ApiOperation) -> bool,
+) -> CliAction<'a> {
     let tokens = tokenize(command);
     // Tolerate a leading program name — the model may write `temps deploy …`.
     let tokens: &[String] = if tokens
@@ -59,11 +69,11 @@ pub(crate) fn resolve<'a>(index: &'a ReadOnlyApiIndex, command: &str) -> CliActi
 
     // Root: no args or `--help`.
     if tokens.is_empty() || is_help(&tokens[0]) {
-        return CliAction::Terminal(render_root_help(index));
+        return CliAction::Terminal(render_root_help(index, permit));
     }
 
     let first = &tokens[0];
-    let secs = sections(index);
+    let secs = sections(index, permit);
 
     // A section?
     if let Some(sec) = secs
@@ -114,8 +124,8 @@ fn resolve_operation<'a>(op: &'a ApiOperation, tail: &[String]) -> CliAction<'a>
 // Help rendering
 // ---------------------------------------------------------------------------
 
-fn render_root_help(index: &ReadOnlyApiIndex) -> String {
-    let secs = sections(index);
+fn render_root_help(index: &ReadOnlyApiIndex, permit: &dyn Fn(&ApiOperation) -> bool) -> String {
+    let secs = sections(index, permit);
     let mut out = String::from(
         "Temps read-only API — a CLI over the platform's GET endpoints.\n\
          Usage: <section> <operation> [--flag value ...]\n\
@@ -213,9 +223,15 @@ fn render_operation_help(op: &ApiOperation) -> String {
 
 /// Group operations into sections by their first OpenAPI tag, preserving a
 /// stable (slug-sorted) order. Operations with no tag fall into "General".
-fn sections(index: &ReadOnlyApiIndex) -> Vec<Section<'_>> {
+fn sections<'a>(
+    index: &'a ReadOnlyApiIndex,
+    permit: &dyn Fn(&ApiOperation) -> bool,
+) -> Vec<Section<'a>> {
     let mut secs: Vec<Section> = Vec::new();
     for op in index.operations() {
+        if !permit(op) {
+            continue;
+        }
         let name = section_name(op);
         if let Some(s) = secs.iter_mut().find(|s| s.name == name) {
             s.operations.push(op);
