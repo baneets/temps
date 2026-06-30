@@ -1,35 +1,25 @@
-//! Generic REST API tools for the OSS debugging chat (ADR-024 Phase 1).
+//! The read-only `temps` virtual-CLI tool for the OSS debugging chat (ADR-024).
 //!
-//! Exposes three [`temps_ai::ChatTool`]s — `search_api`, `describe_api`,
-//! `call_api` — backed by [`temps_ai_api_tools::InternalApiCaller`] via the
-//! shared [`temps_ai_api_tools::ApiToolsHandle`].
-//!
-//! ## Tool descriptions
-//!
-//! - `search_api(query)` — keyword search over the read-only API index; returns
-//!   a ranked list of `{operation_id, path, summary, params[]}` so the model
-//!   can discover which endpoint addresses its goal.
-//! - `describe_api(operation_id)` — returns the full parameter + response schema
-//!   for one operation, on demand, to avoid sending all schemas on every turn.
-//! - `call_api(operation_id, parameters)` — executes the `GET` through the real
-//!   Axum router with the caller's `AuthContext` injected, and returns the
-//!   (capped) JSON body.
+//! Exposes a single [`temps_ai::ChatTool`] — `temps` — backed by
+//! [`temps_ai_api_tools::InternalApiCaller`] via the shared
+//! [`temps_ai_api_tools::ApiToolsHandle`]. The model drives it like a CLI:
+//! `--help` lists sections (OpenAPI tags), `<section> --help` lists operations,
+//! `<section> <operation> --flag value …` runs one. Discovery (`--help`) is a
+//! pure index query; running an operation replays the underlying **GET** through
+//! the real Axum router and returns the (capped) JSON body as
+//! `{operation, status, data}`.
 //!
 //! ## Auth threading
 //!
-//! All three tools are fully functional. `search_api` and `describe_api` are
-//! pure index queries that need no auth. `call_api` replays a GET through the
-//! real Axum router, so it needs the caller's `AuthContext` to build the
-//! `ApiCallScope` injected into the request (which `permission_guard!` then
-//! evaluates).
-//!
-//! The auth is threaded via [`ConversationContextProvider::execute_tool_with_auth`]
-//! (a non-breaking trait method that defaults to the auth-less `execute_tool`):
-//! the chat handler forwards the user's `AuthContext` into
-//! `ConversationService::send_message`, which passes it through the tool loop to
-//! this provider. `call_api` is scoped to the conversation's project, so the
-//! model is bounded by the user's own permissions and cannot reach another
-//! tenant's data.
+//! Running an operation replays a GET through the real router, so it needs the
+//! caller's `AuthContext` to build the `ApiCallScope` injected into the request
+//! (which `permission_guard!` then evaluates). The auth is threaded via
+//! [`ConversationContextProvider::execute_tool_with_auth`] (a non-breaking trait
+//! method that defaults to the auth-less `execute_tool`): the chat handler
+//! forwards the user's `AuthContext` into `ConversationService::send_message`,
+//! which passes it through the tool loop to this provider. The call is scoped to
+//! the conversation's project, so the model is bounded by the user's own
+//! permissions and cannot reach another tenant's data.
 
 use std::sync::Arc;
 

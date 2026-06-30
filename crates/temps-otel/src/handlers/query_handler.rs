@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 
 use crate::types::*;
 use crate::OtelAppState;
-use temps_auth::{permission_guard, RequireAuth};
+use temps_auth::{permission_guard, project_scope_guard, RequireAuth};
 use temps_core::problemdetails::Problem;
 use temps_core::ProblemDetails;
 
@@ -393,6 +393,9 @@ pub async fn list_metric_label_keys(
     Query(params): Query<MetricLabelKeysParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, OtelRead);
+    // Confine a project-scoped deployment token to its own project's telemetry
+    // (no-op for user/API-key/session auth).
+    project_scope_guard!(auth, params.project_id);
 
     let (start, end) = discovery_window(params.start_time.as_deref(), params.end_time.as_deref());
     let keys = state
@@ -430,6 +433,9 @@ pub async fn list_metric_label_values(
     Query(params): Query<MetricLabelValuesParams>,
 ) -> Result<impl IntoResponse, Problem> {
     permission_guard!(auth, OtelRead);
+    // Confine a project-scoped deployment token to its own project's telemetry
+    // (no-op for user/API-key/session auth).
+    project_scope_guard!(auth, params.project_id);
 
     let (start, end) = discovery_window(params.start_time.as_deref(), params.end_time.as_deref());
     let values = state

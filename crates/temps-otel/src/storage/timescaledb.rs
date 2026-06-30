@@ -86,19 +86,19 @@ fn interval_seconds_pg(interval: &str) -> i64 {
 }
 
 /// Validate that a metric label key contains only safe characters.
-/// Mirrors the allowlist in `temps-metrics::validate_metric_name`.
+/// Mirrors the allowlist in `temps-metrics::validate_metric_name`. A bad key is
+/// a client error (`Validation` → HTTP 400), not a server error.
 fn validate_label_key(key: &str) -> Result<(), OtelError> {
     if key.is_empty() {
-        return Err(OtelError::Storage {
-            message: "query_metrics: label key '' is empty (only [a-zA-Z0-9_.:-] allowed)"
-                .to_string(),
+        return Err(OtelError::Validation {
+            message: "label key is empty (only [a-zA-Z0-9_.:-] allowed)".to_string(),
         });
     }
     for ch in key.chars() {
         if !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | '-' | ':') {
-            return Err(OtelError::Storage {
+            return Err(OtelError::Validation {
                 message: format!(
-                    "query_metrics: label key '{key}' is outside the allowed character set [a-zA-Z0-9_.:-]"
+                    "label key '{key}' is outside the allowed character set [a-zA-Z0-9_.:-]"
                 ),
             });
         }
