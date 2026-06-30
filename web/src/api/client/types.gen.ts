@@ -5147,6 +5147,19 @@ export type EnrichVisitorResponse = {
     visitor_id: string;
 };
 
+export type EnrollmentTokenInfo = {
+    bound_node_name?: string | null;
+    created_at: string;
+    expires_at: string;
+    id: number;
+    max_uses: number;
+    used_count: number;
+};
+
+export type EnrollmentTokenListResponse = {
+    tokens: Array<EnrollmentTokenInfo>;
+};
+
 export type EntityInfoResponse = {
     /**
      * Full container path
@@ -7869,7 +7882,14 @@ export type ListApiKeysQuery = {
 };
 
 /**
- * Query parameters for listing audit logs
+ * Query parameters for listing audit logs.
+ *
+ * Every field is optional — omitting one means "don't filter on it". Deriving
+ * `IntoParams` makes utoipa render them as optional query params with the
+ * correct types; the previous hand-written `params(("operation_type", Query,
+ * …))` tuples defaulted every param to `required: true, type: string`, which
+ * misled both API clients and the AI `describe_api`/`call_api` tools into
+ * thinking all filters were mandatory.
  */
 export type ListAuditLogsQuery = {
     /**
@@ -7885,7 +7905,7 @@ export type ListAuditLogsQuery = {
      */
     offset?: number | null;
     /**
-     * Filter logs by operation type
+     * Filter logs by operation type (omit for all)
      */
     operation_type?: string | null;
     /**
@@ -7893,7 +7913,7 @@ export type ListAuditLogsQuery = {
      */
     to?: string | null;
     /**
-     * Filter logs by user ID
+     * Filter logs by user ID (omit for all users)
      */
     user_id?: number | null;
 };
@@ -8178,12 +8198,25 @@ export type LogRecord = {
  */
 export type LogSearchLine = {
     chunk_id: string;
+    /**
+     * Container this line came from — lets the UI tag/group lines by container
+     * in a combined ("show all") multi-container view.
+     */
+    container_id?: string;
     context?: null | LineContext;
     deploy_id?: number | null;
     fields?: unknown;
     level: LogLevel;
     line_offset: number;
     message: string;
+    /**
+     * Worker node the line came from (`None` = control-plane-local).
+     */
+    node_id?: number | null;
+    /**
+     * Human-readable node name for display.
+     */
+    node_name?: string | null;
     service: string;
     timestamp: string;
 };
@@ -8192,6 +8225,19 @@ export type LogSearchLine = {
  * Log severity level (simplified from OTel's 24 levels).
  */
 export type LogSeverity = 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL';
+
+/**
+ * A distinct log source (container) seen in the queried scope. Used to populate
+ * the history filter dropdowns with the *full* set of containers/nodes for the
+ * project + env + deployment + time window — independent of the active
+ * container/node/service filter, so the user can switch between them.
+ */
+export type LogSource = {
+    container_id: string;
+    node_id?: number | null;
+    node_name?: string | null;
+    service: string;
+};
 
 /**
  * Log output stream
@@ -8273,9 +8319,28 @@ export type McpDefinitionResponse = {
 
 export type MessageContent = string | Array<ContentPart>;
 
+/**
+ * One ordered segment of an assistant turn: a chunk of prose, or a tool
+ * invocation. Mirrors the `metadata.parts` persisted by the chat service.
+ */
+export type MessagePart = {
+    text: string;
+    type: 'text';
+} | {
+    tool: ToolInfo;
+    type: 'tool';
+};
+
 export type MessageResponse = {
     content: string;
     created_at: string;
+    /**
+     * Ordered render segments (text / tool, in the order they occurred) so a
+     * reloaded chat shows the same interleaving as the live stream. Absent for
+     * older messages persisted before parts were tracked; the client then falls
+     * back to `tools` (rendered first) + `content`.
+     */
+    parts?: Array<MessagePart> | null;
     role: string;
     /**
      * Tools the assistant ran on this turn (persisted in message metadata), so
@@ -8567,6 +8632,37 @@ export type MigrationSummary = {
     unsupported_features?: Array<UnsupportedFeature>;
 };
 
+export type MintEnrollmentTokenRequest = {
+    /**
+     * Optional: restrict the token to register one specific node name.
+     */
+    bound_node_name?: string | null;
+    /**
+     * Maximum registrations this token may authorize (default 1).
+     */
+    max_uses?: number | null;
+    /**
+     * Time-to-live in seconds (default 3600 = 1h).
+     */
+    ttl_secs?: number | null;
+};
+
+export type MintEnrollmentTokenResponse = {
+    /**
+     * SHA-256 fingerprint of the cluster CA (if mTLS is set up). Pass it to the
+     * worker as `temps join --ca-fingerprint <fp>` to verify the CA on join.
+     */
+    ca_fingerprint?: string | null;
+    expires_at: string;
+    id: number;
+    max_uses: number;
+    message: string;
+    /**
+     * The plaintext enrollment token — shown only once, save it now.
+     */
+    token: string;
+};
+
 /**
  * Miscellaneous validation result
  */
@@ -8762,23 +8858,85 @@ export type MrrBucketResponse = {
  */
 export type MultiNodeSettings = {
     /**
+     * Per-cluster CA certificate (PEM) for multi-node mTLS (ADR-020 WS-2.1).
+     * Public — distributed to nodes as the trust root and used by the control
+     * plane as the root for verifying agent server certs. Minted lazily on the
+     * first CSR-bearing registration.
+     */
+    cluster_ca_cert_pem?: string | null;
+    /**
+     * Per-cluster CA private key, AES-256-GCM ciphertext (EncryptionService).
+     * SECRET — never returned over HTTP (elided in the masked response).
+     */
+    cluster_ca_key_encrypted?: string | null;
+    /**
      * SHA-256 hash of the join token (never store plaintext)
      */
     join_token_hash?: string | null;
+    /**
+     * Whether the legacy single shared join token is still accepted for node
+     * registration (ADR-020 WS-1.1). Defaults to `true` so existing clusters
+     * keep working on upgrade; fresh installs should set it `false` and rely on
+     * short-lived, single-use enrollment tokens instead.
+     */
+    legacy_shared_token_enabled?: boolean;
+    /**
+     * CPU-usage percent above which a worker node raises a resource alert
+     * (ADR-020 / monitoring). `None` disables CPU alerting. Default 90.
+     */
+    node_cpu_alert_percent?: number | null;
+    /**
+     * Disk-usage percent above which a worker node raises a resource alert.
+     * `None` disables disk alerting. Default 90.
+     */
+    node_disk_alert_percent?: number | null;
+    /**
+     * Memory-usage percent above which a worker node raises a resource alert.
+     * `None` disables memory alerting. Default 90.
+     */
+    node_memory_alert_percent?: number | null;
     /**
      * Private/WireGuard IP address of the control plane node.
      * Used by remote worker nodes to reach services (databases, etc.) running on the control plane.
      * Set via `--private-address` or `TEMPS_PRIVATE_ADDRESS`.
      */
     private_address?: string | null;
+    /**
+     * Whether to enforce multi-node mTLS (ADR-020 WS-2.1). When `false`
+     * (default), the control plane ignores join-time CSRs and nodes keep
+     * serving plaintext HTTP — zero behavior change. When `true`, the CP signs
+     * node CSRs, nodes serve mutual TLS, and every CP→agent call uses the
+     * cluster client cert. Observe-then-enforce: flip this on only once all
+     * workers have re-enrolled with certs.
+     */
+    require_mtls?: boolean;
 };
 
 /**
  * Multi-node settings with `join_token_hash` elided.
  */
 export type MultiNodeSettingsMasked = {
+    /**
+     * SHA-256 fingerprint of the cluster CA certificate (public — operators can
+     * verify it out of band; the CA private key is never exposed).
+     */
+    cluster_ca_fingerprint?: string | null;
     has_join_token: boolean;
+    /**
+     * Whether the deprecated shared join token is still accepted.
+     */
+    legacy_shared_token_enabled: boolean;
+    /**
+     * Node resource-alert thresholds (percent); `None` = that alert disabled.
+     */
+    node_cpu_alert_percent?: number | null;
+    node_disk_alert_percent?: number | null;
+    node_memory_alert_percent?: number | null;
     private_address?: string | null;
+    /**
+     * Whether control-plane↔agent mutual TLS is enforced.
+     */
+    require_mtls: boolean;
 };
 
 /**
@@ -11362,6 +11520,13 @@ export type RegisterNodeApiRequest = {
      */
     address: string;
     /**
+     * Node-generated certificate signing request (PEM) for multi-node mTLS
+     * (ADR-020 WS-2.1). When present, the control plane signs it with the
+     * cluster CA and returns the leaf + CA cert. Optional — token-only nodes
+     * (legacy / edge) still register without one.
+     */
+    csr_pem?: string | null;
+    /**
      * X25519 public key for ECIES certificate encryption (base64-encoded, edge nodes only)
      */
     edge_public_key?: string | null;
@@ -11377,6 +11542,12 @@ export type RegisterNodeApiRequest = {
      * Unique name for this node
      */
     name: string;
+    /**
+     * The node's *current* token, supplied to prove possession when
+     * re-registering (changing the identity of) a node that already exists.
+     * Optional; only needed to rebind a still-live node. (ADR-020 WS-1.2.)
+     */
+    prior_token?: string | null;
     /**
      * Private/WireGuard address for inter-node communication
      */
@@ -11400,6 +11571,16 @@ export type RegisterNodeApiRequest = {
 };
 
 export type RegisterNodeResponse = {
+    /**
+     * The cluster CA certificate (PEM) the node pins as its trust root.
+     * Present only when a `csr_pem` was supplied. (ADR-020 WS-2.1.)
+     */
+    ca_cert_pem?: string | null;
+    /**
+     * The signed per-node leaf certificate (PEM) the agent serves as its TLS
+     * server cert. Present only when a `csr_pem` was supplied. (ADR-020 WS-2.1.)
+     */
+    cert_pem?: string | null;
     id: number;
     message: string;
     name: string;
@@ -12345,6 +12526,12 @@ export type ScreenshotSettings = {
 
 export type SearchLogsRequest = {
     /**
+     * Filter to specific containers (Docker container IDs). Empty = all
+     * containers. Drives "filter by container / show all" in a project's
+     * history, which spans multiple deployments and containers.
+     */
+    container_ids?: Array<string>;
+    /**
      * grep -C: number of raw context lines to include before and after each
      * match (0 = none, default). Clamped to 50 server-side. The surrounding
      * lines ignore the level/text filters — they are the actual adjacent log
@@ -12372,6 +12559,11 @@ export type SearchLogsRequest = {
      */
     levels?: Array<string>;
     /**
+     * Filter to specific worker nodes (node_id). Empty = all nodes, including
+     * control-plane-local logs.
+     */
+    node_ids?: Array<number>;
+    /**
      * Page size (default: 100, max: 500)
      */
     page_size?: number | null;
@@ -12394,6 +12586,11 @@ export type SearchLogsRequest = {
 };
 
 export type SearchLogsResponse = {
+    /**
+     * Distinct containers/nodes/services available in the queried scope, for
+     * the filter dropdowns. Populated on the first page (no cursor).
+     */
+    available_sources?: Array<LogSource>;
     lines: Array<LogSearchLine>;
     next_cursor?: string | null;
     search_mode: SearchMode;
@@ -12564,6 +12761,13 @@ export type SendEmailResponseBody = {
 
 export type SendMessageRequest = {
     content: string;
+    /**
+     * Optional, client-supplied description of the page/entity the user is
+     * currently viewing (e.g. a trace in a project). Injected into the model's
+     * view of this turn only — never stored or shown in history. Capped server
+     * side; oversized values are ignored rather than rejected.
+     */
+    page_context?: string | null;
 };
 
 export type SentryChunkUploadResponse = {
@@ -15219,10 +15423,14 @@ export type UpdateProviderCredentialsRequest = {
 
 export type UpdateProviderKeyRequest = {
     api_key?: string | null;
+    /**
+     * Double-Option: absent = leave unchanged, present-null = clear (revert to
+     * the provider's default endpoint), present-value = set.
+     */
     base_url?: string | null;
     /**
-     * Double-Option: outer `Some` = field present in patch, inner `None` =
-     * clear the pinned model (revert to the per-provider default).
+     * Double-Option: absent = leave unchanged, present-null = clear the pinned
+     * model (revert to the per-provider default), present-value = set.
      */
     default_model?: string | null;
     display_name?: string | null;
@@ -41152,6 +41360,108 @@ export type GetDiskStatusResponses = {
 
 export type GetDiskStatusResponse = GetDiskStatusResponses[keyof GetDiskStatusResponses];
 
+export type ListEnrollmentTokensData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/enrollment-tokens';
+};
+
+export type ListEnrollmentTokensErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type ListEnrollmentTokensResponses = {
+    /**
+     * Active enrollment tokens
+     */
+    200: EnrollmentTokenListResponse;
+};
+
+export type ListEnrollmentTokensResponse = ListEnrollmentTokensResponses[keyof ListEnrollmentTokensResponses];
+
+export type MintEnrollmentTokenData = {
+    body: MintEnrollmentTokenRequest;
+    path?: never;
+    query?: never;
+    url: '/settings/enrollment-tokens';
+};
+
+export type MintEnrollmentTokenErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type MintEnrollmentTokenResponses = {
+    /**
+     * Enrollment token minted
+     */
+    200: MintEnrollmentTokenResponse;
+};
+
+export type MintEnrollmentTokenResponse2 = MintEnrollmentTokenResponses[keyof MintEnrollmentTokenResponses];
+
+export type RevokeEnrollmentTokenData = {
+    body?: never;
+    path: {
+        /**
+         * Enrollment token id
+         */
+        id: number;
+    };
+    query?: never;
+    url: '/settings/enrollment-tokens/{id}';
+};
+
+export type RevokeEnrollmentTokenErrors = {
+    /**
+     * Unauthorized
+     */
+    401: unknown;
+    /**
+     * Insufficient permissions
+     */
+    403: unknown;
+    /**
+     * Enrollment token not found
+     */
+    404: unknown;
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type RevokeEnrollmentTokenResponses = {
+    /**
+     * Enrollment token revoked
+     */
+    200: SettingsUpdateResponse;
+};
+
+export type RevokeEnrollmentTokenResponse = RevokeEnrollmentTokenResponses[keyof RevokeEnrollmentTokenResponses];
+
 export type RevokeJoinTokenData = {
     body?: never;
     path?: never;
@@ -43575,31 +43885,31 @@ export type IngestSentryEventResponse = IngestSentryEventResponses[keyof IngestS
 export type ListAuditLogsData = {
     body?: never;
     path?: never;
-    query: {
+    query?: {
         /**
-         * Filter logs by operation type
+         * Filter logs by operation type (omit for all)
          */
-        operation_type: unknown;
+        operation_type?: string;
         /**
-         * Filter logs by user ID
+         * Filter logs by user ID (omit for all users)
          */
-        user_id: unknown;
+        user_id?: number;
         /**
          * Start timestamp (milliseconds since epoch)
          */
-        from: unknown;
+        from?: string;
         /**
          * End timestamp (milliseconds since epoch)
          */
-        to: unknown;
+        to?: string;
         /**
          * Maximum number of logs to return
          */
-        limit: unknown;
+        limit?: number;
         /**
          * Number of logs to skip
          */
-        offset: unknown;
+        offset?: number;
     };
     url: 'audit/logs';
 };
