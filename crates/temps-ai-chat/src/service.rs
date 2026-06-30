@@ -16,8 +16,14 @@ use temps_ai::{AiService, ChatMessage, ChatStreamDelta, ChatTool, ChatTurnReques
 use temps_auth::context::AuthContext;
 use temps_entities::{ai_conversations, ai_messages};
 
+use temps_ai_api_tools::{ApiCallScope, WriteApiToolsHandle, WritePrepareOutcome};
+
+use crate::pending_actions::PendingActionService;
 use crate::provider::ConversationContextProvider;
 use crate::ChatError;
+
+/// Tool name for the write-proposal (confirm-gated) tool.
+const TEMPS_WRITE_TOOL_NAME: &str = "temps_write";
 
 /// System prompt for the one-shot title generator. Kept terse so even small
 /// local models return a clean label rather than a sentence.
@@ -127,12 +133,23 @@ pub struct ConversationWithProject {
     pub project_slug: Option<String>,
 }
 
+/// Optional write-tool support wired into a `ConversationService` via
+/// [`ConversationService::with_write_support`].
+struct WriteSupport {
+    write_handle: Arc<WriteApiToolsHandle>,
+    pending: Arc<PendingActionService>,
+}
+
 /// Owns conversation persistence + AI turn streaming. Construct once with the
 /// registered context providers; resolve via the plugin DI.
 pub struct ConversationService {
     db: Arc<DatabaseConnection>,
     ai: Arc<dyn AiService>,
     providers: HashMap<&'static str, Arc<dyn ConversationContextProvider>>,
+    /// Optional write-tool wiring. `None` until
+    /// [`ConversationService::with_write_support`] is called, or when the
+    /// project toggle is off — the `temps_write` tool is simply absent.
+    write_support: Option<WriteSupport>,
 }
 
 impl ConversationService {
@@ -149,7 +166,31 @@ impl ConversationService {
             .into_iter()
             .map(|p| (p.context_type(), p))
             .collect();
-        Self { db, ai, providers }
+        Self {
+            db,
+            ai,
+            providers,
+            write_support: None,
+        }
+    }
+
+    /// Attach write-tool support (the `temps_write` tool + pending-action
+    /// staging). This is called by the plugin after service construction once
+    /// both the write handle and pending-action service are available.
+    ///
+    /// When not called (or when the project's `ai_write_actions_enabled` toggle
+    /// is off), the service degrades gracefully: `temps_write` is not offered,
+    /// no pending-action rows are created.
+    pub fn with_write_support(
+        mut self,
+        write_handle: Arc<WriteApiToolsHandle>,
+        pending: Arc<PendingActionService>,
+    ) -> Self {
+        self.write_support = Some(WriteSupport {
+            write_handle,
+            pending,
+        });
+        self
     }
 
     /// Is AI configured at all? (Capability gate; feature opt-in is checked at the handler.)
@@ -484,6 +525,32 @@ impl ConversationService {
                     .await,
             );
         }
+
+        // Write tool: offered only when write support is wired AND the project
+        // has opted in. Checking `ai_write_actions_enabled` here (once per turn,
+        // from the already-loaded project row) ensures the model cannot stage
+        // write proposals on a project that hasn't enabled the feature.
+        let write_actions_enabled = self
+            .load_write_actions_enabled(conv.project_id)
+            .await
+            .unwrap_or(false);
+        let write_appendix = if write_actions_enabled {
+            self.maybe_add_write_tool(&mut tools, &messages, auth)
+        } else {
+            None
+        };
+        if let Some(appendix) = write_appendix {
+            // Append the write-CLI section map to the system framing so the model
+            // knows what mutations are available and that they require confirmation.
+            match messages.iter_mut().find(|m| m.role == "system") {
+                Some(sys) => {
+                    sys.content.push_str("\n\n");
+                    sys.content.push_str(&appendix);
+                }
+                None => messages.insert(0, ChatMessage::system(appendix)),
+            }
+        }
+
         if !tools.is_empty() {
             return Ok(self
                 .try_tool_loop(conv, messages, provider, tools, auth)
@@ -555,6 +622,74 @@ impl ConversationService {
         Ok(Box::pin(out))
     }
 
+    /// Load the `ai_write_actions_enabled` flag for a project from the DB.
+    /// Best-effort: returns `None` on DB error (caller treats as `false`).
+    async fn load_write_actions_enabled(&self, project_id: i32) -> Option<bool> {
+        let project = temps_entities::projects::Entity::find_by_id(project_id)
+            .one(self.db.as_ref())
+            .await
+            .ok()??;
+        Some(project.ai_write_actions_enabled)
+    }
+
+    /// If write support is wired, append the `temps_write` tool to `tools` and
+    /// return the write-CLI root-help appendix for the system framing (so the model
+    /// knows the confirm-gated mutation sections). Returns `None` when write support
+    /// is absent or the handle is not yet populated.
+    fn maybe_add_write_tool(
+        &self,
+        tools: &mut Vec<ChatTool>,
+        _messages: &[ChatMessage],
+        auth: &AuthContext,
+    ) -> Option<String> {
+        let ws = self.write_support.as_ref()?;
+        let caller = ws.write_handle.get()?;
+        let help = caller.cli_write_root_help(auth);
+        tools.push(ChatTool {
+            name: TEMPS_WRITE_TOOL_NAME.to_string(),
+            description: "Propose a mutation to the platform. \
+                The change is NOT executed immediately — it creates a PROPOSAL that the user \
+                must explicitly confirm in the UI before anything runs. \
+                Use `--help` to discover available write sections and operations exactly \
+                as you do with the read-only `temps` tool. \
+                Always prefer the most specific operation. \
+                Never claim the action has succeeded — tell the user to review and \
+                confirm or reject the proposal."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "A write Temps CLI command line. \
+                                        Discovery: `--help` → sections; `<section> --help` → operations; \
+                                        `<section> <operation> --help` → flags. \
+                                        Run: `<section> <operation> --flag value …`. \
+                                        project_id is auto-filled. \
+                                        This PROPOSES a change — it does NOT execute immediately. \
+                                        The user must confirm in the UI."
+                    }
+                },
+                "additionalProperties": false
+            }),
+        });
+        if !help.trim().is_empty() {
+            Some(format!(
+                "## The `temps_write` confirm-gated mutation CLI\n\
+                 You have a `temps_write` tool for proposing mutations. \
+                 Every invocation ONLY stages a proposal — it does NOT execute. \
+                 The user must confirm or reject each proposal in the UI. \
+                 Never tell the user an action was taken; always direct them to confirm.\n\n\
+                 Available write sections (permissions permitting):\n```\n{help}```"
+            ))
+        } else {
+            Some("## The `temps_write` tool\nYou may propose confirm-gated mutations via `temps_write`. \
+                 Each proposal must be confirmed in the UI before running."
+                .to_string())
+        }
+    }
+
     /// Run the agentic tool loop and stream the result. Each round is a single
     /// streaming pass ([`AiService::chat_stream_turn`]) that yields assistant text
     /// **and** tool calls inline — so prose arrives token-by-token while tool
@@ -602,6 +737,15 @@ impl ConversationService {
         let context_type = conv.context_type.clone();
         let context_id = conv.context_id.clone();
         let auth = auth.clone();
+        // Write support clones (None when not wired or project toggle is off).
+        let write_handle_opt = self
+            .write_support
+            .as_ref()
+            .and_then(|ws| ws.write_handle.get());
+        let pending_svc_opt = self
+            .write_support
+            .as_ref()
+            .map(|ws| ws.pending.clone());
 
         let (tx, mut rx) =
             tokio::sync::mpsc::unbounded_channel::<Result<ChatStreamEvent, ChatError>>();
@@ -641,6 +785,9 @@ impl ConversationService {
             // provider request, so a stopped turn doesn't keep costing tokens — and
             // still persist whatever streamed so far (the user turn isn't orphaned).
             let mut client_gone = false;
+            // IDs of ai_pending_actions rows created during this turn; linked to the
+            // assistant message after it is persisted (best-effort).
+            let mut proposed_action_ids: Vec<i64> = Vec::new();
 
             'rounds: for _ in 0..MAX_ROUNDS {
                 let req = ChatTurnRequest {
@@ -736,6 +883,7 @@ impl ConversationService {
                 });
                 for tc in &round_calls {
                     // Route the ADR-024 `temps` CLI tool to the API-tools provider;
+                    // `temps_write` to the write-proposal path;
                     // otherwise to the context provider. `project_id` is always the
                     // conversation's project, never anything the model supplied — so
                     // a tool can't be steered to another tenant's data.
@@ -749,7 +897,21 @@ impl ConversationService {
                             tc.name, prev
                         )
                     } else {
-                        let r = if tc.name == "temps" {
+                        let r = if tc.name == TEMPS_WRITE_TOOL_NAME {
+                            // Write-proposal path: parse the command, validate (no
+                            // execution), stage a pending-action row, return a
+                            // JSON proposal receipt to the model.
+                            dispatch_write_tool(
+                                &tc.arguments,
+                                project_id,
+                                conv_id,
+                                &auth,
+                                write_handle_opt.as_deref(),
+                                pending_svc_opt.as_deref(),
+                                &mut proposed_action_ids,
+                            )
+                            .await
+                        } else if tc.name == "temps" {
                             if let Some(api_p) = &api_tools {
                                 api_p
                                     .execute_tool_with_auth(
@@ -876,7 +1038,21 @@ impl ConversationService {
                     created_at: Set(Utc::now()),
                     ..Default::default()
                 };
-                let _ = am.insert(db.as_ref()).await;
+                if let Ok(msg) = am.insert(db.as_ref()).await {
+                    // Best-effort: link any pending actions created during this turn
+                    // to the persisted assistant message so the UI can correlate them.
+                    if !proposed_action_ids.is_empty() {
+                        if let Some(pending) = &pending_svc_opt {
+                            if let Err(e) = pending.link_message(&proposed_action_ids, msg.id).await {
+                                tracing::warn!(
+                                    conv_id,
+                                    "Failed to link pending actions to message {}: {e}",
+                                    msg.id
+                                );
+                            }
+                        }
+                    }
+                }
             }
         });
 
@@ -897,6 +1073,102 @@ impl ConversationService {
         };
         am.update(self.db.as_ref()).await?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write-tool dispatch helper (free function so the spawned task can borrow it)
+// ---------------------------------------------------------------------------
+
+/// Dispatch a `temps_write` tool call: parse the command, validate (no
+/// execution), create a pending-action row, return a JSON proposal receipt.
+///
+/// Returns a readable string result that goes back to the model as the tool
+/// result — always, even on internal errors (never panics).
+async fn dispatch_write_tool(
+    arguments: &str,
+    project_id: i32,
+    conversation_id: i64,
+    auth: &AuthContext,
+    write_handle: Option<&temps_ai_api_tools::InternalApiCaller>,
+    pending_svc: Option<&PendingActionService>,
+    proposed_action_ids: &mut Vec<i64>,
+) -> String {
+    let caller = match write_handle {
+        Some(c) => c,
+        None => {
+            return "The `temps_write` tool is not available (write caller not yet wired or \
+                    project toggle is off)."
+                .to_string()
+        }
+    };
+    let pending = match pending_svc {
+        Some(p) => p,
+        None => {
+            return "The `temps_write` tool is not available (pending-action service absent)."
+                .to_string()
+        }
+    };
+
+    // Parse the JSON arguments.
+    let args: serde_json::Value = match serde_json::from_str(arguments) {
+        Ok(v) => v,
+        Err(e) => return format!("Invalid `temps_write` arguments (not JSON): {e}"),
+    };
+    let command = match args.get("command").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            return "The `temps_write` tool requires a 'command' string. \
+                    Try `--help` to list write sections."
+                .to_string()
+        }
+    };
+
+    let scope = ApiCallScope {
+        auth: auth.clone(),
+        project_ids: vec![project_id],
+    };
+
+    match caller.prepare_write_cli(command, &scope) {
+        WritePrepareOutcome::Help(text) => text,
+        WritePrepareOutcome::Invalid(msg) => msg,
+        WritePrepareOutcome::Prepared(prepared) => {
+            // The advisory required_permission is stored as a colon-separated
+            // string (e.g. "deployments:create"). We pass None here because we
+            // only have the operation_id + method at this point and cannot look
+            // up the OpenAPI tag without the full index. The router's
+            // permission_guard! is the real enforcement boundary at execute time.
+            let required_permission: Option<String> = None;
+
+            match pending
+                .create(
+                    conversation_id,
+                    project_id,
+                    &prepared,
+                    required_permission,
+                    Some(auth.user_id()),
+                )
+                .await
+            {
+                Ok(row) => {
+                    // Track the row ID so the caller can link it to the message
+                    // once the assistant turn is persisted.
+                    proposed_action_ids.push(row.id);
+                    serde_json::json!({
+                        "status": "proposed",
+                        "action_id": row.public_id,
+                        "operation": row.operation_id,
+                        "method": row.method,
+                        "summary": row.summary,
+                        "note": "PROPOSAL ONLY — awaiting explicit user confirmation in the UI. \
+                                 It has NOT run. Do not claim success; tell the user to review \
+                                 and confirm or reject it."
+                    })
+                    .to_string()
+                }
+                Err(e) => format!("Could not stage this change: {e}"),
+            }
+        }
     }
 }
 
@@ -1116,6 +1388,7 @@ mod tests {
             db: Arc::new(db),
             ai,
             providers: HashMap::new(),
+            write_support: None,
         };
         (svc, tools)
     }
@@ -1362,6 +1635,7 @@ mod tests {
             db: Arc::new(db),
             ai: Arc::new(ScriptedAi::new(vec![])),
             providers: HashMap::new(),
+            write_support: None,
         }
     }
 

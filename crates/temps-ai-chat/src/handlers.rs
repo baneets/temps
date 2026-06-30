@@ -24,9 +24,13 @@ use utoipa::{OpenApi, ToSchema};
 use temps_auth::{deny_deployment_token, permission_guard, project_scope_guard, RequireAuth};
 use temps_core::problemdetails::{self, Problem};
 use temps_core::{AuditContext, AuditLogger, RequestMetadata};
-use temps_entities::{ai_conversations, ai_messages};
+use temps_entities::{ai_conversations, ai_messages, ai_pending_actions};
 
-use crate::audit::{ChatMessageSentAudit, ConversationArchivedAudit, ConversationCreatedAudit};
+use crate::audit::{
+    AiActionConfirmedAudit, AiActionRejectedAudit, ChatMessageSentAudit,
+    ConversationArchivedAudit, ConversationCreatedAudit,
+};
+use crate::pending_actions::{PendingActionError, PendingActionService};
 use crate::service::ChatStreamEvent;
 use crate::{ChatError, ConversationService};
 
@@ -36,6 +40,8 @@ pub struct AppState {
     pub db: Arc<DatabaseConnection>,
     /// Audit logger for write operations (best-effort; never fails a request).
     pub audit_service: Arc<dyn AuditLogger>,
+    /// Pending-action service (confirm/reject write proposals).
+    pub pending_actions: Arc<PendingActionService>,
 }
 
 impl AppState {
@@ -225,6 +231,87 @@ impl From<ChatError> for Problem {
                     .with_title("Internal Server Error")
                     .with_detail(e.to_string())
             }
+        }
+    }
+}
+
+impl From<PendingActionError> for Problem {
+    fn from(e: PendingActionError) -> Self {
+        match e {
+            PendingActionError::NotFound { .. } => {
+                problemdetails::new(axum::http::StatusCode::NOT_FOUND)
+                    .with_title("Pending Action Not Found")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::InvalidState { .. } => {
+                problemdetails::new(axum::http::StatusCode::CONFLICT)
+                    .with_title("Invalid Action State")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::PermissionDenied { .. } => {
+                problemdetails::new(axum::http::StatusCode::FORBIDDEN)
+                    .with_title("Permission Denied")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Unavailable => {
+                problemdetails::new(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                    .with_title("Write Actions Unavailable")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Execution { .. } => {
+                problemdetails::new(axum::http::StatusCode::BAD_GATEWAY)
+                    .with_title("Execution Failed")
+                    .with_detail(e.to_string())
+            }
+            PendingActionError::Database(_) => {
+                problemdetails::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .with_title("Internal Server Error")
+                    .with_detail(e.to_string())
+            }
+        }
+    }
+}
+
+// --- Pending-action DTO ------------------------------------------------------
+
+/// A proposed AI write action awaiting human confirmation.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PendingActionResponse {
+    pub public_id: String,
+    pub operation_id: String,
+    pub method: String,
+    pub summary: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_permission: Option<String>,
+    /// The flat params to be replayed at execute time (shown pre-execution for review).
+    pub params: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executed_at: Option<String>,
+}
+
+impl From<ai_pending_actions::Model> for PendingActionResponse {
+    fn from(m: ai_pending_actions::Model) -> Self {
+        Self {
+            public_id: m.public_id,
+            operation_id: m.operation_id,
+            method: m.method,
+            summary: m.summary,
+            status: m.status,
+            required_permission: m.required_permission,
+            params: m.params,
+            result: m.result,
+            error: m.error,
+            created_at: m.created_at.to_rfc3339(),
+            confirmed_at: m.confirmed_at.map(|t| t.to_rfc3339()),
+            executed_at: m.executed_at.map(|t| t.to_rfc3339()),
         }
     }
 }
@@ -597,6 +684,171 @@ pub async fn archive_conversation(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+// --- Pending-action handlers -------------------------------------------------
+
+/// List all pending actions for a conversation (most-recently-proposed first).
+#[utoipa::path(
+    get, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/conversations/{public_id}/pending-actions",
+    params(
+        ("project_id" = i32, Path,),
+        ("public_id" = String, Path, description = "Conversation public id"),
+    ),
+    responses(
+        (status = 200, body = Vec<PendingActionResponse>),
+        (status = 401), (status = 403), (status = 404)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_pending_actions(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path((project_id, conv_public_id)): Path<(i32, String)>,
+) -> Result<Json<Vec<PendingActionResponse>>, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    // Verify conversation exists + is scoped to this project.
+    let conv = state
+        .service
+        .get_by_public_id(project_id, &conv_public_id)
+        .await?;
+    let rows = state
+        .pending_actions
+        .list_for_conversation(conv.id)
+        .await
+        .map_err(Problem::from)?;
+    Ok(Json(rows.into_iter().map(PendingActionResponse::from).collect()))
+}
+
+/// Get a single pending action by its public id (scoped to the project).
+#[utoipa::path(
+    get, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/pending-actions/{action_public_id}",
+    params(
+        ("project_id" = i32, Path,),
+        ("action_public_id" = String, Path,),
+    ),
+    responses(
+        (status = 200, body = PendingActionResponse),
+        (status = 401), (status = 403), (status = 404)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn get_pending_action(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path((project_id, action_public_id)): Path<(i32, String)>,
+) -> Result<Json<PendingActionResponse>, Problem> {
+    permission_guard!(auth, ProjectsRead);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    let action = state
+        .pending_actions
+        .get(project_id, &action_public_id)
+        .await
+        .map_err(Problem::from)?;
+    Ok(Json(PendingActionResponse::from(action)))
+}
+
+/// Confirm a proposed AI action: validate permission, atomically claim, execute,
+/// persist outcome. The execution uses the CONFIRMING user's auth — never the model's.
+#[utoipa::path(
+    post, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/pending-actions/{action_public_id}/confirm",
+    params(
+        ("project_id" = i32, Path,),
+        ("action_public_id" = String, Path,),
+    ),
+    responses(
+        (status = 200, body = PendingActionResponse),
+        (status = 401), (status = 403), (status = 404), (status = 409), (status = 503)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn confirm_pending_action(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((project_id, action_public_id)): Path<(i32, String)>,
+) -> Result<Json<PendingActionResponse>, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    let confirmed_by = Some(auth.user_id());
+    let updated = state
+        .pending_actions
+        .confirm(project_id, &action_public_id, &auth, confirmed_by)
+        .await
+        .map_err(Problem::from)?;
+
+    // Audit is also emitted inside the service, but we emit here with full
+    // metadata (ip_address, user_agent) for the HTTP-layer record.
+    let audit = AiActionConfirmedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        action_id: updated.public_id.clone(),
+        operation_id: updated.operation_id.clone(),
+        status: updated.status.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to write ai.pending_action.confirmed audit log: {e}");
+    }
+
+    Ok(Json(PendingActionResponse::from(updated)))
+}
+
+/// Reject a proposed AI action (no execution). Status transitions to "rejected".
+#[utoipa::path(
+    post, tag = "AI Chat",
+    path = "/projects/{project_id}/ai/pending-actions/{action_public_id}/reject",
+    params(
+        ("project_id" = i32, Path,),
+        ("action_public_id" = String, Path,),
+    ),
+    responses(
+        (status = 200, body = PendingActionResponse),
+        (status = 401), (status = 403), (status = 404), (status = 409)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn reject_pending_action(
+    RequireAuth(auth): RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Extension(metadata): Extension<RequestMetadata>,
+    Path((project_id, action_public_id)): Path<(i32, String)>,
+) -> Result<Json<PendingActionResponse>, Problem> {
+    permission_guard!(auth, ProjectsWrite);
+    project_scope_guard!(auth, project_id);
+    ensure_chat_enabled(state.db.as_ref(), project_id).await?;
+    let rejected_by = Some(auth.user_id());
+    let updated = state
+        .pending_actions
+        .reject(project_id, &action_public_id, &auth, rejected_by)
+        .await
+        .map_err(Problem::from)?;
+
+    let audit = AiActionRejectedAudit {
+        context: AuditContext {
+            user_id: auth.user_id(),
+            ip_address: Some(metadata.ip_address.clone()),
+            user_agent: metadata.user_agent.clone(),
+        },
+        project_id,
+        action_id: updated.public_id.clone(),
+        operation_id: updated.operation_id.clone(),
+    };
+    if let Err(e) = state.audit_service.create_audit_log(&audit).await {
+        error!("Failed to write ai.pending_action.rejected audit log: {e}");
+    }
+
+    Ok(Json(PendingActionResponse::from(updated)))
+}
+
 pub fn configure_routes() -> Router<Arc<AppState>> {
     Router::new()
         // Unified cross-project switcher.
@@ -623,6 +875,23 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
             "/projects/{project_id}/ai/conversations/{public_id}/archive",
             post(archive_conversation),
         )
+        // Pending-action routes (propose-then-confirm write actions).
+        .route(
+            "/projects/{project_id}/ai/conversations/{public_id}/pending-actions",
+            get(list_pending_actions),
+        )
+        .route(
+            "/projects/{project_id}/ai/pending-actions/{action_public_id}",
+            get(get_pending_action),
+        )
+        .route(
+            "/projects/{project_id}/ai/pending-actions/{action_public_id}/confirm",
+            post(confirm_pending_action),
+        )
+        .route(
+            "/projects/{project_id}/ai/pending-actions/{action_public_id}/reject",
+            post(reject_pending_action),
+        )
 }
 
 #[derive(OpenApi)]
@@ -635,6 +904,10 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         get_conversation,
         send_message,
         archive_conversation,
+        list_pending_actions,
+        get_pending_action,
+        confirm_pending_action,
+        reject_pending_action,
     ),
     components(schemas(
         ConversationResponse,
@@ -647,6 +920,7 @@ pub fn configure_routes() -> Router<Arc<AppState>> {
         SendMessageRequest,
         ToolCallEvent,
         ToolResultEvent,
+        PendingActionResponse,
     ))
 )]
 pub struct AiChatApiDoc;

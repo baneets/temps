@@ -45,7 +45,7 @@ pub use caller::{
     WritePrepareOutcome,
 };
 pub use error::ApiToolError;
-pub use handle::ApiToolsHandle;
+pub use handle::{ApiToolsHandle, WriteApiToolsHandle};
 pub use index::{
     ApiOperation, OperationSchema, OperationSummary, ParamLocation, ParamSpec, ReadOnlyApiIndex,
 };

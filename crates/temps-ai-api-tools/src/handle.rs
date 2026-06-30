@@ -1,4 +1,5 @@
-//! [`ApiToolsHandle`] — a shared, lazily-populated holder for [`InternalApiCaller`].
+//! [`ApiToolsHandle`] and [`WriteApiToolsHandle`] — shared, lazily-populated
+//! holders for [`InternalApiCaller`].
 //!
 //! The caller can only be constructed after the Axum router is fully assembled (in
 //! `console.rs`), but plugins that expose API tools need a handle they can receive
@@ -15,6 +16,11 @@
 //! `ApiToolsHandle` is `Clone` — each plugin/adapter clone is shallow (same `Arc`
 //! pointing to the same inner `OnceLock`), so the first `set()` is visible to all
 //! clones immediately.
+//!
+//! [`WriteApiToolsHandle`] is a distinct newtype for the write-only caller.
+//! Registering it as a separate type in the DI container prevents collisions with
+//! the read-only `ApiToolsHandle` (two `Arc<ApiToolsHandle>` of the same type would
+//! silently shadow each other in the registry).
 
 use std::sync::{Arc, OnceLock};
 
@@ -47,5 +53,36 @@ impl ApiToolsHandle {
     /// Return the caller if it has been set, or `None` during startup.
     pub fn get(&self) -> Option<Arc<InternalApiCaller>> {
         self.0.get().cloned()
+    }
+}
+
+/// A distinct newtype for the **write** API caller handle.
+///
+/// Using a separate type avoids DI collisions when both the read and write handles
+/// are registered as services at the same time — the container disambiguates by
+/// type, and `WriteApiToolsHandle` ≠ `ApiToolsHandle`.
+///
+/// Console wiring calls `WriteApiToolsHandle::set(caller)` where `caller` was built
+/// with [`InternalApiCaller::new_write_allowlisted`]. Until that call completes,
+/// `get()` returns `None` and write features degrade gracefully to "unavailable".
+#[derive(Clone, Default)]
+pub struct WriteApiToolsHandle(ApiToolsHandle);
+
+impl WriteApiToolsHandle {
+    /// Create a new, empty write handle.
+    pub fn new() -> Self {
+        Self(ApiToolsHandle::new())
+    }
+
+    /// Populate the handle with the write-only caller.
+    ///
+    /// Silently ignores duplicate calls (see [`ApiToolsHandle::set`]).
+    pub fn set(&self, caller: InternalApiCaller) {
+        self.0.set(caller);
+    }
+
+    /// Return the write caller if it has been set, or `None` during startup.
+    pub fn get(&self) -> Option<Arc<InternalApiCaller>> {
+        self.0.get()
     }
 }
