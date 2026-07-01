@@ -122,13 +122,14 @@ function assistantParts(m: ChatMessage): ChatPart[] {
 }
 
 /**
- * Human label for a tool card — what the tool actually did. For the `temps`
- * virtual CLI that's the command it ran (e.g. `traces get_trace --trace_id …`),
- * which is far more useful than four identical "temps" rows. Falls back to the
- * tool name for other tools or unparsable args.
+ * Human label for a tool card — what the tool actually did. For the `temps` and
+ * `temps_write` virtual CLIs that's the command it ran (e.g.
+ * `traces get_trace --trace_id …`, or `trigger_project_pipeline --environment_id 8`),
+ * which is far more useful than several identical "temps"/"temps_write" rows.
+ * Falls back to the tool name for other tools or unparsable args.
  */
 function toolLabel(tool: ToolCall): string {
-  if (tool.name === 'temps') {
+  if (tool.name === 'temps' || tool.name === 'temps_write') {
     try {
       const args = JSON.parse(tool.arguments) as { command?: unknown }
       if (typeof args.command === 'string' && args.command.trim()) {
