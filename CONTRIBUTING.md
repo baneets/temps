@@ -170,6 +170,24 @@ fix(api): handle null response from external service
 docs: update installation instructions
 ```
 
+Use `!` after the type/scope for breaking changes (`feat(api)!: …`). Choose a
+meaningful **scope** — it becomes the bold prefix in the changelog.
+
+### Changelog (generated — do not edit)
+
+`CHANGELOG.md` is a **generated artifact**, produced from Conventional Commits by
+[git-cliff](https://git-cliff.org) (config: [`cliff.toml`](./cliff.toml)). **Do not
+hand-edit it in a PR** — your commit messages *are* the changelog entries. This is
+deliberate: when every PR edited the same `[Unreleased]` section by hand, every PR
+conflicted on that file. Generating it eliminates that entire class of conflict.
+
+- A non-conventional commit is **dropped** from the changelog — another reason the
+  commit format is enforced.
+- The **Changelog** CI job posts a preview comment showing what your PR will add.
+- Preview locally with `scripts/changelog.sh --unreleased`.
+- Merge commits, release version bumps, and `chore(deps|pr|pull)` are excluded by
+  design (see `commit_parsers` in `cliff.toml`).
+
 ### Rust
 
 - Run `cargo check --lib` after every change.
@@ -220,9 +238,9 @@ Pre-commit hooks run automatically on each commit to check formatting (`cargo fm
 - [ ] Code compiles without warnings (`cargo check --lib`)
 - [ ] Tests pass (`cargo test --lib`)
 - [ ] New functionality includes tests
-- [ ] Commit messages follow Conventional Commits
+- [ ] Commit messages follow Conventional Commits (they generate the changelog — see below)
 - [ ] PR description explains the change
-- [ ] `CHANGELOG.md` updated under `[Unreleased]` (or add `skip-changelog` label)
+- [ ] Do **not** edit `CHANGELOG.md` — it is generated from your commit messages
 
 ## Good First Issues
 
