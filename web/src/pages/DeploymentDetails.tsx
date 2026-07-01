@@ -25,7 +25,6 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorAlert } from '@/components/utils/ErrorAlert'
 import { ReloadableImage } from '@/components/utils/ReloadableImage'
-import { TimeAgo } from '@/components/utils/TimeAgo'
 import { useAssistantPageContext } from '@/components/ai/AiAssistantContext'
 import { useBreadcrumbs } from '@/contexts/BreadcrumbContext'
 import { usePageTitle } from '@/hooks/usePageTitle'
@@ -573,7 +572,7 @@ function DeploymentHeader({
   const hasCommit = Boolean(shortHash || firstLine || deployment.branch)
   return (
     <div className="flex flex-col gap-3 border-b border-gray-950/10 pb-5 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex min-w-0 flex-1 items-center gap-x-3">
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2 sm:flex-nowrap">
         <Button
           variant="ghost"
           size="sm"
@@ -620,9 +619,9 @@ function DeploymentHeader({
               </span>
             )}
             {deployment.branch && (
-              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                <GitBranch className="h-3.5 w-3.5" />
-                {deployment.branch}
+              <span className="inline-flex min-w-0 max-w-[160px] items-center gap-1 text-xs text-muted-foreground sm:max-w-none sm:shrink-0">
+                <GitBranch className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{deployment.branch}</span>
               </span>
             )}
           </>
@@ -652,107 +651,6 @@ function DeploymentHeader({
   )
 }
 
-function statusDotClass(status: string): string {
-  switch (status) {
-    case 'completed':
-      return 'bg-emerald-500'
-    case 'failed':
-      return 'bg-red-500'
-    case 'cancelled':
-      return 'bg-gray-400'
-    case 'running':
-    case 'pending':
-      return 'bg-blue-500 animate-pulse'
-    case 'paused':
-      return 'bg-yellow-500'
-    default:
-      return 'bg-gray-400'
-  }
-}
-
-// Stacked label→value row for the Vercel-style details panel; handles
-// multi-line values (domains, commit) gracefully.
-function DetailRow({
-  label,
-  children,
-}: {
-  label: string
-  children: ReactNode
-}) {
-  return (
-    <div className="space-y-1">
-      <dt className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-      </dt>
-      <dd className="text-sm text-foreground">{children}</dd>
-    </div>
-  )
-}
-
-// Shared commit/source block used by the Vercel variants' details panel.
-function SourceDetail({
-  deployment,
-  commitUrls,
-}: {
-  deployment: DeploymentResponse
-  commitUrls: CommitUrls
-}) {
-  const shortHash = deployment.commit_hash?.slice(0, 7)
-  const firstLine = deployment.commit_message?.split('\n')[0]
-  return (
-    <div className="space-y-1.5">
-      {deployment.branch && (
-        <p className="flex items-center gap-1.5 text-muted-foreground">
-          <GitBranch className="h-3.5 w-3.5 shrink-0" />
-          {commitUrls.branch ? (
-            <a
-              href={commitUrls.branch}
-              target="_blank"
-              rel="noreferrer"
-              className="font-medium text-foreground hover:underline"
-            >
-              {deployment.branch}
-            </a>
-          ) : (
-            <span className="font-medium text-foreground">
-              {deployment.branch}
-            </span>
-          )}
-        </p>
-      )}
-      {(shortHash || firstLine) && (
-        <p className="flex items-start gap-1.5">
-          <GitCommitHorizontal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0">
-            {shortHash &&
-              (commitUrls.commit ? (
-                <a
-                  href={commitUrls.commit}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-mono text-xs text-muted-foreground hover:underline"
-                >
-                  {shortHash}
-                </a>
-              ) : (
-                <span className="font-mono text-xs text-muted-foreground">
-                  {shortHash}
-                </span>
-              ))}{' '}
-            <span className="text-foreground">{firstLine}</span>
-          </span>
-        </p>
-      )}
-      {deployment.commit_author && (
-        <p className="text-xs text-muted-foreground">
-          by {deployment.commit_author}
-        </p>
-      )}
-    </div>
-  )
-}
-
-// ----- Option 1: Classic (current) -----------------------------------------
 // A screenshot-led hero where the live preview, the environment URL, and commit
 // info are the focal point, stacked vertically.
 function OverviewClassic(p: OverviewProps) {
@@ -777,189 +675,6 @@ function OverviewClassic(p: OverviewProps) {
       {wasDeployed && urlEntries.length > 1 && (
         <DeploymentUrlsCard entries={urlEntries} />
       )}
-    </div>
-  )
-}
-
-// ----- Option 2: Vercel Two-Column ------------------------------------------
-// Vercel's signature deployment page: the preview leads a wide main column,
-// with a sticky "Deployment Details" panel (status, domains, source, timings)
-// on the right.
-function OverviewVercelTwoColumn(p: OverviewProps) {
-  const { deployment, project, primaryUrl, urlEntries, buildStats, commitUrls } =
-    p
-  const wasDeployed =
-    deployment.status === 'completed' || deployment.status === 'paused'
-  return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-      <div className="space-y-4 lg:col-span-2">
-        {wasDeployed && (
-          <BrowserFrameScreenshot
-            deployment={deployment}
-            project={project}
-            url={primaryUrl}
-            screenshotsEnabled={p.screenshotsEnabled}
-          />
-        )}
-          {wasDeployed && urlEntries.length > 1 && (
-          <DeploymentUrlsCard entries={urlEntries} />
-        )}
-      </div>
-      <div className="lg:col-span-1">
-        <Card className="lg:sticky lg:top-4">
-          <CardContent className="space-y-4 p-6">
-            <h2 className="text-base font-semibold">Deployment Details</h2>
-            <dl className="grid gap-4">
-              <DetailRow label="Status">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={cn(
-                      'h-2 w-2 rounded-full',
-                      statusDotClass(deployment.status)
-                    )}
-                  />
-                  <span className="capitalize">{deployment.status}</span>
-                  {deployment.is_current && (
-                    <Badge variant="success" className="ml-1">
-                      Current
-                    </Badge>
-                  )}
-                </div>
-              </DetailRow>
-              {deployment.environment && (
-                <DetailRow label="Environment">
-                  <span className="capitalize">
-                    {deployment.environment.name}
-                  </span>
-                </DetailRow>
-              )}
-              {wasDeployed && urlEntries.length > 0 && (
-                <DetailRow label="Domains">
-                  <div className="flex flex-col gap-1">
-                    {urlEntries.map((entry) => (
-                      <a
-                        key={entry.url}
-                        href={entry.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 hover:underline"
-                      >
-                        <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <span className="truncate">{entry.display}</span>
-                      </a>
-                    ))}
-                  </div>
-                </DetailRow>
-              )}
-              <DetailRow label="Created">
-                <TimeAgo date={deployment.created_at} />
-              </DetailRow>
-              {(deployment.branch ||
-                deployment.commit_hash ||
-                deployment.commit_message) && (
-                <DetailRow label="Source">
-                  <SourceDetail
-                    deployment={deployment}
-                    commitUrls={commitUrls}
-                  />
-                </DetailRow>
-              )}
-              {buildStats.length > 0 && (
-                <DetailRow label="Timing">
-                  <div className="flex flex-col gap-1">
-                    {buildStats.map((stat) => (
-                      <div
-                        key={stat.label}
-                        className="flex items-center justify-between gap-3"
-                      >
-                        <span className="text-muted-foreground">
-                          {stat.label}
-                        </span>
-                        <span className="tabular-nums">{stat.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </DetailRow>
-              )}
-            </dl>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
-  )
-}
-
-// ----- Option 3: Vercel Summary ---------------------------------------------
-// Vercel's "Deployment Summary" framing: a status banner up top, then a
-// horizontal stat strip, then the preview and URLs.
-function OverviewVercelSummary(p: OverviewProps) {
-  const { deployment, project, primaryUrl, urlEntries } = p
-  const wasDeployed =
-    deployment.status === 'completed' || deployment.status === 'paused'
-  const statusLabel =
-    deployment.status === 'completed' ? 'Ready' : deployment.status
-  return (
-    <div className="space-y-4">
-      <Card>
-        <CardContent className="flex flex-col gap-4 p-6 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <span
-              className={cn(
-                'h-3 w-3 rounded-full',
-                statusDotClass(deployment.status)
-              )}
-            />
-            <div>
-              <p className="text-lg font-semibold capitalize">{statusLabel}</p>
-              <p className="text-sm text-muted-foreground">
-                <TimeAgo date={deployment.created_at} />
-                {deployment.environment && (
-                  <> · {deployment.environment.name}</>
-                )}
-              </p>
-            </div>
-          </div>
-          {wasDeployed && primaryUrl && <VisitButton url={primaryUrl} />}
-        </CardContent>
-      </Card>
-      {wasDeployed && (
-        <BrowserFrameScreenshot
-          deployment={deployment}
-          project={project}
-          url={primaryUrl}
-          screenshotsEnabled={p.screenshotsEnabled}
-        />
-      )}
-      {wasDeployed && urlEntries.length > 1 && (
-        <DeploymentUrlsCard entries={urlEntries} />
-      )}
-    </div>
-  )
-}
-
-// Picker wrapper: compare Vercel-style deployment-detail layouts in-browser.
-function DeploymentOverview(p: OverviewProps) {
-  return (
-    <div data-uidotsh-pick="Deployment detail layout" className="contents">
-      <div data-uidotsh-option="Classic (current)" className="contents">
-        <OverviewClassic {...p} />
-      </div>
-      <div
-        data-uidotsh-option="Vercel Two-Column"
-        className="contents"
-        hidden
-        style={{ display: 'none' }}
-      >
-        <OverviewVercelTwoColumn {...p} />
-      </div>
-      <div
-        data-uidotsh-option="Vercel Summary"
-        className="contents"
-        hidden
-        style={{ display: 'none' }}
-      >
-        <OverviewVercelSummary {...p} />
-      </div>
     </div>
   )
 }
@@ -1389,7 +1104,7 @@ export function DeploymentDetails({ project }: DeploymentDetailsProps) {
         )}
 
         {/* Deployment overview — preview and (extra) URLs. */}
-        <DeploymentOverview {...overviewProps} />
+        <OverviewClassic {...overviewProps} />
 
         {/* Build configuration */}
         {hasBuildConfig && md && (

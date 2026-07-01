@@ -187,13 +187,10 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
-    if (logs.length > 0) {
-      const viewport = scrollAreaRef.current?.querySelector(
-        '[data-radix-scroll-area-viewport]'
-      )
-      if (viewport) {
-        viewport.scrollTop = viewport.scrollHeight
-      }
+    if (logs.length > 0 && scrollAreaRef.current) {
+      // Native scroll container (not Radix) so mobile gets two-axis touch
+      // scrolling; keep pinned to the latest line.
+      scrollAreaRef.current.scrollTop = scrollAreaRef.current.scrollHeight
     }
   }, [logs])
 
@@ -424,11 +421,18 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
           )}
         </Button>
 
-        <ScrollArea
+        {/* Native scroll container (not Radix ScrollArea) — Radix only wires
+            up a vertical scrollbar and its display:table viewport blocks
+            horizontal touch scrolling on mobile, so long log lines got
+            clipped with no way to reach them. A plain overflow-auto div gives
+            reliable two-axis touch scrolling. */}
+        <div
           ref={scrollAreaRef}
-          className={`h-96 border rounded-md bg-background overflow-auto ${connectionStatus === 'connecting' ? 'opacity-50' : 'opacity-100'}`}
+          className={`h-96 overflow-auto border rounded-md bg-background overscroll-contain ${connectionStatus === 'connecting' ? 'opacity-50' : 'opacity-100'}`}
         >
-          <div className="text-xs font-mono p-4">
+          {/* w-max + min-w-full lets rows grow to the longest line so it can be
+              scrolled to horizontally, while never shrinking below the viewport. */}
+          <div className="text-xs font-mono p-4 w-max min-w-full">
             {logs.length === 0 ? (
               <div className="text-muted-foreground">
                 Connecting to log stream...
@@ -452,19 +456,19 @@ function LogViewer({ project, deployment, job }: LogViewerProps) {
                     {getLevelIcon(log.level)}
                   </span>
                   <span
-                    className="whitespace-pre-wrap break-words flex-1 min-w-0"
+                    className="whitespace-pre flex-1"
                     dangerouslySetInnerHTML={{
                       __html: ansiConverter.toHtml(log.message),
                     }}
                   />
-                  <span className="text-muted-foreground/40 text-[10px] whitespace-nowrap">
+                  <span className="text-muted-foreground/40 text-[10px] whitespace-nowrap shrink-0">
                     {formatTimestamp(log.timestamp)}
                   </span>
                 </div>
               ))
             )}
           </div>
-        </ScrollArea>
+        </div>
       </div>
     </div>
   )
@@ -723,7 +727,7 @@ export function DeploymentStages({
   return (
     <div className="space-y-4">
       {/* Stages */}
-      <div className="space-y-2 px-2 sm:px-0">
+      <div className="space-y-2">
         {stagesQuery.data?.jobs.map((stage) => (
           <div
             key={stage.id}
