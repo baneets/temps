@@ -644,7 +644,10 @@ impl ConversationService {
     ) -> Option<String> {
         let ws = self.write_support.as_ref()?;
         let caller = ws.write_handle.get()?;
-        let help = caller.cli_write_root_help(auth);
+        // Full flat catalogue (not section-grouped) so the model sees every write
+        // operation — a "redeploy" verb lives under `projects`, not `deployments`,
+        // and section-guessing makes the model wrongly conclude an op is missing.
+        let help = caller.cli_write_catalog(auth);
         tools.push(ChatTool {
             name: TEMPS_WRITE_TOOL_NAME.to_string(),
             description: "Propose a mutation to the platform. \
@@ -685,10 +688,12 @@ impl ConversationService {
                  Every invocation ONLY stages a proposal — it does NOT execute. \
                  The user must confirm or reject each proposal in the UI. \
                  Never tell the user an action was taken; always direct them to confirm.\n\
-                 Pick the operation that MATCHES the user's intent — read \
-                 `<section> <operation> --help` first to verify what it does, and never \
-                 approximate with a similarly-named one. If nothing matches, say so and ask.\n\n\
-                 Available write sections (permissions permitting):\n```\n{help}```"
+                 Pick the operation that MATCHES the user's intent from the full list below \
+                 (don't assume a verb lives in an obvious section — e.g. a redeploy/rebuild of \
+                 a project is `trigger_project_pipeline`, not a `deployments` op). Read \
+                 `<operation> --help` to verify flags, and never approximate with a \
+                 similarly-named operation. If nothing matches, say so and ask.\n\n\
+                 Available write operations (permissions permitting):\n```\n{help}```"
             ))
         } else {
             Some("## The `temps_write` tool\nYou may propose confirm-gated mutations via `temps_write`. \

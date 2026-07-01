@@ -479,6 +479,45 @@ impl InternalApiCaller {
         }
     }
 
+    /// A flat catalogue of EVERY write operation the `auth` caller may run, one
+    /// line each: `<operation_id> — <METHOD> <path> — <description>`. Unlike the
+    /// section-grouped `--help` (which makes the model guess which section a verb
+    /// lives in — e.g. "redeploy" is under `projects`, not `deployments`), this
+    /// puts every option in front of the model at once so it can pick the right
+    /// one directly. The write set is small and curated, so this is cheap.
+    /// Sorted by operation_id for stable output.
+    pub fn cli_write_catalog(&self, auth: &AuthContext) -> String {
+        let mut ops: Vec<&ApiOperation> = self
+            .index
+            .operations()
+            .iter()
+            .filter(|op| self.permitted_write(op, auth))
+            .collect();
+        ops.sort_by(|a, b| a.operation_id.cmp(&b.operation_id));
+
+        let mut out = String::with_capacity(ops.len() * 96);
+        for op in ops {
+            out.push_str("- ");
+            out.push_str(&op.operation_id);
+            out.push_str(" — ");
+            out.push_str(&op.method);
+            out.push(' ');
+            out.push_str(&op.path);
+            let blurb = op
+                .summary
+                .as_deref()
+                .or(op.description.as_deref())
+                .map(|s| s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim())
+                .filter(|s| !s.is_empty());
+            if let Some(desc) = blurb {
+                out.push_str(" — ");
+                out.push_str(desc);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
     /// Run one virtual-CLI command line (see [`crate::cli`]). Parsing/help are
     /// pure; execution replays the resolved call through the router with the
     /// caller's scope (auth + `project_id` auto-fill + allowlist all apply).
