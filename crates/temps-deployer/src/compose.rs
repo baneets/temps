@@ -483,8 +483,31 @@ impl ComposeExecutor {
 
         // Expand YAML merge keys (`<<`) so settings inherited from an anchor
         // (privileged, devices, volumes, ...) are visible during validation
-        // instead of hiding behind the raw `<<` key.
-        let _ = root.apply_merge();
+        // instead of hiding behind the raw `<<` key. Fail closed if expansion
+        // errors — otherwise inherited settings could hide from the checks below
+        // while `docker compose` still applies them at runtime.
+        root.apply_merge()
+            .map_err(|e| ComposeError::InvalidComposeYaml {
+                compose_source: source.to_string(),
+                reason: format!("failed to expand YAML merge keys: {e}"),
+            })?;
+
+        // Reject the top-level `include:` directive. Compose merges included
+        // files (repo-controlled) into the project at runtime, but only this
+        // document's `services:` are validated here — an included file could
+        // reintroduce privileged services, host mounts, etc. Inline the
+        // referenced services into the reviewed compose file instead.
+        if let Some(root_map) = root.as_mapping() {
+            if root_map.contains_key(YamlValue::String("include".to_string())) {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: "<top-level>".to_string(),
+                    field: "include".to_string(),
+                    reason: "top-level 'include' pulls in unvalidated compose files; \
+                             inline the referenced services into this compose file instead"
+                        .to_string(),
+                });
+            }
+        }
 
         // Top-level named volumes whose driver options bind a forbidden host
         // path (e.g. `driver_opts: {type: none, o: bind, device: /}`). Service
@@ -500,7 +523,21 @@ impl ComposeExecutor {
         };
 
         for (service_key, service_value) in services {
-            let service_name = service_key.as_str().unwrap_or("<unknown>");
+            // Service names must be quoted strings. A bare `true`/`false`/`null`
+            // or numeric key parses as a non-string scalar here, so it would be
+            // dropped by `parse_service_names_yaml` (which keys off `as_str()`)
+            // and silently skip the injected security override, while a compose
+            // parser may still treat it as a service. Fail closed instead.
+            let Some(service_name) = service_key.as_str() else {
+                return Err(ComposeError::SecurityPolicyViolation {
+                    service: "<non-string>".to_string(),
+                    field: "services".to_string(),
+                    reason: "service names must be quoted strings; non-string scalar keys \
+                             (booleans, null, or numbers) are ambiguous across compose parsers \
+                             and are not allowed"
+                        .to_string(),
+                });
+            };
             let Some(service) = service_value.as_mapping() else {
                 continue;
             };
@@ -788,11 +825,26 @@ impl ComposeExecutor {
         let Some(value) = service.get(YamlValue::String(field.to_string())) else {
             return Ok(());
         };
-        if value.as_str().is_some_and(|v| v == "host") {
+        let Some(mode) = value.as_str() else {
+            return Ok(());
+        };
+        if mode == "host" {
             return Err(ComposeError::SecurityPolicyViolation {
                 service: service_name.to_string(),
                 field: field.to_string(),
                 reason: "host namespace sharing is not allowed for compose deployments".to_string(),
+            });
+        }
+        // `container:<name|id>` joins the namespace of an arbitrary container on
+        // the host — including other tenants' and Temps' own infrastructure
+        // containers. Only intra-project `service:<name>` sharing is acceptable.
+        if mode.starts_with("container:") {
+            return Err(ComposeError::SecurityPolicyViolation {
+                service: service_name.to_string(),
+                field: field.to_string(),
+                reason: "joining another container's namespace via 'container:' is not allowed; \
+                         it can target containers outside this deployment"
+                    .to_string(),
             });
         }
         Ok(())
@@ -872,8 +924,32 @@ impl ComposeExecutor {
     }
 
     /// Whether a string contains compose/shell variable interpolation.
+    ///
+    /// Docker Compose interpolates `${VAR}`, `$(cmd)`, AND the braceless `$VAR`
+    /// form; `$$` is an escaped literal dollar. Matching only `${`/`$(` let
+    /// `network_mode: $NET` or `volumes: [$SRC:/host]` slip past the guard and
+    /// resolve to attacker-controlled values from the repo `.env` at runtime,
+    /// so treat any real `$` sigil as interpolation.
     fn contains_interpolation(value: &str) -> bool {
-        value.contains("${") || value.contains("$(")
+        let bytes = value.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' {
+                match bytes.get(i + 1).copied() {
+                    // `$$` escapes a literal dollar — not interpolation.
+                    Some(b'$') => {
+                        i += 2;
+                        continue;
+                    }
+                    // `${VAR}` / `$(cmd)` / `$VAR` are all interpolation.
+                    Some(b'{') | Some(b'(') => return true,
+                    Some(c) if c.is_ascii_alphabetic() || c == b'_' => return true,
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        false
     }
 
     /// A bare volume name (no path separators and not relative) references a
@@ -1436,6 +1512,10 @@ impl ComposeExecutor {
         let mut override_yaml = String::from("services:\n");
         for service in &services {
             override_yaml.push_str(&format!("  {}:\n", service));
+            // Applied last in the `-f` order, so `privileged: false` here wins
+            // over anything that smuggled `privileged: true` past validation
+            // (e.g. via runtime interpolation) as a last line of defense.
+            override_yaml.push_str("    privileged: false\n");
             override_yaml.push_str("    cap_drop:\n");
             override_yaml.push_str("      - ALL\n");
             override_yaml.push_str("    security_opt:\n");
@@ -2472,5 +2552,141 @@ services:
         // No services to strip — output should be identical
         let result = executor.strip_ports_for_services(compose, &[]);
         assert!(result.contains("80:80"));
+    }
+
+    #[test]
+    fn test_contains_interpolation_covers_braceless_and_escapes() {
+        // Braced, command-substitution, and braceless forms are all caught.
+        assert!(ComposeExecutor::contains_interpolation("${VAR}"));
+        assert!(ComposeExecutor::contains_interpolation("$(id -g docker)"));
+        assert!(ComposeExecutor::contains_interpolation("$VAR"));
+        assert!(ComposeExecutor::contains_interpolation(
+            "prefix-$HOST_ROOT/x"
+        ));
+        assert!(ComposeExecutor::contains_interpolation("${NET:-host}"));
+        // `$$` escapes a literal dollar, and a bare/trailing `$` is not a var.
+        assert!(!ComposeExecutor::contains_interpolation("$$HOME"));
+        assert!(!ComposeExecutor::contains_interpolation("no dollars here"));
+        assert!(!ComposeExecutor::contains_interpolation("trailing$"));
+        assert!(!ComposeExecutor::contains_interpolation("cost is $ 5"));
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_braceless_interpolation() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        // Braceless $VAR in network_mode would resolve to `host` from a
+        // repo-controlled .env at runtime, bypassing the literal `host` check.
+        let net = "services:\n  web:\n    image: alpine\n    network_mode: $NET\n";
+        assert_eq!(
+            violation_field(
+                executor
+                    .validate_compose_security_policy("compose file", net)
+                    .unwrap_err()
+            ),
+            "network_mode"
+        );
+
+        // Braceless $SRC in a bind mount source.
+        let vol = "services:\n  web:\n    image: alpine\n    volumes:\n      - $SRC:/host:rw\n";
+        assert_eq!(
+            violation_field(
+                executor
+                    .validate_compose_security_policy("compose file", vol)
+                    .unwrap_err()
+            ),
+            "volumes"
+        );
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_top_level_include() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        // `include` merges repo-controlled compose files that never flow through
+        // this validator.
+        let compose = "include:\n  - ./evil.yml\nservices:\n  web:\n    image: nginx\n";
+        assert_eq!(
+            violation_field(
+                executor
+                    .validate_compose_security_policy("compose file", compose)
+                    .unwrap_err()
+            ),
+            "include"
+        );
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_container_namespace() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        for (field, compose) in [
+            (
+                "network_mode",
+                "services:\n  web:\n    image: alpine\n    network_mode: \"container:other\"\n",
+            ),
+            (
+                "pid",
+                "services:\n  web:\n    image: alpine\n    pid: \"container:other\"\n",
+            ),
+        ] {
+            assert_eq!(
+                violation_field(
+                    executor
+                        .validate_compose_security_policy("compose file", compose)
+                        .unwrap_err()
+                ),
+                field
+            );
+        }
+
+        // Intra-project `service:` sharing stays within the deployment and is
+        // allowed.
+        let ok = "services:\n  web:\n    image: alpine\n    network_mode: \"service:db\"\n  db:\n    image: postgres\n";
+        assert!(executor
+            .validate_compose_security_policy("compose file", ok)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_compose_security_policy_rejects_non_string_service_names() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        // A bare boolean/null/numeric key is a non-string scalar that would be
+        // dropped by the service-name enumerator and skip the security override.
+        for compose in [
+            "services:\n  true:\n    image: alpine\n",
+            "services:\n  null:\n    image: alpine\n",
+            "services:\n  8080:\n    image: alpine\n",
+        ] {
+            assert_eq!(
+                violation_field(
+                    executor
+                        .validate_compose_security_policy("compose file", compose)
+                        .unwrap_err()
+                ),
+                "services"
+            );
+        }
+
+        // A normal quoted/bareword string service name is still accepted.
+        let ok = "services:\n  web:\n    image: nginx\n";
+        assert!(executor
+            .validate_compose_security_policy("compose file", ok)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_generate_security_override_sets_privileged_false() {
+        let Some(executor) = test_executor() else {
+            return;
+        };
+        let compose = "services:\n  web:\n    image: nginx\n  worker:\n    image: alpine\n";
+        let override_yaml = executor.generate_security_override(compose);
+        assert_eq!(override_yaml.matches("privileged: false").count(), 2);
     }
 }
