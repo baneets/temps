@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+-
+
+### Changed
+-
+
+### Fixed
+-
+
+
+## [0.1.0-beta.40] - 2026-07-01
+
+### Added
 - **AI write actions (propose-then-confirm).** The project AI assistant can now
   go beyond read-only investigation and *propose* changes — redeploy/rollback,
   pause/resume, container restart, env-var edits, domain attach/detach — but it
