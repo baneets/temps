@@ -547,7 +547,25 @@ impl InternalApiCaller {
                         op.operation_id
                     )),
                     Ok(_) => {
-                        let summary = format!("{} {} — {}", op.method, op.path, op.operation_id);
+                        // Lead the summary with the operation's human description
+                        // (first line of the OpenAPI summary/doc-comment) so the
+                        // person reviewing the confirm card sees WHAT the action
+                        // does — e.g. "Promote a deployment to another
+                        // environment" vs. "Trigger pipeline (redeploy)" — not
+                        // just an opaque `method path`. The human gate is only
+                        // meaningful if the human can tell what they're approving.
+                        let human = op
+                            .summary
+                            .as_deref()
+                            .or(op.description.as_deref())
+                            .map(|s| s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim())
+                            .filter(|s| !s.is_empty());
+                        let summary = match human {
+                            Some(desc) => {
+                                format!("{desc} ({} {})", op.method, op.path)
+                            }
+                            None => format!("{} {} — {}", op.method, op.path, op.operation_id),
+                        };
                         let required_permission =
                             required_write_permission(op).map(|p| p.to_string());
                         WritePrepareOutcome::Prepared(PreparedWrite {

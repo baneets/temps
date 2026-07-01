@@ -162,7 +162,16 @@ fn render_section_help(sec: &Section) -> String {
         .max()
         .unwrap_or(0);
     for op in &sec.operations {
-        let summary = op.summary.as_deref().map(first_line).unwrap_or_default();
+        // Fall back to the description when there's no explicit summary — many
+        // operations carry only a doc-comment (surfaced as `description`), and
+        // an empty blurb is what leads a model to pick an operation by its name
+        // alone (e.g. `promote_deployment` for a "redeploy" request).
+        let summary = op
+            .summary
+            .as_deref()
+            .or(op.description.as_deref())
+            .map(first_line)
+            .unwrap_or_default();
         out.push_str(&format!(
             "  {:<width$}  {summary}\n",
             op.operation_id,

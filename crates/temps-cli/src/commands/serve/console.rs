@@ -2054,6 +2054,10 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                     {
                         let write_allowlist: Vec<String> = [
                             // ── Deployment lifecycle (reversible / safe) ──
+                            // Redeploy the project from its configured branch —
+                            // what a "redeploy main" request maps to
+                            // (promote/rollback are NOT redeploys).
+                            "trigger_project_pipeline",
                             "rollback_to_deployment",
                             "promote_deployment",
                             "pause_deployment",

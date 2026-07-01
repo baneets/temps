@@ -650,9 +650,13 @@ impl ConversationService {
             description: "Propose a mutation to the platform. \
                 The change is NOT executed immediately — it creates a PROPOSAL that the user \
                 must explicitly confirm in the UI before anything runs. \
-                Use `--help` to discover available write sections and operations exactly \
-                as you do with the read-only `temps` tool. \
-                Always prefer the most specific operation. \
+                Use `--help` to discover write sections and operations exactly as with the \
+                read-only `temps` tool, and ALWAYS read `<section> <operation> --help` to \
+                confirm the operation does what the user actually asked BEFORE proposing it — \
+                never pick an operation by its name alone (e.g. `promote_deployment` moves an \
+                existing image to another environment; `rollback_to_deployment` reverts to an \
+                older one; neither is a redeploy). If no available operation matches the \
+                request, say so and ask — do NOT substitute a different operation. \
                 Never claim the action has succeeded — tell the user to review and \
                 confirm or reject the proposal."
                 .to_string(),
@@ -680,7 +684,10 @@ impl ConversationService {
                  You have a `temps_write` tool for proposing mutations. \
                  Every invocation ONLY stages a proposal — it does NOT execute. \
                  The user must confirm or reject each proposal in the UI. \
-                 Never tell the user an action was taken; always direct them to confirm.\n\n\
+                 Never tell the user an action was taken; always direct them to confirm.\n\
+                 Pick the operation that MATCHES the user's intent — read \
+                 `<section> <operation> --help` first to verify what it does, and never \
+                 approximate with a similarly-named one. If nothing matches, say so and ask.\n\n\
                  Available write sections (permissions permitting):\n```\n{help}```"
             ))
         } else {
