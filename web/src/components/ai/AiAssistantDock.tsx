@@ -4,6 +4,7 @@ import {
   archiveConversation,
   getProjects,
   listAllConversations,
+  updateProjectSettings,
 } from '@/api/client'
 import {
   AlertDialog,
@@ -28,6 +29,7 @@ import {
   ExternalLink,
   FolderGit2,
   GitBranch,
+  Loader2,
   MessageSquare,
   Plus,
   RotateCcw,
@@ -35,6 +37,7 @@ import {
   Sparkles,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -673,9 +676,11 @@ function ConversationList({
 }
 
 /**
- * Project picker for starting a new project-scoped chat. Lists only projects
- * with AI debug chat enabled (the backend 403s otherwise), searchable by name
- * or slug. Selecting one opens a fresh chat thread for it.
+ * Project picker for starting a new project-scoped chat. Lists ALL projects,
+ * searchable by name or slug. Selecting a project whose read-only AI chat is
+ * already on opens a fresh thread; selecting one where it's off enables it
+ * inline (one click, no trip to Settings — the read-only chat is safe) and then
+ * opens the thread. Write actions remain a separate, explicit per-project opt-in.
  */
 function ProjectPicker({
   onSelect,
@@ -685,6 +690,9 @@ function ProjectPicker({
   const [projects, setProjects] = useState<ProjectResponse[]>([])
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
+  // Project id currently being enabled+opened, so its row shows a spinner and
+  // can't be double-clicked.
+  const [enablingId, setEnablingId] = useState<number | null>(null)
   // True when more projects exist than the single page we fetched, so the
   // client-side search can't reach all of them — surfaced, never silent.
   const [truncated, setTruncated] = useState(false)
@@ -696,7 +704,7 @@ function ProjectPicker({
       .then(({ data }) => {
         if (cancelled) return
         const page = data?.projects ?? []
-        setProjects(page.filter((p) => p.ai_debug_chat_enabled === true))
+        setProjects(page)
         setTruncated((data?.total ?? page.length) > page.length)
       })
       .catch(() => setProjects([]))
@@ -707,6 +715,41 @@ function ProjectPicker({
       cancelled = true
     }
   }, [])
+
+  // Open an already-enabled project's chat, or enable the read-only chat inline
+  // then open it. Enabling flips only `ai_debug_chat_enabled` (read-only, safe);
+  // it never touches write actions. A 403 means the user lacks settings
+  // permission — surfaced as a toast rather than a silent no-op.
+  const pick = useCallback(
+    async (p: ProjectResponse) => {
+      if (p.ai_debug_chat_enabled === true) {
+        onSelect(p)
+        return
+      }
+      setEnablingId(p.id)
+      try {
+        const { error } = await updateProjectSettings({
+          path: { project_id: p.id },
+          body: { ai_debug_chat_enabled: true },
+        })
+        if (error) throw error
+        setProjects((prev) =>
+          prev.map((x) =>
+            x.id === p.id ? { ...x, ai_debug_chat_enabled: true } : x
+          )
+        )
+        toast.success(`AI chat enabled for ${p.name}`)
+        onSelect({ ...p, ai_debug_chat_enabled: true })
+      } catch {
+        toast.error(
+          "Couldn't enable AI chat — you may need project admin permission."
+        )
+      } finally {
+        setEnablingId(null)
+      }
+    },
+    [onSelect]
+  )
 
   const needle = q.trim().toLowerCase()
   const filtered = needle
@@ -735,12 +778,9 @@ function ProjectPicker({
       ) : projects.length === 0 ? (
         <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
           <FolderGit2 className="h-7 w-7 text-muted-foreground" />
-          <p className="text-sm font-medium">
-            No projects with AI chat enabled
-          </p>
+          <p className="text-sm font-medium">No projects yet</p>
           <p className="max-w-xs text-sm text-muted-foreground">
-            Turn on “AI debug chat” in a project's settings to start a chat for
-            it.
+            Create a project to start an AI chat for it.
           </p>
         </div>
       ) : filtered.length === 0 ? (
@@ -753,8 +793,14 @@ function ProjectPicker({
             <button
               key={p.id}
               type="button"
-              onClick={() => onSelect(p)}
-              className="group flex w-full items-center gap-3 rounded-md border border-transparent px-2 py-2.5 text-left transition-colors hover:border-border hover:bg-accent"
+              onClick={() => pick(p)}
+              disabled={enablingId === p.id}
+              title={
+                p.ai_debug_chat_enabled === true
+                  ? undefined
+                  : 'AI chat is off for this project — click to enable it and start'
+              }
+              className="group flex w-full items-center gap-3 rounded-md border border-transparent px-2 py-2.5 text-left transition-colors hover:border-border hover:bg-accent disabled:opacity-60"
             >
               <Avatar className="size-8 rounded-md">
                 <AvatarImage
@@ -773,7 +819,16 @@ function ProjectPicker({
                   </div>
                 )}
               </div>
-              <Plus className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+              {enablingId === p.id ? (
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+              ) : p.ai_debug_chat_enabled === true ? (
+                <Plus className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+              ) : (
+                <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+                  <Zap className="h-3 w-3" />
+                  Enable
+                </span>
+              )}
             </button>
           ))}
           {truncated && (

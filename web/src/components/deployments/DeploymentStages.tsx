@@ -2,6 +2,7 @@ import {
   DeploymentJobResponse,
   DeploymentResponse,
   ProjectResponse,
+  updateProjectSettings,
 } from '@/api/client'
 import { getDeploymentJobsOptions } from '@/api/client/@tanstack/react-query.gen'
 import { Badge } from '@/components/ui/badge'
@@ -32,6 +33,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
 import { useAiAssistant } from '../ai/AiAssistantContext'
 import { ElapsedTime } from '../global/ElapsedTime'
 
@@ -559,7 +561,50 @@ export function DeploymentStages({
   // AI debugging chat (ADR-023), opened from a failed stage into the persistent
   // app-level dock. The chat is scoped to the whole deployment.
   const { open: openAiAssistant } = useAiAssistant()
-  const aiChatEnabled = project.ai_debug_chat_enabled === true
+  // Read-only AI chat is safe, so we don't hide the "Debug with AI" affordance
+  // when it's off — we enable it inline (one click) and then open the chat,
+  // rather than sending the user to Settings. Local state so the button reflects
+  // enablement without refetching the project prop.
+  const [chatEnabled, setChatEnabled] = useState(
+    project.ai_debug_chat_enabled === true
+  )
+  const [enablingChat, setEnablingChat] = useState(false)
+
+  const debugWithAi = async () => {
+    if (!chatEnabled) {
+      setEnablingChat(true)
+      try {
+        const { error } = await updateProjectSettings({
+          path: { project_id: project.id },
+          body: { ai_debug_chat_enabled: true },
+        })
+        if (error) throw error
+        setChatEnabled(true)
+        toast.success('AI chat enabled')
+      } catch {
+        toast.error(
+          "Couldn't enable AI chat — you may need project admin permission."
+        )
+        setEnablingChat(false)
+        return
+      }
+      setEnablingChat(false)
+    }
+    openAiAssistant({
+      projectId: project.id,
+      context: {
+        contextType: 'deployment',
+        contextId: deployment.id,
+        title: `Debug deployment #${deployment.id}`,
+        description:
+          "AI reads this deployment's failed stages and build logs to explain what went wrong. Ask follow-up questions to dig deeper.",
+        startPrompt:
+          'Diagnose this deployment failure and suggest concrete fixes.',
+        projectSlug: project.slug,
+        projectName: project.name,
+      },
+    })
+  }
 
   // Compute which stages should be expanded based on their status and manual overrides
   const expandedStageIds = useMemo(() => {
@@ -703,31 +748,27 @@ export function DeploymentStages({
                 </div>
               </div>
               <div className="flex items-center gap-2 sm:gap-3">
-                {aiChatEnabled && stage.status === 'failure' && (
+                {stage.status === 'failure' && (
                   <Button
                     variant="outline"
                     size="sm"
+                    disabled={enablingChat}
                     className="h-8 gap-1.5 border-primary/30 text-primary hover:bg-primary/10 hover:text-primary"
                     onClick={(e) => {
                       e.stopPropagation()
-                      openAiAssistant({
-                        projectId: project.id,
-                        context: {
-                          contextType: 'deployment',
-                          contextId: deployment.id,
-                          title: `Debug deployment #${deployment.id}`,
-                          description:
-                            "AI reads this deployment's failed stages and build logs to explain what went wrong. Ask follow-up questions to dig deeper.",
-                          startPrompt:
-                            'Diagnose this deployment failure and suggest concrete fixes.',
-                          projectSlug: project.slug,
-                          projectName: project.name,
-                        },
-                      })
+                      void debugWithAi()
                     }}
-                    title="Debug this failure with AI"
+                    title={
+                      chatEnabled
+                        ? 'Debug this failure with AI'
+                        : 'Enable AI chat and debug this failure'
+                    }
                   >
-                    <Sparkles className="h-4 w-4" />
+                    {enablingChat ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-4 w-4" />
+                    )}
                     <span className="hidden sm:inline">Debug with AI</span>
                   </Button>
                 )}
