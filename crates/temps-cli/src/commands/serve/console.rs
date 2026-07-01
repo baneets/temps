@@ -2086,8 +2086,30 @@ pub async fn start_console_api(params: ConsoleApiParams) -> anyhow::Result<()> {
                             temps_ai_api_tools::InternalApiCaller::new_write_allowlisted(
                                 split.admin.clone(),
                                 &openapi,
-                                write_allowlist,
+                                write_allowlist.clone(),
                             );
+                        // Diagnostic: report which allowlist entries actually
+                        // resolved to a real operation in the OpenAPI doc, and
+                        // loudly flag any that did not (a typo or a wrong
+                        // method/operation_id silently drops the op otherwise).
+                        let resolved = write_caller.indexed_operation_ids();
+                        let unresolved: Vec<&String> = write_allowlist
+                            .iter()
+                            .filter(|id| !resolved.contains(id))
+                            .collect();
+                        info!(
+                            resolved_count = resolved.len(),
+                            allowlist_count = write_allowlist.len(),
+                            resolved = ?resolved,
+                            "AI write tool: indexed write operations"
+                        );
+                        if !unresolved.is_empty() {
+                            tracing::warn!(
+                                ?unresolved,
+                                "AI write tool: allowlisted write operations did NOT resolve to \
+                                 an OpenAPI operation and are unavailable — check the operation_id"
+                            );
+                        }
                         write_handle.set(write_caller);
                         debug!("AI write tool: WriteApiToolsHandle populated (curated allowlist)");
                     } else {

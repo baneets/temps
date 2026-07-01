@@ -238,10 +238,11 @@ impl ConversationService {
     /// that project's chats, matching the instance-wide `ProjectsRead` model and
     /// the dock copy. We deliberately do NOT filter by `created_by`.
     ///
-    /// Conversations whose project has `ai_debug_chat_enabled != Some(true)` are
-    /// EXCLUDED so a disabled project's chats never surface in the global
-    /// switcher — consistent with the per-project read gate, which 403s when the
-    /// toggle is off.
+    /// Conversations whose project has AI disabled — neither `ai_debug_chat_enabled`
+    /// NOR `ai_write_actions_enabled` — are EXCLUDED so a disabled project's chats
+    /// never surface in the global switcher. This must mirror `ensure_chat_enabled`
+    /// (the per-project gate): a project with write actions on but the read-only
+    /// debug-chat toggle off is still enabled, so its chats must appear here.
     ///
     /// Bounded by [`Self::LIST_ALL_LIMIT`] (most-recently-active first) so the
     /// response can't grow unbounded with thread count — a resource-exhaustion
@@ -270,7 +271,8 @@ impl ConversationService {
         let by_id: HashMap<i32, (String, String, bool)> = projects
             .into_iter()
             .map(|p| {
-                let enabled = matches!(p.ai_debug_chat_enabled, Some(true));
+                let enabled =
+                    matches!(p.ai_debug_chat_enabled, Some(true)) || p.ai_write_actions_enabled;
                 (p.id, (p.name, p.slug, enabled))
             })
             .collect();
@@ -660,6 +662,13 @@ impl ConversationService {
                 existing image to another environment; `rollback_to_deployment` reverts to an \
                 older one; neither is a redeploy). If no available operation matches the \
                 request, say so and ask — do NOT substitute a different operation. \
+                When an operation needs a concrete id or target you don't already have \
+                (e.g. a redeploy via `trigger_project_pipeline` needs `--environment_id`, and \
+                a container action needs a `container_id`), FIRST look it up with the read-only \
+                `temps` tool (e.g. `environments get_environments`, or reuse an id already \
+                returned by an earlier read such as `get_last_deployment`) and pass the real \
+                value — do NOT omit a field the operation needs just because the schema marks \
+                it optional, and never invent an id. \
                 Never claim the action has succeeded — tell the user to review and \
                 confirm or reject the proposal."
                 .to_string(),

@@ -455,6 +455,18 @@ impl InternalApiCaller {
         self.index.catalog()
     }
 
+    /// The `operation_id`s actually resolved into this caller's index — i.e. the
+    /// allowlist entries that matched a real operation in the OpenAPI document.
+    /// Useful for startup diagnostics: an allowlist entry that is NOT in this list
+    /// was silently dropped (typo, wrong method, or missing from the doc).
+    pub fn indexed_operation_ids(&self) -> Vec<String> {
+        self.index
+            .operations()
+            .iter()
+            .map(|op| op.operation_id.clone())
+            .collect()
+    }
+
     /// Render the virtual-CLI root help (`<root> --help`) — the section list —
     /// for injection into the chat system prompt so the model starts oriented.
     /// Sections the `auth` caller can't read at all are omitted.

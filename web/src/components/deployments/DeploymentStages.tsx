@@ -566,7 +566,8 @@ export function DeploymentStages({
   // rather than sending the user to Settings. Local state so the button reflects
   // enablement without refetching the project prop.
   const [chatEnabled, setChatEnabled] = useState(
-    project.ai_debug_chat_enabled === true
+    project.ai_debug_chat_enabled === true ||
+      project.ai_write_actions_enabled === true
   )
   const [enablingChat, setEnablingChat] = useState(false)
 

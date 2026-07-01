@@ -372,7 +372,9 @@ function AlertFormBody({ project, isEditing, id, existing }: AlertFormBodyProps)
         </div>
       </div>
 
-      {isEditing && project.ai_debug_chat_enabled === true && (
+      {isEditing &&
+        (project.ai_debug_chat_enabled === true ||
+          project.ai_write_actions_enabled === true) && (
         <DebugChat
           projectId={project.id}
           contextType="alert"
