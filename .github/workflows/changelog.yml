@@ -74,7 +74,13 @@ jobs:
         env:
           OUTPUT: CHANGELOG_PREVIEW.md
 
+      # Posting a PR comment needs a write-scoped GITHUB_TOKEN. On pull_request
+      # runs from a fork, GitHub forces the token to read-only regardless of the
+      # `permissions:` block above, so this step 403s ("Resource not accessible
+      # by integration"). Skip it for fork PRs — the Conventional Commits lint
+      # above still runs and gates every PR; only the preview comment is skipped.
       - name: Post preview comment
+        if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/github-script@v7
         with:
           script: |
