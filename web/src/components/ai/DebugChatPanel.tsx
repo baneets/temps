@@ -280,6 +280,10 @@ function PendingActionCard({
   const [busy, setBusy] = useState<'confirm' | 'reject' | null>(null)
   const [result, setResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // The exact request params/body that will be sent, redacted server-side
+  // (value/secret/password/token/key → ***). Shown so the user can review what
+  // the action will actually do before confirming.
+  const [params, setParams] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
 
   // Reconcile the live status once the action id is known (covers reloads).
@@ -295,6 +299,7 @@ function PendingActionCard({
         if (typeof d.status === 'string') setStatus(d.status)
         if (d.result != null) setResult(JSON.stringify(d.result))
         if (typeof d.error === 'string') setError(d.error)
+        if (d.params != null) setParams(JSON.stringify(d.params))
       })
       .catch(() => {
         /* status reconcile is best-effort */
@@ -361,6 +366,14 @@ function PendingActionCard({
           <div className={cn('text-[11px] font-medium', st.cls)}>{st.label}</div>
         </div>
       </div>
+      {params && params !== '{}' && (
+        <div className="min-w-0 space-y-1 border-t border-amber-500/20 px-2.5 py-2">
+          <div className="font-medium text-muted-foreground">
+            {pending ? 'Will send' : 'Sent'}
+          </div>
+          <ToolBlock value={params} />
+        </div>
+      )}
       {pending ? (
         <div className="flex items-center gap-2 border-t border-amber-500/20 px-2.5 py-2">
           <Button
