@@ -197,6 +197,14 @@ pub struct CreateProjectRequest {
     pub source_type: SourceType,
 }
 
+/// Change a project's source type to a Git-less type (docker_image /
+/// static_files / manual). Switching TO `git` is done via the Git settings
+/// endpoint (which also supplies the repository + provider connection).
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ChangeProjectSourceRequest {
+    pub source_type: SourceType,
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct TriggerPipelinePayload {
     pub branch: Option<String>,
@@ -266,6 +274,12 @@ pub struct ProjectResponse {
     pub deployment_config: DeploymentConfig,
     /// Attack mode - when enabled, requires CAPTCHA verification for all project environments
     pub attack_mode: bool,
+    /// Opt-in to AI summarization of metric alert notifications (NULL/false = off).
+    pub ai_alert_summaries_enabled: Option<bool>,
+    /// Opt-in to AI debugging chat, e.g. on deployment failures (NULL/false = off).
+    pub ai_debug_chat_enabled: Option<bool>,
+    /// Opt-in to AI propose-then-confirm write capability (false = off).
+    pub ai_write_actions_enabled: bool,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: bool,
     /// When true, newly-created preview environments default to on-demand mode
@@ -310,6 +324,9 @@ impl ProjectResponse {
             git_provider_connection_id: project.git_provider_connection_id,
             git_url: project.git_url,
             attack_mode: project.attack_mode,
+            ai_alert_summaries_enabled: project.ai_alert_summaries_enabled,
+            ai_debug_chat_enabled: project.ai_debug_chat_enabled,
+            ai_write_actions_enabled: project.ai_write_actions_enabled,
             enable_preview_environments: project.enable_preview_environments,
             preview_envs_on_demand: project.preview_envs_on_demand,
             preview_envs_idle_timeout_seconds: project.preview_envs_idle_timeout_seconds,
@@ -525,6 +542,12 @@ pub struct UpdateProjectSettingsRequest {
     pub directory: Option<String>,
     /// Enable/disable attack mode (CAPTCHA protection) for all project environments
     pub attack_mode: Option<bool>,
+    /// Opt in to AI summarization of metric alert notifications (ADR-021).
+    pub ai_alert_summaries_enabled: Option<bool>,
+    /// Opt in to AI debugging chat, e.g. on deployment failures (ADR-023).
+    pub ai_debug_chat_enabled: Option<bool>,
+    /// Opt in to AI propose-then-confirm write capability.
+    pub ai_write_actions_enabled: Option<bool>,
     /// Enable automatic preview environment creation for each branch
     pub enable_preview_environments: Option<bool>,
     /// When true, newly-created preview environments default to on-demand mode.
